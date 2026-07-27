@@ -12,6 +12,8 @@ It also fixes the colour problem these recordings have, which is the reason
 footage converted with a plain ffmpeg command often comes out with crushed
 blacks.
 
+![Ticking clips, trimming one, and exporting](docs/demo.gif)
+
 Free and open source under the GPL v3. Nothing is gated, and there is no
 account, telemetry or network access of any kind.
 
@@ -62,6 +64,8 @@ That is the whole loop. Everything below is detail.
 
 ## The clip browser
 
+![The clip list, with thumbnails and export settings](docs/01-browse.png)
+
 Clips are listed with a thumbnail taken from a representative frame, plus
 length, size, card date and format. Click any column heading to sort by it. The
 default order is by clip name, which is the DVR's own counter and the only
@@ -80,6 +84,8 @@ Widening the window makes the thumbnails bigger rather than leaving an empty
 filename column.
 
 ## Trimming
+
+![The trim panel, showing the filmstrip and in and out points](docs/02-trim.png)
 
 Open the **Trim** panel and select a clip to set where it starts and ends —
 mostly for cutting the minute or two spent sitting on the bench before arming.
@@ -144,6 +150,8 @@ Nothing is converted, and nothing is deleted from the card — clearing it is le
 to you deliberately.
 
 ## The queue
+
+![The export queue partway through, with progress and time remaining](docs/03-queue.png)
 
 Rows show the filename that will be **written**, so the effect of your settings
 is visible before anything starts. Changing an output setting re-targets jobs
