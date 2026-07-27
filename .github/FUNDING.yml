@@ -1,0 +1,10 @@
+# Puts a "Sponsor" button at the top of the repository.
+#
+# Replace the placeholder with your Ko-fi page name — the part after
+# ko-fi.com/ in your profile URL — then uncomment the line. Delete this file
+# entirely if you would rather not show the button at all.
+#
+# ko_fi: yourkofiname
+
+# GitHub Sponsors, if you ever set it up:
+# github: [yourgithubusername]

@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Build output. Installers belong on the Releases page, not in the repository —
+# git handles source well and 111 MB binaries badly.
+build/
+dist/
+
+# ffmpeg leftovers
+*.log
+*.mbtree
+ffmpeg2pass*
