@@ -248,6 +248,17 @@ when its clock is not.
 
 ## Troubleshooting
 
+**"Windows protected your PC" when you run the installer.** Expected. The
+installer is not code-signed — a certificate costs several hundred pounds a
+year, which is hard to justify for something given away. Click **More info**,
+then **Run anyway**. If you would rather verify it first, the SHA-256 of each
+release is published on its release page.
+
+**Your antivirus flags it.** Occasionally happens to anything built with
+PyInstaller, which looks structurally like a self-extracting archive. It is a
+false positive; report it to your vendor if you like, and check the SHA-256
+against the release page.
+
 **"Could not find ffmpeg" at startup.** Only happens when running from source.
 Install ffmpeg and put it on PATH, or unpack it to `C:\ffmpeg\bin`. The
 installed build carries its own copy and never sees this.
