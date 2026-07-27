@@ -41,9 +41,13 @@ from flightdvr.ui import MainWindow  # noqa: E402
 # Deliberately not a path under C:\Users\<name>, so no username is on show.
 OUTPUT_SHOWN = r"D:\FPV\Exports"
 
-# Tall enough that the settings panel is not cut off mid-sentence, and narrow
-# enough that thumbnails stay modest so several clips are visible at once.
-WINDOW = (1240, 960)
+# Every capture uses this, including the demo recording, which imports it from
+# here. Two copies of the number drifted apart once and produced a GIF that was
+# 60px shorter than the stills, cutting off the last of the export options.
+#
+# Comfortably above the layout's minimum height, so Qt does not silently clamp
+# it and hand back a window of a different size than was asked for.
+WINDOW = (1240, 1160)
 
 
 class Session:
@@ -55,6 +59,10 @@ class Session:
         self.w = MainWindow(find_tools())
         self.w.resize(*WINDOW)
         self.w.show()
+        self.app.processEvents()
+        actual = (self.w.width(), self.w.height())
+        if actual != WINDOW:
+            print(f"note: window settled at {actual}, not {WINDOW}")
 
     def shot(self, name: str) -> None:
         self.app.processEvents()

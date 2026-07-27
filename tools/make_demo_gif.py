@@ -36,11 +36,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from flightdvr.media import NO_WINDOW, find_tools  # noqa: E402
 from flightdvr.ui import MainWindow  # noqa: E402
 
-OUTPUT_SHOWN = r"D:\FPV\Exports"
-WINDOW = (1240, 900)
+# Shared with the stills on purpose. These two had their own copies of the
+# window size once, drifted apart, and the recording ended up showing fewer
+# export options than the screenshots did.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from make_screenshots import OUTPUT_SHOWN, WINDOW  # noqa: E402
+
 FPS = 8
 INTERVAL_MS = 1000 // FPS
-GIF_WIDTH = 860
+
+# Wide enough that the settings text stays readable once GitHub scales the
+# README image down.
+GIF_WIDTH = 1000
 
 
 class Recorder:
@@ -57,6 +64,10 @@ class Recorder:
         self.w = MainWindow(find_tools())
         self.w.resize(*WINDOW)
         self.w.show()
+        self.app.processEvents()
+        actual = (self.w.width(), self.w.height())
+        if actual != WINDOW:
+            print(f"note: window settled at {actual}, not {WINDOW}")
         self.frame = 0
         self.script: list = []
 
