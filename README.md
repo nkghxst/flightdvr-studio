@@ -30,6 +30,23 @@ About 110 MB to download, 360 MB installed. Uninstalls from Add/Remove Programs.
 
 Windows 10 or 11, 64-bit.
 
+Windows will warn you that it "protected your PC", because the installer is not
+code-signed. Click **More info**, then **Run anyway**. See
+[troubleshooting](#troubleshooting) for why.
+
+### Verifying your download
+
+Every release publishes the SHA-256 of its installer, so you can confirm the
+file you downloaded is the file that was built:
+
+```powershell
+Get-FileHash FlightDVRStudio-1.0.0-Setup.exe -Algorithm SHA256
+```
+
+| Release | SHA-256 of the installer |
+|---|---|
+| 1.0.0 | `02800a47b6d214d223988a35ffc8fba31e726c4291c872d525d0eeda479e1ce5` |
+
 ## Quick start
 
 1. Put the goggle card in a reader and press **Find SD card**, or **Browse** to
