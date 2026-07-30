@@ -42,11 +42,25 @@ SKIP_DIRS = {
 DRIVE_REMOVABLE = 2
 DRIVE_FIXED = 3
 
+# Filesystems worth offering as a source. Everything else in /proc/mounts is
+# kernel bookkeeping, snap images, container overlays and the like.
+LINUX_FILESYSTEMS = {
+    "vfat", "exfat", "msdos", "ntfs", "ntfs3", "fuseblk",
+    "ext2", "ext3", "ext4", "btrfs", "xfs", "f2fs",
+    "hfsplus", "udf", "iso9660",
+}
+
+# Where desktop environments mount removable media.
+LINUX_MEDIA_ROOTS = ("/media/", "/run/media/", "/mnt/")
+
+# /proc/mounts escapes these so a path with a space stays one field.
+MOUNT_ESCAPES = {"\\040": " ", "\\011": "\t", "\\012": "\n", "\\134": "\\"}
+
 
 @dataclass(frozen=True)
 class Drive:
     path: Path
-    letter: str
+    identifier: str      # "G:" on Windows, the mount point's name on Linux
     label: str
     removable: bool
 
@@ -55,7 +69,10 @@ class Drive:
         name = self.label or "Untitled"
         # Only removable media gets a tag. Marking every internal disk "(fixed)"
         # is noise: what matters is spotting the card.
-        return f"{self.letter}  {name}" + ("   — removable" if self.removable else "")
+        tag = "   — removable" if self.removable else ""
+        if self.identifier and self.identifier != name:
+            return f"{self.identifier}  {name}{tag}"
+        return f"{name}{tag}"
 
 
 def _volume_label(root: str) -> str:
@@ -72,10 +89,83 @@ def _volume_label(root: str) -> str:
     return buf.value if ok else ""
 
 
-def list_drives(removable_only: bool = False) -> list[Drive]:
-    """Mounted drives, removable ones first. Windows-specific, degrades gracefully."""
-    if not hasattr(ctypes, "windll"):
+def _unescape_mount(field: str) -> str:
+    """/proc/mounts writes spaces and tabs as octal escapes."""
+    for code, char in MOUNT_ESCAPES.items():
+        field = field.replace(code, char)
+    return field
+
+
+def _linux_is_removable(device: str) -> bool:
+    """Ask sysfs whether the block device behind a mount is removable.
+
+    /dev/sdb1 belongs to sdb, and /sys/block/sdb/removable holds the flag. USB
+    card readers sometimes report 0 anyway, so the caller also treats anything
+    mounted under /media or /run/media as removable.
+    """
+    name = device.rsplit("/", 1)[-1]
+    if not name:
+        return False
+    # Strip the partition number: sdb1 -> sdb, mmcblk0p1 -> mmcblk0, nvme0n1p1.
+    base = name
+    while base and base[-1].isdigit():
+        base = base[:-1]
+    if base.endswith("p") and any(c.isdigit() for c in name):
+        base = base[:-1]
+    for candidate in (base, name):
+        flag = Path("/sys/block") / candidate / "removable"
+        try:
+            if flag.read_text().strip() == "1":
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def parse_linux_mounts(text: str) -> list[tuple[str, str, str]]:
+    """Pull (device, mount point, filesystem) out of /proc/mounts content."""
+    found = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        device, mount, fstype = parts[0], _unescape_mount(parts[1]), parts[2]
+        if fstype not in LINUX_FILESYSTEMS or not device.startswith("/dev/"):
+            continue
+        found.append((device, mount, fstype))
+    return found
+
+
+def _linux_drives(removable_only: bool = False) -> list[Drive]:
+    try:
+        text = Path("/proc/mounts").read_text()
+    except OSError:
         return []
+
+    drives: list[Drive] = []
+    seen: set[str] = set()
+    for device, mount, _fstype in parse_linux_mounts(text):
+        if mount in seen:
+            continue
+        seen.add(mount)
+        removable = (
+            _linux_is_removable(device)
+            or any(mount.startswith(root) for root in LINUX_MEDIA_ROOTS)
+        )
+        if removable_only and not removable:
+            continue
+        # Auto-mounted media takes its folder name from the volume label.
+        label = Path(mount).name or mount
+        drives.append(Drive(Path(mount), label, label, removable))
+
+    drives.sort(key=lambda d: (not d.removable, str(d.path)))
+    return drives
+
+
+def list_drives(removable_only: bool = False) -> list[Drive]:
+    """Mounted drives and volumes, removable ones first."""
+    if not hasattr(ctypes, "windll"):
+        return _linux_drives(removable_only)
     kernel32 = ctypes.windll.kernel32
     mask = kernel32.GetLogicalDrives()
     drives: list[Drive] = []
@@ -95,7 +185,7 @@ def list_drives(removable_only: bool = False) -> list[Drive]:
         drives.append(Drive(Path(root), f"{letter}:", _volume_label(root), removable))
 
     # A card is what people are usually reaching for, so float it to the top.
-    drives.sort(key=lambda d: (not d.removable, d.letter))
+    drives.sort(key=lambda d: (not d.removable, d.identifier))
     return drives
 
 

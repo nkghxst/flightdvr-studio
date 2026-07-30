@@ -187,8 +187,74 @@ def test_removable_drives_are_listed_first():
         scan.Drive(Path("G:/"), "G:", "CARD", removable=True),
         scan.Drive(Path("D:/"), "D:", "Storage", removable=False),
     ]
-    drives.sort(key=lambda d: (not d.removable, d.letter))
-    assert drives[0].letter == "G:"
+    drives.sort(key=lambda d: (not d.removable, d.identifier))
+    assert drives[0].identifier == "G:"
+
+
+# -- Linux drive detection ----------------------------------------------------
+#
+# The platform-specific part is parsing /proc/mounts, which is pure string
+# handling and can be tested anywhere. Fixture below is real content from a
+# Fedora Atomic desktop with an SD card in a reader.
+
+PROC_MOUNTS = """\
+sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+devtmpfs /dev devtmpfs rw,nosuid,size=4096k,nr_inodes=4194304 0 0
+/dev/nvme0n1p3 / btrfs rw,relatime,seclabel,compress=zstd:1 0 0
+/dev/nvme0n1p2 /boot ext4 rw,relatime,seclabel 0 0
+/dev/nvme0n1p1 /boot/efi vfat rw,relatime,fmask=0077 0 0
+tmpfs /run/user/1000 tmpfs rw,nosuid,nodev,relatime,seclabel 0 0
+/dev/sda1 /run/media/pilot/HDZERO exfat rw,nosuid,nodev,relatime,uid=1000 0 0
+/dev/sdb1 /media/pilot/My\\040Backup\\040Drive ext4 rw,nosuid,nodev,relatime 0 0
+/dev/loop0 /var/lib/snapd/snap/core22/1122 squashfs ro,nodev,relatime 0 0
+overlay /var/lib/containers/storage/overlay overlay rw,relatime 0 0
+"""
+
+
+def test_only_real_filesystems_are_offered():
+    """Kernel bookkeeping, snap images and container overlays are not drives."""
+    found = scan.parse_linux_mounts(PROC_MOUNTS)
+    mounts = [m for _dev, m, _fs in found]
+    assert "/sys" not in mounts and "/proc" not in mounts and "/dev" not in mounts
+    assert not any("snapd" in m for m in mounts)
+    assert not any("containers" in m for m in mounts)
+    assert "/" in mounts and "/boot" in mounts
+
+
+def test_a_mounted_card_is_found():
+    found = scan.parse_linux_mounts(PROC_MOUNTS)
+    assert ("/dev/sda1", "/run/media/pilot/HDZERO", "exfat") in found
+
+
+def test_spaces_in_mount_points_are_decoded():
+    """A path with a space arrives as \\040 so the line stays parseable."""
+    found = scan.parse_linux_mounts(PROC_MOUNTS)
+    mounts = [m for _dev, m, _fs in found]
+    assert "/media/pilot/My Backup Drive" in mounts
+
+
+def test_tmpfs_is_not_a_drive():
+    found = scan.parse_linux_mounts(PROC_MOUNTS)
+    assert not any(dev == "tmpfs" for dev, _m, _fs in found)
+
+
+def test_malformed_lines_do_not_break_parsing():
+    assert scan.parse_linux_mounts("garbage\n\n/dev/sda1\n") == []
+
+
+@pytest.mark.parametrize("mount", [
+    "/media/pilot/HDZERO", "/run/media/pilot/CARD", "/mnt/usb",
+])
+def test_media_mounts_count_as_removable(mount):
+    """Card readers sometimes report removable=0 in sysfs, so the mount
+    location is used as a second signal."""
+    assert any(mount.startswith(root) for root in scan.LINUX_MEDIA_ROOTS)
+
+
+def test_system_mounts_are_not_treated_as_removable():
+    for mount in ("/", "/boot", "/home", "/var"):
+        assert not any(mount.startswith(root) for root in scan.LINUX_MEDIA_ROOTS)
 
 
 def test_reused_card_folders_are_skipped():

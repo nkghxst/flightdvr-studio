@@ -36,12 +36,25 @@ from pathlib import Path
 # Keeps console windows from flashing up for every ffprobe call on Windows.
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
-# Places people commonly unpack the gyan.dev builds, checked after PATH.
+# Checked after PATH. On Windows these are where people unpack the gyan.dev
+# builds; on Linux a package manager puts ffmpeg on PATH already, so these are
+# only for a manually installed or Flatpak-exported copy.
 _EXTRA_DIRS = [
     Path(r"C:\ffmpeg\bin"),
     Path(r"C:\Program Files\ffmpeg\bin"),
     Path(r"C:\Program Files (x86)\ffmpeg\bin"),
+    Path("/usr/local/bin"),
+    Path("/var/lib/flatpak/exports/bin"),
+    Path.home() / ".local" / "bin",
 ]
+
+INSTALL_HINT = (
+    "Install the full ffmpeg build (it includes ffprobe) and make sure its bin "
+    "folder is on PATH, or unpack it to C:\\ffmpeg\\bin."
+    if os.name == "nt" else
+    "Install ffmpeg with your package manager, for example "
+    "'sudo apt install ffmpeg' or 'sudo dnf install ffmpeg'."
+)
 
 
 class ToolsMissing(RuntimeError):
@@ -91,9 +104,7 @@ def find_tools() -> Tools:
     missing = [n for n, v in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe)) if v is None]
     if missing:
         raise ToolsMissing(
-            "Could not find " + " and ".join(missing) + ".\n\n"
-            "Install the full ffmpeg build (it includes ffprobe) and make sure "
-            "its bin folder is on PATH, or unpack it to C:\\ffmpeg\\bin."
+            "Could not find " + " and ".join(missing) + ".\n\n" + INSTALL_HINT
         )
     return Tools(ffmpeg, ffprobe)  # type: ignore[arg-type]
 

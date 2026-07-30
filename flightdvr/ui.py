@@ -149,12 +149,16 @@ def find_player() -> Path | None:
 
     Windows associates `.ts` with Media Player, which opens the file and then
     often cannot decode it, so a player that definitely works is preferred when
-    one is installed. Falls back to the file association otherwise.
+    one is installed.
+
+    On Linux the usual players are on PATH, and if neither is installed the
+    caller falls back to xdg-open, which reaches a Flatpak player through the
+    desktop association where exec'ing a binary would not.
     """
     for path in PLAYER_PATHS:
         if path.exists():
             return path
-    for name in ("vlc", "mpv"):
+    for name in ("vlc", "mpv", "mplayer", "totem"):
         found = shutil.which(name)
         if found:
             return Path(found)
