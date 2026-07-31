@@ -15,6 +15,9 @@ on:
     # unlimited free runner minutes, so there is nothing to ration.
     branches: ["**"]
     tags: ["v*"]
+    # Prose changes nothing a build could verify. Tags are exempt, so a release
+    # is still built even if the tagged commit only touched the changelog.
+    paths-ignore: ["**.md", "docs/**", ".gitattributes"]
   pull_request:
     branches: [main]
   workflow_dispatch:

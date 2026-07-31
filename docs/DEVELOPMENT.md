@@ -190,6 +190,12 @@ person, and it is the first thing to ask a user whose install will not start.
 On Windows a GUI build has no stdout, so it reports through its exit code only;
 `_say()` swallows the resulting `AttributeError` rather than crashing.
 
+`--check` is not the whole story, because it never constructs the main window.
+The spec drops files by name pattern, and dropping one too many produces a
+window that will not build rather than an app that will not start. So every
+build script follows `--check` by launching the packaged app offscreen for
+twelve seconds and requiring it to still be running.
+
 ### Per platform
 
 | Platform | Script | Output | Built where |
