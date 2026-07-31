@@ -18,8 +18,11 @@ on:
     # Prose changes nothing a build could verify. Tags are exempt, so a release
     # is still built even if the tagged commit only touched the changelog.
     paths-ignore: ["**.md", "docs/**", ".gitattributes"]
-  pull_request:
-    branches: [main]
+  # No pull_request trigger on purpose. Check runs attach to a commit, so a
+  # pull request from this repository already shows the results of the push
+  # that created it; adding the trigger would build every commit twice. A pull
+  # request from a fork gets no build until someone runs this by hand from the
+  # Actions tab, which is the right trade while there are no fork contributors.
   workflow_dispatch:
 
 permissions:
