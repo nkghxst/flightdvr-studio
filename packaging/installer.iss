@@ -8,7 +8,7 @@
 ; matters on a laptop you do not own the admin account for.
 
 #define AppName        "FlightDVR Studio"
-#define AppVersion     "1.1.1"
+#define AppVersion     "1.1.2"
 #define AppPublisher   "Isadu Nkemi"
 #define AppExeName     "FlightDVRStudio.exe"
 
