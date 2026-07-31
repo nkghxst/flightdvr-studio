@@ -110,9 +110,22 @@ def build(preset: str, settings: ExportSettings | None = None, clip: ClipInfo | 
     )
 
 
+def constant_frame_rate_requested(command) -> bool:
+    """Whether this command pins the frame rate, in either spelling.
+
+    Asserting the exact option was a mistake: ffmpeg 5.1 renamed -vsync to
+    -fps_mode and the app now asks which one the installed build takes, so the
+    literal string depends on the machine. These tests passed on a developer's
+    ffmpeg 7 and failed on Ubuntu 22.04's 4.4 while the app was behaving
+    correctly on both.
+    """
+    flat = flatten(command)
+    return "-fps_mode cfr" in flat or "-vsync cfr" in flat
+
+
 def test_every_preset_forces_constant_frame_rate_except_remux():
     for preset in ("edit", "master", "social"):
-        assert "-fps_mode cfr" in flatten(build(preset)[0]), preset
+        assert constant_frame_rate_requested(build(preset)[0]), preset
 
 
 def test_transport_stream_timestamps_are_regenerated():
@@ -205,9 +218,12 @@ def test_both_passes_configure_identical_streams():
     first, second = build("social", ExportSettings(social_mode="size"))
     # Compared as tokens: "-an" appears inside "-analyzeduration" as a substring.
     assert "-an" not in first
-    for fragment in ("-c:a aac", "aresample=async=1", "-fps_mode cfr", "-r 60"):
+    for fragment in ("-c:a aac", "aresample=async=1", "-r 60"):
         assert fragment in flatten(first), fragment
         assert fragment in flatten(second), fragment
+    # Whichever spelling this ffmpeg takes, both passes must use it.
+    assert constant_frame_rate_requested(first)
+    assert constant_frame_rate_requested(second)
 
 
 def test_both_passes_share_one_stats_file():
