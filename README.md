@@ -61,7 +61,7 @@ sudo dnf install ffmpeg      # Fedora, Nobara
 sudo pacman -S ffmpeg        # Arch, Manjaro
 ```
 
-Bazzite and the other image-based systems already include ffmpeg, so there is
+Image-based systems already include ffmpeg, so there is
 nothing to do there. Run the app with `--check` if you want to confirm what it
 found before you go looking.
 
