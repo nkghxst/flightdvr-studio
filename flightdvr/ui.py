@@ -141,7 +141,15 @@ PLAYER_PATHS = [
     Path(r"C:\Program Files\VideoLAN\VLC\vlc.exe"),
     Path(r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe"),
     Path(r"C:\Program Files\mpv\mpv.exe"),
+    # macOS keeps the real executable inside the app bundle; nothing lands on
+    # PATH when these are installed by dragging them to Applications.
+    Path("/Applications/VLC.app/Contents/MacOS/VLC"),
+    Path("/Applications/IINA.app/Contents/MacOS/IINA"),
+    Path("/Applications/mpv.app/Contents/MacOS/mpv"),
 ]
+
+# macOS has no xdg-open. `open` is the equivalent and resolves app bundles.
+DESKTOP_OPEN = "open" if sys.platform == "darwin" else "xdg-open"
 
 
 def find_player() -> Path | None:
@@ -153,7 +161,8 @@ def find_player() -> Path | None:
 
     On Linux the usual players are on PATH, and if neither is installed the
     caller falls back to xdg-open, which reaches a Flatpak player through the
-    desktop association where exec'ing a binary would not.
+    desktop association where exec'ing a binary would not. macOS installs them
+    as app bundles instead, so the paths above are checked first there.
     """
     for path in PLAYER_PATHS:
         if path.exists():
@@ -170,7 +179,7 @@ def reveal(path: Path) -> None:
         if os.name == "nt":
             os.startfile(path)  # type: ignore[attr-defined]
         else:
-            subprocess.Popen(["xdg-open", str(path)])
+            subprocess.Popen([DESKTOP_OPEN, str(path)])
     except OSError:
         pass
 
@@ -1535,7 +1544,7 @@ class MainWindow(QMainWindow):
             elif os.name == "nt":
                 os.startfile(str(path))  # type: ignore[attr-defined]
             else:
-                subprocess.Popen(["xdg-open", str(path)])
+                subprocess.Popen([DESKTOP_OPEN, str(path)])
         except OSError as exc:
             QMessageBox.warning(
                 self, "Could not open the clip",
@@ -2033,8 +2042,62 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Copied {len(written)} clips", 8000)
 
 
-def launch() -> int:
+def _say(text: str) -> None:
+    """print() that survives a windowed build, which has no stdout attached."""
+    try:
+        print(text)
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+def _describe_environment() -> tuple[str, int]:
+    """Report what a packaged build can actually see, and an exit code.
+
+    This is what `--check` runs. It exists so a build can be proved working
+    without a display or a person: CI runs it against the AppImage and the .app
+    to confirm Qt's platform plugin loaded and ffmpeg resolved. It is also the
+    first thing to ask someone whose install will not start.
+    """
+    from . import __version__
     from .media import ToolsMissing, find_tools
+
+    lines = [f"{APP_NAME} {__version__}",
+             f"Python {sys.version.split()[0]} on {sys.platform}"]
+    code = 0
+
+    # Constructing the application proves Qt's platform plugin loaded, which is
+    # the part of a packaged build most likely to be broken.
+    try:
+        app = QApplication.instance() or QApplication([])
+        from PySide6.QtCore import qVersion
+        lines.append(f"Qt {qVersion()} on the {app.platformName()} plugin")
+    except Exception as exc:              # noqa: BLE001 — report, never raise
+        lines.append(f"Qt failed to start: {exc}")
+        code = 4
+
+    try:
+        tools = find_tools()
+        lines.append(f"ffmpeg  {tools.ffmpeg}")
+        lines.append(f"ffprobe {tools.ffprobe}")
+    except ToolsMissing as exc:
+        lines.append(str(exc).replace("\n\n", " "))
+        code = code or 3
+
+    return "\n".join(lines), code
+
+
+def launch(argv: list[str] | None = None) -> int:
+    from .media import ToolsMissing, find_tools
+
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--version" in args:
+        from . import __version__
+        _say(f"{APP_NAME} {__version__}")
+        return 0
+    if "--check" in args:
+        report, code = _describe_environment()
+        _say(report)
+        return code
 
     app = QApplication.instance() or QApplication([])
     app.setApplicationName(APP_NAME)

@@ -17,7 +17,11 @@
 
 Draws a quad silhouette around a play triangle: four motors, one video. Written
 out as a multi-resolution .ico so Windows picks the right size for the taskbar,
-the Start Menu and the desktop.
+the Start Menu and the desktop, plus a PNG at every size the other two
+platforms need: Linux reads one from the .desktop file, and macOS wants a full
+iconset up to 1024px for iconutil to compile into an .icns.
+
+Everything is drawn from the same vector description, so no size is an upscale.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication
 
-SIZES = [256, 128, 64, 48, 32, 16]
+SIZES = [1024, 512, 256, 128, 64, 48, 32, 16]
 
 BACKDROP = QColor("#161b22")
 ACCENT = QColor("#3fd0c9")
@@ -98,7 +102,8 @@ def main() -> int:
         return 1
 
     # QImageWriter writes one image; Qt's ICO handler takes the largest and
-    # scales, so write the 256px master and let Windows downscale.
+    # scales, so write the 256px master and let Windows downscale. 256 is also
+    # the largest size the ICO format holds.
     master = draw(256)
     writer = QImageWriter(str(target), b"ico")
     if not writer.write(master):

@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- **Linux support.** Ships as an AppImage: one executable file, no install.
+  Finds cards by parsing `/proc/mounts`, treating anything under `/media`,
+  `/run/media` or `/mnt` as removable alongside the sysfs removable flag.
+- **macOS support.** Ships as a `.dmg` for Apple Silicon. Finds cards by
+  listing `/Volumes`, and looks for ffmpeg in both Homebrew prefixes because an
+  app launched from Finder inherits neither on PATH.
+- Preview now uses `open` on macOS and finds VLC, IINA or mpv inside
+  `/Applications` where nothing is on PATH.
+- New `--check` flag on every packaged build: reports the Qt platform plugin in
+  use and the ffmpeg it resolved, then exits. Exit code 3 means no ffmpeg, 4
+  means Qt could not start.
+- Builds for Linux and macOS are produced by GitHub Actions, which also runs the
+  test suite on all three platforms.
+- Neither the AppImage nor the macOS app bundles ffmpeg — both platforms have a
+  package manager that supplies a maintained one. The Windows installer is
+  unchanged and still carries its own copy.
+
 ## 1.0.0
 
 First public release.

@@ -37,24 +37,37 @@ from pathlib import Path
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 # Checked after PATH. On Windows these are where people unpack the gyan.dev
-# builds; on Linux a package manager puts ffmpeg on PATH already, so these are
-# only for a manually installed or Flatpak-exported copy.
+# builds; on Linux a package manager puts ffmpeg on PATH already, so those are
+# only for a manually installed or Flatpak-exported copy. The Homebrew prefixes
+# matter more on macOS: a GUI app launched from Finder inherits a bare PATH that
+# does not include either of them.
 _EXTRA_DIRS = [
     Path(r"C:\ffmpeg\bin"),
     Path(r"C:\Program Files\ffmpeg\bin"),
     Path(r"C:\Program Files (x86)\ffmpeg\bin"),
-    Path("/usr/local/bin"),
+    Path("/opt/homebrew/bin"),          # Homebrew on Apple Silicon
+    Path("/usr/local/bin"),             # Homebrew on Intel, and manual installs
+    Path("/opt/local/bin"),             # MacPorts
     Path("/var/lib/flatpak/exports/bin"),
     Path.home() / ".local" / "bin",
 ]
 
-INSTALL_HINT = (
-    "Install the full ffmpeg build (it includes ffprobe) and make sure its bin "
-    "folder is on PATH, or unpack it to C:\\ffmpeg\\bin."
-    if os.name == "nt" else
-    "Install ffmpeg with your package manager, for example "
-    "'sudo apt install ffmpeg' or 'sudo dnf install ffmpeg'."
-)
+if os.name == "nt":
+    INSTALL_HINT = (
+        "Install the full ffmpeg build (it includes ffprobe) and make sure its "
+        "bin folder is on PATH, or unpack it to C:\\ffmpeg\\bin."
+    )
+elif sys.platform == "darwin":
+    INSTALL_HINT = (
+        "Install ffmpeg with Homebrew: run 'brew install ffmpeg' in Terminal. "
+        "If you do not have Homebrew yet, the one-line installer is at "
+        "https://brew.sh."
+    )
+else:
+    INSTALL_HINT = (
+        "Install ffmpeg with your package manager, for example "
+        "'sudo apt install ffmpeg' or 'sudo dnf install ffmpeg'."
+    )
 
 
 class ToolsMissing(RuntimeError):

@@ -257,6 +257,64 @@ def test_system_mounts_are_not_treated_as_removable():
         assert not any(mount.startswith(root) for root in scan.LINUX_MEDIA_ROOTS)
 
 
+# -- finding the card on macOS ------------------------------------------------
+
+# /Volumes with a card in the reader. The startup disk appears as a symlink
+# named after the Mac, and device 16 is the root filesystem it points at.
+MAC_VOLUMES = [
+    ("Macintosh HD", True, 16),
+    ("HDZERO", False, 41),
+    ("Time Machine", False, 52),
+    (".timemachine", False, 53),
+    (".hidden", False, 54),
+]
+
+
+def test_a_card_in_volumes_is_removable():
+    drives = scan.macos_volumes_to_drives(MAC_VOLUMES, root_device=16)
+    card = [d for d in drives if d.label == "HDZERO"]
+    assert len(card) == 1
+    assert card[0].removable
+    assert card[0].path == Path("/Volumes/HDZERO")
+
+
+def test_the_startup_disk_is_listed_once_and_is_not_removable():
+    drives = scan.macos_volumes_to_drives(MAC_VOLUMES, root_device=16)
+    boot = [d for d in drives if d.path == Path("/")]
+    assert len(boot) == 1
+    assert not boot[0].removable
+    assert boot[0].label == "Macintosh HD"
+
+
+def test_a_volume_on_the_root_device_is_not_a_second_drive():
+    """The startup disk is not always represented as a symlink."""
+    drives = scan.macos_volumes_to_drives([("Macintosh HD", False, 16)], 16)
+    assert [d.path for d in drives] == [Path("/")]
+
+
+def test_removable_only_leaves_out_the_startup_disk():
+    drives = scan.macos_volumes_to_drives(MAC_VOLUMES, 16, removable_only=True)
+    assert drives and all(d.removable for d in drives)
+    assert not any(d.path == Path("/") for d in drives)
+
+
+def test_hidden_volumes_are_skipped():
+    names = [d.label for d in scan.macos_volumes_to_drives(MAC_VOLUMES, 16)]
+    assert ".timemachine" not in names and ".hidden" not in names
+
+
+def test_a_card_sorts_above_the_startup_disk():
+    drives = scan.macos_volumes_to_drives(MAC_VOLUMES, 16)
+    assert drives[0].removable
+    assert drives[-1].path == Path("/")
+
+
+def test_an_empty_volumes_folder_still_reports_the_startup_disk():
+    """A Mac with nothing plugged in must not show an empty drive list."""
+    drives = scan.macos_volumes_to_drives([], 16)
+    assert [d.path for d in drives] == [Path("/")]
+
+
 def test_reused_card_folders_are_skipped():
     """Cards get reused in phones; walking those trees wastes time on USB."""
     for folder in ("Android", "Music", "LOST.DIR", "System Volume Information"):
@@ -457,6 +515,24 @@ def test_an_empty_filmstrip_is_falsy_and_safe():
 def qt_app():
     from PySide6.QtWidgets import QApplication
     yield QApplication.instance() or QApplication([])
+
+
+# -- proving a packaged build works without a person to click it --------------
+
+def test_version_flag_prints_and_exits_cleanly(capsys):
+    from flightdvr.ui import launch
+    assert launch(["--version"]) == 0
+    assert "FlightDVR Studio" in capsys.readouterr().out
+
+
+def test_check_reports_qt_and_never_raises(qt_app):
+    """CI runs --check against the packaged build, so it must always return."""
+    from flightdvr.ui import _describe_environment
+    report, code = _describe_environment()
+    assert "Qt " in report
+    # 0 where ffmpeg is installed, 3 where it is not. Either is a real answer;
+    # what matters is that it reports rather than raising or opening a dialog.
+    assert code in (0, 3)
 
 
 def test_muted_labels_are_allowed_to_grow_downwards(qt_app):

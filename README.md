@@ -24,6 +24,8 @@ account, telemetry or network access of any kind.
 
 ## Installing
 
+### Windows
+
 Run **`FlightDVRStudio-Setup.exe`**. It installs per-user, so there is no
 administrator prompt, and it puts ffmpeg inside the install folder — the machine
 needs nothing else installed.
@@ -35,6 +37,53 @@ Windows 10 or 11, 64-bit.
 Windows will warn you that it "protected your PC", because the installer is not
 code-signed. Click **More info**, then **Run anyway**. See
 [troubleshooting](#troubleshooting) for why.
+
+### Linux
+
+Download **`FlightDVR_Studio-*.AppImage`**, make it executable, and run it:
+
+```bash
+chmod +x FlightDVR_Studio-*.AppImage
+./FlightDVR_Studio-*.AppImage
+```
+
+One file, nothing installed, delete it to uninstall. Built on Ubuntu 22.04, so
+it runs on anything with glibc 2.35 or newer — which is every current
+distribution, Bazzite and the other Fedora-based immutable ones included.
+
+Unlike the Windows build it does **not** carry its own ffmpeg, because your
+distribution already ships a maintained one:
+
+```bash
+sudo apt install ffmpeg      # Debian, Ubuntu, Mint, Pop!_OS
+sudo dnf install ffmpeg      # Fedora, Nobara
+sudo pacman -S ffmpeg        # Arch, Manjaro
+rpm-ostree install ffmpeg    # Bazzite and other rpm-ostree systems
+```
+
+Install VLC or mpv as well if you want clip preview to work.
+
+### macOS
+
+Download **`FlightDVR-Studio-*-arm64.dmg`**, open it, and drag the app to
+Applications. Apple Silicon, macOS 11 or newer. Intel Macs are not built for
+today — [ask](https://github.com/nkghxst/flightdvr-studio/issues) if you need
+one and it is a small change to the build.
+
+The app is not signed with an Apple Developer certificate, so the first launch
+is refused. **Right-click the app and choose Open**, then confirm — you only
+need to do this once. If macOS still refuses:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/FlightDVR Studio.app"
+```
+
+ffmpeg is not bundled here either. Install it with
+[Homebrew](https://brew.sh):
+
+```bash
+brew install ffmpeg
+```
 
 ### Verifying your download
 
@@ -284,14 +333,40 @@ PyInstaller, which looks structurally like a self-extracting archive. It is a
 false positive; report it to your vendor if you like, and check the SHA-256
 against the release page.
 
-**"Could not find ffmpeg" at startup.** Only happens when running from source.
-Install ffmpeg and put it on PATH, or unpack it to `C:\ffmpeg\bin`. The
-installed build carries its own copy and never sees this.
+**"macOS cannot verify that this app is free from malware."** Expected, for the
+same reason — signing needs a paid Apple Developer account. Right-click the app
+and choose **Open** rather than double-clicking it, then confirm. If that does
+not work, clear the quarantine flag:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/FlightDVR Studio.app"
+```
+
+**"Could not find ffmpeg" at startup.** On Linux and macOS the app uses your
+system ffmpeg, so install it — see [Installing](#installing) for the command.
+On Windows this only happens when running from source; the installed build
+carries its own copy.
+
+If you have installed it and the app still cannot see it, ask the app what it
+found:
+
+```bash
+./FlightDVR_Studio-*.AppImage --check
+```
+
+```bash
+"/Applications/FlightDVR Studio.app/Contents/MacOS/FlightDVRStudio" --check
+```
+
+That prints the version, the Qt platform in use and the exact ffmpeg paths it
+resolved, then exits. It is the quickest thing to paste into a bug report.
 
 **A clip will not preview.** Windows maps `.ts` to Media Player, which usually
-cannot decode the video inside. Install VLC or mpv and it will be used
-automatically. Alternatively the Remux preset rewraps a clip to `.mp4` in
-seconds without re-encoding.
+cannot decode the video inside; macOS hands it to QuickTime, which cannot
+either. Install VLC, mpv or IINA and it will be used automatically. On Linux
+any of VLC, mpv, mplayer or totem is picked up, including Flatpak versions.
+Alternatively the Remux preset rewraps a clip to `.mp4` in seconds without
+re-encoding.
 
 **DaVinci Resolve will not import the files.** The free version on Windows
 cannot decode H.265. Use the **Edit** preset, which produces a mezzanine it can
@@ -318,12 +393,25 @@ Running from source needs ffmpeg and ffprobe on PATH, or unpacked into
 
 ```bash
 python -m pytest tests/ -q          # no ffmpeg required
-pwsh packaging\build.ps1            # full installer
 ```
 
-The build script runs the tests, regenerates the icon, builds the bundle,
-checks it launches with ffmpeg removed from PATH, then compiles the installer.
-It needs `pyinstaller` and Inno Setup 6 (`winget install JRSoftware.InnoSetup`).
+Each platform has its own packaging script. All three run the tests, regenerate
+the icon, build the bundle and prove the result starts before packaging it.
+
+| Platform | Command | Produces | Also needs |
+|---|---|---|---|
+| Windows | `pwsh packaging\build.ps1` | per-user installer | Inno Setup 6 (`winget install JRSoftware.InnoSetup`) |
+| Linux | `packaging/build-appimage.sh` | AppImage | `curl`; appimagetool is fetched and cached |
+| macOS | `packaging/build-macos.sh` | signed-ad-hoc `.app` in a `.dmg` | Xcode command line tools |
+
+Linux and macOS builds are produced by
+[GitHub Actions](.github/workflows/build.yml) on every push, so you do not need
+those machines to release for them. The Windows installer is still built by
+hand — see the note at the top of that workflow for why.
+
+There is more detail on the internals, the measured findings behind the colour
+handling, and the traps in this footage in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ### How it is put together
 
@@ -365,7 +453,11 @@ Matching the licence of the bundled ffmpeg is deliberate. It removes any
 question about whether the app and the binary form a combined work, which is the
 one genuinely murky part of shipping ffmpeg inside an installer.
 
-The bundled build is `7.1.1-full_build-www.gyan.dev`, configured
+Only the Windows installer bundles ffmpeg. The AppImage and the macOS app use
+whatever your package manager installed, so they redistribute no ffmpeg binary
+and carry no obligation for its source.
+
+The bundled Windows build is `7.1.1-full_build-www.gyan.dev`, configured
 `--enable-gpl --enable-version3`. It is **not** an `--enable-nonfree` build,
 which could not be redistributed at all.
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) records the version, origin and
