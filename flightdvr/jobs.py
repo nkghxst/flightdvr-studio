@@ -249,7 +249,10 @@ class ExportWorker(QThread):
         # Refused here as well as in the window, so a job that reaches the
         # worker by any route cannot produce a file that is quietly wrong.
         if len(job.clips) > 1:
-            problems = join_problems(job.clips)
+            # Stream copy cannot normalise anything, so a joined remux is held
+            # to the stricter standard.
+            problems = join_problems(job.clips,
+                                     re_encoding=job.preset_key != "remux")
             if problems:
                 return False, "Cannot join these clips: " + "; ".join(problems)
 
@@ -282,6 +285,7 @@ class ExportWorker(QThread):
                 self.work_dir,
                 sources=[c.path for c in job.clips],
                 concat_file=job.concat_file,
+                clips=job.clips,
                 # The finished file is as long as every clip together. Sizing a
                 # joined export from clips[0] alone overshot the target by
                 # roughly the number of clips in it.

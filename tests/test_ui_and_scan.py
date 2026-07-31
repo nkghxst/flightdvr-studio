@@ -623,25 +623,50 @@ def test_one_clip_is_never_a_join_problem():
     assert join_problems([joinable("a.ts", width=640)]) == []
 
 
+@pytest.mark.parametrize("difference", [
+    dict(width=1920, height=1080),
+    dict(fps=30.0),
+    dict(video_codec="h264"),
+    dict(audio_codec=""),
+    dict(color_range="tv"),
+])
+def test_re_encoding_absorbs_differences_between_clips(difference):
+    """These all used to be refused. The filter graph brings each clip to a
+    common format now, so they join."""
+    from flightdvr.presets import join_problems
+    assert join_problems([joinable("a.ts"), joinable("b.ts", **difference)]) == []
+
+
 @pytest.mark.parametrize("difference,expected", [
     (dict(width=1920, height=1080), "different sizes"),
     (dict(fps=30.0), "different frame rates"),
     (dict(video_codec="h264"), "different video codecs"),
-    (dict(audio_codec=""), "drop the audio"),
+    (dict(audio_codec=""), "have sound"),
 ])
-def test_mismatched_clips_are_refused_with_a_reason(difference, expected):
-    """A join built from mismatched clips does not fail loudly. It produces a
-    file that is silent after the first clip, or the wrong length, and looks
-    like it worked."""
+def test_a_remux_still_refuses_what_it_cannot_change(difference, expected):
+    """Copying without re-encoding puts the clips end to end untouched, so
+    anything that differs has to match already."""
     from flightdvr.presets import join_problems
-    problems = join_problems([joinable("a.ts"), joinable("b.ts", **difference)])
-    assert problems, f"{difference} should have been refused"
+    problems = join_problems([joinable("a.ts"), joinable("b.ts", **difference)],
+                             re_encoding=False)
+    assert problems, f"{difference} should have been refused for a remux"
+    assert any(expected in p for p in problems), problems
+    assert any("other presets" in p for p in problems), "no way forward offered"
+
+
+@pytest.mark.parametrize("broken,expected", [
+    (dict(width=0, height=0), "could not be read"),
+    (dict(duration=0.0), "empty"),
+])
+def test_clips_nothing_can_rescue_are_still_refused(broken, expected):
+    from flightdvr.presets import join_problems
+    problems = join_problems([joinable("a.ts"), joinable("b.ts", **broken)])
     assert any(expected in p for p in problems), problems
 
 
 def test_the_refusal_names_the_clips_and_suggests_what_to_do():
     from flightdvr.presets import describe_join_problems, join_problems
-    clips = [joinable("hdz_001.ts"), joinable("hdz_002.ts", fps=30.0)]
+    clips = [joinable("hdz_001.ts"), joinable("hdz_002.ts", width=0, height=0)]
     message = describe_join_problems(clips, join_problems(clips))
     assert "hdz_001.ts" in message and "hdz_002.ts" in message
     assert "separately" in message
@@ -650,12 +675,22 @@ def test_the_refusal_names_the_clips_and_suggests_what_to_do():
 def test_a_join_that_cannot_work_never_reaches_ffmpeg(tmp_path):
     from flightdvr.jobs import ExportWorker, Job
     from flightdvr.presets import ExportSettings
-    job = Job(clips=[joinable("a.ts"), joinable("b.ts", fps=30.0)],
+    job = Job(clips=[joinable("a.ts"), joinable("b.ts", width=0, height=0)],
               preset_key="master", settings=ExportSettings(),
               out_path=tmp_path / "joined.mp4")
     ok, message = ExportWorker(TOOLS, [job], tmp_path)._run_job(0, job)
-    assert not ok and "frame rates" in message
+    assert not ok and "could not be read" in message
     assert not (tmp_path / "joined.mp4").exists()
+
+
+def test_a_mismatched_remux_never_reaches_ffmpeg(tmp_path):
+    from flightdvr.jobs import ExportWorker, Job
+    from flightdvr.presets import ExportSettings
+    job = Job(clips=[joinable("a.ts"), joinable("b.ts", fps=30.0)],
+              preset_key="remux", settings=ExportSettings(),
+              out_path=tmp_path / "joined.mp4")
+    ok, message = ExportWorker(TOOLS, [job], tmp_path)._run_job(0, job)
+    assert not ok and "frame rates" in message
 
 
 def test_each_set_of_clips_gets_its_own_concat_list():
