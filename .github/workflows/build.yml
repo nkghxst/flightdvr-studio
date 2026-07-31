@@ -10,13 +10,23 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    # Every branch, not just main: this is a one-person project, so a branch
+    # push is the point at which feedback is useful. Public repositories get
+    # unlimited free runner minutes, so there is nothing to ration.
+    branches: ["**"]
     tags: ["v*"]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# Pushing again while a run is in flight cancels the older one. Tags are kept
+# out of it: a release build should never be cancelled by a later push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   PYTHON_VERSION: "3.12"
