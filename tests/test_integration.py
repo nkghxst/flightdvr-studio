@@ -224,24 +224,25 @@ def test_a_size_target_is_respected_for_one_clip(tools, clip, tmp_path):
 # These fail on purpose. Delete the marker when you fix one; strict xfail turns
 # an unexpected pass into an error so nobody has to remember.
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="build_commands() receives job.clips[0], so a joined size target is "
-           "computed from the first clip's duration alone and overshoots by "
-           "roughly the number of clips joined",
-)
 def test_a_joined_size_target_is_respected(tools, clip, second_clip, tmp_path):
+    """Two six-second clips joined, targeted at 3 MB.
+
+    The bitrate used to be computed from the first clip alone, so the finished
+    file came out at roughly the number of clips times the target.
+    """
     from flightdvr.jobs import write_concat_file
     clips = [probed(tools, clip), probed(tools, second_clip)]
-    concat = write_concat_file(tmp_path, clips)
-    out = tmp_path / "joined_small.mp4"
+    concat = write_concat_file(clips, tmp_path, "joined")
+    out = target(tmp_path, "joined_small", "social")
     settings = ExportSettings()
-    settings.target_mb = 3
+    settings.social_size_mb = 3
     ok, message = export(tools, tmp_path, clips, "social", out,
                          settings=settings, concat=concat)
     assert ok, message
     produced = out.stat().st_size / (1024 * 1024)
     assert produced <= 3 * 1.35, f"asked for 3 MB, produced {produced:.2f} MB"
+    assert probe_output(tools, out)["duration"] == pytest.approx(12.0, abs=0.5), \
+        "both clips should be in the output"
 
 
 @pytest.mark.xfail(
@@ -254,7 +255,7 @@ def test_joining_a_silent_clip_first_keeps_the_others_audio(
 ):
     from flightdvr.jobs import write_concat_file
     clips = [probed(tools, silent_clip), probed(tools, clip)]
-    concat = write_concat_file(tmp_path, clips)
+    concat = write_concat_file(clips, tmp_path, "joined")
     out = tmp_path / "mixed.mp4"
     ok, message = export(tools, tmp_path, clips, "master", out, concat=concat)
     assert ok, message

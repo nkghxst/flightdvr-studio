@@ -468,6 +468,48 @@ def test_trim_applies_to_every_re_encoding_preset():
         assert "-t" in command, preset
 
 
+def test_a_size_target_scales_with_the_length_it_is_given():
+    """A joined export is as long as all its clips, and the bitrate has to
+    follow. Sizing from the first clip alone overshot the target by roughly the
+    number of clips joined."""
+    clip = boxpro_clip()
+    alone = target_video_bitrate(clip, 45, 128)
+    joined = target_video_bitrate(clip, 45, 128, runtime=clip.duration * 2)
+    # Twice the footage in the same file size means about half the bitrate.
+    assert joined < alone
+    assert (joined + 128) == pytest.approx((alone + 128) / 2, rel=0.05)
+
+
+def test_a_joined_export_is_sized_by_its_total_duration():
+    clip = boxpro_clip()
+    commands = build_commands(
+        TOOLS, clip, "social", ExportSettings(social_mode="size"),
+        Path("out.mp4"), Path("work"),
+        sources=[clip.path, clip.path], concat_file=Path("c.txt"),
+        total_duration=clip.duration * 2,
+    )
+    joined = int(commands[0][commands[0].index("-b:v") + 1].rstrip("k"))
+
+    single = build_commands(
+        TOOLS, clip, "social", ExportSettings(social_mode="size"),
+        Path("out.mp4"), Path("work"),
+    )
+    alone = int(single[0][single[0].index("-b:v") + 1].rstrip("k"))
+
+    assert joined < alone, "a join must not reuse the single-clip bitrate"
+
+
+def test_a_single_clip_is_unaffected_by_the_new_argument():
+    clip = boxpro_clip()
+    without = build_commands(TOOLS, clip, "social",
+                             ExportSettings(social_mode="size"),
+                             Path("out.mp4"), Path("work"))
+    with_zero = build_commands(TOOLS, clip, "social",
+                               ExportSettings(social_mode="size"),
+                               Path("out.mp4"), Path("work"), total_duration=0.0)
+    assert without == with_zero
+
+
 def test_joined_export_reads_from_a_concat_list():
     commands = build_commands(
         TOOLS, boxpro_clip(), "master", ExportSettings(), Path("out.mp4"), Path("work"),

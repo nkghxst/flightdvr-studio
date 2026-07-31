@@ -342,9 +342,16 @@ def _scale_filter(clip: ClipInfo, target_height: int) -> list[str]:
     return [f"scale=-2:{target_height}:flags=lanczos"]
 
 
-def target_video_bitrate(clip: ClipInfo, size_mb: int, audio_kbps: int) -> int:
-    """Video bitrate in kbit/s that lands a clip on `size_mb`."""
-    runtime = clip.trimmed_duration or clip.duration
+def target_video_bitrate(clip: ClipInfo, size_mb: int, audio_kbps: int,
+                         runtime: float = 0.0) -> int:
+    """Video bitrate in kbit/s that lands a clip on `size_mb`.
+
+    `runtime` overrides the clip's own length, which is what a joined export
+    needs: the file being produced is as long as all its clips together, and
+    sizing it from the first one alone overshot the target by roughly the
+    number of clips joined.
+    """
+    runtime = runtime or clip.trimmed_duration or clip.duration
     if runtime <= 0:
         return 2500
     total_kbits = (size_mb * 1024 * 1024 * 8) / 1000.0
@@ -363,8 +370,15 @@ def build_commands(
     work_dir: Path,
     sources: list[Path] | None = None,
     concat_file: Path | None = None,
+    total_duration: float = 0.0,
 ) -> list[list[str]]:
-    """Full ffmpeg command list. Two entries when a two-pass encode is needed."""
+    """Full ffmpeg command list. Two entries when a two-pass encode is needed.
+
+    `clip` describes the first source and supplies the stream properties.
+    `total_duration` is how long the finished file will be, which differs from
+    that clip's length whenever several are joined; leave it at zero for a
+    single clip.
+    """
     sources = sources or [clip.path]
     ff = str(tools.ffmpeg)
     head = [ff, "-hide_banner", "-nostdin", "-y"] + _input_args(sources, concat_file, clip)
@@ -423,7 +437,8 @@ def build_commands(
         ]
 
     # Size-targeted. Two passes on CPU gets far closer to the target than one.
-    kbps = target_video_bitrate(clip, settings.social_size_mb, audio_kbps)
+    kbps = target_video_bitrate(clip, settings.social_size_mb, audio_kbps,
+                                runtime=total_duration)
     if settings.hardware:
         # Hardware encoders have no two-pass mode worth using, so this is a
         # single bitrate-targeted pass and lands less precisely on the number.

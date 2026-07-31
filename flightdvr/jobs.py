@@ -275,6 +275,10 @@ class ExportWorker(QThread):
                 self.work_dir,
                 sources=[c.path for c in job.clips],
                 concat_file=job.concat_file,
+                # The finished file is as long as every clip together. Sizing a
+                # joined export from clips[0] alone overshot the target by
+                # roughly the number of clips in it.
+                total_duration=job.total_duration,
             )
         except Exception as exc:  # pragma: no cover - defensive
             return False, f"Could not build command: {exc}"
