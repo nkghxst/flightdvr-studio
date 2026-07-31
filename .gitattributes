@@ -1,0 +1,16 @@
+# Shell scripts and workflows must keep LF endings even when checked out on
+# Windows, which is where most of this project is written. A CRLF in a shebang
+# line makes the whole script unrunnable on Linux and macOS.
+*.sh        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+
+# These only ever run on Windows.
+*.ps1       text eol=crlf
+*.bat       text eol=crlf
+
+*.png       binary
+*.gif       binary
+*.mp4       binary
+*.ico       binary
+*.icns      binary

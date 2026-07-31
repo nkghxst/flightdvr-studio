@@ -1,0 +1,175 @@
+# Tests on all three platforms, and packaged builds for the two that cannot be
+# built on the developer's Windows machine.
+#
+# The Windows installer is still built locally with packaging/build.ps1. It is
+# not here yet because the bundled ffmpeg has to be the exact build described in
+# packaging/ffmpeg-configuration.txt — a CI job that downloaded whatever is
+# current would quietly make that GPL attribution wrong.
+
+name: Build
+
+on:
+  push:
+    # Every branch, not just main: this is a one-person project, so a branch
+    # push is the point at which feedback is useful. Public repositories get
+    # unlimited free runner minutes, so there is nothing to ration.
+    branches: ["**"]
+    tags: ["v*"]
+    # Prose changes nothing a build could verify. Tags are exempt, so a release
+    # is still built even if the tagged commit only touched the changelog.
+    paths-ignore: ["**.md", "docs/**", ".gitattributes"]
+  # No pull_request trigger on purpose. Check runs attach to a commit, so a
+  # pull request from this repository already shows the results of the push
+  # that created it; adding the trigger would build every commit twice. A pull
+  # request from a fork gets no build until someone runs this by hand from the
+  # Actions tab, which is the right trade while there are no fork contributors.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Pushing again while a run is in flight cancels the older one. Tags are kept
+# out of it: a release build should never be cancelled by a later push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  test:
+    name: Tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # PySide6 loads these at import time even under the offscreen platform.
+      - name: Install Qt's runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libdbus-1-3 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Run the tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest tests/ -q
+
+  appimage:
+    name: Linux AppImage
+    needs: test
+    # Built on the oldest supported LTS on purpose: an AppImage carries no
+    # glibc, so one built on 24.04 refuses to start on 22.04. If this runner
+    # label is ever retired, ubuntu-latest works but raises the glibc floor.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Qt's runtime libraries and ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libdbus-1-3 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 \
+            ffmpeg
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pytest
+
+      - name: Build
+        run: packaging/build-appimage.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: dist/*.AppImage
+          if-no-files-found: error
+
+  macos:
+    name: macOS app
+    needs: test
+    # Apple Silicon only. Every Mac sold since late 2020 is arm64 and the Intel
+    # runners are being retired; adding an x86_64 build back is a second entry
+    # in a matrix here, since build-macos.sh already names its output by arch.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install ffmpeg
+        run: brew install ffmpeg
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pytest
+
+      - name: Build
+        run: packaging/build-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    name: Attach to the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [appimage, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # Drafted rather than published: the Windows installer is still built by
+      # hand, so a person has to add it and write the notes before this goes out.
+      - name: Upload the built files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -lh artifacts
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            > /dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" \
+                 --repo "$GITHUB_REPOSITORY" --draft \
+                 --title "$GITHUB_REF_NAME" \
+                 --notes "Linux and macOS builds attached automatically. The Windows installer is added by hand."
+          gh release upload "$GITHUB_REF_NAME" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" --clobber

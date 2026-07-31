@@ -17,7 +17,11 @@
 
 Draws a quad silhouette around a play triangle: four motors, one video. Written
 out as a multi-resolution .ico so Windows picks the right size for the taskbar,
-the Start Menu and the desktop.
+the Start Menu and the desktop, plus a PNG at every size the other two
+platforms need: Linux reads one from the .desktop file, and macOS wants a full
+iconset up to 1024px for iconutil to compile into an .icns.
+
+Everything is drawn from the same vector description, so no size is an upscale.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication
 
-SIZES = [256, 128, 64, 48, 32, 16]
+SIZES = [1024, 512, 256, 128, 64, 48, 32, 16]
 
 BACKDROP = QColor("#161b22")
 ACCENT = QColor("#3fd0c9")
@@ -93,31 +97,33 @@ def main() -> int:
     target = Path(sys.argv[1]) if len(sys.argv) > 1 else root / "packaging/flightdvr.ico"
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    if b"ico" not in [bytes(f) for f in QImageWriter.supportedImageFormats()]:
-        print("This Qt build cannot write .ico files.")
-        return 1
-
-    # QImageWriter writes one image; Qt's ICO handler takes the largest and
-    # scales, so write the 256px master and let Windows downscale.
-    master = draw(256)
-    writer = QImageWriter(str(target), b"ico")
-    if not writer.write(master):
-        print(f"Failed to write icon: {writer.errorString()}")
-        return 1
-
+    # PNGs first. They are what the Linux and macOS packaging needs, and unlike
+    # the .ico they do not depend on an optional Qt image plugin.
     for size in SIZES:
-        png = target.with_name(f"icon_{size}.png")
-        draw(size).save(str(png))
+        draw(size).save(str(target.with_name(f"icon_{size}.png")))
 
     # The app loads its window icon from inside the package, so it has one when
     # run from source as well as when packaged.
     resources = root / "flightdvr" / "resources"
     resources.mkdir(parents=True, exist_ok=True)
     bundled = resources / "icon.ico"
-    writer = QImageWriter(str(bundled), b"ico")
-    if not writer.write(master):
-        print(f"Failed to write bundled icon: {writer.errorString()}")
-        return 1
+
+    if b"ico" not in [bytes(f) for f in QImageWriter.supportedImageFormats()]:
+        # Some Linux Qt builds ship without the ICO plugin. Both .ico files are
+        # committed, so a build there carries on with the copies in the
+        # repository instead of stopping over an icon.
+        print(f"This Qt build cannot write .ico; wrote {len(SIZES)} PNG sizes.")
+        return 0 if target.exists() and bundled.exists() else 1
+
+    # QImageWriter writes one image; Qt's ICO handler takes the largest and
+    # scales, so write the 256px master and let Windows downscale. 256 is also
+    # the largest size the ICO format holds.
+    master = draw(256)
+    for path in (target, bundled):
+        writer = QImageWriter(str(path), b"ico")
+        if not writer.write(master):
+            print(f"Failed to write {path}: {writer.errorString()}")
+            return 1
 
     print(f"wrote {target} and {bundled} ({target.stat().st_size} bytes), "
           f"plus {len(SIZES)} PNG sizes")

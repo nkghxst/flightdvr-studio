@@ -21,6 +21,7 @@ import ctypes
 import os
 import shutil
 import string
+import sys
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -55,6 +56,12 @@ LINUX_MEDIA_ROOTS = ("/media/", "/run/media/", "/mnt/")
 
 # /proc/mounts escapes these so a path with a space stays one field.
 MOUNT_ESCAPES = {"\\040": " ", "\\011": "\t", "\\012": "\n", "\\134": "\\"}
+
+# macOS mounts everything here, including a symlink back to the startup disk.
+MACOS_VOLUMES = Path("/Volumes")
+
+# Bookkeeping macOS leaves in /Volumes that is never worth offering as a source.
+MACOS_SKIP_VOLUMES = {".timemachine", "com.apple.timemachine.donotpresent"}
 
 
 @dataclass(frozen=True)
@@ -162,10 +169,65 @@ def _linux_drives(removable_only: bool = False) -> list[Drive]:
     return drives
 
 
-def list_drives(removable_only: bool = False) -> list[Drive]:
-    """Mounted drives and volumes, removable ones first."""
-    if not hasattr(ctypes, "windll"):
-        return _linux_drives(removable_only)
+def macos_volumes_to_drives(
+    entries: Iterable[tuple[str, bool, int]],
+    root_device: int,
+    removable_only: bool = False,
+) -> list[Drive]:
+    """Turn a listing of /Volumes into drives.
+
+    Each entry is (name, is a symlink, device id). macOS represents the startup
+    disk as a symlink in /Volumes pointing back at /, so that one is reported as
+    the fixed drive and everything else — cards, USB sticks, network shares — is
+    treated as removable. Python cannot read the MNT_REMOVABLE flag without
+    shelling out to diskutil, so the mount location is the signal, exactly as it
+    is on Linux. A second internal APFS volume gets its own device id and so
+    would be labelled removable; that costs nothing beyond an extra row.
+    """
+    drives: list[Drive] = []
+    boot_label = ""
+
+    for name, is_symlink, device in entries:
+        if name.startswith(".") or name.lower() in MACOS_SKIP_VOLUMES:
+            continue
+        if is_symlink or device == root_device:
+            boot_label = boot_label or name
+            continue
+        drives.append(Drive(MACOS_VOLUMES / name, name, name, True))
+
+    if not removable_only:
+        drives.append(Drive(Path("/"), "/", boot_label or "Macintosh HD", False))
+
+    drives.sort(key=lambda d: (not d.removable, str(d.path)))
+    return drives
+
+
+def _macos_drives(removable_only: bool = False) -> list[Drive]:
+    try:
+        root_device = Path("/").stat().st_dev
+    except OSError:
+        root_device = -1
+
+    try:
+        listing = sorted(MACOS_VOLUMES.iterdir())
+    except OSError:
+        listing = []
+
+    entries: list[tuple[str, bool, int]] = []
+    for entry in listing:
+        try:
+            # is_symlink() first: is_dir() follows the link and would hide it.
+            is_symlink = entry.is_symlink()
+            if not entry.is_dir():
+                continue
+            entries.append((entry.name, is_symlink, entry.stat().st_dev))
+        except OSError:
+            continue
+
+    return macos_volumes_to_drives(entries, root_device, removable_only)
+
+
+def _windows_drives(removable_only: bool = False) -> list[Drive]:
     kernel32 = ctypes.windll.kernel32
     mask = kernel32.GetLogicalDrives()
     drives: list[Drive] = []
@@ -187,6 +249,15 @@ def list_drives(removable_only: bool = False) -> list[Drive]:
     # A card is what people are usually reaching for, so float it to the top.
     drives.sort(key=lambda d: (not d.removable, d.identifier))
     return drives
+
+
+def list_drives(removable_only: bool = False) -> list[Drive]:
+    """Mounted drives and volumes, removable ones first."""
+    if hasattr(ctypes, "windll"):
+        return _windows_drives(removable_only)
+    if sys.platform == "darwin":
+        return _macos_drives(removable_only)
+    return _linux_drives(removable_only)
 
 
 def find_clips(folder: Path, recursive: bool = True) -> list[Path]:
