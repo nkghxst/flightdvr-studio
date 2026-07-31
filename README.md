@@ -30,7 +30,7 @@ Run **`FlightDVRStudio-Setup.exe`**. It installs per-user, so there is no
 administrator prompt, and it puts ffmpeg inside the install folder — the machine
 needs nothing else installed.
 
-About 110 MB to download, 360 MB installed. Uninstalls from Add/Remove Programs.
+About 95 MB to download, 340 MB installed. Uninstalls from Add/Remove Programs.
 
 Windows 10 or 11, 64-bit.
 
@@ -96,24 +96,34 @@ you downloaded is what was built. None of these are code-signed, so this is the
 only check that means anything.
 
 ```powershell
-Get-FileHash FlightDVRStudio-1.1.0-Setup.exe -Algorithm SHA256
+Get-FileHash FlightDVRStudio-1.1.1-Setup.exe -Algorithm SHA256
 ```
 
 ```bash
-sha256sum FlightDVR_Studio-1.1.0-x86_64.AppImage    # Linux
-shasum -a 256 FlightDVR-Studio-1.1.0-arm64.dmg      # macOS
+sha256sum FlightDVR_Studio-1.1.1-x86_64.AppImage    # Linux
+shasum -a 256 FlightDVR-Studio-1.1.1-arm64.dmg      # macOS
 ```
 
-**1.1.0**
+**1.1.1**
+
+| File | SHA-256 |
+|---|---|
+| `FlightDVRStudio-1.1.1-Setup.exe` | `f0ed2872217fa831c593ab052ffab7ac9b6205952609472368d6f49a3306e8e0` |
+| `FlightDVR_Studio-1.1.1-x86_64.AppImage` | `0d53c8677cbd090c00b66e7c5c4a01329a79e0101e6d4da1036d5eb2e350134b` |
+| `FlightDVR-Studio-1.1.1-arm64.dmg` | `77aeb1edba0f8fa173a479cba74d54d4da1d533802ab057a1581a15caf926035` |
+
+<details>
+<summary>Earlier releases</summary>
+
+**1.1.0** — superseded by 1.1.1, which fixes corrupt trimmed exports and a
+failed export destroying the file it was replacing. Still downloadable, but
+there is no reason to choose it.
 
 | File | SHA-256 |
 |---|---|
 | `FlightDVRStudio-1.1.0-Setup.exe` | `228b5a4bd214be4a54143e7fd2d08b1281d480a735da508bba4f9211e148ebea` |
 | `FlightDVR_Studio-1.1.0-x86_64.AppImage` | `8526a1cc19be7813a4b2b55b41a36cf14913cc95258e0ddf40761b493de3ffe4` |
 | `FlightDVR-Studio-1.1.0-arm64.dmg` | `1d9f0493150406a36c9f330a215a5fa20471fc45a1248ce7dc8248e8b7aa30d3` |
-
-<details>
-<summary>Earlier releases</summary>
 
 **1.0.0** — Windows only.
 
