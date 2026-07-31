@@ -89,6 +89,15 @@ def _describe_failure(log: Iterable[str], code: int) -> str:
                 return line[:300]
     if tagged:
         return tagged[0][:300]
+    # Whatever it said, say it. Falling straight through to the exit code threw
+    # away ffmpeg's own account of the failure whenever it phrased the problem
+    # in words this function does not recognise, which is precisely when the
+    # user most needs to read it. Older builds word things differently, and an
+    # export failing on Ubuntu 22.04 reported nothing but "exit code 1".
+    if useful:
+        return useful[-1][:300]
+    if lines:
+        return lines[-1][:300]
     return f"exit code {code}"
 
 
