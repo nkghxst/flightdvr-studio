@@ -35,7 +35,7 @@ from PySide6.QtCore import QObject, QRect, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import QWidget
 
-from .media import NO_WINDOW, ClipInfo, Tools
+from .media import NO_WINDOW, ClipInfo, Tools, frame_rate_mode
 
 FRAME_WIDTH = 160
 PTS = re.compile(r"pts_time:([0-9.]+)")
@@ -102,7 +102,10 @@ def extract(tools: Tools, clip: ClipInfo) -> Filmstrip:
         # Decoding keyframes alone is five times quicker than decoding
         # everything, and a keyframe a second is finer than anyone needs.
         "-skip_frame", "nokey", "-i", str(clip.path),
-        "-fps_mode", "passthrough", "-vf", ",".join(filters), "-q:v", "6",
+        # Asked for rather than assumed: -fps_mode replaced -vsync in ffmpeg
+        # 5.1, and on 4.4 this call failed, so the filmstrip stayed empty.
+        *frame_rate_mode(tools, "passthrough"),
+        "-vf", ",".join(filters), "-q:v", "6",
         str(folder / "f_%04d.jpg"),
     ]
     try:

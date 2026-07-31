@@ -43,7 +43,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .media import ClipInfo, Tools
+from .media import ClipInfo, Tools, frame_rate_mode
 
 # --- colour modes ------------------------------------------------------------
 
@@ -319,15 +319,20 @@ def _audio_args(settings: ExportSettings, clip: ClipInfo, bitrate: str, pcm: boo
     return codec + ["-ac", "2", "-af", "aresample=async=1:first_pts=0"]
 
 
-def _fps_args(clip: ClipInfo, override: int = 0) -> list[str]:
-    """Force constant frame rate. NLEs handle variable frame rate badly."""
+def _fps_args(tools: Tools, clip: ClipInfo, override: int = 0) -> list[str]:
+    """Force constant frame rate. NLEs handle variable frame rate badly.
+
+    The option name is asked for rather than assumed: -fps_mode replaced
+    -vsync in ffmpeg 5.1, and Ubuntu 22.04 still ships 4.4.
+    """
+    mode = frame_rate_mode(tools, "cfr")
     fps = override or clip.fps
     # Never ask for more frames than the source has; that only duplicates them.
     if override and clip.fps and override > clip.fps:
         fps = clip.fps
     if fps <= 0:
-        return ["-fps_mode", "cfr"]
-    return ["-fps_mode", "cfr", "-r", f"{fps:g}"]
+        return mode
+    return mode + ["-r", f"{fps:g}"]
 
 
 def _scale_filter(clip: ClipInfo, target_height: int) -> list[str]:
@@ -375,7 +380,7 @@ def build_commands(
             head
             + ["-vf", ",".join(vf)]
             + codec_args
-            + _fps_args(clip)
+            + _fps_args(tools, clip)
             + _audio_args(settings, clip, "192k", pcm=True)
             + [str(out_path)]
         ]
@@ -393,7 +398,7 @@ def build_commands(
             head
             + ["-vf", ",".join(vf)]
             + video
-            + _fps_args(clip)
+            + _fps_args(tools, clip)
             + _audio_args(settings, clip, "192k")
             + ["-movflags", "+faststart", str(out_path)]
         ]
@@ -403,7 +408,7 @@ def build_commands(
     vf = _scale_filter(clip, settings.social_height) + colour_filters(
         settings.colour, clip, "yuv420p"
     )
-    fps_args = _fps_args(clip, settings.social_fps)
+    fps_args = _fps_args(tools, clip, settings.social_fps)
     audio_args = _audio_args(settings, clip, "128k")
 
     if settings.social_mode == "quality":

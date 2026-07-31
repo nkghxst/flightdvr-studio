@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import subprocess
+import functools
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -88,6 +89,42 @@ def _bundled_dirs() -> list[Path]:
         here = Path(sys.executable).parent
         dirs += [here / "ffmpeg", here]
     return dirs
+
+
+@functools.lru_cache(maxsize=8)
+def _fps_mode_supported(ffmpeg: str) -> bool:
+    """Whether this ffmpeg knows -fps_mode, which replaced -vsync in 5.1.
+
+    Tested rather than inferred from the version string, for the same reason
+    the hardware encoders are: what a build advertises and what it accepts are
+    not always the same thing.
+
+    This matters more than it looks. Ubuntu 22.04 ships ffmpeg 4.4, the
+    AppImage is built for 22.04 on purpose and does not carry its own ffmpeg,
+    and every re-encoding export used -fps_mode. Every export on that
+    distribution failed with "Unrecognized option 'fps_mode'".
+    """
+    try:
+        result = run_hidden(
+            [ffmpeg, "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "nullsrc=s=16x16:d=0.04",
+             "-fps_mode", "cfr", "-f", "null", "-"],
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def frame_rate_mode(tools: "Tools", mode: str) -> list[str]:
+    """The frame-rate-sync option this ffmpeg actually understands.
+
+    `mode` is the modern spelling — "cfr" or "passthrough". Both are accepted
+    by -vsync on older builds, so only the option name changes.
+    """
+    if _fps_mode_supported(str(tools.ffmpeg)):
+        return ["-fps_mode", mode]
+    return ["-vsync", mode]
 
 
 def is_bundled(path: Path) -> bool:

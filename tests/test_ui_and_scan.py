@@ -583,6 +583,25 @@ def test_a_silent_failure_still_reports_something():
     assert _describe_failure([], 137) == "exit code 137"
 
 
+def test_output_is_never_discarded_just_because_it_is_unfamiliar():
+    """ffmpeg's wording varies by version. Reporting only lines that match a
+    keyword list meant an export failing under Ubuntu 22.04's ffmpeg 4.4 told
+    the user "exit code 1" and nothing else, which is the exact moment its own
+    account of the problem is worth the most."""
+    from flightdvr.jobs import _describe_failure
+    log = [
+        "Input #0, mpegts, from 'hdz_001.ts':",
+        "Something went wrong in a way nobody anticipated",
+    ]
+    assert _describe_failure(log, 1) == "Something went wrong in a way nobody anticipated"
+
+
+def test_noise_is_still_preferred_over_nothing():
+    """Even when every line is boilerplate, quote one rather than an errno."""
+    from flightdvr.jobs import _describe_failure
+    assert _describe_failure(["Conversion failed!"], 1) == "Conversion failed!"
+
+
 # -- licence obligations are structural, so guard them structurally -----------
 
 ROOT = Path(__file__).resolve().parents[1]
