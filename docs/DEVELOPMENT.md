@@ -179,6 +179,20 @@ works. `_encoder_runs()` performs a real three-frame encode. Hardcoding
 `h264_amf` because it worked on the development machine would have failed on
 the laptop, which is how this was found.
 
+**ffmpeg options are not stable, and the app does not bundle one on Linux or
+macOS.** `-fps_mode` replaced `-vsync` in ffmpeg 5.1. Ubuntu 22.04 ships 4.4,
+the AppImage is built for 22.04 on purpose, and every re-encoding export plus
+the filmstrip extraction used `-fps_mode` — so on that distribution every
+export failed with `Unrecognized option 'fps_mode'` and the trim panel stayed
+empty. `frame_rate_mode()` in `media.py` probes for it once, the same way the
+hardware encoders are probed, and falls back to `-vsync`.
+
+The general rule: the Windows build knows exactly which ffmpeg it has because
+the binary is pinned, and the other two know nothing at all. Anything added to
+a command that is newer than the oldest supported distribution's ffmpeg has to
+be probed. The integration suite runs on `ubuntu-22.04` during the AppImage
+build precisely so this class of problem shows up.
+
 **The goggles have no clock battery.** The Box Pro's own log reports
 `rtc_init has NOT detected a battery`, so the clock restarts from the same
 stored value on every power-up and every clip carries nearly the same

@@ -321,6 +321,42 @@ def trimmed_clip(start=44.0, end=104.0, **overrides) -> ClipInfo:
     return clip
 
 
+# -- ffmpeg 5.1 renamed -vsync to -fps_mode, and 22.04 still ships 4.4 --------
+
+def test_a_modern_ffmpeg_gets_fps_mode(monkeypatch):
+    from flightdvr import media
+    monkeypatch.setattr(media, "_fps_mode_supported", lambda _: True)
+    assert media.frame_rate_mode(TOOLS, "cfr") == ["-fps_mode", "cfr"]
+
+
+def test_an_older_ffmpeg_gets_vsync(monkeypatch):
+    """Ubuntu 22.04 ships ffmpeg 4.4, the AppImage is built for 22.04 on
+    purpose and carries no ffmpeg of its own, and every re-encoding export used
+    -fps_mode. Every export on that distribution failed outright."""
+    from flightdvr import media
+    monkeypatch.setattr(media, "_fps_mode_supported", lambda _: False)
+    assert media.frame_rate_mode(TOOLS, "cfr") == ["-vsync", "cfr"]
+    assert media.frame_rate_mode(TOOLS, "passthrough") == ["-vsync", "passthrough"]
+
+
+@pytest.mark.parametrize("supported,flag", [(True, "-fps_mode"), (False, "-vsync")])
+@pytest.mark.parametrize("preset", ["edit", "master", "social"])
+def test_re_encoding_presets_pin_the_frame_rate_either_way(
+    monkeypatch, supported, flag, preset
+):
+    from flightdvr import media
+    monkeypatch.setattr(media, "_fps_mode_supported", lambda _, v=supported: v)
+    command = build(preset)[0]
+    assert flag in command, f"{preset} lost its frame rate mode"
+    assert ("-fps_mode" in command) != ("-vsync" in command), "both spellings sent"
+
+
+def test_remux_does_not_pin_the_frame_rate():
+    """It copies the stream, so there is nothing to synchronise."""
+    command = build("remux")[0]
+    assert "-fps_mode" not in command and "-vsync" not in command
+
+
 def test_an_untrimmed_clip_adds_no_seek():
     command = build("master")[0]
     assert "-ss" not in command
