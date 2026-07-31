@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.1.2
+
+**Linux users on Ubuntu 22.04, Debian 11 or Linux Mint 21 should update.**
+Nothing changes on Windows or macOS, or on Linux with ffmpeg 5.1 or newer.
+
+- **Exports failed outright on ffmpeg older than 5.1.** ffmpeg 5.1 renamed
+  `-vsync` to `-fps_mode`, and every re-encoding export used the new name — so
+  on distributions still shipping ffmpeg 4.4 every export stopped with
+  `Unrecognized option 'fps_mode'`, and the trim panel showed no filmstrip for
+  the same reason. The option is now asked for rather than assumed, the same
+  way hardware encoders already are. Ubuntu 22.04 is exactly the version the
+  AppImage is built for, so this affected the distribution it most needed to
+  work on.
+- **Failures no longer hide ffmpeg's explanation.** The message shown was
+  chosen by matching against a list of words, and anything phrased differently
+  was reduced to "exit code 1" — which is precisely when ffmpeg's own account
+  of the problem is worth the most.
+
+Behind the scenes, exports are now tested by running ffmpeg and inspecting the
+file that comes out, rather than by checking the arguments the app assembled.
+That suite found the defect above on its first run, on a machine none of this
+had been tried on.
+
 ## 1.1.1
 
 Export integrity. Everything here was found by an independent review of the
