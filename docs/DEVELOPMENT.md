@@ -18,15 +18,44 @@ Running from source needs `ffmpeg` and `ffprobe` findable — on PATH, or in one
 of the fallback directories listed in `media.py`.
 
 ```bash
-python -m pytest tests/ -q
+python -m pytest                        # everything, about 15 seconds
+python -m pytest -m "not integration"   # the fast loop, under a second
+python -m pytest -m integration         # real encodes only
 ```
 
-The suite needs neither ffmpeg nor a display. It checks the commands the app
-*would* issue rather than running them, so it is fast (under a second) and
-runs identically on all three platforms in CI. Set `QT_QPA_PLATFORM=offscreen`
-if you are on a headless machine; the test module sets it itself before any
-Qt import, which is why those imports sit below `os.environ.setdefault` with
-`# noqa: E402`.
+There are two kinds of test here and the difference matters.
+
+**Unit tests** check the commands the app *would* issue. They need neither
+ffmpeg nor a display and run in well under a second. `QT_QPA_PLATFORM` is set
+in `conftest.py` before any Qt import, which is why some imports sit below an
+`os.environ.setdefault` with `# noqa: E402`.
+
+**Integration tests** (`tests/test_integration.py`) run ffmpeg and inspect the
+file that comes out. They exist because the review found eighteen defects and
+**not one was visible in the arguments** — several were guarded by unit tests
+that passed. A command can be perfectly well-formed and still produce half a
+second of corrupt video, or an empty container reported as a success.
+
+Fixtures in `conftest.py` imitate a Box Pro: MPEG-TS, HEVC, 60fps, full range,
+and a keyframe every 1.000 s, because the trim defect depended on that GOP
+length. They are 320x180 and cached per session, so the whole thing costs about
+fifteen seconds.
+
+### xfail is the known-defects list
+
+Every `xfail(strict=True)` in the integration module describes a defect that is
+still real. `xfail_strict` is on, so a test that starts passing becomes an
+error rather than a quiet success — whoever fixes the defect is told to delete
+the marker. The list cannot silently go stale.
+
+### Assert your fixtures
+
+Three separate attempts at the odd-dimensions fixture tested nothing and passed
+while doing it. `testsrc2` works internally in yuv420p and silently emits
+126x94 when asked for 127x95; H.264 crops to macroblock boundaries and does the
+same. The working version uses `testsrc` and FFV1, and the fixture checks its
+own output and skips loudly rather than pretending. If a fixture is meant to
+have an awkward property, verify it has it.
 
 **Compare paths as `Path` objects, never as strings.** Several constants hold
 Windows and macOS locations regardless of which platform is running — the
