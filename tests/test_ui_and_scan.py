@@ -349,10 +349,20 @@ def test_player_lookup_returns_something_runnable_or_nothing():
 
 
 def test_a_known_good_player_is_preferred_over_the_association(monkeypatch):
-    """Windows maps .ts to Media Player, which often cannot decode HEVC."""
-    fake = Path("C:/Program Files/VideoLAN/VLC/vlc.exe")
-    monkeypatch.setattr(Path, "exists", lambda self: str(self) == str(fake))
-    assert find_player() == fake
+    """Windows maps .ts to Media Player and macOS to QuickTime; neither
+    reliably decodes HEVC, so an installed VLC, mpv or IINA wins.
+
+    Every known location is checked, and paths are compared as paths rather
+    than as strings: PLAYER_PATHS carries the Windows and macOS locations on
+    every platform, and to POSIX a Windows path is one long filename rather
+    than something with separators in it.
+    """
+    from flightdvr.ui import PLAYER_PATHS
+
+    for candidate in PLAYER_PATHS:
+        monkeypatch.setattr(Path, "exists",
+                            lambda self, want=candidate: self == want)
+        assert find_player() == candidate
 
 
 # -- queued jobs follow later changes to the output settings ------------------

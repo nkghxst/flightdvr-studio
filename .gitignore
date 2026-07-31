@@ -15,3 +15,6 @@ dist/
 *.log
 *.mbtree
 ffmpeg2pass*
+
+# Compiled on the macOS build machine from the committed PNGs.
+packaging/flightdvr.icns
