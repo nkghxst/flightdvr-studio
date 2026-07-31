@@ -342,6 +342,76 @@ def _scale_filter(clip: ClipInfo, target_height: int) -> list[str]:
     return [f"scale=-2:{target_height}:flags=lanczos"]
 
 
+# --- joining several clips into one export -----------------------------------
+
+def join_problems(clips: list[ClipInfo]) -> list[str]:
+    """Why these clips cannot be joined into one file, in words a pilot can act on.
+
+    A joined export reads through the concat demuxer, which needs every input
+    to present the same streams, and the filter chain and encoder settings are
+    built from the first clip and applied to all of them. A mismatch does not
+    fail loudly: it produces a file that is quietly wrong — silent from the
+    second clip onwards, or stretched, or the wrong size.
+
+    Refusing is the interim answer. Each check here goes away as the export
+    learns to normalise that difference instead, and the messages are written
+    to be read by someone deciding what to do, not to describe the internals.
+    """
+    if len(clips) < 2:
+        return []
+
+    def distinct(key):
+        seen = []
+        for clip in clips:
+            value = key(clip)
+            if value not in seen:
+                seen.append(value)
+        return seen
+
+    problems: list[str] = []
+
+    sizes = distinct(lambda c: (c.width, c.height))
+    if len(sizes) > 1:
+        listed = ", ".join(f"{w}×{h}" for w, h in sizes)
+        problems.append(f"they are different sizes ({listed})")
+
+    rates = distinct(lambda c: round(c.fps, 2) if c.fps else 0.0)
+    if len(rates) > 1:
+        listed = ", ".join(f"{r:g}" for r in rates)
+        problems.append(f"they were recorded at different frame rates ({listed} fps)")
+
+    codecs = distinct(lambda c: c.video_codec or "unknown")
+    if len(codecs) > 1:
+        problems.append(f"they use different video codecs ({', '.join(codecs)})")
+
+    with_sound = [c for c in clips if c.has_audio]
+    if with_sound and len(with_sound) < len(clips):
+        problems.append(
+            f"only {len(with_sound)} of {len(clips)} have sound, and joining "
+            "them as they are would drop the audio from all of them"
+        )
+    elif len(with_sound) == len(clips):
+        audio = distinct(lambda c: c.audio_codec or "unknown")
+        if len(audio) > 1:
+            problems.append(f"they use different audio codecs ({', '.join(audio)})")
+
+    return problems
+
+
+def describe_join_problems(clips: list[ClipInfo], problems: list[str]) -> str:
+    """The refusal, as the user should read it."""
+    names = ", ".join(c.path.name for c in clips[:3])
+    if len(clips) > 3:
+        names += f" and {len(clips) - 3} more"
+    reasons = "".join(f"\n  • {problem}" for problem in problems)
+    return (
+        f"These {len(clips)} clips cannot be joined into one file because"
+        f"{reasons}\n\n"
+        f"Exporting them separately works and produces the same footage — "
+        f"only as {len(clips)} files instead of one.\n\n({names})"
+    )
+
+
 def target_video_bitrate(clip: ClipInfo, size_mb: int, audio_kbps: int,
                          runtime: float = 0.0) -> int:
     """Video bitrate in kbit/s that lands a clip on `size_mb`.

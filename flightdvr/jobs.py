@@ -33,7 +33,7 @@ from typing import Iterable
 from PySide6.QtCore import QThread, Signal
 
 from .media import NO_WINDOW, ClipInfo, Tools
-from .presets import PRESETS, ExportSettings, build_commands
+from .presets import PRESETS, ExportSettings, build_commands, join_problems
 
 # Pass 1 of a two-pass encode analyses without writing video, so it is quicker.
 PASS_WEIGHTS = (0.35, 0.65)
@@ -246,6 +246,13 @@ class ExportWorker(QThread):
         self.queue_finished.emit(completed, failed)
 
     def _run_job(self, index: int, job: Job) -> tuple[bool, str]:
+        # Refused here as well as in the window, so a job that reaches the
+        # worker by any route cannot produce a file that is quietly wrong.
+        if len(job.clips) > 1:
+            problems = join_problems(job.clips)
+            if problems:
+                return False, "Cannot join these clips: " + "; ".join(problems)
+
         try:
             job.out_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:

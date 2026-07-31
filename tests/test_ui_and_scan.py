@@ -602,6 +602,79 @@ def test_noise_is_still_preferred_over_nothing():
     assert _describe_failure(["Conversion failed!"], 1) == "Conversion failed!"
 
 
+# -- joining several clips -----------------------------------------------------
+
+def joinable(name, **overrides):
+    from flightdvr.media import ClipInfo
+    fields = dict(size=1, modified=datetime(2026, 7, 4), duration=60.0,
+                  width=1280, height=720, fps=60.0, video_codec="hevc",
+                  audio_codec="aac")
+    fields.update(overrides)
+    return ClipInfo(path=Path(name), **fields)
+
+
+def test_matching_clips_can_be_joined():
+    from flightdvr.presets import join_problems
+    assert join_problems([joinable("a.ts"), joinable("b.ts")]) == []
+
+
+def test_one_clip_is_never_a_join_problem():
+    from flightdvr.presets import join_problems
+    assert join_problems([joinable("a.ts", width=640)]) == []
+
+
+@pytest.mark.parametrize("difference,expected", [
+    (dict(width=1920, height=1080), "different sizes"),
+    (dict(fps=30.0), "different frame rates"),
+    (dict(video_codec="h264"), "different video codecs"),
+    (dict(audio_codec=""), "drop the audio"),
+])
+def test_mismatched_clips_are_refused_with_a_reason(difference, expected):
+    """A join built from mismatched clips does not fail loudly. It produces a
+    file that is silent after the first clip, or the wrong length, and looks
+    like it worked."""
+    from flightdvr.presets import join_problems
+    problems = join_problems([joinable("a.ts"), joinable("b.ts", **difference)])
+    assert problems, f"{difference} should have been refused"
+    assert any(expected in p for p in problems), problems
+
+
+def test_the_refusal_names_the_clips_and_suggests_what_to_do():
+    from flightdvr.presets import describe_join_problems, join_problems
+    clips = [joinable("hdz_001.ts"), joinable("hdz_002.ts", fps=30.0)]
+    message = describe_join_problems(clips, join_problems(clips))
+    assert "hdz_001.ts" in message and "hdz_002.ts" in message
+    assert "separately" in message
+
+
+def test_a_join_that_cannot_work_never_reaches_ffmpeg(tmp_path):
+    from flightdvr.jobs import ExportWorker, Job
+    from flightdvr.presets import ExportSettings
+    job = Job(clips=[joinable("a.ts"), joinable("b.ts", fps=30.0)],
+              preset_key="master", settings=ExportSettings(),
+              out_path=tmp_path / "joined.mp4")
+    ok, message = ExportWorker(TOOLS, [job], tmp_path)._run_job(0, job)
+    assert not ok and "frame rates" in message
+    assert not (tmp_path / "joined.mp4").exists()
+
+
+def test_each_set_of_clips_gets_its_own_concat_list():
+    """Lists were named after the first clip alone, so a+b and a+c shared one
+    file and the second overwrote the first."""
+    from flightdvr.ui import _clip_set_id
+    a, b, c = joinable("a.ts"), joinable("b.ts"), joinable("c.ts")
+    assert _clip_set_id([a, b]) != _clip_set_id([a, c])
+    assert _clip_set_id([a, b]) == _clip_set_id([a, b])
+
+
+def test_trimming_a_clip_changes_its_concat_list():
+    from flightdvr.ui import _clip_set_id
+    a, b = joinable("a.ts"), joinable("b.ts")
+    trimmed = joinable("b.ts")
+    trimmed.trim_in = 5.0
+    assert _clip_set_id([a, b]) != _clip_set_id([a, trimmed])
+
+
 # -- licence obligations are structural, so guard them structurally -----------
 
 ROOT = Path(__file__).resolve().parents[1]

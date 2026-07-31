@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -46,8 +47,8 @@ from .media import (
 )
 from .presets import (
     COLOUR_MODES, EDIT_CODECS, PRESET_ORDER, PRESETS, QUALITY_LEVELS,
-    SOCIAL_QUALITY_LEVELS, SPEEDS, ExportSettings, edit_bitrate_mbps,
-    estimate_output_size, output_path,
+    SOCIAL_QUALITY_LEVELS, SPEEDS, ExportSettings, describe_join_problems,
+    edit_bitrate_mbps, estimate_output_size, join_problems, output_path,
 )
 from .thumbs import THUMB_WIDTH, ThumbnailLoader
 from .trim import Filmstrip, FilmstripLoader, TrimBar
@@ -129,6 +130,18 @@ def human_duration(seconds: float) -> str:
 def natural_key(text: str) -> str:
     """Sort key where digit runs compare numerically (hdz_9 before hdz_112)."""
     return re.sub(r"\d+", lambda m: m.group().zfill(12), text.lower())
+
+
+def _clip_set_id(clips) -> str:
+    """A short identifier for exactly this set of clips and their trims.
+
+    Concat lists were named after the first clip alone, so two different joins
+    beginning with the same recording shared one file and overwrote each other.
+    """
+    material = "|".join(
+        f"{c.path}:{c.trim_in:.3f}:{c.trim_out:.3f}" for c in clips
+    )
+    return hashlib.sha1(material.encode("utf-8", "replace")).hexdigest()[:8]
 
 
 def work_dir() -> Path:
@@ -1756,10 +1769,26 @@ class MainWindow(QMainWindow):
         if self.join_check.isChecked() and len(clips) > 1:
             # Joined in DVR counter order: the file timestamps cannot be trusted.
             ordered = sorted(clips, key=lambda c: (c.sequence, natural_key(c.path.name)))
+
+            # Refused rather than exported wrongly. A join built from mismatched
+            # clips does not fail; it produces a file that is silent after the
+            # first clip, or the wrong length, and looks like it worked.
+            problems = join_problems(ordered)
+            if problems:
+                QMessageBox.warning(self, "These clips cannot be joined",
+                                    describe_join_problems(ordered, problems))
+                return
+
             stem = f"{ordered[0].stem}_joined"
-            concat = write_concat_file(ordered, work_dir(), stem)
             target = output_path(out_dir, stem, key, subfolders, stamp)
             if str(target) not in already:
+                # The list is written only once the target is accepted, and its
+                # name covers every clip in it. Writing it first, under a name
+                # taken from the first clip alone, meant queueing a+c after a+b
+                # was rejected as a duplicate yet still rewrote a+b's list, so
+                # the job on screen exported clips it did not name.
+                concat = write_concat_file(ordered, work_dir(),
+                                           f"{stem}_{_clip_set_id(ordered)}")
                 self.jobs.append(Job(ordered, key, settings, target, concat_file=concat,
                                      out_dir=out_dir, stem=stem, subfolders=subfolders))
         else:
