@@ -90,6 +90,48 @@ def _bundled_dirs() -> list[Path]:
     return dirs
 
 
+def is_bundled(path: Path) -> bool:
+    """True when this tool came from inside the packaged app.
+
+    Only the Windows installer carries its own ffmpeg; the AppImage and the
+    macOS app use whatever the system has. The About box has to say which,
+    because the licensing position differs.
+    """
+    for folder in _bundled_dirs():
+        try:
+            path.resolve().relative_to(folder.resolve())
+            return True
+        except (ValueError, OSError):
+            continue
+    return False
+
+
+def packaged_file(name: str) -> Path | None:
+    """Find a file that was packaged alongside the app.
+
+    Every format puts these somewhere different: _internal beside the exe on
+    Windows, Contents/Frameworks inside a macOS app, usr/bin inside an
+    AppImage. sys._MEIPASS is whichever of those is in use at runtime.
+    """
+    folders: list[Path] = []
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        folders.append(Path(bundle))
+    if getattr(sys, "frozen", False):
+        here = Path(sys.executable).parent
+        folders += [here, here / "_internal", here.parent, here.parent.parent]
+    folders.append(Path(__file__).resolve().parents[1])
+
+    for folder in folders:
+        candidate = folder / name
+        try:
+            if candidate.exists():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
 def _locate(name: str) -> Path | None:
     exe = name + (".exe" if os.name == "nt" else "")
     for folder in _bundled_dirs():

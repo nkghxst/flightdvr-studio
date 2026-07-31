@@ -424,36 +424,99 @@ def test_retarget_keeps_the_preset_subfolder():
     assert job.out_path.name == "2026-07-04_hdz_109_edit.mov"
 
 
-# -- a cancelled encode must not leave something that looks finished ----------
+# -- an export is all or nothing ----------------------------------------------
 
 def worker_for(tmp_path):
     from flightdvr.jobs import ExportWorker
     return ExportWorker(TOOLS, [], tmp_path)
 
 
-def test_partial_output_is_deleted_when_a_job_fails(tmp_path):
-    """A killed MP4 has no moov atom and will not play, but the filename looks
-    perfectly normal. Leaving it behind is worse than having nothing."""
-    job = queued_job()
-    job.out_path = tmp_path / "half_written.mp4"
-    job.out_path.write_bytes(b"partial")
-    assert worker_for(tmp_path)._discard_partial(job, existed_before=False)
-    assert not job.out_path.exists()
+def run_job_with(tmp_path, job, ffmpeg_effect, validates=True):
+    """Drive _run_job with ffmpeg and ffprobe replaced.
+
+    `ffmpeg_effect(temp_path)` stands in for the encode: it can write a file,
+    write nothing, or raise. Returns whatever _run_job returned.
+    """
+    worker = worker_for(tmp_path)
+    encoded_to = {}
+
+    def fake_run_one(index, command, duration, offset, weight):
+        temp = Path(command[-1])
+        encoded_to["path"] = temp
+        return ffmpeg_effect(temp)
+
+    worker._run_one = fake_run_one
+    worker._validate = lambda path: (
+        (True, "") if validates else (False, "no video in it")
+    )
+    result = worker._run_job(0, job)
+    return result, encoded_to.get("path")
 
 
-def test_a_file_that_was_already_there_is_never_deleted(tmp_path):
-    """Only files this run created may be cleaned up."""
+def test_a_failed_overwrite_leaves_the_previous_export_intact(tmp_path):
+    """The reason this exists: ffmpeg gets -y, so pointing it at the real path
+    truncated the user's file on open. A failure then destroyed work that was
+    already finished, and cleanup refused to touch it because it pre-existing.
+    """
     job = queued_job()
     job.out_path = tmp_path / "previous_export.mp4"
-    job.out_path.write_bytes(b"someone else's work")
-    assert not worker_for(tmp_path)._discard_partial(job, existed_before=True)
-    assert job.out_path.exists()
+    job.out_path.write_bytes(b"a good export from yesterday")
+
+    def encoder_fails(temp):
+        temp.write_bytes(b"truncated rubbish")
+        return False, "Encoder failure"
+
+    (ok, message), temp = run_job_with(tmp_path, job, encoder_fails)
+
+    assert not ok and "Encoder failure" in message
+    assert job.out_path.read_bytes() == b"a good export from yesterday"
+    assert temp != job.out_path, "ffmpeg must never be aimed at the real path"
+    assert not temp.exists(), "the wreckage should not be left lying about"
 
 
-def test_discarding_nothing_is_harmless(tmp_path):
+def test_a_successful_export_replaces_the_previous_one(tmp_path):
     job = queued_job()
-    job.out_path = tmp_path / "never_created.mp4"
-    assert not worker_for(tmp_path)._discard_partial(job, existed_before=False)
+    job.out_path = tmp_path / "export.mp4"
+    job.out_path.write_bytes(b"old")
+
+    def encoder_works(temp):
+        temp.write_bytes(b"a brand new export")
+        return True, ""
+
+    (ok, _), temp = run_job_with(tmp_path, job, encoder_works)
+
+    assert ok
+    assert job.out_path.read_bytes() == b"a brand new export"
+    assert not temp.exists()
+
+
+def test_output_that_fails_validation_never_reaches_the_target(tmp_path):
+    """A sub-GOP remux exits zero having written a header and no streams."""
+    job = queued_job()
+    job.out_path = tmp_path / "export.mp4"
+    job.out_path.write_bytes(b"still good")
+
+    def writes_an_empty_container(temp):
+        temp.write_bytes(b"\x00" * 261)
+        return True, ""
+
+    (ok, message), _ = run_job_with(
+        tmp_path, job, writes_an_empty_container, validates=False
+    )
+
+    assert not ok and "no video" in message
+    assert job.out_path.read_bytes() == b"still good"
+
+
+def test_the_temporary_file_keeps_the_container_extension(tmp_path):
+    """ffmpeg picks its muxer from the extension, so .mov must stay .mov."""
+    job = queued_job("edit")
+    job.out_path = tmp_path / "clip_edit.mov"
+    (_, _), temp = run_job_with(
+        tmp_path, job, lambda t: (t.write_bytes(b"x"), (True, ""))[1]
+    )
+    assert temp.suffix == ".mov"
+    assert temp.parent == job.out_path.parent, "must be on the same filesystem"
 
 
 def test_only_pending_jobs_are_run():
@@ -463,6 +526,129 @@ def test_only_pending_jobs_are_run():
                 JobStatus.FAILED, JobStatus.CANCELLED]
     runnable = [s for s in statuses if s is JobStatus.PENDING]
     assert runnable == [JobStatus.PENDING]
+
+
+# -- reporting a failure usefully ---------------------------------------------
+
+# Real ffmpeg 7.1.1 output, captured by encoding a 127x95 source. The cause is
+# the first line; the nine after it are fallout, and the app used to show the
+# user the last one.
+ODD_SIZE_FAILURE = [
+    "Stream #0:0 -> #0:0 (wrapped_avframe (native) -> h264 (libx264))",
+    "[libx264 @ 0000022774177580] width not divisible by 2 (127x95)",
+    "[vost#0:0/libx264 @ 000002277416af40] Error while opening encoder - maybe "
+    "incorrect parameters such as bit_rate, rate, width or height.",
+    "[vf#0:0 @ 00000227741782c0] Error sending frames to consumers: Generic "
+    "error in an external library",
+    "[vf#0:0 @ 00000227741782c0] Task finished with error code: -542398533",
+    "[vf#0:0 @ 00000227741782c0] Terminating thread with return code -542398533",
+    "[vost#0:0/libx264 @ 000002277416af40] Could not open encoder before EOF",
+    "[vost#0:0/libx264 @ 000002277416af40] Task finished with error code: -22",
+    "[out#0/mp4 @ 0000022774165400] Nothing was written into output file, "
+    "because at least one of its streams received no packets.",
+    "Conversion failed!",
+]
+
+# Also real: an output path that cannot be opened.
+UNWRITABLE_FAILURE = [
+    "Input #0, lavfi, from 'testsrc=duration=1:rate=30':",
+    "  Stream #0:0: Video: wrapped_avframe, rgb24, 320x240",
+    "[out#0/mp4 @ 00000195e31f4b80] Error opening output Z:\\nowhere\\x.mp4: "
+    "No such file or directory",
+    "Error opening output file Z:\\nowhere\\x.mp4.",
+    "Error opening output files: No such file or directory",
+]
+
+
+def test_the_cause_is_reported_not_the_last_line():
+    from flightdvr.jobs import _describe_failure
+    assert "not divisible by 2" in _describe_failure(ODD_SIZE_FAILURE, 1)
+
+
+def test_an_unwritable_output_names_the_path_and_the_reason():
+    from flightdvr.jobs import _describe_failure
+    reported = _describe_failure(UNWRITABLE_FAILURE, 1)
+    assert "No such file or directory" in reported
+    assert "nowhere" in reported
+
+
+def test_the_informational_preamble_is_never_reported_as_an_error():
+    from flightdvr.jobs import _describe_failure
+    for log in (ODD_SIZE_FAILURE, UNWRITABLE_FAILURE):
+        assert not _describe_failure(log, 1).startswith(("Input #", "Stream #"))
+
+
+def test_a_silent_failure_still_reports_something():
+    from flightdvr.jobs import _describe_failure
+    assert _describe_failure([], 137) == "exit code 137"
+
+
+# -- licence obligations are structural, so guard them structurally -----------
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_the_lgpl_text_is_in_the_repository():
+    """Qt reaches users under the LGPL, and section 4(b) requires its text to
+    accompany the combined work. It was in no build before 1.1.1."""
+    text = (ROOT / "LICENSE.LGPL-3.0.txt").read_text(encoding="utf-8")
+    assert "GNU LESSER GENERAL PUBLIC LICENSE" in text
+    assert "Version 3" in text
+
+
+@pytest.mark.parametrize("route", [
+    "packaging/flightdvr_studio.spec",
+    "packaging/installer.iss",
+    "packaging/build-appimage.sh",
+    "packaging/build-macos.sh",
+])
+def test_every_packaging_route_ships_both_licences(route):
+    text = (ROOT / route).read_text(encoding="utf-8")
+    assert "LICENSE.LGPL-3.0.txt" in text, f"{route} omits Qt's licence"
+    assert "LICENSE" in text, f"{route} omits our own licence"
+
+
+def test_the_licence_is_findable_from_a_source_checkout():
+    """About shows this path, so it has to resolve in every layout."""
+    from flightdvr.media import packaged_file
+    found = packaged_file("LICENSE")
+    assert found is not None and found.exists()
+
+
+def test_a_missing_packaged_file_reports_nothing_rather_than_guessing():
+    from flightdvr.media import packaged_file
+    assert packaged_file("NO-SUCH-FILE.txt") is None
+
+
+def test_the_bundled_ffmpeg_is_pinned_and_matches_the_notices():
+    """The notices name a build and offer its corresponding source. If the pin
+    and the notices disagree, one of them is lying about what ships."""
+    import json
+    pin = json.loads((ROOT / "packaging/ffmpeg-build.json").read_text(encoding="utf-8"))
+    notices = (ROOT / "THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+
+    assert pin["version"] in notices, "the notices name a different build"
+    assert pin["release_tag"] in notices
+    assert pin["ffmpeg_git_commit"] in notices, "no link to the exact source"
+    for tool in ("ffmpeg.exe", "ffprobe.exe"):
+        assert len(pin["binaries"][tool]) == 64, f"{tool} has no usable hash"
+
+
+def test_the_windows_build_refuses_an_unpinned_ffmpeg():
+    """Packaging whatever happens to be installed is how the attribution
+    drifted away from the binary in the first place."""
+    script = (ROOT / "packaging/build.ps1").read_text(encoding="utf-8")
+    assert "ffmpeg-build.json" in script
+    assert "Get-FileHash" in script
+    assert "does not match the pinned build" in script
+
+
+def test_a_system_ffmpeg_is_not_reported_as_bundled():
+    """Only the Windows installer carries one; saying otherwise in the About
+    box would misstate the licensing position."""
+    from flightdvr.media import is_bundled
+    assert not is_bundled(Path("/usr/bin/ffmpeg"))
+    assert not is_bundled(Path(r"C:\ffmpeg\bin\ffmpeg.exe"))
 
 
 def test_skipped_is_a_real_status():
@@ -543,6 +729,17 @@ def test_check_reports_qt_and_never_raises(qt_app):
     # 0 where ffmpeg is installed, 3 where it is not. Either is a real answer;
     # what matters is that it reports rather than raising or opening a dialog.
     assert code in (0, 3)
+
+
+def test_check_reports_where_it_found_both_licences(qt_app):
+    """Each package format stores them differently, and a build that cannot
+    find its own licence should fail CI rather than surprise someone in the
+    About dialog."""
+    from flightdvr.ui import _describe_environment
+    report, code = _describe_environment()
+    assert "NOT FOUND" not in report
+    assert "LICENSE.LGPL-3.0.txt" in report
+    assert code != 5
 
 
 def test_muted_labels_are_allowed_to_grow_downwards(qt_app):

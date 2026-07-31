@@ -59,9 +59,11 @@ print(f"[spec] bundling {len(ffmpeg_files)} ffmpeg binaries"
 data_files = [(str(ROOT / "flightdvr" / "resources" / "icon.ico"),
                "flightdvr/resources")]
 
-# The GPL requires the licence to travel with the binary, so it goes in the
-# bundle as well as being installed by the setup program.
-for name in ("LICENSE", "THIRD-PARTY-NOTICES.md"):
+# Licences travel with the binary. LICENSE is our own GPL v3; the LGPL text is
+# there because Qt reaches us under it and section 4(b) requires a copy of that
+# licence to accompany a combined work — it is not optional and was missing
+# from every build format before 1.1.1.
+for name in ("LICENSE", "LICENSE.LGPL-3.0.txt", "THIRD-PARTY-NOTICES.md"):
     if (ROOT / name).exists():
         data_files.append((str(ROOT / name), "."))
 

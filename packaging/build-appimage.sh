@@ -86,8 +86,9 @@ exec "$HERE/usr/bin/FlightDVRStudio" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
 
-# The GPL requires the licence to travel with the binary.
-cp LICENSE THIRD-PARTY-NOTICES.md "$APPDIR/"
+# Licences travel with the binary. The LGPL text accompanies Qt as its section
+# 4(b) requires; the GPL text is our own licence.
+cp LICENSE LICENSE.LGPL-3.0.txt THIRD-PARTY-NOTICES.md "$APPDIR/"
 
 step "appimagetool"
 TOOL="build/appimagetool-${ARCH}.AppImage"

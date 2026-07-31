@@ -108,6 +108,28 @@ or plain grey. Thumbnails and filmstrips use an input seek followed by a second
 output-side seek that decodes ~1.5 s past the target (`RESYNC_SECONDS` in
 `trim.py`). This was the cause of the grey-thumbnail bug.
 
+**It applies to trimming too, and that took a version to notice.** Until 1.1.1
+the export path used a single input seek, under a docstring asserting the
+encode "still lands exactly". It does not. Measured on real Box Pro footage,
+which writes a keyframe every 1.000 s at 60 fps:
+
+| Trim method | Frames below 30 dB vs an accurate reference | Time |
+|---|---|---|
+| Input seek only (what shipped) | **30 of 120** — 0.50 s of garbage at 12 dB | 1.1 s |
+| Input seek to a lead-in, then output seek | **0** — bit-identical | 1.2 s |
+| Output-only accurate seek | reference | 2.6 s |
+
+The corrupt run is exactly the distance from the in point to the *next*
+keyframe, so the worst case is a full GOP. ffmpeg reports no error and the
+frame count is correct, which is why nothing caught it: the test asserted that
+`-ss` preceded `-i`. `SEEK_LEAD_IN` in `presets.py` is the fix, and the lesson
+is that a documented trap needs checking everywhere it could apply, not only
+where it was first found.
+
+**Joined exports still carry this defect**, because concat `inpoint` seeks the
+same way. That is why they are on the outstanding list rather than merely
+imperfect.
+
 **Two-pass x264 needs identical stream configuration in both passes.** The
 common advice to pass `-an` on the first pass shifts the video framing by one
 frame on these files, and the second pass then dies with *"2nd pass has more
@@ -134,6 +156,28 @@ stored value on every power-up and every clip carries nearly the same
 timestamp. `timestamps_are_unreliable()` detects this and the UI offers a
 manual flight date instead. The clip name's DVR counter is the real recording
 order — that is why `natural_key()` exists.
+
+**An export is a transaction, not a file being written.** ffmpeg gets `-y`, so
+aiming it at the final path truncates whatever was there the moment it opens
+the file. Until 1.1.1 a failed or cancelled overwrite therefore destroyed a
+finished export, and cleanup made it worse by refusing to remove the wreckage
+on the grounds that the file had existed beforehand. Encodes now go to
+`<name>.flightdvr-part<ext>` beside the target — same directory, so `replace()`
+is atomic — and land only after `_validate()` has proved there is video in
+them. Exit code zero is not proof: a copy-without-re-encoding of a selection
+containing no keyframe exits happily having written a 261-byte header.
+
+**ffmpeg reports the cause first and the noise afterwards.** Rejecting a
+127×95 encode emits `width not divisible by 2` and then nine lines of cascading
+wrappers ending in `Conversion failed!`. Showing the user the last line, which
+is what the app did, told them nothing. `_describe_failure()` prefers the first
+component-tagged line that is not in `CASCADE_NOISE`.
+
+**Both ffmpeg pipes must be drained at once.** Reading stderr only after stdout
+closed meant a chatty encode could fill the stderr pipe, block ffmpeg writing
+to it, and so stop the stdout the reader was waiting on. Neither side had a
+timeout. Corrupt DVR footage — a recording cut short by a power loss — produces
+exactly that volume of decoder warnings.
 
 **Applying the flight date at queue time is wrong.** It has to be re-applied
 when the date changes, or clips already queued silently keep the old one.
@@ -224,11 +268,28 @@ cosmetic — but it does not satisfy Gatekeeper, and users still need the
 right-click-Open step. Proper notarisation needs a paid Apple Developer
 account.
 
-**The Windows installer is deliberately not in CI.** The bundled ffmpeg has to
-be the exact build described in `packaging/ffmpeg-configuration.txt`. A CI job
-downloading whatever is current would quietly make that GPL attribution wrong.
-Fixing this means pinning a specific ffmpeg release with a checksum and
-regenerating the notices from it.
+**The bundled Windows ffmpeg is pinned, and that is a compliance control
+rather than tidiness.** `packaging/ffmpeg-build.json` records the exact archive
+URL, its SHA-256, and the SHA-256 of both binaries. `build.ps1` refuses to
+package anything that does not match, and regenerates
+`ffmpeg-configuration.txt` from the binary it is actually shipping. The notices
+name that build and offer its corresponding source, so a silent swap would make
+the attribution false; a test asserts the pin and the notices agree.
+
+The build comes from BtbN/FFmpeg-Builds rather than a binary-only distributor,
+because GPL v3 section 6 wants the source of every statically linked library
+and the scripts that assembled them — and BtbN publishes all of it in a public
+repository under an immutable tag. That turns corresponding source into a link
+instead of a gigabyte this project would have to host forever.
+
+Verified as a drop-in before switching: same trim and colour chain, both
+builds, **PSNR `inf`** — bit-identical output. Anything less would have made
+the measured findings above stale.
+
+**The Windows installer is not in CI yet, but nothing blocks it now.** The
+reason it was excluded — a CI job would fetch an unknown ffmpeg — is solved by
+the pin above: a workflow can download the recorded URL, check the hash, and
+fail if it drifts. What is left is installing Inno Setup on the runner.
 
 ### Releasing
 
@@ -245,6 +306,47 @@ regenerating the notices from it.
 The release is drafted rather than published precisely because step 5 is manual.
 
 ---
+
+## Known defects, still unfixed
+
+An independent review in July 2026 found 18 confirmed defects. 1.1.1 fixed the
+ones that make an export untrustworthy. These remain, roughly in order of how
+much they matter:
+
+- **Joined exports are unreliable and should be treated as unsupported.**
+  `build_commands()` receives `job.clips[0]`, so a joined job takes its
+  bitrate, audio presence, frame rate, dimensions and colour handling from the
+  first clip alone. A size-targeted join of two clips produces roughly double
+  the target; joining a silent clip with one that has audio drops all audio.
+  Queueing a second join whose first clip matches an existing job also
+  overwrites that job's concat file. Fix by refusing incompatible joins with a
+  clear message before attempting anything cleverer.
+- **The queue can be edited while the worker is running it.** Remove and Clear
+  mutate the list the worker is iterating, so clearing mid-export still encodes
+  pending jobs and progress signals can index a shortened list.
+- **Interrupted library copies leave `.part` files** and cannot be cancelled
+  part way through a single file.
+- **Duplicate-output detection compares paths as case-sensitive strings**, so
+  on Windows and default macOS two differently-cased names collide silently.
+- **A relative output folder beginning with `-` is parsed as an ffmpeg option.**
+  Make output directories absolute when they are chosen.
+- **Odd source or output dimensions fail** — only the computed width is forced
+  even, and only during an explicit downscale. Cannot occur with HDZero
+  footage, which is always even, but imported files can trigger it.
+- **Scan shutdown does not cancel in-flight probes**, so a stale worker can
+  emit `done` during a later scan.
+- **Free-space checking skips nested new destinations**, walking up only one
+  level rather than to the first existing ancestor.
+Fixed since that review, beyond the 1.1.1 list: the corresponding source offer
+for the bundled Windows ffmpeg, the unverified ffmpeg going into the installer,
+and the Windows smoke test that passed when ffmpeg was missing because the
+resulting modal kept the process alive.
+
+The review's sharpest point was about the tests, and it stands: they assert
+that a command *contains the right arguments*, never that it *produces the
+right media*. Every defect above and every one fixed in 1.1.1 would have been
+caught on the day it was written by a small integration suite running real
+ffmpeg against synthetic fixtures. Build that before adding features.
 
 ## Outstanding
 

@@ -111,8 +111,9 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE" dist
 cp -a "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
-# The GPL requires the licence to travel with the binary.
-cp LICENSE THIRD-PARTY-NOTICES.md README.md "$STAGE/"
+# Licences travel with the binary. The LGPL text accompanies Qt as its section
+# 4(b) requires; the GPL text is our own licence.
+cp LICENSE LICENSE.LGPL-3.0.txt THIRD-PARTY-NOTICES.md README.md "$STAGE/"
 
 rm -f "$DMG"
 hdiutil create -volname "FlightDVR Studio" -srcfolder "$STAGE" \

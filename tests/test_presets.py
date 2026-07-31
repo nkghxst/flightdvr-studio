@@ -327,13 +327,44 @@ def test_an_untrimmed_clip_adds_no_seek():
     assert "-t" not in command
 
 
-def test_trim_seeks_before_the_input_and_limits_the_length():
-    """Seeking before -i is fast, and the encode still lands exactly because
-    it decodes from the preceding keyframe and discards what comes first."""
+def test_trim_decodes_a_lead_in_before_the_in_point():
+    """The in point is split across two seeks, and the second one is what makes
+    the first output frame correct.
+
+    A single seek before -i lands on an estimated byte offset in an MPEG-TS,
+    not a keyframe, so decoding starts without a reference picture. Measured on
+    real footage that produced 30 frames of garbage at 12 dB PSNR — every frame
+    from the in point to the next keyframe — with no ffmpeg error and the right
+    frame count. See SEEK_LEAD_IN.
+    """
     command = build("master", clip=trimmed_clip())[0]
-    assert command.index("-ss") < command.index("-i")
-    assert command[command.index("-ss") + 1] == "44.000"
+    i = command.index("-i")
+    before = [command[n + 1] for n, a in enumerate(command[:i]) if a == "-ss"]
+    after = [command[n + 1] for n, a in enumerate(command[i:], i) if a == "-ss"]
+
+    assert before == ["42.000"], "fast seek should land SEEK_LEAD_IN early"
+    assert after == ["2.000"], "the lead-in must be discarded after decoding"
+    assert float(before[0]) + float(after[0]) == pytest.approx(44.0)
     assert command[command.index("-t") + 1] == "60.000"
+
+
+def test_a_lead_in_never_seeks_past_the_start_of_the_file():
+    """An in point closer to zero than the lead-in has a shorter one."""
+    command = build("master", clip=trimmed_clip(0.5, 60.0))[0]
+    i = command.index("-i")
+    assert "-ss" not in command[:i], "nothing to fast-seek to before 0.5s"
+    after = [command[n + 1] for n, a in enumerate(command[i:], i) if a == "-ss"]
+    assert after == ["0.500"], "the whole in point becomes an accurate seek"
+
+
+def test_the_two_seeks_always_sum_to_the_in_point():
+    for start in (0.2, 1.0, 2.0, 2.5, 44.0, 180.0):
+        command = build("master", clip=trimmed_clip(start, 200.0))[0]
+        i = command.index("-i")
+        total = sum(
+            float(command[n + 1]) for n, a in enumerate(command) if a == "-ss"
+        )
+        assert total == pytest.approx(start), f"in point {start} drifted"
 
 
 def test_trimmed_duration_is_the_kept_footage():

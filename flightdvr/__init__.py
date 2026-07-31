@@ -15,4 +15,4 @@
 
 """FlightDVR Studio — browse, trim and convert HDZero goggle DVR footage."""
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"

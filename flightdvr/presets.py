@@ -257,23 +257,52 @@ PRESET_ORDER = ["edit", "master", "social", "remux"]
 
 # --- command construction ----------------------------------------------------
 
+# How far before the in point to start decoding. A seek into an MPEG-TS lands
+# on an estimated byte offset rather than a keyframe, so decoding from there
+# produces frames with no reference picture: the app used to emit up to a full
+# GOP of corrupt video at the start of every trim, silently, with the correct
+# frame count and no ffmpeg error.
+#
+# Measured on real Box Pro footage, which writes a keyframe every 1.000s at
+# 60fps. A trim at 10.500s produced 30 frames at 12 dB PSNR against an accurate
+# reference — exactly the distance to the next keyframe. Decoding from 2s
+# earlier and discarding the lead-in is bit-identical to an accurate seek, and
+# still 2.2x faster than one. Two seconds gives double the margin a Box Pro
+# needs, at a cost of decoding two seconds of video per export.
+SEEK_LEAD_IN = 2.0
+
+
 def _input_args(
     sources: list[Path], concat_file: Path | None, clip: ClipInfo | None = None
 ) -> list[str]:
     """Input side, hardened for the loose timestamps DVR transport streams have.
 
-    An in point is applied as a seek before the input, which is fast and, since
-    the encode decodes from the preceding keyframe and throws away what comes
-    before the target, still lands exactly. A joined export carries its trims in
-    the concat list instead, one per file.
+    An in point is split across two seeks: a fast one before the input that
+    lands somewhere before the target, and an accurate one after it that trims
+    the lead-in away. See SEEK_LEAD_IN for why the second seek is not optional.
+
+    A joined export carries its trims in the concat list instead, one per file,
+    and has the mid-GOP problem this avoids.
     """
     args = ["-fflags", "+genpts", "-analyzeduration", "100M", "-probesize", "100M"]
+
+    lead_in = 0.0
     if concat_file is None and clip is not None and clip.trim_in > 0.01:
-        args += ["-ss", f"{clip.trim_in:.3f}"]
+        # Never seek past the start of the file.
+        lead_in = min(clip.trim_in, SEEK_LEAD_IN)
+        start = clip.trim_in - lead_in
+        if start > 0.01:
+            args += ["-ss", f"{start:.3f}"]
+
     if concat_file is not None:
         args += ["-f", "concat", "-safe", "0", "-i", str(concat_file)]
     else:
         args += ["-i", str(sources[0])]
+
+    # Output-side seek: discards the lead-in after it has been decoded, which is
+    # what makes the first output frame correct.
+    if lead_in > 0.01:
+        args += ["-ss", f"{lead_in:.3f}"]
     if concat_file is None and clip is not None and clip.is_trimmed:
         args += ["-t", f"{clip.trimmed_duration:.3f}"]
     return args
