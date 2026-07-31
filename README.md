@@ -47,9 +47,10 @@ chmod +x FlightDVR_Studio-*.AppImage
 ./FlightDVR_Studio-*.AppImage
 ```
 
-One file, nothing installed, delete it to uninstall. Built on Ubuntu 22.04, so
-it runs on anything with glibc 2.35 or newer — which is every current
-distribution, Bazzite and the other Fedora-based immutable ones included.
+About 63 MB. One file, nothing installed, delete it to uninstall. Built on
+Ubuntu 22.04, so it runs on anything with glibc 2.35 or newer — which is every
+current distribution, Bazzite and the other Fedora-based immutable ones
+included.
 
 Unlike the Windows build it does **not** carry its own ffmpeg, because your
 distribution already ships a maintained one:
@@ -69,9 +70,9 @@ Install VLC or mpv as well if you want clip preview to work.
 ### macOS
 
 Download **`FlightDVR-Studio-*-arm64.dmg`**, open it, and drag the app to
-Applications. Apple Silicon, macOS 11 or newer. Intel Macs are not built for
-today — [ask](https://github.com/nkghxst/flightdvr-studio/issues) if you need
-one and it is a small change to the build.
+Applications. About 30 MB. Apple Silicon, macOS 11 or newer. Intel Macs are not
+built for today — [ask](https://github.com/nkghxst/flightdvr-studio/issues) if
+you need one and it is a small change to the build.
 
 The app is not signed with an Apple Developer certificate, so the first launch
 is refused. **Right-click the app and choose Open**, then confirm — you only
@@ -90,16 +91,37 @@ brew install ffmpeg
 
 ### Verifying your download
 
-Every release publishes the SHA-256 of its installer, so you can confirm the
-file you downloaded is the file that was built:
+Every release publishes the SHA-256 of each file, so you can confirm that what
+you downloaded is what was built. None of these are code-signed, so this is the
+only check that means anything.
 
 ```powershell
-Get-FileHash FlightDVRStudio-1.0.0-Setup.exe -Algorithm SHA256
+Get-FileHash FlightDVRStudio-1.1.0-Setup.exe -Algorithm SHA256
 ```
 
-| Release | SHA-256 of the installer |
+```bash
+sha256sum FlightDVR_Studio-1.1.0-x86_64.AppImage    # Linux
+shasum -a 256 FlightDVR-Studio-1.1.0-arm64.dmg      # macOS
+```
+
+**1.1.0**
+
+| File | SHA-256 |
 |---|---|
-| 1.0.0 | `02800a47b6d214d223988a35ffc8fba31e726c4291c872d525d0eeda479e1ce5` |
+| `FlightDVRStudio-1.1.0-Setup.exe` | `228b5a4bd214be4a54143e7fd2d08b1281d480a735da508bba4f9211e148ebea` |
+| `FlightDVR_Studio-1.1.0-x86_64.AppImage` | `8526a1cc19be7813a4b2b55b41a36cf14913cc95258e0ddf40761b493de3ffe4` |
+| `FlightDVR-Studio-1.1.0-arm64.dmg` | `1d9f0493150406a36c9f330a215a5fa20471fc45a1248ce7dc8248e8b7aa30d3` |
+
+<details>
+<summary>Earlier releases</summary>
+
+**1.0.0** — Windows only.
+
+| File | SHA-256 |
+|---|---|
+| `FlightDVRStudio-1.0.0-Setup.exe` | `02800a47b6d214d223988a35ffc8fba31e726c4291c872d525d0eeda479e1ce5` |
+
+</details>
 
 ## Quick start
 
