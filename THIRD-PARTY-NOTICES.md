@@ -5,9 +5,13 @@ The full text is in [LICENSE](LICENSE).
 
 ## FFmpeg
 
-The installer bundles `ffmpeg.exe` and `ffprobe.exe`. They are separate
-programs: FlightDVR Studio runs them as child processes and contains no FFmpeg
-code itself.
+**Only the Windows installer bundles FFmpeg.** The Linux AppImage and the macOS
+app use the copy your package manager installed and redistribute no FFmpeg
+binary, so the offer below applies to the Windows download alone.
+
+Where it is bundled, `ffmpeg.exe` and `ffprobe.exe` are separate programs:
+FlightDVR Studio runs them as child processes and contains no FFmpeg code
+itself.
 
 | | |
 |---|---|
@@ -31,6 +35,14 @@ the bundled FFmpeg binaries is available:
   from the installation folder, and is reproduced in `ffmpeg-configuration.txt`
   alongside this file.
 
+**Known gap.** That build links a number of libraries statically, and the link
+above covers FFmpeg's own source rather than every dependency and the scripts
+used to assemble them. Corresponding source under section 6 means all of it. If
+you want any part of it and cannot obtain it, ask the author and it will be
+provided; meanwhile a complete versioned bundle is being prepared to sit beside
+the installer. Tracked at
+https://github.com/nkghxst/flightdvr-studio/issues.
+
 If you would rather receive the source on physical media, contact the author and
 it will be provided at no more than the cost of distribution. This offer is valid
 for three years from the date you received this software.
@@ -40,6 +52,16 @@ for three years from the date you received this software.
 The user interface uses Qt via PySide6, used under the **GNU Lesser General
 Public License v3**. Qt is dynamically linked and unmodified. Sources are
 available from https://download.qt.io and https://pypi.org/project/PySide6/.
+
+The LGPL's own text accompanies every build as
+[LICENSE.LGPL-3.0.txt](LICENSE.LGPL-3.0.txt), which section 4(b) requires with a
+combined work. The LGPL v3 supplements the GPL v3 rather than replacing it, so
+both texts are needed and both are included.
+
+You may replace the Qt used by this program with your own build. Everything
+needed to do so is here: the application is plain Python, the Qt libraries live
+alongside it inside the package, and rebuilding is documented in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Patents
 

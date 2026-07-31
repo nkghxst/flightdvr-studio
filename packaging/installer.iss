@@ -8,7 +8,7 @@
 ; matters on a laptop you do not own the admin account for.
 
 #define AppName        "FlightDVR Studio"
-#define AppVersion     "1.1.0"
+#define AppVersion     "1.1.1"
 #define AppPublisher   "Isadu Nkemi"
 #define AppExeName     "FlightDVRStudio.exe"
 
@@ -52,8 +52,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"
 
 [Files]
-; Licence and attribution travel with the install.
+; Licence and attribution travel with the install. The LGPL text is required
+; alongside Qt by LGPL v3 section 4(b), not merely polite.
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE.LGPL-3.0.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "ffmpeg-configuration.txt"; DestDir: "{app}"; Flags: ignoreversion

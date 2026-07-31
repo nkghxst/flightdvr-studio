@@ -471,10 +471,21 @@ class MainWindow(QMainWindow):
         redistributed under the licence, and say how to read the licence.
         """
         from . import __version__
+        from .media import is_bundled, packaged_file
 
-        installed = Path(sys.executable).parent if getattr(sys, "frozen", False) \
-            else Path(__file__).resolve().parents[1]
-        licence = installed / "LICENSE"
+        # Each package format puts the licence somewhere different, and only
+        # the Windows installer carries its own ffmpeg. Saying otherwise in a
+        # notice whose whole job is accuracy would be a poor look.
+        licence = packaged_file("LICENSE")
+        where = (f"The full licence is in <code>{licence}</code>, or at "
+                 if licence else "The full licence is at ")
+
+        if is_bundled(self.tools.ffmpeg):
+            ffmpeg_line = ("Bundles <b>FFmpeg</b> (GPL v3) and uses <b>Qt</b> "
+                           "via PySide6 (LGPL v3).")
+        else:
+            ffmpeg_line = ("Uses the <b>FFmpeg</b> installed on this system "
+                           "(GPL) and <b>Qt</b> via PySide6 (LGPL v3).")
 
         box = QMessageBox(self)
         box.setWindowTitle(f"About {APP_NAME}")
@@ -485,11 +496,11 @@ class MainWindow(QMainWindow):
             "This program comes with <b>absolutely no warranty</b>. It is free "
             "software, and you are welcome to redistribute it under the terms of "
             "the GNU General Public License, version 3 or later.<br><br>"
-            f"The full licence is in <code>{licence}</code>, or at "
+            f"{where}"
             "<a href='https://www.gnu.org/licenses/gpl-3.0.html'>gnu.org</a>.<br><br>"
-            "Bundles <b>FFmpeg</b> (GPL v3) and uses <b>Qt</b> via PySide6 "
-            "(LGPL v3). See THIRD-PARTY-NOTICES.md for versions, origins and the "
-            "offer of source.<br><br>"
+            f"{ffmpeg_line} Qt's own licence is in "
+            "<code>LICENSE.LGPL-3.0.txt</code>. See THIRD-PARTY-NOTICES.md for "
+            "versions, origins and the offer of source.<br><br>"
             "Not affiliated with or endorsed by HDZero."
         )
         box.setTextFormat(Qt.TextFormat.RichText)
