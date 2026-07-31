@@ -119,5 +119,22 @@ case "$code" in
     *) echo "  --check failed with exit code $code" >&2; exit 1 ;;
 esac
 
+step "Launch check"
+# --check proves Qt started. This proves the whole window builds, which is the
+# part an over-aggressive file drop in the spec would break. Offscreen, so
+# nothing is displayed and no display is needed.
+APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=offscreen "$OUT" &
+pid=$!
+sleep 12
+if kill -0 "$pid" 2>/dev/null; then
+    echo "  the full window built and stayed up"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+else
+    wait "$pid" 2>/dev/null || echo "  exit code $?" >&2
+    echo "  the packaged app exited on its own instead of opening" >&2
+    exit 1
+fi
+
 step "Done"
 ls -lh "$OUT"

@@ -28,6 +28,14 @@ if you are on a headless machine; the test module sets it itself before any
 Qt import, which is why those imports sit below `os.environ.setdefault` with
 `# noqa: E402`.
 
+**Compare paths as `Path` objects, never as strings.** Several constants hold
+Windows and macOS locations regardless of which platform is running — the
+preview player list is the obvious one. To POSIX, `C:\Program Files\...` is a
+single long filename rather than something with separators in it, so a string
+comparison silently never matches and the test passes for the wrong reason.
+That is exactly how the first CI run caught a test which had only ever run on
+Windows.
+
 ---
 
 ## Layout
@@ -173,9 +181,14 @@ Elsewhere:
 
 Every packaged build answers `--check`: it starts Qt, reports the platform
 plugin in use, resolves ffmpeg and exits. Exit codes are `0` fine, `3` no
-ffmpeg found, `4` Qt failed to start. Both build scripts and CI use it to prove
-a bundle works without a display or a person, and it is the first thing to ask
-a user whose install will not start.
+ffmpeg found, `4` Qt raised on the way up. A platform-plugin failure usually
+aborts the process rather than raising, so `4` is a backstop — the build
+scripts treat anything that is not `0` or `3` as a failure either way.
+
+Both build scripts and CI use it to prove a bundle works without a display or a
+person, and it is the first thing to ask a user whose install will not start.
+On Windows a GUI build has no stdout, so it reports through its exit code only;
+`_say()` swallows the resulting `AttributeError` rather than crashing.
 
 ### Per platform
 

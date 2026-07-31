@@ -58,8 +58,11 @@ distribution already ships a maintained one:
 sudo apt install ffmpeg      # Debian, Ubuntu, Mint, Pop!_OS
 sudo dnf install ffmpeg      # Fedora, Nobara
 sudo pacman -S ffmpeg        # Arch, Manjaro
-rpm-ostree install ffmpeg    # Bazzite and other rpm-ostree systems
 ```
+
+Bazzite and the other image-based systems already include ffmpeg, so there is
+nothing to do there. Run the app with `--check` if you want to confirm what it
+found before you go looking.
 
 Install VLC or mpv as well if you want clip preview to work.
 
