@@ -268,11 +268,28 @@ cosmetic — but it does not satisfy Gatekeeper, and users still need the
 right-click-Open step. Proper notarisation needs a paid Apple Developer
 account.
 
-**The Windows installer is deliberately not in CI.** The bundled ffmpeg has to
-be the exact build described in `packaging/ffmpeg-configuration.txt`. A CI job
-downloading whatever is current would quietly make that GPL attribution wrong.
-Fixing this means pinning a specific ffmpeg release with a checksum and
-regenerating the notices from it.
+**The bundled Windows ffmpeg is pinned, and that is a compliance control
+rather than tidiness.** `packaging/ffmpeg-build.json` records the exact archive
+URL, its SHA-256, and the SHA-256 of both binaries. `build.ps1` refuses to
+package anything that does not match, and regenerates
+`ffmpeg-configuration.txt` from the binary it is actually shipping. The notices
+name that build and offer its corresponding source, so a silent swap would make
+the attribution false; a test asserts the pin and the notices agree.
+
+The build comes from BtbN/FFmpeg-Builds rather than a binary-only distributor,
+because GPL v3 section 6 wants the source of every statically linked library
+and the scripts that assembled them — and BtbN publishes all of it in a public
+repository under an immutable tag. That turns corresponding source into a link
+instead of a gigabyte this project would have to host forever.
+
+Verified as a drop-in before switching: same trim and colour chain, both
+builds, **PSNR `inf`** — bit-identical output. Anything less would have made
+the measured findings above stale.
+
+**The Windows installer is not in CI yet, but nothing blocks it now.** The
+reason it was excluded — a CI job would fetch an unknown ffmpeg — is solved by
+the pin above: a workflow can download the recorded URL, check the hash, and
+fail if it drifts. What is left is installing Inno Setup on the runner.
 
 ### Releasing
 
@@ -320,9 +337,10 @@ much they matter:
   emit `done` during a later scan.
 - **Free-space checking skips nested new destinations**, walking up only one
   level rather than to the first existing ancestor.
-- **The corresponding source offer for the bundled Windows ffmpeg is
-  incomplete** — see THIRD-PARTY-NOTICES.md. It links FFmpeg's own source, but
-  that build links several libraries statically and section 6 covers all of it.
+Fixed since that review, beyond the 1.1.1 list: the corresponding source offer
+for the bundled Windows ffmpeg, the unverified ffmpeg going into the installer,
+and the Windows smoke test that passed when ffmpeg was missing because the
+resulting modal kept the process alive.
 
 The review's sharpest point was about the tests, and it stands: they assert
 that a command *contains the right arguments*, never that it *produces the

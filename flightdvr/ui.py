@@ -2070,11 +2070,20 @@ def _describe_environment() -> tuple[str, int]:
     first thing to ask someone whose install will not start.
     """
     from . import __version__
-    from .media import ToolsMissing, find_tools
+    from .media import ToolsMissing, find_tools, is_bundled, packaged_file
 
     lines = [f"{APP_NAME} {__version__}",
              f"Python {sys.version.split()[0]} on {sys.platform}"]
     code = 0
+
+    # Each package format puts these somewhere different, and About shows the
+    # path. Reporting it here means a build that cannot find its own licence
+    # is visible in CI rather than only to whoever opens the dialog.
+    for name in ("LICENSE", "LICENSE.LGPL-3.0.txt"):
+        found = packaged_file(name)
+        lines.append(f"{name:<22} {found if found else 'NOT FOUND'}")
+        if found is None:
+            code = 5
 
     # Constructing the application proves Qt's platform plugin loaded, which is
     # the part of a packaged build most likely to be broken.
@@ -2088,7 +2097,8 @@ def _describe_environment() -> tuple[str, int]:
 
     try:
         tools = find_tools()
-        lines.append(f"ffmpeg  {tools.ffmpeg}")
+        origin = "bundled" if is_bundled(tools.ffmpeg) else "from this system"
+        lines.append(f"ffmpeg  {tools.ffmpeg}  ({origin})")
         lines.append(f"ffprobe {tools.ffprobe}")
     except ToolsMissing as exc:
         lines.append(str(exc).replace("\n\n", " "))

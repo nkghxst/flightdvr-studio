@@ -38,6 +38,21 @@ by inspecting arguments.
   with a combined work. It was in none of them.
 - About no longer claims to bundle ffmpeg on Linux and macOS, where it uses the
   system copy, and finds the licence in whichever package format is running.
+- **The Windows build now bundles ffmpeg from BtbN/FFmpeg-Builds**, pinned by
+  checksum. The previous notice offered only FFmpeg's own source, while the
+  binary statically linked dozens of libraries — section 6 of the GPL covers
+  all of them. BtbN publishes its entire build system publicly under immutable
+  tags, so the corresponding source is now a set of exact links rather than
+  something this project would have to host. Verified as a drop-in first: the
+  same trim and colour chain produces bit-identical output on both builds.
+- The Windows build script refuses to package an ffmpeg that does not match the
+  recorded hashes, and regenerates the recorded configuration from the binary
+  it is actually shipping, so the attribution cannot drift.
+- The Windows smoke test no longer passes when ffmpeg is missing. It judged
+  success on the process still running, and a missing-ffmpeg dialog kept it
+  running; it now requires `--check` to exit cleanly first.
+- `--check` reports where it found each licence file, so a build that cannot
+  find its own licence fails in CI rather than surprising someone in About.
 
 ## 1.1.0
 

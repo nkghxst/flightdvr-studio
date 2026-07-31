@@ -620,6 +620,29 @@ def test_a_missing_packaged_file_reports_nothing_rather_than_guessing():
     assert packaged_file("NO-SUCH-FILE.txt") is None
 
 
+def test_the_bundled_ffmpeg_is_pinned_and_matches_the_notices():
+    """The notices name a build and offer its corresponding source. If the pin
+    and the notices disagree, one of them is lying about what ships."""
+    import json
+    pin = json.loads((ROOT / "packaging/ffmpeg-build.json").read_text(encoding="utf-8"))
+    notices = (ROOT / "THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+
+    assert pin["version"] in notices, "the notices name a different build"
+    assert pin["release_tag"] in notices
+    assert pin["ffmpeg_git_commit"] in notices, "no link to the exact source"
+    for tool in ("ffmpeg.exe", "ffprobe.exe"):
+        assert len(pin["binaries"][tool]) == 64, f"{tool} has no usable hash"
+
+
+def test_the_windows_build_refuses_an_unpinned_ffmpeg():
+    """Packaging whatever happens to be installed is how the attribution
+    drifted away from the binary in the first place."""
+    script = (ROOT / "packaging/build.ps1").read_text(encoding="utf-8")
+    assert "ffmpeg-build.json" in script
+    assert "Get-FileHash" in script
+    assert "does not match the pinned build" in script
+
+
 def test_a_system_ffmpeg_is_not_reported_as_bundled():
     """Only the Windows installer carries one; saying otherwise in the About
     box would misstate the licensing position."""
@@ -706,6 +729,17 @@ def test_check_reports_qt_and_never_raises(qt_app):
     # 0 where ffmpeg is installed, 3 where it is not. Either is a real answer;
     # what matters is that it reports rather than raising or opening a dialog.
     assert code in (0, 3)
+
+
+def test_check_reports_where_it_found_both_licences(qt_app):
+    """Each package format stores them differently, and a build that cannot
+    find its own licence should fail CI rather than surprise someone in the
+    About dialog."""
+    from flightdvr.ui import _describe_environment
+    report, code = _describe_environment()
+    assert "NOT FOUND" not in report
+    assert "LICENSE.LGPL-3.0.txt" in report
+    assert code != 5
 
 
 def test_muted_labels_are_allowed_to_grow_downwards(qt_app):

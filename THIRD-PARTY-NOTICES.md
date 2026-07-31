@@ -15,33 +15,35 @@ itself.
 
 | | |
 |---|---|
-| Version | 7.1.1 |
-| Build | `7.1.1-full_build-www.gyan.dev` |
-| Build source | https://www.gyan.dev/ffmpeg/builds/ |
+| Version | `n7.1.5-12-g1fdbca85aa` |
+| Build | BtbN/FFmpeg-Builds, tag `autobuild-2026-07-31-14-10` |
+| Build source | https://github.com/BtbN/FFmpeg-Builds |
 | Upstream project | https://ffmpeg.org |
 | Licence | **GNU General Public License v3 or later** |
 
 That build is configured with `--enable-gpl --enable-version3`, which places it
 under GPL v3. It includes `libx264` and `libx265`, both GPL. It is **not** a
-`--enable-nonfree` build, so it is redistributable.
+`--enable-nonfree` build, so it is redistributable. The exact configuration is
+in `ffmpeg-configuration.txt` alongside this file, and the exact binaries are
+pinned by SHA-256 in `packaging/ffmpeg-build.json`; the Windows build script
+refuses to package anything that does not match, so this attribution cannot
+drift away from what is shipped.
 
-### Written offer for the source code
+### Corresponding source
 
-As required by section 6 of the GPL v3, the complete corresponding source for
-the bundled FFmpeg binaries is available:
+Section 6 of the GPL v3 requires the complete corresponding source: FFmpeg
+itself, every library statically linked into it, and the scripts used to
+build the whole thing. This build was chosen because all of that is public and
+permanently addressable, rather than something this project has to mirror.
 
-- FFmpeg 7.1.1 upstream source: https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz
-- The exact build configuration used is printed by running `ffmpeg -version`
-  from the installation folder, and is reproduced in `ffmpeg-configuration.txt`
-  alongside this file.
+| Part | Where |
+|---|---|
+| FFmpeg, at the exact commit | https://github.com/FFmpeg/FFmpeg/tree/1fdbca85aa |
+| The complete build system | https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-07-31-14-10 |
+| Every dependency, with the version and source of each | https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-07-31-14-10/scripts.d |
 
-**Known gap.** That build links a number of libraries statically, and the link
-above covers FFmpeg's own source rather than every dependency and the scripts
-used to assemble them. Corresponding source under section 6 means all of it. If
-you want any part of it and cannot obtain it, ask the author and it will be
-provided; meanwhile a complete versioned bundle is being prepared to sit beside
-the installer. Tracked at
-https://github.com/nkghxst/flightdvr-studio/issues.
+Those are tagged references, not moving ones, so they describe the binary you
+received rather than whatever is current.
 
 If you would rather receive the source on physical media, contact the author and
 it will be provided at no more than the cost of distribution. This offer is valid

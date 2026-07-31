@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "The exact FFmpeg build the Windows installer bundles. build.ps1 refuses",
+    "to package anything whose hashes do not match, so the attribution in",
+    "THIRD-PARTY-NOTICES.md cannot silently drift away from the binary.",
+    "",
+    "BtbN publishes the whole build system as a public repository, and the",
+    "tag below is immutable, so the corresponding source required by GPL v3",
+    "section 6 is a link rather than something this project has to host."
+  ],
+  "version": "n7.1.5-12-g1fdbca85aa",
+  "ffmpeg_git_commit": "1fdbca85aa",
+  "release_tag": "autobuild-2026-07-31-14-10",
+  "archive": "ffmpeg-n7.1.5-12-g1fdbca85aa-win64-gpl-7.1.zip",
+  "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n7.1.5-12-g1fdbca85aa-win64-gpl-7.1.zip",
+  "archive_sha256": "c067a1ca58f4fc4449f4bab0890fbcd65cbb3e5f46e066cf9c768e06c0c1d4d9",
+  "binaries": {
+    "ffmpeg.exe": "efabedca4b599c13e073bb08f66369619e9deb1db1dc1f32822583379d6513de",
+    "ffprobe.exe": "69743e70806215ffb64a25c94e6bd870903a4a50a212b0c9aeea0261368b07b2"
+  },
+  "licence": "GPL-3.0-or-later",
+  "corresponding_source": {
+    "ffmpeg": "https://github.com/FFmpeg/FFmpeg/tree/1fdbca85aa",
+    "build_system": "https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-07-31-14-10",
+    "dependency_sources": "https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-07-31-14-10/scripts.d"
+  }
+}
