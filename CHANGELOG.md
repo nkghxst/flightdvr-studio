@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.0
 
 - **Linux support.** Ships as an AppImage: one executable file, no install.
   Finds cards by parsing `/proc/mounts`, treating anything under `/media`,
