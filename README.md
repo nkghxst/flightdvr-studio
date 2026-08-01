@@ -195,6 +195,17 @@ instant rather than waiting on a seek.
 
 Trims survive into a joined export: each clip keeps its own in and out points.
 
+**Joining clips into one file** is the *Join the ticked clips into one file*
+box, for when the DVR split a single flight across several recordings. Clips
+are joined in DVR counter order rather than by timestamp, because
+[the goggles cannot keep time](#the-goggles-cannot-keep-time).
+
+Clips that do not match each other are fine. Different sizes, frame rates and
+codecs are brought to a common format — the largest size and rate among them,
+so nothing is thrown away to suit the smallest — and a clip with no sound gets
+silence rather than removing the audio from the rest. Only *Remux* refuses a
+mismatched set, because copying without re-encoding cannot change anything.
+
 > **Remux is the exception.** It does no re-encoding, so it can only cut at a
 > keyframe and a trimmed rewrap may be a second or so out. Every other preset is
 > frame-accurate.

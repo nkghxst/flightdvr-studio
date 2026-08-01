@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.2.0
+
+**Joining clips works properly now.** Earlier versions produced a file that
+played, was the right length, and was quietly wrong — so the advice was to
+export clips separately. That advice no longer applies.
+
+- **A joined export is built from every clip rather than the first one.** The
+  size target, audio, frame rate, dimensions and colour handling were all read
+  off the first clip and applied to the rest: a joined 45 MB target produced
+  roughly 45 MB per clip, and putting a silent clip first removed the sound
+  from all of them. Each clip is now decoded on its own, cut, brought to a
+  common format, given silence if it has none, and only then joined.
+- **Clips that differ can be joined.** Different sizes, frame rates, codecs and
+  colour ranges are all handled. Clips are brought to the largest size and rate
+  among them, so nothing is thrown away to suit the smallest.
+- **A trimmed join no longer starts each clip on a damaged frame.** Every clip
+  gets the accurate two-part seek that a single-clip export already had.
+- **Joining with Remux still refuses clips that differ**, because copying
+  without re-encoding cannot change anything — and it now says which presets
+  can.
+
+Everything else here was found by an independent review of the code.
+
+- **Editing the queue during an export no longer disturbs it.** Clearing the
+  queue while encoding left the app working through jobs that were no longer on
+  screen, and removing a row could move the wrong progress bar or stop the
+  queue with an error.
+- **Starting a new scan no longer lets the previous one interfere.** A scan of
+  a slow card kept running after a new one began, and its clips and its
+  "finished" could arrive in the middle of the new scan.
+- **An interrupted copy to the library leaves nothing behind.** Pulling the
+  card or filling the disk mid-copy left a `.part` file among the recordings.
+- **Free space is checked properly for a new folder.** Choosing a destination
+  two levels below anything that existed skipped the check entirely.
+- **Two exports can no longer quietly overwrite each other** on Windows and
+  macOS, where `hdz_001.mp4` and `HDZ_001.mp4` are the same file.
+- **Footage that is not an even number of pixels across now exports.** Nothing
+  a goggle records is, but the app opens any folder.
+- **An export folder whose name begins with a dash now works.**
+
 ## 1.1.2
 
 **Linux users on Ubuntu 22.04, Debian 11 or Linux Mint 21 should update.**
