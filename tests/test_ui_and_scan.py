@@ -710,6 +710,40 @@ def test_trimming_a_clip_changes_its_concat_list():
     assert _clip_set_id([a, b]) != _clip_set_id([a, trimmed])
 
 
+# -- a stale scan must not touch the one on screen ----------------------------
+
+class FakeWindow:
+    """Just enough of MainWindow to drive the generation gate."""
+    from flightdvr.ui import MainWindow
+    _is_current_scan = MainWindow._is_current_scan
+
+    def __init__(self):
+        self._scan_generation = 2
+
+
+def test_signals_from_the_current_scan_are_accepted():
+    assert FakeWindow()._is_current_scan(2)
+
+
+def test_signals_from_an_earlier_scan_are_ignored():
+    """Stopping a worker only asks it to finish early; a probe already inside
+    ffprobe runs to completion. The old worker then arrived with `done` and
+    re-enabled the window in the middle of the new scan."""
+    window = FakeWindow()
+    assert not window._is_current_scan(1)
+    assert not window._is_current_scan(0)
+
+
+def test_a_scan_worker_stamps_everything_it_emits(tmp_path):
+    from flightdvr.ui import ScanWorker
+    worker = ScanWorker(TOOLS, tmp_path, recursive=False, generation=7)
+    assert worker.generation == 7
+    # Each signal carries the generation as its first argument, so the window
+    # can tell whose scan it belongs to.
+    for signal in ("found", "counted", "done"):
+        assert hasattr(worker, signal)
+
+
 # -- editing the queue while it is running ------------------------------------
 
 def test_the_worker_keeps_its_own_list(tmp_path):

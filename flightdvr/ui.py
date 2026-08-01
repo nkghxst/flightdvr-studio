@@ -261,15 +261,22 @@ class DriveCombo(QComboBox):
 class ScanWorker(QThread):
     """Finds and probes clips without blocking the window."""
 
-    found = Signal(object)
-    counted = Signal(int)
-    done = Signal(int)
+    # Every signal carries the scan it belongs to. A probe can sit in ffprobe
+    # for a long time on a slow card, and stopping a worker only asks it to
+    # finish early — it cannot interrupt a call already in progress. Starting
+    # a new scan therefore leaves the old worker alive, and it used to arrive
+    # later with `done` and re-enable the window in the middle of the new one.
+    found = Signal(int, object)
+    counted = Signal(int, int)
+    done = Signal(int, int)
 
-    def __init__(self, tools: Tools, folder: Path, recursive: bool, parent=None):
+    def __init__(self, tools: Tools, folder: Path, recursive: bool,
+                 generation: int = 0, parent=None):
         super().__init__(parent)
         self.tools = tools
         self.folder = folder
         self.recursive = recursive
+        self.generation = generation
         self._stop = False
 
     def stop(self) -> None:
@@ -277,7 +284,7 @@ class ScanWorker(QThread):
 
     def run(self) -> None:
         paths = scan.find_clips(self.folder, self.recursive)
-        self.counted.emit(len(paths))
+        self.counted.emit(self.generation, len(paths))
         count = 0
         with ThreadPoolExecutor(max_workers=PROBE_WORKERS) as pool:
             futures = {pool.submit(probe, self.tools, path): path for path in paths}
@@ -291,12 +298,15 @@ class ScanWorker(QThread):
                         continue
                     if clip.error and not clip.width:
                         continue
-                    self.found.emit(clip)
+                    self.found.emit(self.generation, clip)
                     count += 1
             finally:
+                # cancel_futures drops the ones not started; the context manager
+                # still waits for any probe already inside ffprobe, which is why
+                # the window cannot rely on this worker being finished.
                 if self._stop:
                     pool.shutdown(wait=False, cancel_futures=True)
-        self.done.emit(count)
+        self.done.emit(self.generation, count)
 
 
 class HardwareProbe(QThread):
@@ -421,6 +431,10 @@ class MainWindow(QMainWindow):
         self.jobs: list[Job] = []
         self.worker: ExportWorker | None = None
         self.scan_worker: ScanWorker | None = None
+        self._scan_generation = 0
+        # Workers asked to stop that may still be finishing a probe. Held only
+        # so a running QThread is not collected out from under itself.
+        self._retired_scans: list[ScanWorker] = []
         self.copy_worker: CopyWorker | None = None
         self.encoders = available_encoders(tools)
         self.hw_encoder = ""
@@ -1135,7 +1149,9 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
             self.worker.wait(4000)
-        for thread in (self.scan_worker, self.copy_worker):
+        # Retired scans are included: one can still be inside a probe, and a
+        # QThread destroyed while running takes the process with it.
+        for thread in [self.scan_worker, self.copy_worker, *self._retired_scans]:
             if thread and thread.isRunning():
                 thread.stop()
                 thread.wait(2000)
@@ -1243,17 +1259,36 @@ class MainWindow(QMainWindow):
         self.thumbs.clear()
         self.thumbs.pause()
 
-        self.scan_worker = ScanWorker(self.tools, folder, self.recursive_check.isChecked(), self)
+        # A worker that was asked to stop may still be inside a probe, so the
+        # old one is left to finish in its own time and simply ignored. Keeping
+        # a reference stops Python collecting a running QThread.
+        self._scan_generation += 1
+        if self.scan_worker and self.scan_worker.isRunning():
+            self._retired_scans.append(self.scan_worker)
+        self._retired_scans = [w for w in self._retired_scans if w.isRunning()]
+
+        self.scan_worker = ScanWorker(
+            self.tools, folder, self.recursive_check.isChecked(),
+            self._scan_generation, self,
+        )
         self.scan_worker.counted.connect(self._scan_counted)
         self.scan_worker.found.connect(self._add_clip)
         self.scan_worker.done.connect(self._scan_done)
         self.scan_worker.start()
 
-    def _scan_counted(self, total: int) -> None:
+    def _is_current_scan(self, generation: int) -> bool:
+        """Whether a signal belongs to the scan now on screen."""
+        return generation == self._scan_generation
+
+    def _scan_counted(self, generation: int, total: int) -> None:
+        if not self._is_current_scan(generation):
+            return
         self._expected = total
         self.clip_count_label.setText(f"Reading {total} clips…")
 
-    def _scan_done(self, count: int) -> None:
+    def _scan_done(self, generation: int, count: int) -> None:
+        if not self._is_current_scan(generation):
+            return
         self.scan_button.setEnabled(True)
         self.table.setSortingEnabled(True)
         self.table.sortItems(0, Qt.SortOrder.AscendingOrder)
@@ -1270,7 +1305,11 @@ class MainWindow(QMainWindow):
 
         self.thumbs.resume()
 
-    def _add_clip(self, clip: ClipInfo) -> None:
+    def _add_clip(self, generation: int, clip: ClipInfo) -> None:
+        # A worker from an earlier scan can still be finishing probes it had
+        # already started, and its clips do not belong in this list.
+        if not self._is_current_scan(generation):
+            return
         self.clips.append(clip)
         self.clip_by_path[str(clip.path)] = clip
 
