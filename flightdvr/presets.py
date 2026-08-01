@@ -342,6 +342,25 @@ def _scale_filter(clip: ClipInfo, target_height: int) -> list[str]:
     return [f"scale=-2:{target_height}:flags=lanczos"]
 
 
+def _even_size_filter(clip: ClipInfo) -> list[str]:
+    """Round an odd frame size down to an even one.
+
+    H.264 and HEVC in 4:2:0 cannot represent an odd width or height, and
+    libx264 does not cope — it stops with "width not divisible by 2" and writes
+    nothing. Even sizing was previously applied only to the width computed
+    during an explicit downscale, so a source that was already odd reached the
+    encoder untouched.
+
+    Nothing a Box Pro records is odd, but the app opens any folder. Emitted
+    only when it is needed, so the ordinary chain stays exactly as measured.
+    """
+    if not clip.width or not clip.height:
+        return []
+    if clip.width % 2 == 0 and clip.height % 2 == 0:
+        return []
+    return ["scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=lanczos"]
+
+
 # --- joining several clips into one export -----------------------------------
 
 # Audio every joined clip is brought to, so the pieces can be concatenated.
@@ -640,7 +659,8 @@ def build_commands(
             if audio_label:
                 args += ["-map", audio_label]
             return args, bool(audio_label)
-        chain = (tail or []) + colour_filters(settings.colour, clip, pix_fmt)
+        chain = (_even_size_filter(clip) + (tail or [])
+                 + colour_filters(settings.colour, clip, pix_fmt))
         return ["-vf", ",".join(chain)], None
 
     def sound(bitrate: str, mapped, pcm: bool = False) -> list[str]:
