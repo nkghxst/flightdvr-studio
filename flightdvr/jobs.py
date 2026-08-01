@@ -174,7 +174,12 @@ class ExportWorker(QThread):
     def __init__(self, tools: Tools, jobs: list[Job], work_dir: Path, parent=None):
         super().__init__(parent)
         self.tools = tools
-        self.jobs = jobs
+        # A copy, so the window can add to or remove from its own list without
+        # shifting the sequence being worked through. The jobs themselves are
+        # shared, which is how a job dropped from the queue tells the worker to
+        # pass over it: the window marks it, and the loop below skips anything
+        # that is no longer pending.
+        self.jobs = list(jobs)
         self.work_dir = work_dir
         self._cancel = False
         self._process: subprocess.Popen | None = None
@@ -261,6 +266,15 @@ class ExportWorker(QThread):
         except OSError as exc:
             return False, f"Cannot create output folder: {exc}"
 
+        # Made absolute before it reaches a command line. ffmpeg reads a
+        # leading dash as the start of an option, so exporting into a relative
+        # folder called "-exports" failed with "Unrecognized option". Resolving
+        # also settles any "." or ".." in a path the user typed.
+        try:
+            out_path = job.out_path.resolve()
+        except OSError:
+            out_path = job.out_path.absolute()
+
         # Everything is written beside the target under a temporary name and
         # moved into place only after it has been checked.
         #
@@ -270,8 +284,8 @@ class ExportWorker(QThread):
         # refused to remove it because it had existed beforehand. Overwriting
         # an export is now all-or-nothing: same directory, so the move is
         # atomic and the previous file survives every failure.
-        temp_path = job.out_path.with_name(
-            f"{job.out_path.stem}.flightdvr-part{job.out_path.suffix}"
+        temp_path = out_path.with_name(
+            f"{out_path.stem}.flightdvr-part{out_path.suffix}"
         )
         self._remove(temp_path)
 
@@ -310,7 +324,7 @@ class ExportWorker(QThread):
 
             size = temp_path.stat().st_size
             try:
-                temp_path.replace(job.out_path)
+                temp_path.replace(out_path)
             except OSError as exc:
                 return False, f"Could not put the finished file in place: {exc}"
             return True, f"{size / (1024 * 1024):.0f} MB"

@@ -306,25 +306,21 @@ def test_matching_clips_still_join(tools, clip, second_clip, tmp_path):
     assert result["duration"] == pytest.approx(12.0, abs=0.5)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="even dimensions are only forced on the computed width during an "
-           "explicit downscale, so an odd-sized source reaches libx264 as-is "
-           "and is rejected",
-)
 def test_an_odd_sized_source_still_exports(tools, odd_sized_clip, tmp_path):
-    out = tmp_path / "odd.mp4"
+    """libx264 refuses an odd width or height outright rather than coping.
+    Nothing a Box Pro records is odd, but the app opens any folder."""
+    out = target(tmp_path, "odd", "master")
     ok, message = export(tools, tmp_path, [probed(tools, odd_sized_clip)],
                          "master", out)
     assert ok, message
+    result = probe_output(tools, out)
+    assert result["width"] % 2 == 0 and result["height"] % 2 == 0
+    assert result["frames"] > 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="output paths are appended without being made absolute, so a folder "
-           "whose name begins with a dash is parsed by ffmpeg as an option",
-)
 def test_an_output_folder_beginning_with_a_dash_works(tools, clip, tmp_path):
+    """ffmpeg reads a leading dash as the start of an option, so a relative
+    folder called "-exports" produced "Unrecognized option"."""
     import os
     folder = tmp_path / "-exports"
     folder.mkdir()

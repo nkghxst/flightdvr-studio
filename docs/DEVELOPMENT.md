@@ -350,46 +350,59 @@ The release is drafted rather than published precisely because step 5 is manual.
 
 ---
 
-## Known defects, still unfixed
+## The July 2026 review
 
-An independent review in July 2026 found 18 confirmed defects. 1.1.1 fixed the
-ones that make an export untrustworthy. These remain, roughly in order of how
-much they matter:
+An independent review found 18 confirmed defects. **All of them are fixed**,
+across 1.1.1, 1.1.2 and the work after it. The integration suite was built
+second, and it immediately found a nineteenth — `-fps_mode` breaking every
+export on ffmpeg older than 5.1 — which is the argument for having built it.
 
-- **Joined exports are unreliable and should be treated as unsupported.**
-  `build_commands()` receives `job.clips[0]`, so a joined job takes its
-  bitrate, audio presence, frame rate, dimensions and colour handling from the
-  first clip alone. A size-targeted join of two clips produces roughly double
-  the target; joining a silent clip with one that has audio drops all audio.
-  Queueing a second join whose first clip matches an existing job also
-  overwrites that job's concat file. Fix by refusing incompatible joins with a
-  clear message before attempting anything cleverer.
-- **The queue can be edited while the worker is running it.** Remove and Clear
-  mutate the list the worker is iterating, so clearing mid-export still encodes
-  pending jobs and progress signals can index a shortened list.
-- **Interrupted library copies leave `.part` files** and cannot be cancelled
-  part way through a single file.
-- **Duplicate-output detection compares paths as case-sensitive strings**, so
-  on Windows and default macOS two differently-cased names collide silently.
-- **A relative output folder beginning with `-` is parsed as an ffmpeg option.**
-  Make output directories absolute when they are chosen.
-- **Odd source or output dimensions fail** — only the computed width is forced
-  even, and only during an explicit downscale. Cannot occur with HDZero
-  footage, which is always even, but imported files can trigger it.
-- **Scan shutdown does not cancel in-flight probes**, so a stale worker can
-  emit `done` during a later scan.
-- **Free-space checking skips nested new destinations**, walking up only one
-  level rather than to the first existing ancestor.
-Fixed since that review, beyond the 1.1.1 list: the corresponding source offer
-for the bundled Windows ffmpeg, the unverified ffmpeg going into the installer,
-and the Windows smoke test that passed when ffmpeg was missing because the
-resulting modal kept the process alive.
+Worth keeping in mind, because they are the shapes that recurred:
 
-The review's sharpest point was about the tests, and it stands: they assert
-that a command *contains the right arguments*, never that it *produces the
-right media*. Every defect above and every one fixed in 1.1.1 would have been
-caught on the day it was written by a small integration suite running real
-ffmpeg against synthetic fixtures. Build that before adding features.
+- **A well-formed command is not a working one.** Most of the eighteen were
+  invisible to argument inspection, and several were guarded by tests that
+  passed. Anything touching ffmpeg needs an integration test.
+- **Exit code zero is not success.** A copy without re-encoding can write a
+  container header and nothing else and exit happily.
+- **The first clip is not the job.** Bitrate, audio, frame rate, dimensions and
+  colour were all read off `clips[0]` and applied to everything.
+- **A worker and the window must not share mutable state.** The queue race, the
+  stale scan and the orphaned ffmpeg all came from that.
+- **Options are not stable across ffmpeg versions**, and only the Windows build
+  knows which ffmpeg it has.
+
+<details>
+<summary>What they were</summary>
+
+Fixed in 1.1.1: failed overwrites destroying the previous export; mid-GOP
+corruption at the start of every trim; the queue deadlocking on a full stderr
+pipe; cancel not stopping ffmpeg; empty output reported as success; failures
+reported as "Conversion failed!"; the missing LGPL text; the incomplete
+corresponding-source offer; the unverified bundled ffmpeg; the Windows smoke
+test that passed with no ffmpeg; the wrong About dialog.
+
+Fixed in 1.1.2: `-fps_mode` on ffmpeg older than 5.1.
+
+Fixed after: joined size targets sized from one clip; joined audio dropped by a
+silent first clip; joined exports taking every property from the first clip;
+concat lists overwriting each other; odd source dimensions; relative output
+paths beginning with a dash; the queue mutating under a running worker;
+case-insensitive output collisions; `.part` files left by interrupted copies;
+free space measured against a folder that does not exist; superseded scans
+updating a newer one.
+
+</details>
+
+## Known imprecisions
+
+- **A joined segment can come out one frame short** — 359 where 360 were
+  expected across two three-second cuts. The seam content is correct: frames
+  either side match a standalone export at 44.7 dB. Likely rounding in the
+  `fps` or `concat` filter.
+
+- **A library copy cannot be stopped part way through a single file.** Cancel
+  is checked between files, so a large one runs to completion. Nothing is left
+  behind either way.
 
 ## Outstanding
 
