@@ -33,7 +33,7 @@ from typing import Iterable
 from PySide6.QtCore import QThread, Signal
 
 from .media import NO_WINDOW, ClipInfo, Tools
-from .presets import PRESETS, ExportSettings, build_commands
+from .presets import PRESETS, ExportSettings, build_commands, join_problems
 
 # Pass 1 of a two-pass encode analyses without writing video, so it is quicker.
 PASS_WEIGHTS = (0.35, 0.65)
@@ -246,6 +246,16 @@ class ExportWorker(QThread):
         self.queue_finished.emit(completed, failed)
 
     def _run_job(self, index: int, job: Job) -> tuple[bool, str]:
+        # Refused here as well as in the window, so a job that reaches the
+        # worker by any route cannot produce a file that is quietly wrong.
+        if len(job.clips) > 1:
+            # Stream copy cannot normalise anything, so a joined remux is held
+            # to the stricter standard.
+            problems = join_problems(job.clips,
+                                     re_encoding=job.preset_key != "remux")
+            if problems:
+                return False, "Cannot join these clips: " + "; ".join(problems)
+
         try:
             job.out_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -275,6 +285,11 @@ class ExportWorker(QThread):
                 self.work_dir,
                 sources=[c.path for c in job.clips],
                 concat_file=job.concat_file,
+                clips=job.clips,
+                # The finished file is as long as every clip together. Sizing a
+                # joined export from clips[0] alone overshot the target by
+                # roughly the number of clips in it.
+                total_duration=job.total_duration,
             )
         except Exception as exc:  # pragma: no cover - defensive
             return False, f"Could not build command: {exc}"

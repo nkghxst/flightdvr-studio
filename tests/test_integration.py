@@ -224,41 +224,86 @@ def test_a_size_target_is_respected_for_one_clip(tools, clip, tmp_path):
 # These fail on purpose. Delete the marker when you fix one; strict xfail turns
 # an unexpected pass into an error so nobody has to remember.
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="build_commands() receives job.clips[0], so a joined size target is "
-           "computed from the first clip's duration alone and overshoots by "
-           "roughly the number of clips joined",
-)
 def test_a_joined_size_target_is_respected(tools, clip, second_clip, tmp_path):
+    """Two six-second clips joined, targeted at 3 MB.
+
+    The bitrate used to be computed from the first clip alone, so the finished
+    file came out at roughly the number of clips times the target.
+    """
     from flightdvr.jobs import write_concat_file
     clips = [probed(tools, clip), probed(tools, second_clip)]
-    concat = write_concat_file(tmp_path, clips)
-    out = tmp_path / "joined_small.mp4"
+    concat = write_concat_file(clips, tmp_path, "joined")
+    out = target(tmp_path, "joined_small", "social")
     settings = ExportSettings()
-    settings.target_mb = 3
+    settings.social_size_mb = 3
     ok, message = export(tools, tmp_path, clips, "social", out,
                          settings=settings, concat=concat)
     assert ok, message
     produced = out.stat().st_size / (1024 * 1024)
     assert produced <= 3 * 1.35, f"asked for 3 MB, produced {produced:.2f} MB"
+    assert probe_output(tools, out)["duration"] == pytest.approx(12.0, abs=0.5), \
+        "both clips should be in the output"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="audio presence is taken from the first clip, so joining a silent "
-           "clip first applies -an and drops the sound from all of them",
-)
 def test_joining_a_silent_clip_first_keeps_the_others_audio(
     tools, silent_clip, clip, tmp_path
 ):
+    """Audio presence used to be read off the first clip and applied to all of
+    them, so a silent clip at the front added -an and took the sound out of
+    every clip that had it. Silence is synthesised for the ones that lack it
+    instead."""
     from flightdvr.jobs import write_concat_file
     clips = [probed(tools, silent_clip), probed(tools, clip)]
-    concat = write_concat_file(tmp_path, clips)
+    concat = write_concat_file(clips, tmp_path, "joined")
     out = tmp_path / "mixed.mp4"
     ok, message = export(tools, tmp_path, clips, "master", out, concat=concat)
     assert ok, message
     assert probe_output(tools, out)["has_audio"], "the second clip's audio was dropped"
+
+
+def test_a_mixed_audio_join_runs_for_its_full_length(
+    tools, silent_clip, clip, tmp_path
+):
+    """Synthesised silence has to be the right length, or the clip that does
+    have sound ends up out of step with its own picture."""
+    from flightdvr.jobs import write_concat_file
+    clips = [probed(tools, silent_clip), probed(tools, clip)]
+    concat = write_concat_file(clips, tmp_path, "joined")
+    out = target(tmp_path, "mixed", "master")
+    ok, message = export(tools, tmp_path, clips, "master", out, concat=concat)
+
+    assert ok, message
+    result = probe_output(tools, out)
+    assert result["has_audio"]
+    assert result["duration"] == pytest.approx(12.0, abs=0.5)
+
+
+def test_a_joined_remux_of_mismatched_clips_is_refused(
+    tools, clip, odd_sized_clip, tmp_path
+):
+    """Copying without re-encoding cannot bring anything to a common format,
+    so it still has to say no."""
+    from flightdvr.jobs import write_concat_file
+    clips = [probed(tools, clip), probed(tools, odd_sized_clip)]
+    concat = write_concat_file(clips, tmp_path, "joined")
+    out = target(tmp_path, "badremux", "remux")
+    ok, message = export(tools, tmp_path, clips, "remux", out, concat=concat)
+
+    assert not ok
+    assert "other presets" in message, message
+
+
+def test_matching_clips_still_join(tools, clip, second_clip, tmp_path):
+    """The refusal must not catch clips that are genuinely compatible."""
+    from flightdvr.jobs import write_concat_file
+    clips = [probed(tools, clip), probed(tools, second_clip)]
+    concat = write_concat_file(clips, tmp_path, "joined")
+    out = target(tmp_path, "ok", "master")
+    ok, message = export(tools, tmp_path, clips, "master", out, concat=concat)
+    assert ok, message
+    result = probe_output(tools, out)
+    assert result["has_audio"]
+    assert result["duration"] == pytest.approx(12.0, abs=0.5)
 
 
 @pytest.mark.xfail(

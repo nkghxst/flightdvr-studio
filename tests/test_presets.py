@@ -468,15 +468,139 @@ def test_trim_applies_to_every_re_encoding_preset():
         assert "-t" in command, preset
 
 
-def test_joined_export_reads_from_a_concat_list():
+def test_a_size_target_scales_with_the_length_it_is_given():
+    """A joined export is as long as all its clips, and the bitrate has to
+    follow. Sizing from the first clip alone overshot the target by roughly the
+    number of clips joined."""
+    clip = boxpro_clip()
+    alone = target_video_bitrate(clip, 45, 128)
+    joined = target_video_bitrate(clip, 45, 128, runtime=clip.duration * 2)
+    # Twice the footage in the same file size means about half the bitrate.
+    assert joined < alone
+    assert (joined + 128) == pytest.approx((alone + 128) / 2, rel=0.05)
+
+
+def test_a_joined_export_is_sized_by_its_total_duration():
+    clip = boxpro_clip()
     commands = build_commands(
-        TOOLS, boxpro_clip(), "master", ExportSettings(), Path("out.mp4"), Path("work"),
+        TOOLS, clip, "social", ExportSettings(social_mode="size"),
+        Path("out.mp4"), Path("work"),
+        sources=[clip.path, clip.path], concat_file=Path("c.txt"),
+        total_duration=clip.duration * 2,
+    )
+    joined = int(commands[0][commands[0].index("-b:v") + 1].rstrip("k"))
+
+    single = build_commands(
+        TOOLS, clip, "social", ExportSettings(social_mode="size"),
+        Path("out.mp4"), Path("work"),
+    )
+    alone = int(single[0][single[0].index("-b:v") + 1].rstrip("k"))
+
+    assert joined < alone, "a join must not reuse the single-clip bitrate"
+
+
+def test_a_single_clip_is_unaffected_by_the_new_argument():
+    clip = boxpro_clip()
+    without = build_commands(TOOLS, clip, "social",
+                             ExportSettings(social_mode="size"),
+                             Path("out.mp4"), Path("work"))
+    with_zero = build_commands(TOOLS, clip, "social",
+                               ExportSettings(social_mode="size"),
+                               Path("out.mp4"), Path("work"), total_duration=0.0)
+    assert without == with_zero
+
+
+def two_clips(**second):
+    a = boxpro_clip()
+    a.path = Path("a.ts")
+    b = boxpro_clip()
+    b.path = Path("b.ts")
+    for field, value in second.items():
+        setattr(b, field, value)
+    return [a, b]
+
+
+def test_a_joined_remux_still_reads_from_a_concat_list():
+    """Stream copy has no filter graph to route through."""
+    commands = build_commands(
+        TOOLS, boxpro_clip(), "remux", ExportSettings(), Path("out.mp4"), Path("work"),
         sources=[Path("a.ts"), Path("b.ts")], concat_file=Path("list.txt"),
+        clips=two_clips(),
     )
     command = flatten(commands[0])
-    assert "-f concat" in command
-    assert "-safe 0" in command
-    assert "list.txt" in command
+    assert "-f concat" in command and "-safe 0" in command and "list.txt" in command
+
+
+def test_a_joined_re_encode_opens_each_clip_separately():
+    """The concat demuxer applies one clip's properties to all of them. Every
+    clip gets its own input and its own place in the filter graph instead."""
+    clips = two_clips()
+    commands = build_commands(
+        TOOLS, clips[0], "master", ExportSettings(), Path("out.mp4"), Path("work"),
+        clips=clips,
+    )
+    command = commands[0]
+    assert command.count("-i") == 2, "each clip needs its own input"
+    assert "-f" not in command or "concat" not in flatten(command).split("-filter_complex")[0]
+    assert "-filter_complex" in command
+    graph = command[command.index("-filter_complex") + 1]
+    assert "[0:v]" in graph and "[1:v]" in graph
+    assert "concat=n=2" in graph
+    assert "-map" in command
+
+
+def test_a_join_brings_every_clip_to_one_size_and_rate():
+    clips = two_clips(width=1920, height=1080, fps=30.0)
+    graph = build_commands(
+        TOOLS, clips[0], "master", ExportSettings(), Path("out.mp4"), Path("work"),
+        clips=clips,
+    )[0]
+    filtergraph = graph[graph.index("-filter_complex") + 1]
+    # The largest of each, so nothing is thrown away for the smaller clip.
+    assert "scale=1920:1080" in filtergraph
+    assert "fps=60" in filtergraph
+
+
+def test_a_join_gives_silence_to_the_clips_that_have_none():
+    """Applying -an because the first clip is silent removed the sound from
+    every clip that had it."""
+    clips = two_clips()
+    clips[0].audio_codec = ""            # first clip silent, second has sound
+    graph = build_commands(
+        TOOLS, clips[0], "master", ExportSettings(), Path("out.mp4"), Path("work"),
+        clips=clips,
+    )[0]
+    filtergraph = graph[graph.index("-filter_complex") + 1]
+    assert "anullsrc" in filtergraph, "no silence was synthesised"
+    assert "concat=n=2:v=1:a=1" in filtergraph, "audio was dropped from the join"
+    assert "-an" not in graph
+
+
+def test_a_join_of_silent_clips_carries_no_audio():
+    clips = two_clips()
+    for c in clips:
+        c.audio_codec = ""
+    command = build_commands(
+        TOOLS, clips[0], "master", ExportSettings(), Path("out.mp4"), Path("work"),
+        clips=clips,
+    )[0]
+    assert "-an" in command
+    assert "anullsrc" not in command[command.index("-filter_complex") + 1]
+
+
+def test_each_clip_in_a_join_is_trimmed_accurately():
+    """The concat demuxer's inpoint lands mid-GOP, which is what corrupted the
+    start of a trimmed export. Each input gets the same two-part seek a single
+    clip gets."""
+    clips = two_clips()
+    clips[1].trim_in, clips[1].trim_out = 44.0, 104.0
+    command = build_commands(
+        TOOLS, clips[0], "master", ExportSettings(), Path("out.mp4"), Path("work"),
+        clips=clips,
+    )[0]
+    assert "42.000" in command, "no fast seek to a lead-in before the in point"
+    graph = command[command.index("-filter_complex") + 1]
+    assert "trim=start=2.000:duration=60.000" in graph
 
 
 # -- size targeting -----------------------------------------------------------

@@ -342,9 +342,240 @@ def _scale_filter(clip: ClipInfo, target_height: int) -> list[str]:
     return [f"scale=-2:{target_height}:flags=lanczos"]
 
 
-def target_video_bitrate(clip: ClipInfo, size_mb: int, audio_kbps: int) -> int:
-    """Video bitrate in kbit/s that lands a clip on `size_mb`."""
-    runtime = clip.trimmed_duration or clip.duration
+# --- joining several clips into one export -----------------------------------
+
+# Audio every joined clip is brought to, so the pieces can be concatenated.
+JOIN_SAMPLE_RATE = 48000
+JOIN_CHANNELS = "stereo"
+
+
+def join_target_format(clips: list[ClipInfo]) -> tuple[int, int, float]:
+    """The frame size and rate every clip in a join is brought to.
+
+    The largest of each, so nothing is thrown away to accommodate the smallest
+    clip. Dimensions are forced even because the H.264 and HEVC encoders
+    refuse odd ones in 4:2:0.
+    """
+    width = max((c.width for c in clips if c.width), default=1280)
+    height = max((c.height for c in clips if c.height), default=720)
+    fps = max((c.fps for c in clips if c.fps), default=60.0)
+    return width - (width % 2), height - (height % 2), fps
+
+
+def _clip_timing(clip: ClipInfo) -> tuple[float, float, float]:
+    """(input seek, where the wanted part starts after it, how much to keep).
+
+    Split the same way a single-clip export splits it: a fast seek that lands
+    somewhere before the in point, then an accurate cut once the decoder has
+    caught up. The concat demuxer's `inpoint` cannot do the second half, which
+    is why a joined trim used to begin with corrupt frames.
+    """
+    duration = clip.trimmed_duration or clip.duration
+    if clip.trim_in <= 0.01:
+        return 0.0, 0.0, duration
+    lead_in = min(clip.trim_in, SEEK_LEAD_IN)
+    return clip.trim_in - lead_in, lead_in, duration
+
+
+def join_inputs(clips: list[ClipInfo]) -> list[str]:
+    """Input arguments for a join: one -i per clip, each with its own seek."""
+    args: list[str] = []
+    for clip in clips:
+        seek, _, _ = _clip_timing(clip)
+        args += ["-fflags", "+genpts", "-analyzeduration", "100M",
+                 "-probesize", "100M"]
+        if seek > 0.01:
+            args += ["-ss", f"{seek:.3f}"]
+        args += ["-i", str(clip.path)]
+    return args
+
+
+def join_filtergraph(
+    clips: list[ClipInfo],
+    settings: ExportSettings,
+    pix_fmt: str,
+    tail: list[str] | None = None,
+) -> tuple[str, str, str]:
+    """A filter_complex that normalises every clip and then joins them.
+
+    Returns (graph, video label, audio label). The audio label is empty when
+    the export carries no sound.
+
+    This replaces the concat demuxer, which needed every input to present
+    identical streams and took its encoder settings from the first clip, so a
+    join of clips that differed produced a file that was silent, or stretched,
+    or the wrong size, without ever reporting a problem. Here each clip is
+    decoded on its own, cut accurately, brought to a common frame size, rate
+    and range, given silence if it has none, and only then concatenated.
+
+    Colour is handled per clip rather than once for all of them, because
+    whether a recording is full range is a property of that recording.
+    """
+    width, height, fps = join_target_format(clips)
+    want_audio = settings.keep_audio and any(c.has_audio for c in clips)
+
+    chains: list[str] = []
+    labels: list[str] = []
+
+    for index, clip in enumerate(clips):
+        _, start, duration = _clip_timing(clip)
+
+        # A seek before -i already rebases timestamps to zero, so the trim is
+        # measured from the start of what was decoded.
+        #
+        # Known imprecision: a joined segment can come out one frame short,
+        # measured at 359 frames where 360 were expected across two three-
+        # second cuts. The seam itself is correct — the frames on either side
+        # of it match a standalone export at 44.7 dB — so this is a sixtieth of
+        # a second lost at each join, against the corrupt frames the concat
+        # demuxer produced at every trimmed seam.
+        video = [f"trim=start={start:.3f}:duration={duration:.3f}",
+                 "setpts=PTS-STARTPTS"]
+        # Range conversion folded into the scale that resizes the clip, so the
+        # picture is only resampled once.
+        scale = f"scale={width}:{height}:force_original_aspect_ratio=decrease"
+        if settings.colour == LEVELS and clip.is_full_range:
+            scale += ":in_range=full:out_range=limited"
+        video += [
+            scale,
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+            "setsar=1",
+            f"fps={fps:g}",
+            f"format={pix_fmt}",
+        ]
+        chains.append(f"[{index}:v]{','.join(video)}[v{index}]")
+        labels.append(f"[v{index}]")
+
+        if not want_audio:
+            continue
+        if clip.has_audio:
+            audio = [f"atrim=start={start:.3f}:duration={duration:.3f}",
+                     "asetpts=PTS-STARTPTS",
+                     f"aresample={JOIN_SAMPLE_RATE}:async=1:first_pts=0"]
+            chains.append(f"[{index}:a]{','.join(audio)}[a{index}]")
+        else:
+            # Silence of exactly this clip's length, so the ones that do have
+            # sound keep theirs instead of the whole join being silenced.
+            chains.append(
+                f"anullsrc=channel_layout={JOIN_CHANNELS}:"
+                f"sample_rate={JOIN_SAMPLE_RATE},"
+                f"atrim=duration={duration:.3f},asetpts=PTS-STARTPTS[a{index}]"
+            )
+        labels.append(f"[a{index}]")
+
+    streams = "1" if want_audio else "0"
+    chains.append(
+        f"{''.join(labels)}concat=n={len(clips)}:v=1:a={streams}"
+        f"[jv]{'[ja]' if want_audio else ''}"
+    )
+
+    video_label = "[jv]"
+    if tail:
+        chains.append(f"[jv]{','.join(tail)}[vout]")
+        video_label = "[vout]"
+
+    return ";".join(chains), video_label, "[ja]" if want_audio else ""
+
+
+def join_problems(clips: list[ClipInfo], re_encoding: bool = True) -> list[str]:
+    """Why these clips cannot be joined into one file, in words a pilot can act on.
+
+    Clips of different sizes, frame rates, codecs and colour ranges join
+    perfectly well now, and so do clips with no sound alongside clips that have
+    it — join_filtergraph() brings each one to a common format first. What is
+    left here is what no amount of normalising can rescue: a clip whose
+    properties could not be read, and a clip with nothing in it.
+
+    Messages are written to be read by someone deciding what to do next, not
+    to describe the internals.
+    """
+    if len(clips) < 2:
+        return []
+
+    def distinct(key):
+        seen = []
+        for clip in clips:
+            value = key(clip)
+            if value not in seen:
+                seen.append(value)
+        return seen
+
+    problems: list[str] = []
+
+    # Differences that used to be refused are now normalised in the filter
+    # graph instead: frame size, frame rate, codec, colour range, and clips
+    # with no sound among clips that have it. See join_filtergraph().
+
+    unreadable = [c for c in clips if not c.width or not c.height]
+    if unreadable:
+        listed = ", ".join(c.path.name for c in unreadable[:3])
+        problems.append(
+            f"{len(unreadable)} of them could not be read properly ({listed}), "
+            "so there is no way to tell what joining them would produce"
+        )
+
+    empty = [c for c in clips if (c.trimmed_duration or c.duration) <= 0.05]
+    if empty:
+        listed = ", ".join(c.path.name for c in empty[:3])
+        problems.append(f"{len(empty)} of them are empty or trimmed to nothing ({listed})")
+
+    if re_encoding:
+        return problems
+
+    # Copying without re-encoding puts the clips end to end untouched, so
+    # anything that differs between them has to match already.
+    sizes = distinct(lambda c: (c.width, c.height))
+    if len(sizes) > 1:
+        listed = ", ".join(f"{w}×{h}" for w, h in sizes)
+        problems.append(f"they are different sizes ({listed})")
+
+    rates = distinct(lambda c: round(c.fps, 2) if c.fps else 0.0)
+    if len(rates) > 1:
+        listed = ", ".join(f"{r:g}" for r in rates)
+        problems.append(f"they were recorded at different frame rates ({listed} fps)")
+
+    codecs = distinct(lambda c: c.video_codec or "unknown")
+    if len(codecs) > 1:
+        problems.append(f"they use different video codecs ({', '.join(codecs)})")
+
+    if len({c.has_audio for c in clips}) > 1:
+        with_sound = sum(1 for c in clips if c.has_audio)
+        problems.append(
+            f"only {with_sound} of {len(clips)} have sound"
+        )
+
+    if problems:
+        problems.append(
+            "copying without re-encoding cannot change any of that — one of "
+            "the other presets can"
+        )
+    return problems
+
+
+def describe_join_problems(clips: list[ClipInfo], problems: list[str]) -> str:
+    """The refusal, as the user should read it."""
+    names = ", ".join(c.path.name for c in clips[:3])
+    if len(clips) > 3:
+        names += f" and {len(clips) - 3} more"
+    reasons = "".join(f"\n  • {problem}" for problem in problems)
+    return (
+        f"These {len(clips)} clips cannot be joined into one file because"
+        f"{reasons}\n\n"
+        f"Exporting them separately works and produces the same footage — "
+        f"only as {len(clips)} files instead of one.\n\n({names})"
+    )
+
+
+def target_video_bitrate(clip: ClipInfo, size_mb: int, audio_kbps: int,
+                         runtime: float = 0.0) -> int:
+    """Video bitrate in kbit/s that lands a clip on `size_mb`.
+
+    `runtime` overrides the clip's own length, which is what a joined export
+    needs: the file being produced is as long as all its clips together, and
+    sizing it from the first one alone overshot the target by roughly the
+    number of clips joined.
+    """
+    runtime = runtime or clip.trimmed_duration or clip.duration
     if runtime <= 0:
         return 2500
     total_kbits = (size_mb * 1024 * 1024 * 8) / 1000.0
@@ -363,30 +594,83 @@ def build_commands(
     work_dir: Path,
     sources: list[Path] | None = None,
     concat_file: Path | None = None,
+    total_duration: float = 0.0,
+    clips: list[ClipInfo] | None = None,
 ) -> list[list[str]]:
-    """Full ffmpeg command list. Two entries when a two-pass encode is needed."""
-    sources = sources or [clip.path]
+    """Full ffmpeg command list. Two entries when a two-pass encode is needed.
+
+    `clip` describes the first source. `clips` is every clip in the job, which
+    a join needs in full: each one is decoded separately and brought to a
+    common format, rather than one clip's properties being applied to all of
+    them. `total_duration` is how long the finished file will be.
+
+    Leave `clips` and `total_duration` alone for a single clip.
+    """
+    clips = clips or [clip]
+    joined = len(clips) > 1
+    sources = sources or [c.path for c in clips]
     ff = str(tools.ffmpeg)
-    head = [ff, "-hide_banner", "-nostdin", "-y"] + _input_args(sources, concat_file, clip)
     preset = PRESETS[preset_key]
 
     if preset_key == "remux":
+        # Stream copy cannot normalise anything, so a joined remux still reads
+        # through the concat demuxer and still needs matching clips. That is
+        # why join_problems() is stricter when re_encoding is False.
+        head = ([ff, "-hide_banner", "-nostdin", "-y"]
+                + _input_args(sources, concat_file, clip))
         return [head + ["-c", "copy", "-movflags", "+faststart", str(out_path)]]
+
+    if joined:
+        head = [ff, "-hide_banner", "-nostdin", "-y"] + join_inputs(clips)
+    else:
+        head = ([ff, "-hide_banner", "-nostdin", "-y"]
+                + _input_args(sources, None, clip))
+
+    def picture(pix_fmt: str, tail: list[str] | None = None):
+        """Filter arguments, and whether the result carries audio.
+
+        A join routes through filter_complex so every clip can be brought to a
+        common format first; a single clip keeps the simpler -vf chain.
+        """
+        if joined:
+            graph, video_label, audio_label = join_filtergraph(
+                clips, settings, pix_fmt, tail
+            )
+            args = ["-filter_complex", graph, "-map", video_label]
+            if audio_label:
+                args += ["-map", audio_label]
+            return args, bool(audio_label)
+        chain = (tail or []) + colour_filters(settings.colour, clip, pix_fmt)
+        return ["-vf", ",".join(chain)], None
+
+    def sound(bitrate: str, mapped, pcm: bool = False) -> list[str]:
+        """Audio arguments for whichever route the picture took."""
+        if mapped is None:
+            return _audio_args(settings, clip, bitrate, pcm=pcm)
+        if not mapped:
+            return ["-an"]
+        # Resampling and channel layout are already done in the graph.
+        return ["-c:a", "pcm_s16le"] if pcm else ["-c:a", "aac", "-b:a", bitrate]
+
+    def timing(override: int = 0) -> list[str]:
+        if not joined:
+            return _fps_args(tools, clip, override)
+        # The graph has already put every clip on one rate; state it plainly
+        # rather than deriving it from the first clip, whose rate may differ.
+        _, _, fps = join_target_format(clips)
+        rate = min(override, fps) if override else fps
+        return frame_rate_mode(tools, "cfr") + ["-r", f"{rate:g}"]
 
     if preset_key == "edit":
         label, codec_args, pix_fmt, _ = EDIT_CODECS[settings.edit_codec]
-        vf = colour_filters(settings.colour, clip, pix_fmt)
+        filters, mapped = picture(pix_fmt)
         return [
-            head
-            + ["-vf", ",".join(vf)]
-            + codec_args
-            + _fps_args(tools, clip)
-            + _audio_args(settings, clip, "192k", pcm=True)
-            + [str(out_path)]
+            head + filters + codec_args + timing()
+            + sound("192k", mapped, pcm=True) + [str(out_path)]
         ]
 
     if preset_key == "master":
-        vf = colour_filters(settings.colour, clip, "yuv420p")
+        filters, mapped = picture("yuv420p")
         if settings.hardware:
             video = hardware_video_args(settings.hardware, settings.master_crf)
         else:
@@ -395,21 +679,18 @@ def build_commands(
                 "-crf", str(settings.master_crf), "-profile:v", "high",
             ]
         return [
-            head
-            + ["-vf", ",".join(vf)]
-            + video
-            + _fps_args(tools, clip)
-            + _audio_args(settings, clip, "192k")
+            head + filters + video + timing() + sound("192k", mapped)
             + ["-movflags", "+faststart", str(out_path)]
         ]
 
     # social
-    audio_kbps = 128 if (settings.keep_audio and clip.has_audio) else 0
-    vf = _scale_filter(clip, settings.social_height) + colour_filters(
-        settings.colour, clip, "yuv420p"
+    filters, mapped = picture("yuv420p", _scale_filter(clip, settings.social_height))
+    carries_audio = mapped if mapped is not None else (
+        settings.keep_audio and clip.has_audio
     )
-    fps_args = _fps_args(tools, clip, settings.social_fps)
-    audio_args = _audio_args(settings, clip, "128k")
+    audio_kbps = 128 if carries_audio else 0
+    fps_args = timing(settings.social_fps)
+    audio_args = sound("128k", mapped)
 
     if settings.social_mode == "quality":
         if settings.hardware:
@@ -418,18 +699,19 @@ def build_commands(
             video = ["-c:v", "libx264", "-preset", "medium",
                      "-crf", str(settings.social_crf), "-profile:v", "high"]
         return [
-            head + ["-vf", ",".join(vf)] + video + fps_args + audio_args
+            head + filters + video + fps_args + audio_args
             + ["-movflags", "+faststart", str(out_path)]
         ]
 
     # Size-targeted. Two passes on CPU gets far closer to the target than one.
-    kbps = target_video_bitrate(clip, settings.social_size_mb, audio_kbps)
+    kbps = target_video_bitrate(clip, settings.social_size_mb, audio_kbps,
+                                runtime=total_duration)
     if settings.hardware:
         # Hardware encoders have no two-pass mode worth using, so this is a
         # single bitrate-targeted pass and lands less precisely on the number.
         video = hardware_bitrate_args(settings.hardware, kbps)
         return [
-            head + ["-vf", ",".join(vf)] + video + fps_args + audio_args
+            head + filters + video + fps_args + audio_args
             + ["-movflags", "+faststart", str(out_path)]
         ]
 
@@ -440,11 +722,11 @@ def build_commands(
     # pass 1 with -an, which is the usual advice, shifts the video framing by a
     # frame here, and x264 then refuses the mismatched stats file.
     pass1 = (
-        head + ["-vf", ",".join(vf)] + common
+        head + filters + common
         + ["-pass", "1"] + fps_args + audio_args + ["-f", "null", "-"]
     )
     pass2 = (
-        head + ["-vf", ",".join(vf)] + common
+        head + filters + common
         + ["-pass", "2"] + fps_args + audio_args
         + ["-movflags", "+faststart", str(out_path)]
     )
