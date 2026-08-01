@@ -174,7 +174,12 @@ class ExportWorker(QThread):
     def __init__(self, tools: Tools, jobs: list[Job], work_dir: Path, parent=None):
         super().__init__(parent)
         self.tools = tools
-        self.jobs = jobs
+        # A copy, so the window can add to or remove from its own list without
+        # shifting the sequence being worked through. The jobs themselves are
+        # shared, which is how a job dropped from the queue tells the worker to
+        # pass over it: the window marks it, and the loop below skips anything
+        # that is no longer pending.
+        self.jobs = list(jobs)
         self.work_dir = work_dir
         self._cancel = False
         self._process: subprocess.Popen | None = None

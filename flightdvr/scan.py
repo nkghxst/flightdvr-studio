@@ -412,6 +412,7 @@ def copy_clips(
     for index, source in enumerate(sources):
         if on_progress and not on_progress(index, total, source.name):
             break
+        temporary: Path | None = None
         try:
             target = ingest_destination(base, source, by_date, date_prefix, flight_date)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -426,14 +427,23 @@ def copy_clips(
             # Size check is enough here: we are guarding against a half-finished
             # copy, not against a card that is silently corrupting data.
             if temporary.stat().st_size != source.stat().st_size:
-                temporary.unlink(missing_ok=True)
                 problems.append(f"{source.name}: copy finished at the wrong size")
                 continue
 
             temporary.replace(target)
+            temporary = None          # it is the real file now
             written.append(target)
         except OSError as exc:
             problems.append(f"{source.name}: {exc}")
+        finally:
+            # Whatever went wrong, do not leave a .part behind. Cleanup used to
+            # run only when a completed copy came out the wrong size, so pulling
+            # the card or filling the disk mid-copy left one in the library.
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     if on_progress:
         on_progress(total, total, "")

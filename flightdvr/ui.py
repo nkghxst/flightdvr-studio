@@ -132,6 +132,33 @@ def natural_key(text: str) -> str:
     return re.sub(r"\d+", lambda m: m.group().zfill(12), text.lower())
 
 
+def output_key(path: Path) -> str:
+    """One name per file, for spotting two jobs aimed at the same place.
+
+    Absolute and case-folded, because Windows and macOS treat hdz_001.mp4 and
+    HDZ_001.mp4 as one file. Comparing the paths as written meant two jobs from
+    differently-cased folders queued happily and the second silently overwrote
+    the first, without the overwrite prompt appearing.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path.absolute()
+    return os.path.normcase(str(resolved))
+
+
+def existing_ancestor(path: Path) -> Path:
+    """The nearest folder that exists, so free space can be measured.
+
+    Looking only at the immediate parent meant a destination two levels below
+    anything that existed skipped the capacity check altogether: disk_usage()
+    failed, the failure came back as zero, and zero reads as "no warning".
+    """
+    while not path.exists() and path.parent != path:
+        path = path.parent
+    return path
+
+
 def _clip_set_id(clips) -> str:
     """A short identifier for exactly this set of clips and their trims.
 
@@ -1761,7 +1788,7 @@ class MainWindow(QMainWindow):
 
         # Two jobs writing the same filename would just overwrite each other.
         already = {
-            str(j.out_path) for j in self.jobs
+            output_key(j.out_path) for j in self.jobs
             if j.status in (JobStatus.PENDING, JobStatus.RUNNING)
         }
         before = len(self.jobs)
@@ -1781,7 +1808,7 @@ class MainWindow(QMainWindow):
 
             stem = f"{ordered[0].stem}_joined"
             target = output_path(out_dir, stem, key, subfolders, stamp)
-            if str(target) not in already:
+            if output_key(target) not in already:
                 # The list is written only once the target is accepted, and its
                 # name covers every clip in it. Writing it first, under a name
                 # taken from the first clip alone, meant queueing a+c after a+b
@@ -1794,9 +1821,9 @@ class MainWindow(QMainWindow):
         else:
             for clip in clips:
                 target = output_path(out_dir, clip.stem, key, subfolders, stamp)
-                if str(target) in already:
+                if output_key(target) in already:
                     continue
-                already.add(str(target))
+                already.add(output_key(target))
                 self.jobs.append(Job([clip], key, settings, target,
                                      out_dir=out_dir, stem=clip.stem,
                                      subfolders=subfolders))
@@ -1932,10 +1959,7 @@ class MainWindow(QMainWindow):
                     estimate_output_size(c, job.preset_key, job.settings)
                     for c in job.clips
                 )
-        target = pending[0].out_path.parent
-        while not target.exists() and target.parent != target:
-            target = target.parent
-        available = scan.free_space(target)
+        available = scan.free_space(existing_ancestor(pending[0].out_path.parent))
         if not available or needed < available * 0.95:
             return True
 
@@ -1960,6 +1984,19 @@ class MainWindow(QMainWindow):
         return [r for r in rows if 0 <= r < len(self.jobs)
                 and self.jobs[r].status is not JobStatus.RUNNING]
 
+    @staticmethod
+    def _withdraw(job: Job) -> None:
+        """Tell a running worker to pass over a job dropped from the queue.
+
+        The worker holds its own list and skips anything that is not pending,
+        so marking the job is what stops it. Removing it from the window's list
+        alone did not: clearing the queue mid-export left the worker encoding
+        jobs that were no longer on screen.
+        """
+        if job.status is JobStatus.PENDING:
+            job.status = JobStatus.SKIPPED
+            job.message = "removed from the queue"
+
     def _remove_selected_jobs(self) -> None:
         rows = {i.row() for i in self.queue_table.selectedIndexes()}
         removable = self._removable_rows(sorted(rows))
@@ -1971,42 +2008,69 @@ class MainWindow(QMainWindow):
             )
             return
         for row in sorted(removable, reverse=True):
+            self._withdraw(self.jobs[row])
             del self.jobs[row]
         self._rebuild_queue()
         self.statusBar().showMessage(f"Removed {len(removable)} from the queue", 4000)
 
     def _clear_queue(self) -> None:
         keep = [j for j in self.jobs if j.status is JobStatus.RUNNING]
-        dropped = len(self.jobs) - len(keep)
+        dropped = [j for j in self.jobs if j.status is not JobStatus.RUNNING]
         if not dropped:
             return
+        for job in dropped:
+            self._withdraw(job)
         self.jobs = keep
         self._rebuild_queue()
-        self.statusBar().showMessage(f"Cleared {dropped} from the queue", 4000)
+        self.statusBar().showMessage(f"Cleared {len(dropped)} from the queue", 4000)
+
+    def _reported_job(self, index: int):
+        """Resolve a worker's index to (job, row), either of which may be gone.
+
+        The index refers to the worker's own list, not to what is on screen.
+        Using it to subscript self.jobs meant that removing a queued row while
+        an export was running updated the wrong progress bar, or raised
+        IndexError once the list had grown shorter than the worker's.
+        """
+        jobs = self.worker.jobs if self.worker else self.jobs
+        if not 0 <= index < len(jobs):
+            return None, None
+        job = jobs[index]
+        row = next((i for i, queued in enumerate(self.jobs) if queued is job), None)
+        return job, row
 
     def _job_started(self, index: int) -> None:
-        item = self.queue_table.item(index, 3)
+        _, row = self._reported_job(index)
+        if row is None:
+            return
+        item = self.queue_table.item(row, 3)
         if item:
             item.setText(JobStatus.RUNNING.value)
 
     def _job_progress(self, index: int, fraction: float, speed: str) -> None:
-        job = self.jobs[index]
+        job, row = self._reported_job(index)
+        if job is None:
+            return
         job.progress = fraction
-        bar = self.queue_table.cellWidget(index, 2)
+        bar = self.queue_table.cellWidget(row, 2) if row is not None else None
         if isinstance(bar, QProgressBar):
             bar.setValue(int(fraction * 1000))
             bar.setFormat(f"{fraction * 100:.0f}%  {speed}".strip())
         self._update_overall(self._queue_done + fraction * job.total_duration)
 
     def _job_finished(self, index: int, ok: bool, message: str) -> None:
-        job = self.jobs[index]
-        item = self.queue_table.item(index, 3)
-        if item:
-            item.setText(f"{job.status.value} — {message}" if message else job.status.value)
-        bar = self.queue_table.cellWidget(index, 2)
-        if isinstance(bar, QProgressBar) and ok:
-            bar.setValue(1000)
-            bar.setFormat("100%")
+        job, row = self._reported_job(index)
+        if job is None:
+            return
+        if row is not None:
+            item = self.queue_table.item(row, 3)
+            if item:
+                item.setText(f"{job.status.value} — {message}" if message
+                             else job.status.value)
+            bar = self.queue_table.cellWidget(row, 2)
+            if isinstance(bar, QProgressBar) and ok:
+                bar.setValue(1000)
+                bar.setFormat("100%")
         self._queue_done += job.total_duration
         self._update_overall(self._queue_done)
 
@@ -2050,7 +2114,7 @@ class MainWindow(QMainWindow):
         if not str(base).strip():
             return
 
-        available = scan.free_space(base.parent if not base.exists() else base)
+        available = scan.free_space(existing_ancestor(base))
         if available and needed > available:
             QMessageBox.warning(
                 self, "Not enough space",

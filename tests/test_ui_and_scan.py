@@ -710,6 +710,133 @@ def test_trimming_a_clip_changes_its_concat_list():
     assert _clip_set_id([a, b]) != _clip_set_id([a, trimmed])
 
 
+# -- editing the queue while it is running ------------------------------------
+
+def test_the_worker_keeps_its_own_list(tmp_path):
+    """The window mutates self.jobs. The worker enumerating that same list
+    meant a removal shifted the sequence underneath it."""
+    from flightdvr.jobs import ExportWorker
+    queue = [queued_job(), queued_job()]
+    worker = ExportWorker(TOOLS, queue, tmp_path)
+    del queue[0]
+    assert len(worker.jobs) == 2, "the worker's sequence moved with the window's"
+
+
+def test_a_withdrawn_job_is_skipped_by_a_running_worker(tmp_path):
+    """Clearing the queue mid-export left the worker encoding jobs that were
+    no longer on screen. The worker skips anything not pending, so withdrawing
+    a job is what stops it."""
+    from flightdvr.jobs import JobStatus
+    from flightdvr.ui import MainWindow
+    job = queued_job()
+    assert job.status is JobStatus.PENDING
+    MainWindow._withdraw(job)
+    assert job.status is JobStatus.SKIPPED
+    assert "removed" in job.message
+
+
+def test_withdrawing_never_disturbs_a_job_already_encoding(tmp_path):
+    from flightdvr.jobs import JobStatus
+    from flightdvr.ui import MainWindow
+    job = queued_job()
+    job.status = JobStatus.RUNNING
+    MainWindow._withdraw(job)
+    assert job.status is JobStatus.RUNNING
+
+
+def test_a_finished_job_is_not_relabelled_as_removed():
+    from flightdvr.jobs import JobStatus
+    from flightdvr.ui import MainWindow
+    job = queued_job()
+    job.status = JobStatus.DONE
+    MainWindow._withdraw(job)
+    assert job.status is JobStatus.DONE
+
+
+# -- two jobs must not silently aim at the same file --------------------------
+
+def test_differently_cased_targets_are_the_same_file_where_that_is_true():
+    """Windows and default macOS do not distinguish these, so two jobs queued
+    happily and the second overwrote the first with no prompt."""
+    from flightdvr.ui import output_key
+    same = output_key(Path("exports/hdz_001.mp4")) == output_key(Path("Exports/HDZ_001.mp4"))
+    assert same == (os.path.normcase("A") == "a")
+
+
+def test_the_same_file_reached_two_ways_has_one_key():
+    from flightdvr.ui import output_key
+    assert output_key(Path("a/b/../c.mp4")) == output_key(Path("a/c.mp4"))
+
+
+def test_genuinely_different_targets_keep_different_keys():
+    from flightdvr.ui import output_key
+    assert output_key(Path("a/one.mp4")) != output_key(Path("a/two.mp4"))
+
+
+# -- capacity checks have to look at a folder that exists ---------------------
+
+def test_free_space_is_measured_against_a_folder_that_exists(tmp_path):
+    """Checking only the immediate parent meant a destination two levels below
+    anything that existed skipped the check: disk_usage failed, the failure
+    came back as zero, and zero reads as "no warning"."""
+    from flightdvr.ui import existing_ancestor
+    deep = tmp_path / "new" / "deeper" / "library"
+    found = existing_ancestor(deep)
+    assert found.exists()
+    assert found == tmp_path
+
+
+def test_an_existing_destination_is_used_as_it_is(tmp_path):
+    from flightdvr.ui import existing_ancestor
+    assert existing_ancestor(tmp_path) == tmp_path
+
+
+# -- an interrupted copy must not leave anything behind -----------------------
+
+def test_a_failed_copy_leaves_no_part_file(tmp_path, monkeypatch):
+    """Pulling the card or filling the disk mid-copy used to leave a .part in
+    the library: cleanup ran only when a completed copy came out wrong."""
+    source = tmp_path / "hdz_001.ts"
+    source.write_bytes(b"x" * 4096)
+    library = tmp_path / "library"
+
+    def explode(src, dst, *args, **kwargs):
+        Path(dst).write_bytes(b"partial")     # as a real copy would
+        raise OSError("device disconnected")
+
+    monkeypatch.setattr(scan.shutil, "copy2", explode)
+    written, problems = scan.copy_clips([source], library, by_date=False,
+                                        date_prefix=False)
+
+    assert not written and problems
+    assert not list(library.rglob("*.part")), "a .part file was left behind"
+
+
+def test_a_copy_that_comes_out_the_wrong_size_leaves_nothing_either(tmp_path, monkeypatch):
+    source = tmp_path / "hdz_002.ts"
+    source.write_bytes(b"x" * 4096)
+    library = tmp_path / "library"
+
+    monkeypatch.setattr(scan.shutil, "copy2",
+                        lambda src, dst, *a, **k: Path(dst).write_bytes(b"short"))
+    written, problems = scan.copy_clips([source], library, by_date=False,
+                                        date_prefix=False)
+
+    assert not written and problems
+    assert not list(library.rglob("*.part"))
+
+
+def test_a_good_copy_still_arrives(tmp_path):
+    source = tmp_path / "hdz_003.ts"
+    source.write_bytes(b"x" * 4096)
+    library = tmp_path / "library"
+    written, problems = scan.copy_clips([source], library, by_date=False,
+                                        date_prefix=False)
+    assert written and not problems
+    assert written[0].read_bytes() == b"x" * 4096
+    assert not list(library.rglob("*.part"))
+
+
 # -- licence obligations are structural, so guard them structurally -----------
 
 ROOT = Path(__file__).resolve().parents[1]
