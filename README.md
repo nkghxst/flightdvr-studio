@@ -96,24 +96,33 @@ you downloaded is what was built. None of these are code-signed, so this is the
 only check that means anything.
 
 ```powershell
-Get-FileHash FlightDVRStudio-1.1.2-Setup.exe -Algorithm SHA256
+Get-FileHash FlightDVRStudio-1.2.0-Setup.exe -Algorithm SHA256
 ```
 
 ```bash
-sha256sum FlightDVR_Studio-1.1.2-x86_64.AppImage    # Linux
-shasum -a 256 FlightDVR-Studio-1.1.2-arm64.dmg      # macOS
+sha256sum FlightDVR_Studio-1.2.0-x86_64.AppImage    # Linux
+shasum -a 256 FlightDVR-Studio-1.2.0-arm64.dmg      # macOS
 ```
 
-**1.1.2**
+**1.2.0**
+
+| File | SHA-256 |
+|---|---|
+| `FlightDVRStudio-1.2.0-Setup.exe` | `6f8d8c1b90a601b3bbb4bb10fbdb95f3efae4dc976fd673a52eba990abfdf7e5` |
+| `FlightDVR_Studio-1.2.0-x86_64.AppImage` | `c432130ad29aae7c5172538a72e8a3bae4000c58496045d3a6aad7b9440616ab` |
+| `FlightDVR-Studio-1.2.0-arm64.dmg` | `8eabb6c3230aa0c4599d4773d65759d513d7fb27a5c28f233a2c6bcf5a166928` |
+
+<details>
+<summary>Earlier releases</summary>
+
+**1.1.2** — joining clips into one file produced a result that was quietly
+wrong. Everything else works.
 
 | File | SHA-256 |
 |---|---|
 | `FlightDVRStudio-1.1.2-Setup.exe` | `a0262b6aa7809757e7f83b29da77deeacf8d1a81c056df6be1ea4a2a7cdd81ea` |
 | `FlightDVR_Studio-1.1.2-x86_64.AppImage` | `3c34cc807709c32ec76f67e373731d29ff574dbae590b2ab0215a73ea373827c` |
 | `FlightDVR-Studio-1.1.2-arm64.dmg` | `da548b3f9f1289943a7ec7b7bc8894a44c9994f6b8eee954f033c8bfb6fb1b31` |
-
-<details>
-<summary>Earlier releases</summary>
 
 **1.1.1** — fine on Windows and macOS, and on Linux with ffmpeg 5.1 or newer.
 On older ffmpeg, which Ubuntu 22.04 and Debian 11 ship, exports fail and the
