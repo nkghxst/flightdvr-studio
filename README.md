@@ -14,8 +14,15 @@ blacks.
 
 ![Ticking clips, trimming one, and exporting](docs/demo.gif)
 
-Free and open source under the GPL v3. Nothing is gated, and there is no
-account, telemetry or network access of any kind.
+Free and open source under the GPL v3. Nothing is gated and there is no
+account, no telemetry, and nothing to sign up for.
+
+The one thing it does over the network is check whether a newer version exists:
+a single request, at most once a day, to this project's own releases page on
+GitHub. Nothing is sent beyond what any web request unavoidably reveals — an IP
+address and the app's version — and nothing is downloaded or installed; a newer
+release just shows a link. Untick **Check for updates** in the About box and no
+request is made at all.
 
 > Not affiliated with, endorsed by, or supported by HDZero. It is an independent
 > tool that reads files their goggles produce.

@@ -26,7 +26,7 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QSettings, QSize, Qt, QThread, Signal
@@ -436,6 +436,7 @@ class MainWindow(QMainWindow):
         # so a running QThread is not collected out from under itself.
         self._retired_scans: list[ScanWorker] = []
         self.copy_worker: CopyWorker | None = None
+        self.update_check = None
         self.encoders = available_encoders(tools)
         self.hw_encoder = ""
         self.hw_label = ""
@@ -471,6 +472,8 @@ class MainWindow(QMainWindow):
         self.hw_probe.result.connect(self._hardware_found)
         self.hw_probe.start()
 
+        self._start_update_check()
+
     # -- construction ---------------------------------------------------------
 
     def _build(self) -> None:
@@ -480,6 +483,7 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(8)
 
+        outer.addWidget(self._build_update_bar())
         outer.addLayout(self._build_source_bar())
 
         splitter = self.splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -517,6 +521,63 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._build_queue())
         self._install_shortcuts()
         self.statusBar().showMessage(f"{APP_TAGLINE}   ·   ffmpeg: {self.tools.ffmpeg}")
+
+    def _build_update_bar(self) -> QWidget:
+        """A quiet line offering a newer release. Hidden until there is one.
+
+        Deliberately not a dialog. Nobody opened this app to be interrupted by
+        a box about software; the offer can sit there until it is convenient.
+        """
+        bar = self.update_bar = QWidget()
+        bar.hide()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(8, 4, 4, 4)
+        row.setSpacing(8)
+
+        self.update_label = QLabel("")
+        self.update_label.setOpenExternalLinks(True)
+        self.update_label.setTextFormat(Qt.TextFormat.RichText)
+        row.addWidget(self.update_label, 1)
+
+        dismiss = QPushButton("Dismiss")
+        dismiss.setFlat(True)
+        dismiss.clicked.connect(bar.hide)
+        row.addWidget(dismiss)
+        return bar
+
+    def _start_update_check(self) -> None:
+        """Look for a newer release, at most once a day, if that is wanted.
+
+        Everything about this is quiet: no request when it is turned off, no
+        message when it finds nothing, and no message when it fails. Somebody
+        flying with no signal is not having a problem.
+        """
+        from . import __version__
+        from .updates import UpdateCheck, should_check
+
+        if not self.settings_store.value("check_for_updates", True, type=bool):
+            return
+
+        stamp = self.settings_store.value("last_update_check", "", type=str)
+        try:
+            last = datetime.fromisoformat(stamp) if stamp else None
+        except ValueError:
+            last = None
+        if not should_check(last, datetime.now()):
+            return
+
+        self.settings_store.setValue("last_update_check",
+                                     datetime.now().isoformat(timespec="seconds"))
+        self.update_check = UpdateCheck(__version__, self)
+        self.update_check.found.connect(self._update_available)
+        self.update_check.start()
+
+    def _update_available(self, version: str, page: str) -> None:
+        self.update_label.setText(
+            f"<b>Version {version} is available.</b> "
+            f'<a href="{page}">See what changed</a>'
+        )
+        self.update_bar.show()
 
     def _show_about(self) -> None:
         """The legal notice GPL v3 section 5(d) asks an interactive program to show.
@@ -558,6 +619,22 @@ class MainWindow(QMainWindow):
             "Not affiliated with or endorsed by HDZero."
         )
         box.setTextFormat(Qt.TextFormat.RichText)
+
+        # The only network access this program makes, so the switch for it
+        # belongs next to the statement of what the program is.
+        updates = QCheckBox("Check for new versions")
+        updates.setChecked(
+            self.settings_store.value("check_for_updates", True, type=bool)
+        )
+        updates.setToolTip(
+            "One request a day to this project's releases page on GitHub, to "
+            "see whether a newer version exists. Nothing is downloaded or "
+            "installed, and nothing about you or your footage is sent."
+        )
+        updates.toggled.connect(
+            lambda on: self.settings_store.setValue("check_for_updates", on)
+        )
+        box.setCheckBox(updates)
         box.exec()
 
     def _install_shortcuts(self) -> None:
@@ -1151,6 +1228,8 @@ class MainWindow(QMainWindow):
             self.worker.wait(4000)
         # Retired scans are included: one can still be inside a probe, and a
         # QThread destroyed while running takes the process with it.
+        if self.update_check and self.update_check.isRunning():
+            self.update_check.wait(2000)
         for thread in [self.scan_worker, self.copy_worker, *self._retired_scans]:
             if thread and thread.isRunning():
                 thread.stop()
