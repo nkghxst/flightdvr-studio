@@ -832,6 +832,7 @@ class MainWindow(QMainWindow):
         self.options_stack.addWidget(self._build_edit_options())
         self.options_stack.addWidget(self._build_master_options())
         self.options_stack.addWidget(self._build_social_options())
+        self.options_stack.addWidget(self._build_upload_options())
         self.options_stack.addWidget(self._build_remux_options())
         layout.addWidget(self.options_stack)
 
@@ -937,6 +938,47 @@ class MainWindow(QMainWindow):
             "Mezzanine codecs are deliberately large. They decode a frame at a "
             "time, so scrubbing is instant and the free DaVinci Resolve can read "
             "them, which it cannot do with the original HEVC."
+        )))
+        return box
+
+    def _build_upload_options(self) -> QWidget:
+        box = QWidget()
+        form = QFormLayout(box)
+
+        self.upload_height = QComboBox()
+        self.upload_height.currentIndexChanged.connect(self._update_estimate)
+        self.upload_height.setToolTip(
+            "The resolution you hand the platform, not the resolution the "
+            "goggles recorded."
+        )
+        form.addRow("Upload at:", self.upload_height)
+
+        self.upload_quality = QComboBox()
+        for crf, name, _ in QUALITY_LEVELS:
+            self.upload_quality.addItem(name, crf)
+        self.upload_quality.setCurrentIndex(1)          # High
+        self.upload_quality.currentIndexChanged.connect(self._on_quality_changed)
+        form.addRow("Quality:", self.upload_quality)
+
+        self.upload_quality_help = dim(QLabel())
+        form.addRow(self.upload_quality_help)
+
+        self.upload_speed = QComboBox()
+        self.upload_speed.addItems(SPEEDS)
+        self.upload_speed.setCurrentText("slow")
+        form.addRow("Encoder effort:", self.upload_speed)
+
+        # Two labels rather than one paragraph: Qt underestimates the height of
+        # a wrapped label containing newlines, and the text gets clipped.
+        form.addRow(dim(QLabel(
+            "These sites re-encode everything you send them and decide how much "
+            "bitrate to spend based on the resolution you arrived at. Sending "
+            "1080p buys a bigger allowance than sending 720p, so more of your "
+            "footage survives their encode."
+        )))
+        form.addRow(dim(QLabel(
+            "It does not add detail the goggles never recorded. The picture is "
+            "the same; the difference is how kindly the platform treats it."
         )))
         return box
 
@@ -1116,11 +1158,14 @@ class MainWindow(QMainWindow):
             ("social_quality", self.social_quality),
             ("social_height", self.social_height),
             ("social_fps", self.social_fps),
+            ("upload_height", self.upload_height),
+            ("upload_quality", self.upload_quality),
         ]
 
     def _text_combo_settings(self) -> list[tuple[str, QComboBox]]:
         """Combos built from plain strings, which carry no item data at all."""
-        return [("master_speed", self.master_speed)]
+        return [("master_speed", self.master_speed),
+                ("upload_speed", self.upload_speed)]
 
     def _check_settings(self) -> list[tuple[str, QCheckBox]]:
         return [
@@ -1510,6 +1555,21 @@ class MainWindow(QMainWindow):
                 options.append((f"Downscale to {step}p", step))
         self._repopulate(self.social_height, options)
 
+        # Upload is the one preset that goes the other way. Everything from the
+        # source height upwards is offered, because the whole point of it is to
+        # arrive in a higher resolution tier than the footage was recorded in.
+        upload_options = []
+        for step in sorted(RESOLUTION_STEPS):
+            if not top_height or step < top_height:
+                continue
+            if step == top_height:
+                upload_options.append((f"Keep {step}p", step))
+            else:
+                upload_options.append((f"Upscale to {step}p", step))
+        if not upload_options:
+            upload_options = [(keep_height, 0)]
+        self._repopulate(self.upload_height, upload_options)
+
         keep_rate = "Keep original"
         if top_rate and not mixed_rate:
             keep_rate = f"Keep original ({top_rate} fps)"
@@ -1779,6 +1839,11 @@ class MainWindow(QMainWindow):
             if value == crf:
                 self.social_quality_help.setText(f"{description}  (CRF {value})")
                 break
+        crf = self.upload_quality.currentData()
+        for value, _, description in QUALITY_LEVELS:
+            if value == crf:
+                self.upload_quality_help.setText(f"{description}  (CRF {value})")
+                break
         self._update_estimate()
 
     def _on_date_toggled(self, checked: bool) -> None:
@@ -1855,6 +1920,9 @@ class MainWindow(QMainWindow):
             social_crf=self.social_quality.currentData(),
             social_height=self.social_height.currentData(),
             social_fps=self.social_fps.currentData(),
+            upload_height=self.upload_height.currentData() or 1080,
+            upload_crf=self.upload_quality.currentData(),
+            upload_speed=self.upload_speed.currentText(),
             use_gpu=self.gpu_check.isChecked() and self.gpu_check.isEnabled(),
             hw_encoder=self.hw_encoder,
             keep_audio=self.audio_check.isChecked(),
