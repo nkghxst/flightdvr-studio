@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.3.0
+
+- **A new Upload preset, for sites that re-encode what you send them.**
+  YouTube, Instagram and Reddit decide how much bitrate to spend based on the
+  resolution you arrived at, so uploading at 1080p wins a bigger allowance than
+  720p and more of the footage survives their encode. It does not add detail
+  the goggles never recorded — the picture is the same, the difference is how
+  the platform treats it. Quality-based only; a size target and an upscale pull
+  against each other. Asked for by TheFunkLovinCriminal.
+- **The app can tell you when a new version exists.** One request a day to this
+  project's own releases page, showing a dismissible line when there is
+  something newer. Nothing is downloaded or installed — it links to the release
+  and you decide. It can be turned off in the About box, and then nothing is
+  requested at all.
+
+  This is the only network access the app makes, and the README now says so
+  plainly rather than claiming there is none.
+
 ## 1.2.0
 
 **Joining clips works properly now.** Earlier versions produced a file that

@@ -233,6 +233,7 @@ mismatched set, because copying without re-encoding cannot change anything.
 | **Edit** | DNxHR or ProRes in `.mov` | 58 GB/hour | DaVinci timelines, handing to an editor |
 | **Master** | H.264 `.mp4`, quality-based | 11 GB/hour | archiving, sending to editors online |
 | **Social** | H.264 `.mp4`, size-targeted | you choose | WhatsApp, Instagram, Discord |
+| **Upload** | H.264 `.mp4` at 1080p or above | 20 GB/hour | YouTube, Instagram, Reddit |
 | **Remux** | `.ts` → `.mp4`, no re-encode | same as source | instant lossless rewrap |
 
 Sizes are for 720p60; other resolutions are scaled accordingly.
@@ -245,6 +246,19 @@ DNxHR SQ, HQ and LB and ProRes 422 and LT are all available.
 **Master** quality is chosen by name — Archive, High, Good, Compact — with the
 underlying CRF number shown alongside. High is visually indistinguishable from
 the original.
+
+**Upload** is the only preset that will make the picture *bigger*, and it is
+worth being clear about why, because upscaling usually deserves suspicion. It
+does not recover detail the goggles never recorded — nothing can. What it does
+is arrive at a site in a higher resolution tier. YouTube, Instagram and Reddit
+re-encode everything they receive and decide how much bitrate to spend based on
+the resolution you sent, so a 1080p upload gets a bigger allowance than a 720p
+one and more of your footage survives their encode. The picture going in is the
+same; the difference is how kindly the platform treats it.
+
+It is quality-based and never size-targeted. Spreading a fixed byte budget over
+2.25 times as many pixels is worse than doing neither, so that combination is
+not offered.
 
 **Social** hits an exact file size using a two-pass encode, landing within about
 one percent of the number you ask for. It can also downscale and halve the frame
