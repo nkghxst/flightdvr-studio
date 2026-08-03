@@ -26,7 +26,7 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QSettings, QSize, Qt, QThread, Signal
@@ -436,6 +436,7 @@ class MainWindow(QMainWindow):
         # so a running QThread is not collected out from under itself.
         self._retired_scans: list[ScanWorker] = []
         self.copy_worker: CopyWorker | None = None
+        self.update_check = None
         self.encoders = available_encoders(tools)
         self.hw_encoder = ""
         self.hw_label = ""
@@ -471,6 +472,8 @@ class MainWindow(QMainWindow):
         self.hw_probe.result.connect(self._hardware_found)
         self.hw_probe.start()
 
+        self._start_update_check()
+
     # -- construction ---------------------------------------------------------
 
     def _build(self) -> None:
@@ -480,6 +483,7 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(8)
 
+        outer.addWidget(self._build_update_bar())
         outer.addLayout(self._build_source_bar())
 
         splitter = self.splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -517,6 +521,63 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._build_queue())
         self._install_shortcuts()
         self.statusBar().showMessage(f"{APP_TAGLINE}   ·   ffmpeg: {self.tools.ffmpeg}")
+
+    def _build_update_bar(self) -> QWidget:
+        """A quiet line offering a newer release. Hidden until there is one.
+
+        Deliberately not a dialog. Nobody opened this app to be interrupted by
+        a box about software; the offer can sit there until it is convenient.
+        """
+        bar = self.update_bar = QWidget()
+        bar.hide()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(8, 4, 4, 4)
+        row.setSpacing(8)
+
+        self.update_label = QLabel("")
+        self.update_label.setOpenExternalLinks(True)
+        self.update_label.setTextFormat(Qt.TextFormat.RichText)
+        row.addWidget(self.update_label, 1)
+
+        dismiss = QPushButton("Dismiss")
+        dismiss.setFlat(True)
+        dismiss.clicked.connect(bar.hide)
+        row.addWidget(dismiss)
+        return bar
+
+    def _start_update_check(self) -> None:
+        """Look for a newer release, at most once a day, if that is wanted.
+
+        Everything about this is quiet: no request when it is turned off, no
+        message when it finds nothing, and no message when it fails. Somebody
+        flying with no signal is not having a problem.
+        """
+        from . import __version__
+        from .updates import UpdateCheck, should_check
+
+        if not self.settings_store.value("check_for_updates", True, type=bool):
+            return
+
+        stamp = self.settings_store.value("last_update_check", "", type=str)
+        try:
+            last = datetime.fromisoformat(stamp) if stamp else None
+        except ValueError:
+            last = None
+        if not should_check(last, datetime.now()):
+            return
+
+        self.settings_store.setValue("last_update_check",
+                                     datetime.now().isoformat(timespec="seconds"))
+        self.update_check = UpdateCheck(__version__, self)
+        self.update_check.found.connect(self._update_available)
+        self.update_check.start()
+
+    def _update_available(self, version: str, page: str) -> None:
+        self.update_label.setText(
+            f"<b>Version {version} is available.</b> "
+            f'<a href="{page}">See what changed</a>'
+        )
+        self.update_bar.show()
 
     def _show_about(self) -> None:
         """The legal notice GPL v3 section 5(d) asks an interactive program to show.
@@ -558,6 +619,22 @@ class MainWindow(QMainWindow):
             "Not affiliated with or endorsed by HDZero."
         )
         box.setTextFormat(Qt.TextFormat.RichText)
+
+        # The only network access this program makes, so the switch for it
+        # belongs next to the statement of what the program is.
+        updates = QCheckBox("Check for new versions")
+        updates.setChecked(
+            self.settings_store.value("check_for_updates", True, type=bool)
+        )
+        updates.setToolTip(
+            "One request a day to this project's releases page on GitHub, to "
+            "see whether a newer version exists. Nothing is downloaded or "
+            "installed, and nothing about you or your footage is sent."
+        )
+        updates.toggled.connect(
+            lambda on: self.settings_store.setValue("check_for_updates", on)
+        )
+        box.setCheckBox(updates)
         box.exec()
 
     def _install_shortcuts(self) -> None:
@@ -755,6 +832,7 @@ class MainWindow(QMainWindow):
         self.options_stack.addWidget(self._build_edit_options())
         self.options_stack.addWidget(self._build_master_options())
         self.options_stack.addWidget(self._build_social_options())
+        self.options_stack.addWidget(self._build_upload_options())
         self.options_stack.addWidget(self._build_remux_options())
         layout.addWidget(self.options_stack)
 
@@ -860,6 +938,47 @@ class MainWindow(QMainWindow):
             "Mezzanine codecs are deliberately large. They decode a frame at a "
             "time, so scrubbing is instant and the free DaVinci Resolve can read "
             "them, which it cannot do with the original HEVC."
+        )))
+        return box
+
+    def _build_upload_options(self) -> QWidget:
+        box = QWidget()
+        form = QFormLayout(box)
+
+        self.upload_height = QComboBox()
+        self.upload_height.currentIndexChanged.connect(self._update_estimate)
+        self.upload_height.setToolTip(
+            "The resolution you hand the platform, not the resolution the "
+            "goggles recorded."
+        )
+        form.addRow("Upload at:", self.upload_height)
+
+        self.upload_quality = QComboBox()
+        for crf, name, _ in QUALITY_LEVELS:
+            self.upload_quality.addItem(name, crf)
+        self.upload_quality.setCurrentIndex(1)          # High
+        self.upload_quality.currentIndexChanged.connect(self._on_quality_changed)
+        form.addRow("Quality:", self.upload_quality)
+
+        self.upload_quality_help = dim(QLabel())
+        form.addRow(self.upload_quality_help)
+
+        self.upload_speed = QComboBox()
+        self.upload_speed.addItems(SPEEDS)
+        self.upload_speed.setCurrentText("slow")
+        form.addRow("Encoder effort:", self.upload_speed)
+
+        # Two labels rather than one paragraph: Qt underestimates the height of
+        # a wrapped label containing newlines, and the text gets clipped.
+        form.addRow(dim(QLabel(
+            "These sites re-encode everything you send them and decide how much "
+            "bitrate to spend based on the resolution you arrived at. Sending "
+            "1080p buys a bigger allowance than sending 720p, so more of your "
+            "footage survives their encode."
+        )))
+        form.addRow(dim(QLabel(
+            "It does not add detail the goggles never recorded. The picture is "
+            "the same; the difference is how kindly the platform treats it."
         )))
         return box
 
@@ -1039,11 +1158,14 @@ class MainWindow(QMainWindow):
             ("social_quality", self.social_quality),
             ("social_height", self.social_height),
             ("social_fps", self.social_fps),
+            ("upload_height", self.upload_height),
+            ("upload_quality", self.upload_quality),
         ]
 
     def _text_combo_settings(self) -> list[tuple[str, QComboBox]]:
         """Combos built from plain strings, which carry no item data at all."""
-        return [("master_speed", self.master_speed)]
+        return [("master_speed", self.master_speed),
+                ("upload_speed", self.upload_speed)]
 
     def _check_settings(self) -> list[tuple[str, QCheckBox]]:
         return [
@@ -1151,6 +1273,8 @@ class MainWindow(QMainWindow):
             self.worker.wait(4000)
         # Retired scans are included: one can still be inside a probe, and a
         # QThread destroyed while running takes the process with it.
+        if self.update_check and self.update_check.isRunning():
+            self.update_check.wait(2000)
         for thread in [self.scan_worker, self.copy_worker, *self._retired_scans]:
             if thread and thread.isRunning():
                 thread.stop()
@@ -1431,6 +1555,21 @@ class MainWindow(QMainWindow):
                 options.append((f"Downscale to {step}p", step))
         self._repopulate(self.social_height, options)
 
+        # Upload is the one preset that goes the other way. Everything from the
+        # source height upwards is offered, because the whole point of it is to
+        # arrive in a higher resolution tier than the footage was recorded in.
+        upload_options = []
+        for step in sorted(RESOLUTION_STEPS):
+            if not top_height or step < top_height:
+                continue
+            if step == top_height:
+                upload_options.append((f"Keep {step}p", step))
+            else:
+                upload_options.append((f"Upscale to {step}p", step))
+        if not upload_options:
+            upload_options = [(keep_height, 0)]
+        self._repopulate(self.upload_height, upload_options)
+
         keep_rate = "Keep original"
         if top_rate and not mixed_rate:
             keep_rate = f"Keep original ({top_rate} fps)"
@@ -1700,6 +1839,11 @@ class MainWindow(QMainWindow):
             if value == crf:
                 self.social_quality_help.setText(f"{description}  (CRF {value})")
                 break
+        crf = self.upload_quality.currentData()
+        for value, _, description in QUALITY_LEVELS:
+            if value == crf:
+                self.upload_quality_help.setText(f"{description}  (CRF {value})")
+                break
         self._update_estimate()
 
     def _on_date_toggled(self, checked: bool) -> None:
@@ -1776,6 +1920,9 @@ class MainWindow(QMainWindow):
             social_crf=self.social_quality.currentData(),
             social_height=self.social_height.currentData(),
             social_fps=self.social_fps.currentData(),
+            upload_height=self.upload_height.currentData() or 1080,
+            upload_crf=self.upload_quality.currentData(),
+            upload_speed=self.upload_speed.currentText(),
             use_gpu=self.gpu_check.isChecked() and self.gpu_check.isEnabled(),
             hw_encoder=self.hw_encoder,
             keep_audio=self.audio_check.isChecked(),

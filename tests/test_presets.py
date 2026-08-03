@@ -31,8 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from flightdvr.media import ClipInfo, Tools  # noqa: E402
 from flightdvr.presets import (  # noqa: E402
-    LEVELS, PASSTHROUGH, REC709, ExportSettings, build_commands, colour_filters,
-    estimate_output_size, output_path, target_video_bitrate,
+    LEVELS, PASSTHROUGH, PRESET_ORDER, REC709, ExportSettings, build_commands,
+    colour_filters, estimate_output_size, output_path, target_video_bitrate,
 )
 
 TOOLS = Tools(Path("ffmpeg"), Path("ffprobe"))
@@ -124,12 +124,12 @@ def constant_frame_rate_requested(command) -> bool:
 
 
 def test_every_preset_forces_constant_frame_rate_except_remux():
-    for preset in ("edit", "master", "social"):
+    for preset in ("edit", "master", "social", "upload"):
         assert constant_frame_rate_requested(build(preset)[0]), preset
 
 
 def test_transport_stream_timestamps_are_regenerated():
-    for preset in ("edit", "master", "social", "remux"):
+    for preset in ("edit", "master", "social", "upload", "remux"):
         assert "-fflags +genpts" in flatten(build(preset)[0]), preset
 
 
@@ -356,7 +356,7 @@ def test_an_older_ffmpeg_gets_vsync(monkeypatch):
 
 
 @pytest.mark.parametrize("supported,flag", [(True, "-fps_mode"), (False, "-vsync")])
-@pytest.mark.parametrize("preset", ["edit", "master", "social"])
+@pytest.mark.parametrize("preset", ["edit", "master", "social", "upload"])
 def test_re_encoding_presets_pin_the_frame_rate_either_way(
     monkeypatch, supported, flag, preset
 ):
@@ -462,7 +462,7 @@ def test_remux_estimate_scales_with_the_trim():
 
 
 def test_trim_applies_to_every_re_encoding_preset():
-    for preset in ("edit", "master", "social", "remux"):
+    for preset in ("edit", "master", "social", "upload", "remux"):
         command = build(preset, clip=trimmed_clip())[0]
         assert "-ss" in command, preset
         assert "-t" in command, preset
@@ -518,6 +518,92 @@ def two_clips(**second):
     for field, value in second.items():
         setattr(b, field, value)
     return [a, b]
+
+
+def test_an_unknown_preset_is_refused_rather_than_built_as_social():
+    """Social used to be the unguarded fallthrough in both the command builder
+    and the estimator, so a preset added to PRESETS without its own branch was
+    silently built as Social — plausible output, wrong preset."""
+    assert "vertical" not in PRESET_ORDER, "pick a key that is not a real preset"
+    with pytest.raises(KeyError):
+        build_commands(TOOLS, boxpro_clip(), "vertical", ExportSettings(),
+                       Path("out.mp4"), Path("work"))
+    with pytest.raises(KeyError):
+        estimate_output_size(boxpro_clip(), "vertical", ExportSettings())
+
+
+# -- the Upload preset, which is the only one allowed to enlarge --------------
+
+def upload_command(height=1080, source_height=720, **settings):
+    clip = boxpro_clip()
+    clip.height, clip.width = source_height, round(source_height * 16 / 9)
+    return build_commands(
+        TOOLS, clip, "upload",
+        ExportSettings(upload_height=height, **settings),
+        Path("out.mp4"), Path("work"),
+    )[0], clip
+
+
+def test_upload_enlarges_where_every_other_preset_refuses():
+    """The point is the resolution tier, not the pixels. These sites hand out
+    bitrate by the resolution you arrive at, so 1080p buys a bigger allowance
+    for their re-encode than 720p does."""
+    command, _ = upload_command(height=1080, source_height=720)
+    assert "scale=-2:1080:flags=lanczos" in flatten(command)
+
+
+def test_upload_can_still_downscale():
+    command, _ = upload_command(height=720, source_height=1080)
+    assert "scale=-2:720:flags=lanczos" in flatten(command)
+
+
+def test_upload_at_the_source_height_adds_no_scale():
+    command, _ = upload_command(height=720, source_height=720)
+    assert "scale=-2:720" not in flatten(command)
+
+
+def test_upload_is_never_size_targeted():
+    """A byte budget and an upscale pull against each other: the same bits over
+    more pixels is worse than doing neither. Upload is quality-based only."""
+    command, _ = upload_command()
+    assert "-b:v" not in command
+    assert "-pass" not in command
+    assert "-crf" in command
+
+
+def test_upload_is_a_single_pass():
+    clip = boxpro_clip()
+    commands = build_commands(TOOLS, clip, "upload", ExportSettings(),
+                              Path("out.mp4"), Path("work"))
+    assert len(commands) == 1
+
+
+def test_the_upload_estimate_grows_with_the_upscale():
+    """pixel_rate() clamps to the source height for every other preset. Without
+    an exception the estimate would report a 720p size for a 1080p file, and
+    that number is what people plan their card around."""
+    clip = boxpro_clip()
+    clip.height, clip.width = 720, 1280
+    at_source = estimate_output_size(
+        clip, "upload", ExportSettings(upload_height=720))
+    upscaled = estimate_output_size(
+        clip, "upload", ExportSettings(upload_height=1080))
+    assert upscaled > at_source * 1.5, (at_source, upscaled)
+
+
+def test_upload_keeps_the_colour_handling():
+    """An upscaled export is still full-range footage and still needs the range
+    conversion, or it looks wrong in exactly the way the app exists to fix."""
+    command, _ = upload_command()
+    assert "scale=in_range=full:out_range=limited" in flatten(command)
+
+
+def test_every_preset_can_be_built_and_estimated():
+    """The other half of the guard: the raise must not catch a real preset."""
+    for key in PRESET_ORDER:
+        assert build_commands(TOOLS, boxpro_clip(), key, ExportSettings(),
+                              Path("out.mp4"), Path("work")), key
+        assert estimate_output_size(boxpro_clip(), key, ExportSettings()) > 0, key
 
 
 def test_a_joined_remux_still_reads_from_a_concat_list():
@@ -671,7 +757,7 @@ def test_dated_exports_still_go_into_preset_subfolders():
 
 
 @pytest.mark.parametrize("preset,extension", [
-    ("edit", ".mov"), ("master", ".mp4"), ("social", ".mp4"), ("remux", ".mp4"),
+    ("edit", ".mov"), ("master", ".mp4"), ("social", ".mp4"), ("upload", ".mp4"), ("remux", ".mp4"),
 ])
 def test_containers_match_the_codec(preset, extension):
     assert output_path(Path("/out"), "x", preset, False).suffix == extension

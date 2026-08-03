@@ -182,7 +182,7 @@ def test_a_remux_with_no_keyframe_in_range_fails_rather_than_lying(
     assert "keyframe" in message.lower() or "no video" in message.lower(), message
 
 
-@pytest.mark.parametrize("preset", ["edit", "master", "social", "remux"])
+@pytest.mark.parametrize("preset", ["edit", "master", "social", "upload", "remux"])
 def test_every_preset_produces_something_playable(tools, clip, tmp_path, preset):
     out = target(tmp_path, "whole", preset)
     ok, message = export(tools, tmp_path, [probed(tools, clip)], preset, out)
@@ -190,6 +190,46 @@ def test_every_preset_produces_something_playable(tools, clip, tmp_path, preset)
     result = probe_output(tools, out)
     assert result["has_video"], f"{preset} produced no video"
     assert result["frames"] > 0, f"{preset} produced no frames"
+
+
+def test_upload_actually_enlarges_the_picture(tools, clip, tmp_path):
+    """The whole point of the preset, checked on the file rather than the
+    command. Every other preset refuses to enlarge, in four separate places,
+    and it would be easy to leave one of them in the way."""
+    out = target(tmp_path, "upscaled", "upload")
+    settings = ExportSettings()
+    settings.upload_height = 360           # the fixture is 320x180
+    settings.upload_speed = "veryfast"     # this is a test, not a release
+    ok, message = export(tools, tmp_path, [probed(tools, clip)], "upload", out,
+                         settings=settings)
+    assert ok, message
+    result = probe_output(tools, out)
+    assert result["height"] == 360, result
+    assert result["width"] == 640, result
+    assert result["frames"] > 0
+
+
+def test_upload_does_not_lose_the_colour_correction(tools, clip, tmp_path):
+    """An enlarged export is still full-range footage. If the upscale filter
+    displaced the range conversion the picture would come out wrong in exactly
+    the way this app exists to prevent."""
+    settings = ExportSettings()
+    settings.upload_height = 180           # same size as the source, no resize
+    settings.upload_speed = "veryfast"
+    upload = target(tmp_path, "colour_upload", "upload")
+    ok, message = export(tools, tmp_path, [probed(tools, clip)], "upload",
+                         upload, settings=settings)
+    assert ok, message
+
+    master = target(tmp_path, "colour_master", "master")
+    ok, message = export(tools, tmp_path, [probed(tools, clip)], "master", master)
+    assert ok, message
+
+    scores = frame_psnr(tools, upload, master, tmp_path)
+    assert scores, "could not compare the two exports"
+    assert min(scores) >= CLEAN_PSNR, (
+        f"upload and master disagree on colour, worst frame {min(scores):.1f} dB"
+    )
 
 
 def test_audio_survives_an_ordinary_export(tools, clip, tmp_path):

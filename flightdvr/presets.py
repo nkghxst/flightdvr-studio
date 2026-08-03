@@ -116,11 +116,21 @@ MASTER_REFERENCE_MBPS = 26.0
 SOCIAL_REFERENCE_MBPS = 8.0
 
 
-def pixel_rate(clip: ClipInfo, height: int = 0, fps: float = 0.0) -> float:
-    """Pixels per second, optionally for a resized or retimed output."""
+def pixel_rate(clip: ClipInfo, height: int = 0, fps: float = 0.0,
+               allow_upscale: bool = False) -> float:
+    """Pixels per second, optionally for a resized or retimed output.
+
+    `allow_upscale` exists for the Upload preset. Without it this clamps to the
+    source height, which would have quietly under-predicted every upscaled
+    export — the estimate is the number people plan around, so a gate here is
+    as damaging as one in the command itself, and much harder to notice.
+    """
     source_height = clip.height or 720
     source_width = clip.width or 1280
-    out_height = height if (height and height < source_height) else source_height
+    if height and (allow_upscale or height < source_height):
+        out_height = height
+    else:
+        out_height = source_height
     # Width follows the source aspect ratio, as the scale filter keeps it.
     out_width = source_width * (out_height / source_height)
     out_fps = fps if fps else (clip.fps or 60.0)
@@ -168,6 +178,14 @@ class ExportSettings:
     social_crf: int = 23
     social_height: int = 0             # 0 keeps the source height, lower downscales
     social_fps: int = 0                # 0 keeps the source frame rate
+
+    # Upload is the one preset allowed to make the picture bigger, because the
+    # point of it is the resolution tier rather than the pixels. Quality-based
+    # only: a size target and an upscale pull against each other, and asking
+    # for both produces a worse file than asking for neither.
+    upload_height: int = 1080
+    upload_crf: int = 20
+    upload_speed: str = "slow"
 
     use_gpu: bool = False              # hardware encode for the H.264 lanes
     hw_encoder: str = ""               # whichever one this machine really has
@@ -222,7 +240,6 @@ class Preset:
     blurb: str
     suffix: str
     extension: str
-    two_pass: bool = False
 
 
 PRESETS: dict[str, Preset] = {
@@ -242,7 +259,15 @@ PRESETS: dict[str, Preset] = {
         "social", "Social",
         "Compact MP4 for WhatsApp, Instagram or Discord. Can hit an exact file "
         "size using a two-pass encode.",
-        "_social", ".mp4", two_pass=True,
+        "_social", ".mp4",
+    ),
+    "upload": Preset(
+        "upload", "Upload",
+        "For YouTube, Instagram or Reddit, which re-encode whatever you send "
+        "them and hand out bitrate by resolution. Uploading at 1080p wins a "
+        "bigger allowance than 720p does, so the result survives their encode "
+        "better — it does not add detail that was never recorded.",
+        "_upload", ".mp4",
     ),
     "remux": Preset(
         "remux", "Remux",
@@ -252,7 +277,7 @@ PRESETS: dict[str, Preset] = {
     ),
 }
 
-PRESET_ORDER = ["edit", "master", "social", "remux"]
+PRESET_ORDER = ["edit", "master", "social", "upload", "remux"]
 
 
 # --- command construction ----------------------------------------------------
@@ -339,6 +364,23 @@ def _scale_filter(clip: ClipInfo, target_height: int) -> list[str]:
     if not target_height or not clip.height or target_height >= clip.height:
         return []
     # -2 keeps the width even, which H.264 requires.
+    return [f"scale=-2:{target_height}:flags=lanczos"]
+
+
+def _resize_filter(clip: ClipInfo, target_height: int) -> list[str]:
+    """Scale to `target_height` in either direction, unlike _scale_filter.
+
+    Every other preset refuses to enlarge, and rightly: making the picture
+    bigger cannot recover detail that was never recorded. Upload does it anyway
+    for a reason that has nothing to do with detail — the platforms it targets
+    hand out bitrate by resolution tier, so arriving at 1080p buys a larger
+    allowance for their own re-encode than arriving at 720p does.
+
+    Lanczos going up as well as down: it is the sharpest of the usual choices,
+    and softness here would waste the allowance the upscale was meant to win.
+    """
+    if not target_height or not clip.height or target_height == clip.height:
+        return _even_size_filter(clip)
     return [f"scale=-2:{target_height}:flags=lanczos"]
 
 
@@ -703,7 +745,32 @@ def build_commands(
             + ["-movflags", "+faststart", str(out_path)]
         ]
 
-    # social
+    if preset_key == "upload":
+        # The only preset that may enlarge the picture. Quality-based, never
+        # size-targeted: spreading a fixed budget over more pixels than the
+        # camera recorded is worse than doing neither.
+        filters, mapped = picture(
+            "yuv420p", _resize_filter(clip, settings.upload_height)
+        )
+        if settings.hardware:
+            video = hardware_video_args(settings.hardware, settings.upload_crf)
+        else:
+            video = [
+                "-c:v", "libx264", "-preset", settings.upload_speed,
+                "-crf", str(settings.upload_crf), "-profile:v", "high",
+            ]
+        return [
+            head + filters + video + timing() + sound("192k", mapped)
+            + ["-movflags", "+faststart", str(out_path)]
+        ]
+
+    # Guarded rather than left as the fallthrough it used to be. A preset added
+    # to PRESETS without a branch here would otherwise have been built as
+    # Social, silently and plausibly, which is the worst way for a mistake to
+    # present itself.
+    if preset_key != "social":
+        raise KeyError(f"no command builder for the {preset_key!r} preset")
+
     filters, mapped = picture("yuv420p", _scale_filter(clip, settings.social_height))
     carries_audio = mapped if mapped is not None else (
         settings.keep_audio and clip.has_audio
@@ -774,6 +841,19 @@ def estimate_output_size(clip: ClipInfo, preset_key: str, settings: ExportSettin
         # Each 6 points of CRF roughly halves or doubles the size.
         mbps = MASTER_REFERENCE_MBPS * scale * (2 ** ((18 - settings.master_crf) / 6.0))
         return int(mbps * 1_000_000 / 8 * runtime)
+
+    if preset_key == "upload":
+        # allow_upscale, or this reports the size of a 720p file for a 1080p
+        # export and everyone plans around the wrong number.
+        out_scale = pixel_rate(clip, settings.upload_height, allow_upscale=True)
+        mbps = (MASTER_REFERENCE_MBPS * (out_scale / REFERENCE_PIXEL_RATE)
+                * (2 ** ((18 - settings.upload_crf) / 6.0)))
+        return int(mbps * 1_000_000 / 8 * runtime)
+
+    # Guarded for the same reason as build_commands: an unknown preset must not
+    # quietly inherit Social's estimate.
+    if preset_key != "social":
+        raise KeyError(f"no size estimate for the {preset_key!r} preset")
 
     if settings.social_mode == "size":
         return settings.social_size_mb * 1024 * 1024

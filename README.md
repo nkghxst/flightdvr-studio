@@ -14,8 +14,15 @@ blacks.
 
 ![Ticking clips, trimming one, and exporting](docs/demo.gif)
 
-Free and open source under the GPL v3. Nothing is gated, and there is no
-account, telemetry or network access of any kind.
+Free and open source under the GPL v3. Nothing is gated and there is no
+account, no telemetry, and nothing to sign up for.
+
+The one thing it does over the network is check whether a newer version exists:
+a single request, at most once a day, to this project's own releases page on
+GitHub. Nothing is sent beyond what any web request unavoidably reveals — an IP
+address and the app's version — and nothing is downloaded or installed; a newer
+release just shows a link. Untick **Check for updates** in the About box and no
+request is made at all.
 
 > Not affiliated with, endorsed by, or supported by HDZero. It is an independent
 > tool that reads files their goggles produce.
@@ -226,6 +233,7 @@ mismatched set, because copying without re-encoding cannot change anything.
 | **Edit** | DNxHR or ProRes in `.mov` | 58 GB/hour | DaVinci timelines, handing to an editor |
 | **Master** | H.264 `.mp4`, quality-based | 11 GB/hour | archiving, sending to editors online |
 | **Social** | H.264 `.mp4`, size-targeted | you choose | WhatsApp, Instagram, Discord |
+| **Upload** | H.264 `.mp4` at 1080p or above | 20 GB/hour | YouTube, Instagram, Reddit |
 | **Remux** | `.ts` → `.mp4`, no re-encode | same as source | instant lossless rewrap |
 
 Sizes are for 720p60; other resolutions are scaled accordingly.
@@ -238,6 +246,19 @@ DNxHR SQ, HQ and LB and ProRes 422 and LT are all available.
 **Master** quality is chosen by name — Archive, High, Good, Compact — with the
 underlying CRF number shown alongside. High is visually indistinguishable from
 the original.
+
+**Upload** is the only preset that will make the picture *bigger*, and it is
+worth being clear about why, because upscaling usually deserves suspicion. It
+does not recover detail the goggles never recorded — nothing can. What it does
+is arrive at a site in a higher resolution tier. YouTube, Instagram and Reddit
+re-encode everything they receive and decide how much bitrate to spend based on
+the resolution you sent, so a 1080p upload gets a bigger allowance than a 720p
+one and more of your footage survives their encode. The picture going in is the
+same; the difference is how kindly the platform treats it.
+
+It is quality-based and never size-targeted. Spreading a fixed byte budget over
+2.25 times as many pixels is worse than doing neither, so that combination is
+not offered.
 
 **Social** hits an exact file size using a two-pass encode, landing within about
 one percent of the number you ask for. It can also downscale and halve the frame
