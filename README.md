@@ -103,24 +103,33 @@ you downloaded is what was built. None of these are code-signed, so this is the
 only check that means anything.
 
 ```powershell
-Get-FileHash FlightDVRStudio-1.2.0-Setup.exe -Algorithm SHA256
+Get-FileHash FlightDVRStudio-1.3.0-Setup.exe -Algorithm SHA256
 ```
 
 ```bash
-sha256sum FlightDVR_Studio-1.2.0-x86_64.AppImage    # Linux
-shasum -a 256 FlightDVR-Studio-1.2.0-arm64.dmg      # macOS
+sha256sum FlightDVR_Studio-1.3.0-x86_64.AppImage    # Linux
+shasum -a 256 FlightDVR-Studio-1.3.0-arm64.dmg      # macOS
 ```
 
-**1.2.0**
+**1.3.0**
+
+| File | SHA-256 |
+|---|---|
+| `FlightDVRStudio-1.3.0-Setup.exe` | `9c3de6763e383e4f3bd4eb1be85918683bcdd695bc353f75a4611c814a4845d0` |
+| `FlightDVR_Studio-1.3.0-x86_64.AppImage` | `ad1fd20398fbba66ace8f88ac6518365ac8c0c0e4ab01d1d58b4ca255bc98600` |
+| `FlightDVR-Studio-1.3.0-arm64.dmg` | `b883f2e83afc0bb96c386d8745197e7a41c3e16d8856a2b1711ba758aaeecc55` |
+
+<details>
+<summary>Earlier releases</summary>
+
+**1.2.0** — no Upload preset and no update check, so it never tells you a newer
+version exists. Everything else works.
 
 | File | SHA-256 |
 |---|---|
 | `FlightDVRStudio-1.2.0-Setup.exe` | `6f8d8c1b90a601b3bbb4bb10fbdb95f3efae4dc976fd673a52eba990abfdf7e5` |
 | `FlightDVR_Studio-1.2.0-x86_64.AppImage` | `c432130ad29aae7c5172538a72e8a3bae4000c58496045d3a6aad7b9440616ab` |
 | `FlightDVR-Studio-1.2.0-arm64.dmg` | `8eabb6c3230aa0c4599d4773d65759d513d7fb27a5c28f233a2c6bcf5a166928` |
-
-<details>
-<summary>Earlier releases</summary>
 
 **1.1.2** — joining clips into one file produced a result that was quietly
 wrong. Everything else works.
