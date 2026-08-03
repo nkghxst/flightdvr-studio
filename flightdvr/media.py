@@ -37,6 +37,9 @@ from pathlib import Path
 # Keeps console windows from flashing up for every ffprobe call on Windows.
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
+# How long to let a child shut down politely before killing it.
+TERMINATE_SECONDS = 5
+
 # Checked after PATH. On Windows these are where people unpack the gyan.dev
 # builds; on Linux a package manager puts ffmpeg on PATH already, so those are
 # only for a manually installed or Flatpak-exported copy. The Homebrew prefixes
@@ -125,6 +128,34 @@ def frame_rate_mode(tools: "Tools", mode: str) -> list[str]:
     if _fps_mode_supported(str(tools.ffmpeg)):
         return ["-fps_mode", mode]
     return ["-vsync", mode]
+
+
+def stop_process(proc, timeout: float = TERMINATE_SECONDS) -> None:
+    """Stop a child process and make sure it has actually gone.
+
+    terminate() is a request, not an instruction. An ffmpeg that ignores it
+    used to be left running while the app carried on, and closing the window
+    could orphan it entirely — still holding the card open. So: ask, wait a
+    bounded time, then insist.
+
+    Lives here rather than in jobs.py because both the export queue and the
+    preview player need it, and the player importing the export queue would be
+    the wrong direction entirely.
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except OSError:
+        return
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            proc.wait(timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 def is_bundled(path: Path) -> bool:

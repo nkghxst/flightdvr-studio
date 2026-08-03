@@ -711,6 +711,73 @@ def test_trimming_a_clip_changes_its_concat_list():
     assert _clip_set_id([a, b]) != _clip_set_id([a, trimmed])
 
 
+# -- stopping a child process that does not want to stop ----------------------
+
+class FakeProcess:
+    """A child that ignores terminate() until told to notice it."""
+
+    def __init__(self, stubborn: bool = False):
+        self.stubborn = stubborn
+        self.terminated = False
+        self.killed = False
+        self._running = True
+
+    def poll(self):
+        return None if self._running else 0
+
+    def terminate(self):
+        self.terminated = True
+        if not self.stubborn:
+            self._running = False
+
+    def kill(self):
+        self.killed = True
+        self._running = False
+
+    def wait(self, timeout=None):
+        if self._running:
+            import subprocess as sp
+            raise sp.TimeoutExpired("ffmpeg", timeout)
+        return 0
+
+
+def test_a_cooperative_process_is_only_asked():
+    from flightdvr.media import stop_process
+    proc = FakeProcess()
+    stop_process(proc, timeout=0.01)
+    assert proc.terminated and not proc.killed
+
+
+def test_a_process_that_ignores_terminate_is_killed():
+    """terminate() is a request. An ffmpeg that ignored it used to be left
+    running while the app carried on, still holding the card open."""
+    from flightdvr.media import stop_process
+    proc = FakeProcess(stubborn=True)
+    stop_process(proc, timeout=0.01)
+    assert proc.terminated and proc.killed
+
+
+def test_a_process_that_has_already_exited_is_left_alone():
+    from flightdvr.media import stop_process
+    proc = FakeProcess()
+    proc._running = False
+    stop_process(proc, timeout=0.01)
+    assert not proc.terminated and not proc.killed
+
+
+def test_stopping_nothing_is_harmless():
+    from flightdvr.media import stop_process
+    stop_process(None, timeout=0.01)
+
+
+def test_the_export_worker_uses_the_shared_helper():
+    """Two copies of this escalation would drift, and only one of them would
+    be the tested one."""
+    source = (ROOT / "flightdvr" / "jobs.py").read_text(encoding="utf-8")
+    assert "stop_process" in source
+    assert source.count("proc.kill()") == 0, "jobs.py should not escalate itself"
+
+
 # -- the preset radio buttons and their options panels must stay in step ------
 
 def test_the_options_stack_is_built_in_preset_order():
