@@ -22,6 +22,7 @@ was first used against a full card.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -708,6 +709,28 @@ def test_trimming_a_clip_changes_its_concat_list():
     trimmed = joinable("b.ts")
     trimmed.trim_in = 5.0
     assert _clip_set_id([a, b]) != _clip_set_id([a, trimmed])
+
+
+# -- the preset radio buttons and their options panels must stay in step ------
+
+def test_the_options_stack_is_built_in_preset_order():
+    """Switching presets uses setCurrentIndex(PRESET_ORDER.index(key)), so the
+    order pages are added in is load-bearing and nothing else checks it. Get it
+    wrong and a preset shows another preset's options, silently."""
+    from flightdvr.presets import PRESET_ORDER
+    source = (ROOT / "flightdvr" / "ui.py").read_text(encoding="utf-8")
+    added = re.findall(r"options_stack\.addWidget\(self\._build_(\w+?)_options\(\)\)",
+                       source)
+    assert added == PRESET_ORDER, (
+        f"pages are added as {added} but PRESET_ORDER is {PRESET_ORDER}"
+    )
+
+
+def test_every_preset_has_an_options_page():
+    from flightdvr.presets import PRESET_ORDER
+    source = (ROOT / "flightdvr" / "ui.py").read_text(encoding="utf-8")
+    for key in PRESET_ORDER:
+        assert f"def _build_{key}_options" in source, key
 
 
 # -- a stale scan must not touch the one on screen ----------------------------

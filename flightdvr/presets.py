@@ -703,7 +703,13 @@ def build_commands(
             + ["-movflags", "+faststart", str(out_path)]
         ]
 
-    # social
+    # Guarded rather than left as the fallthrough it used to be. A preset added
+    # to PRESETS without a branch here would otherwise have been built as
+    # Social, silently and plausibly, which is the worst way for a mistake to
+    # present itself.
+    if preset_key != "social":
+        raise KeyError(f"no command builder for the {preset_key!r} preset")
+
     filters, mapped = picture("yuv420p", _scale_filter(clip, settings.social_height))
     carries_audio = mapped if mapped is not None else (
         settings.keep_audio and clip.has_audio
@@ -774,6 +780,11 @@ def estimate_output_size(clip: ClipInfo, preset_key: str, settings: ExportSettin
         # Each 6 points of CRF roughly halves or doubles the size.
         mbps = MASTER_REFERENCE_MBPS * scale * (2 ** ((18 - settings.master_crf) / 6.0))
         return int(mbps * 1_000_000 / 8 * runtime)
+
+    # Guarded for the same reason as build_commands: an unknown preset must not
+    # quietly inherit Social's estimate.
+    if preset_key != "social":
+        raise KeyError(f"no size estimate for the {preset_key!r} preset")
 
     if settings.social_mode == "size":
         return settings.social_size_mb * 1024 * 1024

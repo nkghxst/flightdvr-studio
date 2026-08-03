@@ -31,8 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from flightdvr.media import ClipInfo, Tools  # noqa: E402
 from flightdvr.presets import (  # noqa: E402
-    LEVELS, PASSTHROUGH, REC709, ExportSettings, build_commands, colour_filters,
-    estimate_output_size, output_path, target_video_bitrate,
+    LEVELS, PASSTHROUGH, PRESET_ORDER, REC709, ExportSettings, build_commands,
+    colour_filters, estimate_output_size, output_path, target_video_bitrate,
 )
 
 TOOLS = Tools(Path("ffmpeg"), Path("ffprobe"))
@@ -518,6 +518,25 @@ def two_clips(**second):
     for field, value in second.items():
         setattr(b, field, value)
     return [a, b]
+
+
+def test_an_unknown_preset_is_refused_rather_than_built_as_social():
+    """Social used to be the unguarded fallthrough in both the command builder
+    and the estimator, so a preset added to PRESETS without its own branch was
+    silently built as Social — plausible output, wrong preset."""
+    with pytest.raises(KeyError):
+        build_commands(TOOLS, boxpro_clip(), "upload", ExportSettings(),
+                       Path("out.mp4"), Path("work"))
+    with pytest.raises(KeyError):
+        estimate_output_size(boxpro_clip(), "upload", ExportSettings())
+
+
+def test_every_preset_can_be_built_and_estimated():
+    """The other half of the guard: the raise must not catch a real preset."""
+    for key in PRESET_ORDER:
+        assert build_commands(TOOLS, boxpro_clip(), key, ExportSettings(),
+                              Path("out.mp4"), Path("work")), key
+        assert estimate_output_size(boxpro_clip(), key, ExportSettings()) > 0, key
 
 
 def test_a_joined_remux_still_reads_from_a_concat_list():
