@@ -31,8 +31,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from flightdvr.media import ClipInfo, Tools  # noqa: E402
 from flightdvr.presets import (  # noqa: E402
-    LEVELS, PASSTHROUGH, PRESET_ORDER, REC709, ExportSettings, build_commands,
-    colour_filters, estimate_output_size, output_path, target_video_bitrate,
+    LEVELS, PASSTHROUGH, PRESET_ORDER, REC709, SEEK_LEAD_IN, ExportSettings,
+    build_commands, colour_filters, estimate_output_size, output_path,
+    target_video_bitrate,
 )
 
 TOOLS = Tools(Path("ffmpeg"), Path("ffprobe"))
@@ -395,9 +396,28 @@ def test_trim_decodes_a_lead_in_before_the_in_point():
     after = [command[n + 1] for n, a in enumerate(command[i:], i) if a == "-ss"]
 
     assert before == ["42.000"], "fast seek should land SEEK_LEAD_IN early"
-    assert after == ["2.000"], "the lead-in must be discarded after decoding"
-    assert float(before[0]) + float(after[0]) == pytest.approx(44.0)
+    assert after == ["44.000"], "the lead-in must be discarded after decoding"
     assert command[command.index("-t") + 1] == "60.000"
+
+
+def test_both_seeks_are_measured_from_the_start_of_the_file():
+    """Whether the first seek rebases the timeline turns out to depend on the
+    file and on whether audio is being written. Pinning it with -copyts and
+    -start_at_zero is what makes the second seek's number mean one thing:
+    without them, a trim asked to begin at 2.5 s on a file whose audio starts
+    before its video began at 2.0 s instead, cleanly and at the right length."""
+    command = build("master", clip=trimmed_clip())[0]
+    i = command.index("-i")
+    assert "-copyts" in command[:i]
+    assert "-start_at_zero" in command[:i]
+
+
+def test_an_untrimmed_export_does_not_touch_timestamps():
+    """Nothing to seek to means nothing to pin, and every export that does not
+    trim should carry on producing exactly what it did before."""
+    command = build("master")[0]
+    assert "-copyts" not in command
+    assert "-start_at_zero" not in command
 
 
 def test_a_lead_in_never_seeks_past_the_start_of_the_file():
@@ -409,14 +429,20 @@ def test_a_lead_in_never_seeks_past_the_start_of_the_file():
     assert after == ["0.500"], "the whole in point becomes an accurate seek"
 
 
-def test_the_two_seeks_always_sum_to_the_in_point():
+def test_the_second_seek_always_lands_on_the_in_point():
     for start in (0.2, 1.0, 2.0, 2.5, 44.0, 180.0):
         command = build("master", clip=trimmed_clip(start, 200.0))[0]
         i = command.index("-i")
-        total = sum(
-            float(command[n + 1]) for n, a in enumerate(command) if a == "-ss"
-        )
-        assert total == pytest.approx(start), f"in point {start} drifted"
+        after = [command[n + 1] for n, a in enumerate(command[i:], i)
+                 if a == "-ss"]
+        assert after == [f"{start:.3f}"], f"in point {start} drifted"
+        before = [command[n + 1] for n, a in enumerate(command[:i])
+                  if a == "-ss"]
+        # And the fast seek is never more than the lead-in earlier, nor before
+        # the beginning of the file.
+        fast = float(before[0]) if before else 0.0
+        assert 0.0 <= fast <= start
+        assert start - fast <= SEEK_LEAD_IN + 0.001
 
 
 def test_trimmed_duration_is_the_kept_footage():
