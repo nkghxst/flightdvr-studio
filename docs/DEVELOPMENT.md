@@ -404,6 +404,93 @@ updating a newer one.
   is checked between files, so a large one runs to completion. Nothing is left
   behind either way.
 
+## In progress: the in-app preview player
+
+Branch `preview-player`, targeting 1.4.0. Requested by boomz on Discord: play a
+clip in the window and set trim points with a hotkey while it runs, the way
+avidemux does. The full design is in the plan file that accompanied this work;
+what follows is enough to pick it up cold.
+
+### Why not Qt's video widget
+
+`QtMultimedia` decodes through Media Foundation on Windows — the same decoder
+behind Windows Media Player, which the README already documents as unable to
+play HEVC inside an MPEG-TS. That is the only format this app exists for, so
+the obvious approach would pass every test on synthetic footage and fail on
+every real recording. It is excluded from the packaged build, and
+`test_nothing_reaches_for_qt_multimedia` asserts nothing imports it. **Do not
+"simplify" the player by reaching for it.**
+
+### Done and verified
+
+- **`media.stop_process()`** — the terminate → bounded wait → kill escalation,
+  lifted out of `ExportWorker._stop` so the player can share it without
+  importing the export queue. Tested for the first time, using a fake child
+  that ignores `terminate()`.
+- **`flightdvr/player.py` core** — `PreviewSize`/`choose_size`, `seek_pair`,
+  `build_command`, `read_frames`, `seconds_for_index`, `should_restart`,
+  `PlayClock`. All pure or stream-based; 43 tests in `tests/test_player.py`
+  needing no ffmpeg, display or subprocess.
+- **`DecodeWorker`** is written but **has never been run**. It follows the
+  `ExportWorker._run_one` discipline, but nothing has exercised it yet — treat
+  it as unproven code, not working code.
+
+Measured on real footage (`F:\FPV clips\hdz_022.ts`, 720p60 full range):
+
+| | from 0 s | from 10.5 s, mid-GOP |
+|---|---|---|
+| First frame | 0.12 s | 0.41 s |
+| Frame size | 691,200 bytes (640×360×3), exactly | same |
+
+That run also emitted `Could not find ref with POC 29` on stderr — decoder
+chatter from the lead-in frames the second seek discards. Harmless, but it is
+the same species of noise that deadlocked the export queue before stderr got
+its own draining thread, and it appeared on the very first real invocation.
+
+### Still to build
+
+1. **`PreviewPlayer(QObject)`** — play/pause/seek, the UI-side clock, retired
+   worker retention, the 30 s idle kill.
+2. **`FrameView(QWidget)`** — replaces `self.trim_preview`, a QLabel fixed at
+   176×99 which is useless for judging a moment. Minimum 320×180.
+3. **Layout**: video and transport in the left column on a `QSplitter(Vertical)`
+   under the clip table; filmstrip `TrimBar` as a full-width band below the
+   queue, where it gets roughly three times the horizontal resolution. Persist
+   the new splitter alongside the existing one.
+4. **Hotkeys**, scoped with `WidgetWithChildrenShortcut` on the `FrameView` so
+   they cannot fire while the clip table has focus — that is what makes `Space`
+   usable despite the table deliberately reserving it. `Ctrl+P` becomes in-app
+   play; `Ctrl+Shift+P` opens VLC.
+5. **Integration tests** against the existing synthetic fixture.
+
+### Traps known before starting, so they are not rediscovered
+
+- **`_show_frame` must be guarded with `if player.is_playing: return`.**
+  Otherwise every press of `I` goes through `_on_trim_changed` and paints a
+  stale filmstrip JPEG over the live video. Most likely bug in the wiring.
+- **Set the playhead from the timestamp of the frame actually painted**, not
+  from the clock, so `I` means "this picture" by construction.
+- **Throttle `set_playhead` to whole-pixel changes.** `TrimBar.paintEvent`
+  rescales every tile with `SmoothTransformation`; driving it at 30 Hz will be
+  slower than the decoder and will get blamed on the decoder.
+- **`TrimBar` needs one new method**, `set_playhead(seconds)`, which moves the
+  marker *without* emitting `playhead_moved` — the existing signal rebounds
+  into `_show_frame`.
+- **Shutdown order**: flag, then stop the process, then `wait()`. The reader
+  blocks inside `readinto`, where a cancel flag is never seen; closing ffmpeg's
+  end is what makes the read return. Backwards gives a hang on window close
+  that only reproduces during playback.
+- **Retain retired workers.** A running `QThread` that gets collected takes the
+  process down with it — already documented for `ScanWorker`.
+- `_set_in` / `_set_out` / `_on_trim_changed` need **no changes**; they already
+  read `trim_bar.playhead`.
+
+### Deliberately not doing
+
+No audio — a second pipe, a second clock and an output device, for footage
+whose soundtrack is motor whine. No reverse play: a forward-only pipe cannot do
+it honestly. Say both in the UI so their absence is not filed as a bug.
+
 ## Outstanding
 
 - **VAAPI hardware encoding on Linux.** The current design swaps encoder
