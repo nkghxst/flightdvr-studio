@@ -1153,3 +1153,93 @@ def test_no_wrapped_label_hides_a_blank_line(qt_app):
         "these wrapped labels contain a blank line and will clip; "
         f"split them into separate labels: {offenders}"
     )
+
+
+# -- the preview panel ---------------------------------------------------------
+#
+# MainWindow is expensive to build, so these share one. They only read from it
+# or drive it through its own handlers, which is what a person would do.
+
+@pytest.fixture(scope="module")
+def window(qt_app):
+    from flightdvr.media import find_tools
+    from flightdvr.ui import MainWindow
+    made = MainWindow(find_tools())
+    yield made
+    made.close()
+
+
+def shortcuts_on(widget) -> dict:
+    from PySide6.QtGui import QShortcut
+    return {s.key().toString(): s for s in widget.findChildren(QShortcut)
+            if s.parent() is widget}
+
+
+def test_the_preview_is_always_there(window):
+    """It used to be behind an unticked checkbox, which meant that trimming —
+    the thing the app exists for — was hidden from everyone who had not been
+    told it was there."""
+    assert not hasattr(window, "trim_box")
+    assert window.frame_view.isVisibleTo(window.left_splitter)
+
+
+def test_the_picture_is_worth_looking_at(window):
+    """176x99 was enough to tell clips apart and not enough to find the moment
+    a flight starts, which is what the panel is for."""
+    assert window.frame_view.minimumWidth() >= 320
+    assert window.frame_view.minimumHeight() >= 180
+
+
+def test_the_filmstrip_spans_the_window(window):
+    """Beneath the queue rather than beside the video: on a five minute clip
+    that is the difference between a four pixel tile and a twelve pixel one."""
+    assert window.trim_bar.parentWidget() is not window.frame_view.parentWidget()
+    central = window.centralWidget()
+    assert window.trim_bar.parentWidget().parentWidget() is central
+
+
+def test_the_playback_keys_cannot_fire_from_the_clip_list(window):
+    """Space ticks the highlighted row, and that is worth more than anything a
+    window-wide binding could do with it. Scoping is what lets the player have
+    it too."""
+    from PySide6.QtCore import Qt
+
+    scoped = shortcuts_on(window.frame_view)
+    for key in ("Space", "I", "O", "Left", "Right", "Home", "End", "Esc"):
+        assert key in scoped, f"{key} is not bound on the picture"
+        assert scoped[key].context() == (
+            Qt.ShortcutContext.WidgetWithChildrenShortcut), (
+            f"{key} would fire while the clip list has focus"
+        )
+    assert "Space" not in shortcuts_on(window)
+
+
+def test_the_picture_can_take_focus(window):
+    """Without it the keys above can never fire at all."""
+    from PySide6.QtCore import Qt
+    assert window.frame_view.focusPolicy() != Qt.FocusPolicy.NoFocus
+
+
+def test_a_still_is_never_painted_over_a_running_preview(window, monkeypatch):
+    """The most likely integration bug in the whole feature: the playhead moves
+    for reasons other than scrubbing now, and every one of them used to land in
+    _show_frame and repaint a second-old keyframe over the live video."""
+    painted = []
+    monkeypatch.setattr(window.frame_view, "set_image", painted.append)
+    monkeypatch.setattr(window.player, "is_playing", True)
+
+    window._show_frame(1.0)
+    assert not painted, "a filmstrip still was painted while the clip was running"
+
+
+def test_selecting_a_clip_waits_before_decoding_its_filmstrip(window):
+    """Holding the down arrow walks the list. With the panel always open, each
+    row it passes through would otherwise start a full decode pass."""
+    assert window._select_timer.isSingleShot()
+    assert 100 <= window._select_timer.interval() <= 1000
+
+
+def test_ctrl_p_plays_here_and_ctrl_shift_p_hands_it_over(window):
+    bound = shortcuts_on(window)
+    assert "Ctrl+P" in bound and "Ctrl+Shift+P" in bound
+    assert "Open in player" in window.preview_button.text()
