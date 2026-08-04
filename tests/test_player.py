@@ -27,12 +27,13 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QObject, Qt, Signal
 
 from flightdvr.media import ClipInfo, Tools
 from flightdvr.player import (
-    PREVIEW_FPS, PREVIEW_SIZES, SEEK_LEAD_IN, PlayClock, PreviewSize,
-    build_command, choose_size, read_frames, seconds_for_index, seek_pair,
-    should_restart,
+    PREVIEW_FPS, PREVIEW_SIZES, QUEUE_FRAMES, SEEK_LEAD_IN, PlayClock,
+    PreviewSize, build_command, choose_size, read_frames, seconds_for_index,
+    seek_pair, should_restart,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,15 +106,13 @@ def test_a_seek_is_split_so_the_decoder_can_catch_up():
     frames after it are torn until the next keyframe."""
     fast, accurate = seek_pair(10.5)
     assert fast == pytest.approx(8.5)
-    assert accurate == pytest.approx(2.0)
-    assert fast + accurate == pytest.approx(10.5)
+    assert accurate == pytest.approx(10.5)
 
 
 def test_a_seek_never_lands_before_the_start_of_the_clip():
     fast, accurate = seek_pair(0.5)
     assert fast == 0.0
     assert accurate == pytest.approx(0.5)
-    assert fast + accurate == pytest.approx(0.5)
 
 
 def test_playing_from_the_beginning_seeks_at_all():
@@ -122,10 +121,12 @@ def test_playing_from_the_beginning_seeks_at_all():
 
 @pytest.mark.parametrize("start", [0.0, 0.2, 1.0, 2.0, 2.5, 44.0, 180.0])
 def test_the_two_seeks_always_reach_the_point_asked_for(start):
+    """Both are measured from the start of the file, so the second one is the
+    target itself rather than the distance from the first."""
     fast, accurate = seek_pair(start)
-    assert fast + accurate == pytest.approx(start)
-    assert fast >= 0.0 and accurate >= 0.0
-    assert accurate <= SEEK_LEAD_IN
+    assert accurate == pytest.approx(start)
+    assert fast >= 0.0
+    assert start - fast <= SEEK_LEAD_IN + 0.001
 
 
 # -- the command ---------------------------------------------------------------
@@ -161,21 +162,29 @@ def test_the_seek_goes_either_side_of_the_input():
     before = [command[n + 1] for n, a in enumerate(command[:i]) if a == "-ss"]
     after = [command[n + 1] for n, a in enumerate(command[i:], i) if a == "-ss"]
     assert before == ["8.500"]
-    assert after == ["2.000"]
+    assert after == ["10.500"]
 
 
-def test_a_full_range_clip_keeps_the_colour_correction():
-    """Without it the preview looks washed out and disagrees with the export it
-    is meant to be predicting."""
-    command = flatten(build_command(TOOLS, clip(color_range="pc"), 0.0,
-                                    PreviewSize(640, 360)))
-    assert "scale=in_range=full:out_range=limited" in command
+def test_the_second_seek_is_measured_from_the_start_of_the_file():
+    """Measured on a file whose audio begins before its video: without
+    -copyts -start_at_zero, the seek after the input counts from the keyframe
+    the seek before it landed on rather than from where it was aimed, and
+    asking for 2.5 s gives you the frame at 2.0 s with no complaint."""
+    command = build_command(TOOLS, clip(), 10.5, PreviewSize(640, 360))
+    i = command.index("-i")
+    assert "-copyts" in command[:i]
+    assert "-start_at_zero" in command[:i]
 
 
-def test_a_limited_range_clip_is_left_alone():
-    command = flatten(build_command(TOOLS, clip(color_range="tv", pix_fmt=""),
-                                    0.0, PreviewSize(640, 360)))
-    assert "in_range=full" not in command
+def test_no_range_conversion_is_attempted_on_the_way_to_rgb():
+    """Measured: in a chain ending in rgb24 these are inert, because the
+    conversion out of YUV already honours the source's range tag. Applying
+    full-to-limited, applying its opposite and applying neither all produced
+    byte-identical frames."""
+    for source in (clip(color_range="pc"), clip(color_range="tv", pix_fmt="")):
+        command = flatten(build_command(TOOLS, source, 0.0,
+                                        PreviewSize(640, 360)))
+        assert "in_range" not in command
 
 
 def test_the_preview_carries_no_audio():
@@ -354,3 +363,344 @@ def test_the_first_advance_does_not_leap():
     """Nothing has elapsed before the clock is started."""
     clock = PlayClock(origin=2.0, clock=FakeClock())
     assert clock.advance() == pytest.approx(2.0)
+
+
+# -- the controller ------------------------------------------------------------
+#
+# A fake decoder stands in for ffmpeg here. What is under test is which frames
+# get shown and when a decoder gets restarted, and neither needs a real one —
+# that ffmpeg accepts these arguments is what the integration tests are for.
+
+@pytest.fixture(scope="module")
+def qt_app():
+    from PySide6.QtWidgets import QApplication
+    yield QApplication.instance() or QApplication([])
+
+
+class FakeWorker(QObject):
+    failed = Signal(int, str)
+    ended = Signal(int)
+
+    def __init__(self, tools, clip_info, start, size, generation, frames,
+                 fps, parent=None):
+        super().__init__(parent)
+        self.start_at = start
+        self.size = size
+        self.generation = generation
+        self.frames = frames
+        self.started = False
+        self.stopped = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def isRunning(self) -> bool:  # noqa: N802 (matching QThread)
+        return self.started and not self.stopped
+
+    def wait(self, _msecs=0) -> bool:
+        return True
+
+
+def player(fake_clock):
+    from flightdvr.player import PreviewPlayer
+    made = []
+
+    def factory(*args, **kwargs):
+        worker = FakeWorker(*args, **kwargs)
+        made.append(worker)
+        return worker
+
+    instance = PreviewPlayer(TOOLS, clock=fake_clock, worker_factory=factory)
+    instance.load(clip())
+    instance.workers = made
+    return instance
+
+
+def fill(instance, *times):
+    """Queue frames as though the decoder had produced them.
+
+    Never more than QUEUE_FRAMES of them: the queue is bounded, and putting
+    past its limit is exactly the block that gives the pipeline its
+    back-pressure. Here it would simply hang the test.
+    """
+    assert len(times) <= QUEUE_FRAMES
+    for when in times:
+        instance._frames.put((when, b"\0" * instance.size.frame_bytes))
+
+
+def test_playing_starts_a_decoder_at_the_playhead(qt_app):
+    p = player(FakeClock())
+    p.seek(30.0)
+    p.play(view_width=640)
+
+    assert p.is_playing
+    assert len(p.workers) == 1
+    assert p.workers[0].start_at == pytest.approx(30.0)
+    assert p.workers[0].started
+
+
+def test_the_first_frame_is_not_dropped_for_being_late(qt_app):
+    """The clock must not run before anything has arrived, or the seek latency
+    is charged to the frames that paid for it."""
+    fake = FakeClock()
+    p = player(fake)
+    p.seek(30.0)
+    p.play(view_width=640)
+
+    fake.tick(0.6)                       # ffmpeg took this long to say anything
+    fill(p, 30.0, 30.0 + 1 / PREVIEW_FPS)
+
+    shown = []
+    p.frame_ready.connect(lambda _image, when: shown.append(when))
+    p._tick()
+    assert shown == [pytest.approx(30.0)]
+
+
+def test_a_frame_still_in_the_future_is_kept_for_its_moment(qt_app):
+    p = player(FakeClock())
+    p.play(view_width=640)
+    fill(p, 0.0, 5.0)
+
+    shown = []
+    p.frame_ready.connect(lambda _image, when: shown.append(when))
+    p._tick()
+    p._tick()
+    assert shown == [pytest.approx(0.0)]
+    assert p._pending is not None and p._pending[0] == pytest.approx(5.0)
+
+
+def test_late_frames_are_dropped_rather_than_played_in_slow_motion(qt_app):
+    """A repaint that overran must cost frames, not put the picture behind the
+    clock for the rest of the clip."""
+    fake = FakeClock()
+    p = player(fake)
+    p.play(view_width=640)
+    fill(p, 0.0)
+    p._tick()                            # gets the clock running
+
+    fake.tick(0.6)                       # the UI thread was busy for a while
+    fill(p, *[i / PREVIEW_FPS for i in range(1, 21)])
+
+    shown = []
+    p.frame_ready.connect(lambda _image, when: shown.append(when))
+    p._tick()
+    # One frame painted out of the twenty that piled up, and it is the one for
+    # now rather than the oldest of the backlog.
+    assert len(shown) == 1
+    assert shown[0] == pytest.approx(0.6, abs=1 / PREVIEW_FPS)
+
+
+def test_the_playhead_follows_the_frame_shown_not_the_clock(qt_app):
+    """Setting an in point has to mean the picture on screen. A playhead taken
+    from the clock could name a frame that was never painted."""
+    fake = FakeClock()
+    p = player(fake)
+    p.play(view_width=640)
+    fill(p, 0.0, 0.25)
+    p._tick()
+    fake.tick(0.4)                       # the clock is past 0.25 now
+    p._tick()
+    assert p.position == pytest.approx(0.25)
+
+
+def test_running_dry_stalls_the_picture_rather_than_skipping_ahead(qt_app):
+    fake = FakeClock()
+    p = player(fake)
+    p.play(view_width=640)
+    fill(p, 0.0)
+    p._tick()
+
+    fake.tick(2.0)
+    p._tick()                            # nothing queued: starved
+    fake.tick(0.1)
+    fill(p, 1 / PREVIEW_FPS)
+
+    shown = []
+    p.frame_ready.connect(lambda _image, when: shown.append(when))
+    p._tick()
+    # The frame that finally arrived is shown, rather than thrown away for
+    # being two seconds behind a clock that kept running without it.
+    assert shown == [pytest.approx(1 / PREVIEW_FPS)]
+
+
+def test_a_small_jump_forward_does_not_restart_the_decoder(qt_app):
+    p = player(FakeClock())
+    p.play(view_width=640)
+    p.seek(1.0)
+    assert len(p.workers) == 1
+    assert p.position == pytest.approx(1.0)
+
+
+def test_a_jump_backwards_restarts_the_decoder_at_the_target(qt_app):
+    p = player(FakeClock())
+    p.seek(40.0)
+    p.play(view_width=640)
+    p.seek(10.0)
+    assert len(p.workers) == 2
+    assert p.workers[1].start_at == pytest.approx(10.0)
+    assert p.workers[0].stopped
+
+
+def test_seeking_past_the_end_lands_inside_the_clip(qt_app):
+    p = player(FakeClock())
+    p.seek(9999.0)
+    assert p.position == pytest.approx(clip().duration)
+
+
+def test_seeking_while_paused_drops_the_decoder_it_had(qt_app):
+    """Otherwise pressing play again resumes from where the pause happened,
+    which is no longer where the playhead is."""
+    p = player(FakeClock())
+    p.play(view_width=640)
+    p.pause()
+    p.seek(90.0)
+    assert p.workers[0].stopped
+
+    p.play(view_width=640)
+    assert len(p.workers) == 2
+    assert p.workers[1].start_at == pytest.approx(90.0)
+
+
+def test_pausing_keeps_the_decoder_so_resuming_is_instant(qt_app):
+    p = player(FakeClock())
+    p.play(view_width=640)
+    p.pause()
+    assert not p.is_playing
+    assert not p.workers[0].stopped
+
+    p.play(view_width=640)
+    assert len(p.workers) == 1
+
+
+def test_a_restart_gives_the_new_decoder_a_queue_of_its_own(qt_app):
+    """A retired worker is usually blocked in a put. Letting it write where
+    nobody reads is how it gets to notice it was cancelled and leave."""
+    p = player(FakeClock())
+    p.play(view_width=640)
+    fill(p, 0.0, 1.0)
+    p.seek(120.0)
+    assert p._frames.empty()
+    assert p.workers[1].frames is p._frames
+    assert p.workers[0].frames is not p._frames
+
+
+def test_the_end_of_the_stream_waits_for_the_frames_already_queued(qt_app):
+    fake = FakeClock()
+    p = player(fake)
+    p.play(view_width=640)
+    fill(p, 0.0, 0.1)
+    p.workers[0].ended.emit(1)
+
+    over = []
+    p.ended.connect(lambda: over.append(True))
+    p._tick()
+    assert not over and p.is_playing
+
+    fake.tick(1.0)
+    p._tick()                            # shows the last queued frame
+    p._tick()                            # nothing left, and the stream is over
+    assert over and not p.is_playing
+
+
+def test_a_retired_decoder_cannot_end_playback(qt_app):
+    """Its signals arrive after it was replaced, describing a stream nobody is
+    watching any more."""
+    p = player(FakeClock())
+    p.play(view_width=640)
+    stale = p.workers[0]
+    p.seek(120.0)
+
+    over = []
+    p.ended.connect(lambda: over.append(True))
+    stale.ended.emit(stale.generation)
+    p._tick()
+    assert not over
+
+
+def test_a_retired_decoder_cannot_report_a_failure(qt_app):
+    p = player(FakeClock())
+    p.play(view_width=640)
+    stale = p.workers[0]
+    p.seek(120.0)
+
+    complaints = []
+    p.failed.connect(complaints.append)
+    stale.failed.emit(stale.generation, "Invalid data found")
+    assert not complaints
+    assert p.is_playing
+
+
+def test_a_failure_stops_playback_and_says_so(qt_app):
+    p = player(FakeClock())
+    p.play(view_width=640)
+
+    complaints, states = [], []
+    p.failed.connect(complaints.append)
+    p.state_changed.connect(states.append)
+    p.workers[0].failed.emit(1, "Invalid data found when processing input")
+
+    assert complaints == ["Invalid data found when processing input"]
+    assert states == [False]
+    assert not p.is_playing
+
+
+def test_stopping_retires_the_decoder(qt_app):
+    p = player(FakeClock())
+    p.play(view_width=640)
+    p.stop()
+    assert p.workers[0].stopped
+    assert not p.is_playing
+
+
+def test_loading_another_clip_stops_the_one_playing(qt_app):
+    p = player(FakeClock())
+    p.play(view_width=640)
+    p.load(clip(path=Path("hdz_023.ts")))
+    assert p.workers[0].stopped
+    assert not p.is_playing
+    assert p.position == 0.0
+
+
+def test_a_frame_becomes_an_image_that_owns_its_pixels(qt_app):
+    """QImage does not copy the buffer it is handed, and the buffer here is a
+    local that is about to go out of scope."""
+    from PySide6.QtGui import QImage
+    p = player(FakeClock())
+    p.size = PreviewSize(4, 2)
+    data = bytes([255, 0, 0] * 8)
+    image = p._to_image(data)
+    del data
+
+    assert image.width() == 4 and image.height() == 2
+    assert image.format() == QImage.Format.Format_RGB32
+    assert image.pixelColor(0, 0).red() == 255
+
+
+# -- the view ------------------------------------------------------------------
+
+def test_the_view_reports_whether_it_has_a_picture(qt_app):
+    from PySide6.QtGui import QImage
+    from flightdvr.player import FrameView
+
+    view = FrameView()
+    assert not view.has_image()
+    view.set_message("reading frames…")
+    assert not view.has_image()
+
+    view.set_image(QImage(8, 8, QImage.Format.Format_RGB32))
+    assert view.has_image()
+    view.set_message("no frames")
+    assert not view.has_image()
+
+
+def test_the_view_is_big_enough_to_judge_a_moment_by(qt_app):
+    """The label it replaces was 176x99 — fine for telling clips apart, useless
+    for deciding where a flight starts."""
+    from flightdvr.player import FrameView
+    view = FrameView()
+    assert view.minimumWidth() >= 320
+    # The playback keys are scoped to this widget, so it has to be focusable.
+    assert view.focusPolicy() != Qt.FocusPolicy.NoFocus

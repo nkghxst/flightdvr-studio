@@ -31,7 +31,10 @@ delete the marker — so this file cannot quietly fall out of date.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -39,6 +42,7 @@ import pytest
 from conftest import FPS, CLEAN_PSNR, frame_psnr, probe_output
 from flightdvr.jobs import ExportWorker, Job
 from flightdvr.media import probe
+from flightdvr.player import PreviewSize
 from flightdvr.presets import ExportSettings, output_path
 
 pytestmark = pytest.mark.integration
@@ -114,6 +118,39 @@ def test_a_mid_gop_trim_produces_no_corrupt_frames(tools, clip, tmp_path, start)
         f"{len(damaged)} of {len(scores)} frames are corrupt, starting at frame "
         f"{damaged[0]} — worst {min(scores):.1f} dB. The in point at {start}s is "
         f"{start - clip.keyframe_before(start):.2f}s past a keyframe."
+    )
+
+
+def test_a_mid_gop_trim_is_still_right_with_the_sound_turned_off(
+        tools, clip, tmp_path):
+    """Dropping the audio changed where the export started.
+
+    Found while measuring the preview, which always passes -an. With the audio
+    kept, the seek after the input counts from the position asked for; with it
+    dropped, from the keyframe the seek before the input landed on. Asking for
+    2.5 s gave a clean, complete, correctly-lengthed export of 2.0 s onwards.
+
+    It needs a file whose start time is not zero, which is why nothing caught
+    it: HDZero recordings start at zero, and every other test here keeps the
+    sound.
+    """
+    entire = target(tmp_path, "entire_silent", "master")
+    settings = ExportSettings(keep_audio=False)
+    ok, message = export(tools, tmp_path, [probed(tools, clip)], "master",
+                         entire, settings=settings)
+    assert ok, f"the untrimmed control export failed: {message}"
+
+    cut = target(tmp_path, "cut_silent", "master")
+    ok, message = export(tools, tmp_path, [probed(tools, clip, 2.5, 3.5)],
+                         "master", cut, settings=settings)
+    assert ok, message
+
+    scores = frame_psnr(tools, cut, entire, tmp_path,
+                        skip_reference_frames=round(2.5 * FPS))
+    assert scores, "could not compare the two exports"
+    assert min(scores) >= CLEAN_PSNR, (
+        f"worst frame {min(scores):.1f} dB — the trim did not start where it "
+        f"was asked to"
     )
 
 
@@ -361,7 +398,6 @@ def test_an_odd_sized_source_still_exports(tools, odd_sized_clip, tmp_path):
 def test_an_output_folder_beginning_with_a_dash_works(tools, clip, tmp_path):
     """ffmpeg reads a leading dash as the start of an option, so a relative
     folder called "-exports" produced "Unrecognized option"."""
-    import os
     folder = tmp_path / "-exports"
     folder.mkdir()
     here = Path.cwd()
@@ -373,3 +409,165 @@ def test_an_output_folder_beginning_with_a_dash_works(tools, clip, tmp_path):
         assert ok, message
     finally:
         os.chdir(here)
+
+
+# -- the preview player --------------------------------------------------------
+#
+# The unit tests fake the decoder, so everything below is the first thing that
+# runs a real one. The failure being guarded against is the one the whole
+# integration suite exists for: a well-formed command that produces nothing, or
+# produces frames nobody can tell are wrong.
+
+PREVIEW = PreviewSize(320, 180)          # the fixture's own size: no rescaling,
+                                         # so corruption is not blurred away
+
+
+@pytest.fixture(scope="module")
+def qt_app():
+    from PySide6.QtWidgets import QApplication
+    yield QApplication.instance() or QApplication([])
+
+
+def decode(tools, info, start, size=PREVIEW):
+    """Run one real DecodeWorker to completion and collect what it produced.
+
+    run() is called rather than start(): it is an ordinary method, and calling
+    it directly runs the decode in this thread, where a test can wait for it
+    without an event loop. The queue is given no practical limit because the
+    bounded one exists for back-pressure against a UI that is not here — left
+    at its usual depth this would block after twenty-four frames and hang.
+    """
+    import queue as queue_module
+    from flightdvr.player import DecodeWorker
+
+    frames: queue_module.Queue = queue_module.Queue(maxsize=10000)
+    worker = DecodeWorker(tools, info, start, size, 1, frames)
+    problems, over = [], []
+    worker.failed.connect(lambda _gen, message: problems.append(message))
+    worker.ended.connect(over.append)
+    worker.run()
+
+    collected = []
+    while not frames.empty():
+        collected.append(frames.get_nowait())
+    return collected, problems, over
+
+
+def mean_abs_diff(left: bytes, right: bytes) -> float:
+    """Average per-byte difference between two raw RGB frames."""
+    assert len(left) == len(right)
+    return sum(abs(a - b) for a, b in zip(left, right)) / len(left)
+
+
+def preview_frame(tools, info, start, size=PREVIEW):
+    """One raw frame, through exactly the command the player would issue."""
+    from flightdvr.player import build_command, read_frames
+
+    command = build_command(tools, info, start, size)
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, bufsize=1 << 20)
+    try:
+        for frame in read_frames(proc.stdout, size.frame_bytes):
+            return frame
+    finally:
+        proc.stdout.close()
+        proc.terminate()
+        proc.wait(timeout=5)
+    return b""
+
+
+def test_the_preview_decoder_actually_produces_frames(tools, clip, qt_app):
+    """The whole point of this file. Every argument can be right and the
+    result still be an empty pipe."""
+    frames, problems, over = decode(tools, probed(tools, clip), 0.0)
+
+    assert not problems, problems
+    assert over == [1], "the stream never reported a clean end"
+    # Six seconds at thirty, give or take how the fps filter rounds the ends.
+    assert 170 <= len(frames) <= 182, len(frames)
+    assert all(len(data) == PREVIEW.frame_bytes for _when, data in frames)
+    assert frames[0][0] == pytest.approx(0.0)
+
+
+def test_a_preview_seek_lands_on_the_right_frame_not_a_torn_one(tools, clip,
+                                                                qt_app):
+    """The defect this design exists to avoid, in the preview path.
+
+    2.5 seconds is deliberately mid-GOP: the fixture has a keyframe every
+    1.000 s, so a single input seek there decodes torn macroblocks until 3.0.
+    Compared frame by frame, and the first one especially — an average hides
+    exactly the damage being looked for.
+    """
+    info = probed(tools, clip)
+    from_start, _p, _e = decode(tools, info, 0.0)
+    from_seek, problems, _e2 = decode(tools, info, 2.5)
+
+    assert not problems, problems
+    assert from_seek, "seeking produced no frames at all"
+
+    # 2.5 s at 30 fps is frame 75 of the run that started at zero.
+    offset = 75
+    pairs = list(zip(from_seek, from_start[offset:]))[:30]
+    assert len(pairs) == 30
+
+    differences = [mean_abs_diff(seek[1], whole[1]) for seek, whole in pairs]
+    assert differences[0] < 2.0, (
+        f"the first frame after a seek is wrong: {differences[0]:.1f}")
+    assert max(differences) < 2.0, f"worst frame differs by {max(differences):.1f}"
+    assert from_seek[0][0] == pytest.approx(2.5)
+
+
+def test_the_preview_agrees_with_the_export_about_colour(tools, clip, tmp_path,
+                                                         qt_app):
+    """Nothing proved this before, and it is the preview's entire job.
+
+    The source is full range and the export converts it to limited. The
+    preview does no conversion at all, because measurement showed range
+    filters are inert on the way to rgb24 — the conversion out of YUV reads
+    the source's range tag either way. This is what says that reasoning holds
+    end to end rather than only in the one case it was measured on.
+    """
+    info = probed(tools, clip)
+    out = target(tmp_path, "colour", "master")
+    ok, message = export(tools, tmp_path, [probed(tools, clip, 2.0, 3.0)],
+                         "master", out)
+    assert ok, message
+
+    exported = probe(tools, out)
+    reference = preview_frame(tools, exported, 0.0)
+    assert reference, "could not read a frame back out of the export"
+
+    live = preview_frame(tools, info, 2.0)
+    agreed = mean_abs_diff(live, reference)
+    # What is left is H.264's own loss. A range mismatch would put this in the
+    # teens, and would show as the preview being visibly flatter than the file.
+    assert agreed < 6.0, f"preview and export differ by {agreed:.1f}"
+
+    # Levels, separately from the pictures: a squashed preview reaches neither
+    # end of the scale even when the shapes still line up.
+    assert abs(min(live) - min(reference)) <= 8
+    assert abs(max(live) - max(reference)) <= 8
+
+
+def test_a_corrupt_source_fails_rather_than_hanging(tools, tmp_path, qt_app):
+    """Preview is the feature most likely to be pointed at a recording cut
+    short by a flat battery, which is where the stderr flood comes from."""
+    from flightdvr.media import ClipInfo
+
+    broken = tmp_path / "hdz_broken.ts"
+    broken.write_bytes(b"\x47" + os.urandom(400_000))
+    info = ClipInfo(
+        path=broken, size=broken.stat().st_size,
+        modified=datetime.fromtimestamp(broken.stat().st_mtime),
+        duration=10.0, width=320, height=180, fps=60.0,
+        video_codec="hevc", audio_codec="", color_range="pc",
+    )
+
+    began = time.monotonic()
+    frames, problems, over = decode(tools, info, 0.0)
+    took = time.monotonic() - began
+
+    assert took < 30, f"took {took:.1f}s to give up"
+    assert problems, "a file that decodes to nothing reported success"
+    assert problems[0] and "exit code" not in problems[0].lower(), problems
+    assert not frames

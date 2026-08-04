@@ -53,7 +53,9 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Iterator
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QRect, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPalette
+from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from .media import NO_WINDOW, ClipInfo, Tools, frame_rate_mode, stop_process
 
@@ -79,6 +81,12 @@ SEEK_LEAD_IN = 2.0
 
 # Enough stderr to explain a failure without holding a whole log.
 STDERR_LINES = 100
+
+# How long a paused clip keeps its decoder. A pause is usually a moment's
+# thought, so holding the process makes resuming instant; a pause that lasts
+# this long is somebody who has walked away, and the card should be free to
+# eject. Resuming after it simply costs one seek.
+IDLE_STOP_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -116,11 +124,15 @@ def seek_pair(start: float) -> tuple[float, float]:
     and lands somewhere before the target; the second discards the lead-in once
     the decoder has produced real frames. One seek alone gives torn macroblocks
     for up to a full group of pictures, which on this footage is a second.
+
+    Both numbers are measured from the start of the file, which is only true
+    because of the `-copyts -start_at_zero` in `build_command`. Without those
+    the second seek is relative to wherever the first one landed, which is not
+    where it was aimed — see the comment there.
     """
     if start <= 0.01:
         return 0.0, 0.0
-    lead_in = min(start, SEEK_LEAD_IN)
-    return start - lead_in, lead_in
+    return max(0.0, start - SEEK_LEAD_IN), start
 
 
 def build_command(tools: Tools, clip: ClipInfo, start: float,
@@ -135,12 +147,15 @@ def build_command(tools: Tools, clip: ClipInfo, start: float,
     """
     fast, accurate = seek_pair(start)
 
-    filters = []
-    if clip.is_full_range:
-        # Or the preview looks washed out and disagrees with the export it is
-        # supposed to be predicting.
-        filters.append("scale=in_range=full:out_range=limited")
-    filters += [
+    # No range conversion here, unlike the export and the filmstrip. Measured:
+    # in a chain that ends in rgb24 the range filters are inert, because the
+    # conversion out of YUV already reads the source's range tag. Applying
+    # full-to-limited, applying limited-to-full, and applying neither all give
+    # byte-identical frames, and all three match the export decoded back to RGB
+    # to within H.264's own loss. So the preview agrees with the export by
+    # construction, and a filter here would only be a comment that costs a
+    # scale pass.
+    filters = [
         f"scale={size.width}:{size.height}:force_original_aspect_ratio=decrease",
         f"pad={size.width}:{size.height}:(ow-iw)/2:(oh-ih)/2",
         f"fps={max(1, fps)}",
@@ -151,7 +166,14 @@ def build_command(tools: Tools, clip: ClipInfo, start: float,
     # as much reading from a card over USB and tells us nothing extra.
     if fast > 0.01:
         command += ["-ss", f"{fast:.3f}"]
-    command += ["-i", str(clip.path)]
+    # Measured, on a file whose audio begins 23 ms before its video: without
+    # these, the seek after the input is counted from the keyframe the seek
+    # before it landed on, rather than from the position that was asked for.
+    # Asking for 2.5 s produced the frame at 2.0 s — bit-exact, no warning, and
+    # a preview that lies about where the playhead is. It only shows up when
+    # the file's start time is not zero and the audio is dropped, which is why
+    # HDZero footage never showed it and a synthetic fixture did.
+    command += ["-copyts", "-start_at_zero", "-i", str(clip.path)]
     if accurate > 0.01:
         command += ["-ss", f"{accurate:.3f}"]
     command += [
@@ -365,3 +387,328 @@ def _describe(log: deque[str]) -> str:
     """The most useful line ffmpeg wrote, as the export path does it."""
     from .jobs import _describe_failure
     return _describe_failure(list(log), 1)
+
+
+class PreviewPlayer(QObject):
+    """Turns a queue of decoded frames into a picture that plays at real speed.
+
+    The decoder runs flat out and this decides which of its frames to show and
+    when. Anything that arrived too late to be shown is dropped rather than
+    queued up, so a slow moment costs a frame instead of putting the picture
+    permanently behind the clock.
+
+    Nothing here paints. It emits a frame and the time it came from, and the
+    window is free to do what it likes with both — which is what lets the trim
+    playhead be driven by the picture actually on screen rather than by a clock
+    that might be describing a frame nobody saw.
+    """
+
+    frame_ready = Signal(object, float)   # QImage, seconds into the clip
+    state_changed = Signal(bool)          # playing
+    failed = Signal(str)
+    ended = Signal()
+
+    def __init__(self, tools: Tools, parent=None, clock=time.monotonic,
+                 worker_factory=None):
+        super().__init__(parent)
+        self.tools = tools
+        self.clip: ClipInfo | None = None
+        self.size = PreviewSize(*PREVIEW_SIZES[0])
+        self.position = 0.0
+        self.is_playing = False
+        self._clock_source = clock
+        self._make_worker = worker_factory or DecodeWorker
+
+        self._generation = 0
+        self._worker: DecodeWorker | None = None
+        # A running QThread that gets collected takes its process down with it,
+        # so workers asked to stop are held until they have actually finished.
+        self._retired: list[DecodeWorker] = []
+        self._frames: queue.Queue = queue.Queue(maxsize=QUEUE_FRAMES)
+        # One frame read out of the queue and found to be in the future. There
+        # is no way to look at the head of a Queue without taking it.
+        self._pending: tuple[float, bytes] | None = None
+        self._playclock = PlayClock(clock=clock)
+        self._starved = True
+        self._stream_ended = False
+
+        self._timer = QTimer(self)
+        # The default coarse timer rounds to about 15 ms on Windows, which at
+        # 30 fps is half a frame and visible as judder.
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.setInterval(max(1, 1000 // PREVIEW_FPS))
+        self._timer.timeout.connect(self._tick)
+
+        self._idle = QTimer(self)
+        self._idle.setSingleShot(True)
+        self._idle.setInterval(IDLE_STOP_SECONDS * 1000)
+        self._idle.timeout.connect(self._release)
+
+    # -- what the window asks for ---------------------------------------------
+
+    def load(self, clip: ClipInfo | None, position: float = 0.0) -> None:
+        """Point at a clip. Nothing decodes until somebody presses play."""
+        self.stop()
+        self.clip = clip
+        self.position = max(0.0, position)
+
+    def play(self, view_width: int = 0) -> None:
+        if self.clip is None or self.is_playing:
+            return
+        self._idle.stop()
+        if self._worker is None:
+            # Chosen once, on the way in. Resizing the window mid-clip must not
+            # restart ffmpeg: Qt can scale a frame for far less than a spawn.
+            if view_width > 0:
+                self.size = choose_size(view_width)
+            self._start(self.position)
+        self._playclock.jump_to(self.position)
+        # Nothing has arrived yet, so the clock must not start running until
+        # something does, or the first frames are dropped for being late.
+        self._starved = True
+        self.is_playing = True
+        self._timer.start()
+        self.state_changed.emit(True)
+
+    def pause(self) -> None:
+        """Stop the clock, keep the decoder.
+
+        The queue stops draining, which fills the pipe and blocks ffmpeg where
+        it stands, so a pause costs nothing and resuming is immediate.
+        """
+        if not self.is_playing:
+            return
+        self.is_playing = False
+        self._timer.stop()
+        self._idle.start()
+        self.state_changed.emit(False)
+
+    def toggle(self, view_width: int = 0) -> None:
+        self.pause() if self.is_playing else self.play(view_width)
+
+    def stop(self) -> None:
+        was_playing = self.is_playing
+        self.is_playing = False
+        self._timer.stop()
+        self._idle.stop()
+        self._release()
+        if was_playing:
+            self.state_changed.emit(False)
+
+    def seek(self, seconds: float) -> None:
+        """Move to a point in the clip.
+
+        While paused this only records where the playhead is: the filmstrip
+        already has a keyframe for every second and shows it instantly, which
+        is a better answer than half a second of black waiting for a decoder.
+        """
+        target = max(0.0, seconds)
+        if self.clip is not None and self.clip.duration > 0:
+            target = min(target, self.clip.duration)
+        if not self.is_playing:
+            # A paused decoder is holding frames from where it was paused, and
+            # they are now the wrong ones. Dropping it here rather than letting
+            # play() resume from the old spot.
+            self._release()
+            self.position = target
+            return
+        if should_restart(self.position, target, True):
+            self._start(target)
+            self._starved = True
+        self.position = target
+        self._playclock.jump_to(target)
+
+    def step(self, seconds: float) -> None:
+        self.seek(self.position + seconds)
+
+    def set_speed(self, speed: float) -> None:
+        self._playclock.speed = max(0.1, speed)
+
+    @property
+    def speed(self) -> float:
+        return self._playclock.speed
+
+    def shutdown(self) -> None:
+        """Wait for every decoder to be gone. Called when the window closes."""
+        self.stop()
+        for worker in self._retired:
+            if worker.isRunning():
+                worker.stop()
+                worker.wait(2000)
+        self._retired.clear()
+
+    # -- the decoder ----------------------------------------------------------
+
+    def _start(self, start: float) -> None:
+        self._release()
+        self._generation += 1
+        worker = self._make_worker(self.tools, self.clip, start, self.size,
+                                   self._generation, self._frames,
+                                   PREVIEW_FPS, self)
+        worker.failed.connect(self._worker_failed)
+        worker.ended.connect(self._worker_ended)
+        self._worker = worker
+        worker.start()
+
+    def _release(self) -> None:
+        """Retire the current decoder and give the next one a clean queue.
+
+        A fresh queue rather than draining the old one: the retired worker is
+        very likely blocked inside a put, and letting it write into a queue
+        nobody reads is how it gets to notice it has been cancelled and leave.
+        """
+        worker, self._worker = self._worker, None
+        if worker is not None:
+            worker.stop()
+            self._retired.append(worker)
+        self._retired = [w for w in self._retired if w.isRunning()]
+        self._frames = queue.Queue(maxsize=QUEUE_FRAMES)
+        self._pending = None
+        self._stream_ended = False
+
+    def _worker_ended(self, generation: int) -> None:
+        if generation == self._generation:
+            # Not the end of playback — there can still be frames queued.
+            self._stream_ended = True
+
+    def _worker_failed(self, generation: int, message: str) -> None:
+        if generation != self._generation:
+            return
+        was_playing = self.is_playing
+        self.is_playing = False
+        self._timer.stop()
+        self._release()
+        if was_playing:
+            self.state_changed.emit(False)
+        self.failed.emit(message)
+
+    # -- the clock ------------------------------------------------------------
+
+    def _tick(self) -> None:
+        wanted = self._playclock.advance(starved=self._starved)
+        frame = self._pick(wanted)
+        if frame is not None:
+            when, data = frame
+            self.position = when
+            self.frame_ready.emit(self._to_image(data), when)
+            return
+        if self._stream_ended and self._pending is None and self._frames.empty():
+            self._finish()
+
+    def _pick(self, wanted: float) -> tuple[float, bytes] | None:
+        """The newest queued frame that is not still in the future.
+
+        Everything older is thrown away rather than shown. Painting them would
+        be playing catch-up in slow motion, and the point of pacing against a
+        clock is that a late frame costs one frame, not a growing lag.
+        """
+        chosen = None
+        while True:
+            if self._pending is None:
+                try:
+                    self._pending = self._frames.get_nowait()
+                except queue.Empty:
+                    self._starved = chosen is None
+                    return chosen
+            if self._pending[0] > wanted + 1e-6:
+                self._starved = False
+                return chosen
+            chosen, self._pending = self._pending, None
+
+    def _to_image(self, data: bytes) -> QImage:
+        """Raw RGB into something Qt will paint.
+
+        Done here rather than on the decode thread on purpose: frames that
+        arrive too late are dropped by `_pick` and never reach this, so the
+        conversion is paid for once per frame shown rather than once per frame
+        decoded. It also keeps the worker free of GUI types.
+
+        convertToFormat returns an independent image, which matters because
+        QImage does not copy the buffer it is handed and `data` is about to go
+        out of scope.
+        """
+        image = QImage(data, self.size.width, self.size.height,
+                       self.size.stride, QImage.Format.Format_RGB888)
+        return image.convertToFormat(QImage.Format.Format_RGB32)
+
+    def _finish(self) -> None:
+        self.is_playing = False
+        self._timer.stop()
+        self._release()
+        self.state_changed.emit(False)
+        self.ended.emit()
+
+
+class FrameView(QWidget):
+    """Paints whatever picture it was last given, and nothing else.
+
+    A QLabel with a scaled pixmap was doing this job at 176x99, which is fine
+    for confirming which clip you are looking at and useless for deciding where
+    a flight begins. This scales to whatever room it is given and keeps the
+    aspect ratio, so the same widget shows a filmstrip still while paused and
+    live frames while playing without the two disagreeing about geometry.
+    """
+
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(320, 180)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Expanding)
+        # Focusable because the playback keys are scoped to this widget: they
+        # only work when it has focus, which is what keeps Space free for the
+        # clip list to tick rows with.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._image = QImage()
+        self._message = "Select a clip"
+
+    def set_image(self, image: QImage) -> None:
+        self._image = image
+        self._message = ""
+        self.update()
+
+    def set_message(self, text: str) -> None:
+        self._image = QImage()
+        self._message = text
+        self.update()
+
+    def has_image(self) -> bool:
+        return not self._image.isNull()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        painter = QPainter(self)
+        rect = self.rect()
+        painter.fillRect(rect, QColor(16, 16, 16))
+
+        if not self._image.isNull():
+            scaled = self._image.size().scaled(
+                rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
+            target = QRect(0, 0, scaled.width(), scaled.height())
+            target.moveCenter(rect.center())
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.drawImage(target, self._image)
+        elif self._message:
+            painter.setPen(self.palette().color(QPalette.ColorRole.Mid))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._message)
+
+        if self.hasFocus():
+            # Without this there is no way to tell whether the keys will do
+            # anything, which is the whole risk of scoping them to a widget.
+            painter.setPen(self.palette().color(QPalette.ColorRole.Highlight))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect.adjusted(0, 0, -1, -1))
+        painter.end()
+
+    def focusInEvent(self, event) -> None:  # noqa: N802
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        super().focusOutEvent(event)
+        self.update()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        self.clicked.emit()
