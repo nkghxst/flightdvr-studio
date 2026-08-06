@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -1534,3 +1535,123 @@ def test_the_strip_says_what_is_in_the_queue(window):
         assert "1 done" in summary
     finally:
         window.jobs = []
+
+
+# -- closing while the hardware probe is still going ---------------------------
+#
+# The probe is a real test encode per candidate encoder, so it can easily
+# outlive the window that started it. Nothing waited for it, and a QThread
+# destroyed while running aborts the process — which is what the macOS CI
+# runner did, where a VideoToolbox probe is slow enough to still be there.
+
+def test_the_probe_is_asked_before_every_candidate():
+    """A probe told to stop must not start the next encoder's test encode."""
+    from flightdvr.media import detect_hardware_encoder
+
+    tried = []
+    stop = []
+
+    def ran(_tools, name, _register=None):
+        tried.append(name)
+        stop.append(True)          # cancelled while the first one is running
+        return False
+
+    with _swapped("_encoder_runs", ran):
+        found = detect_hardware_encoder(
+            TOOLS, encoders={name for name, _ in _all_hw_encoders()},
+            should_stop=lambda: bool(stop),
+        )
+
+    assert found is None
+    assert len(tried) == 1, f"kept probing after being told to stop: {tried}"
+
+
+def test_the_probe_hands_out_the_process_it_is_waiting_on():
+    """stop() has nothing to kill unless the encode registers itself."""
+    from flightdvr.media import detect_hardware_encoder
+
+    seen = []
+    with _swapped("_encoder_runs", lambda t, n, register=None: (
+            seen.append(register), False)[1]):
+        detect_hardware_encoder(
+            TOOLS, encoders={name for name, _ in _all_hw_encoders()},
+            register="the-callback",
+        )
+    assert seen and all(r == "the-callback" for r in seen)
+
+
+def test_closing_the_window_stops_a_probe_that_is_still_running(qt_app):
+    """The regression itself: build a window whose probe will not finish on
+    its own, close it, and it must be gone rather than left running."""
+    import threading
+
+    from flightdvr.media import find_tools
+    from flightdvr.ui import MainWindow
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def never_finishes(_tools, _name, register=None):
+        if register is not None:
+            register(_Stoppable(release))
+        started.set()
+        release.wait(30)
+        if register is not None:
+            register(None)
+        return False
+
+    with _swapped("_encoder_runs", never_finishes), \
+            _swapped("available_encoders", lambda *a, **k: {"h264_nvenc"}):
+        window = MainWindow(find_tools())
+        try:
+            assert started.wait(10), "the probe never got going"
+            assert window.hw_probe.isRunning()
+            window.close()
+            assert not window.hw_probe.isRunning(), (
+                "the probe outlived the window and will abort the process "
+                "when the window is collected"
+            )
+        finally:
+            release.set()
+            window.hw_probe.wait(5000)
+
+
+class _Stoppable:
+    """Stands in for the ffmpeg the probe would be waiting on."""
+
+    def __init__(self, release):
+        self._release = release
+
+    def poll(self):
+        return 0 if self._release.is_set() else None
+
+    def terminate(self):
+        self._release.set()
+
+    def wait(self, timeout=None):
+        self._release.wait(timeout)
+        return 0
+
+    def kill(self):
+        self._release.set()
+
+
+def _all_hw_encoders():
+    from flightdvr.media import HW_ENCODERS
+    return HW_ENCODERS
+
+
+@contextmanager
+def _swapped(name, replacement):
+    """Swap a media-module global for the duration of a block.
+
+    monkeypatch is per-test and these run inside a worker thread, so the
+    replacement has to still be in place when that thread reaches it.
+    """
+    from flightdvr import media
+    original = getattr(media, name)
+    setattr(media, name, replacement)
+    try:
+        yield
+    finally:
+        setattr(media, name, original)

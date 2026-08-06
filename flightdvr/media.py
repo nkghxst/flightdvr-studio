@@ -470,6 +470,10 @@ def available_encoders(tools: Tools) -> set[str]:
     return names
 
 
+# A test encode is three frames of 320x240. Anything still going after this is
+# a driver that has hung rather than an encoder that is merely slow.
+PROBE_SECONDS = 45
+
 # Hardware H.264 encoders, best first. Whichever one this machine can actually
 # run is the one the app offers.
 HW_ENCODERS = [
@@ -480,12 +484,17 @@ HW_ENCODERS = [
 ]
 
 
-def _encoder_runs(tools: Tools, name: str) -> bool:
+def _encoder_runs(tools: Tools, name: str, register=None) -> bool:
     """Try a token encode.
 
     An encoder being compiled into ffmpeg says nothing about whether the
     hardware is present: a build with NVENC support still fails on a machine
     with no NVIDIA card, so the only reliable test is to run it once.
+
+    Popen rather than run_hidden because the caller has to be able to reach the
+    process: a test encode can sit there for the best part of a minute, and
+    somebody closing the window in the meantime should not be made to wait for
+    it. `register` is handed the process while it runs and None afterwards.
     """
     args = [
         str(tools.ffmpeg), "-hide_banner", "-v", "error", "-nostdin",
@@ -493,18 +502,39 @@ def _encoder_runs(tools: Tools, name: str) -> bool:
         "-c:v", name, "-frames:v", "3", "-f", "null", "-",
     ]
     try:
-        return run_hidden(args, timeout=45).returncode == 0
-    except (subprocess.TimeoutExpired, OSError):
+        proc = subprocess.Popen(
+            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=NO_WINDOW,
+        )
+    except OSError:
         return False
+    if register is not None:
+        register(proc)
+    try:
+        return proc.wait(timeout=PROBE_SECONDS) == 0
+    except subprocess.TimeoutExpired:
+        stop_process(proc)
+        return False
+    finally:
+        if register is not None:
+            register(None)
 
 
 def detect_hardware_encoder(
-    tools: Tools, encoders: set[str] | None = None
+    tools: Tools, encoders: set[str] | None = None,
+    should_stop=None, register=None,
 ) -> tuple[str, str] | None:
-    """The hardware encoder this machine can really use, or None."""
+    """The hardware encoder this machine can really use, or None.
+
+    `should_stop` is consulted before each candidate and `register` is passed
+    through to the test encode, so a caller that is going away can stop this
+    between candidates and part way through one.
+    """
     if encoders is None:
         encoders = available_encoders(tools)
     for name, label in HW_ENCODERS:
-        if name in encoders and _encoder_runs(tools, name):
+        if should_stop is not None and should_stop():
+            return None
+        if name in encoders and _encoder_runs(tools, name, register):
             return name, label
     return None
