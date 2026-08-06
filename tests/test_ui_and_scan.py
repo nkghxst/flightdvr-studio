@@ -28,6 +28,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QPoint
 
 # Must be set before any QApplication exists, so these tests need no display.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -1378,40 +1379,32 @@ def test_adding_a_job_opens_the_queue(window):
         window.queue_toggle.setChecked(False)
 
 
-def test_the_frame_covers_exactly_what_it_frames(window, qt_app):
-    """A frame a few pixels out from the thing it is framing reads as a bug,
-    and this one has to track a window resize, the preview choosing its own
-    height, a splitter and the queue opening."""
-    from PySide6.QtCore import QPoint, QRect
+def test_toggling_the_queue_leaves_every_panel_intact(window, qt_app):
+    """Opening and closing the queue moved everything above it, and things
+    stopped being drawn until the window was resized. Nothing may end up with
+    no size, or outside the window, at either state."""
+    central = window.centralWidget()
+    panels = {
+        "clip table": window.table,
+        "preview": window.preview_box,
+        "picture": window.frame_view,
+        "sidebar": window.preview_sidebar,
+        "filmstrip": window.trim_bar,
+        "queue strip": window.queue_toggle,
+    }
 
-    def union():
-        central = window.centralWidget()
-        preview = QRect(window.preview_box.mapTo(central, QPoint(0, 0)),
-                        window.preview_box.size())
-        band = QRect(window.trim_band.mapTo(central, QPoint(0, 0)),
-                     window.trim_band.size())
-        return preview.united(band)
-
-    for size in ((1240, 900), (1000, 760), (1400, 1000)):
-        window.resize(*size)
+    for opening in (True, False, True, False):
+        window.queue_toggle.setChecked(opening)
         qt_app.processEvents()
-        window.region_frame.follow()
-        assert window.region_frame.geometry() == union(), f"drifted at {size}"
-
-    window.queue_toggle.setChecked(True)
-    qt_app.processEvents()
-    window.region_frame.follow()
-    assert window.region_frame.geometry() == union(), "drifted when the queue opened"
-    window.queue_toggle.setChecked(False)
-    window.resize(1240, 900)
-    qt_app.processEvents()
-
-
-def test_the_frame_never_swallows_a_click(window):
-    """It sits behind everything it frames and must stay out of the way."""
-    from PySide6.QtCore import Qt
-    assert window.region_frame.testAttribute(
-        Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        for name, widget in panels.items():
+            size = widget.size()
+            assert size.width() > 0 and size.height() > 0, (
+                f"{name} has no size with the queue "
+                f"{'open' if opening else 'closed'}")
+            top_left = widget.mapTo(central, QPoint(0, 0))
+            assert top_left.y() + size.height() <= central.height() + 1, (
+                f"{name} runs off the bottom with the queue "
+                f"{'open' if opening else 'closed'}")
 
 
 # -- what the sidebar says -----------------------------------------------------
@@ -1425,8 +1418,8 @@ def test_the_sidebar_says_what_you_are_looking_at(window):
     window._highlighted_clip = lambda: info
     try:
         window._load_selected_clip()
-        assert window.clip_format.text() == info.format_label
-        assert window.clip_size.text() == info.size_label
+        assert info.format_label in window.clip_format.text()
+        assert info.size_label in window.clip_format.text()
         assert "2025" in window.clip_date.text()
     finally:
         del window._highlighted_clip
@@ -1436,11 +1429,9 @@ def test_the_static_labels_are_not_rewritten_on_every_frame(window):
     """_update_trim_labels runs from _preview_frame_ready, thirty times a
     second. Text that changes once a clip has no business in it."""
     window.clip_format.setText("sentinel")
-    window.clip_size.setText("sentinel")
     window.clip_date.setText("sentinel")
     window._update_trim_labels()
     assert window.clip_format.text() == "sentinel"
-    assert window.clip_size.text() == "sentinel"
     assert window.clip_date.text() == "sentinel"
 
 
