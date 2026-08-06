@@ -1,0 +1,191 @@
+# Working on FlightDVR Studio
+
+Read this before touching anything. It is written for the two assistants that
+work on this repository — Claude Code and Codex — and for anyone else who turns
+up. Neither assistant remembers the last session, and they cannot see each
+other. **The repository is the only channel between them.** Anything not
+written down here, in an issue, or in a commit message did not happen.
+
+The maintainer is Isadu Nkemi (`nkghxst`). Only he merges.
+
+---
+
+## What this is
+
+A desktop app that gets HDZero goggle DVR footage off a card and into something
+usable: browse, preview, trim, convert. Python, PySide6, ffmpeg under the hood.
+Users are FPV pilots, not video engineers.
+
+`README.md` covers using it. `docs/DEVELOPMENT.md` covers building it and the
+reasoning behind the parts that look arbitrary — **read it before changing
+anything to do with colour, seeking or the preview player.** `docs/ROADMAP.md`
+covers where it is going and what it deliberately will not do.
+
+---
+
+## How the two of us work together
+
+### Before starting anything
+
+```bash
+gh issue list --label ready          # what is available
+gh pr list --state open              # what is already claimed
+```
+
+If an open PR touches the file you were about to change, pick something else or
+say so on the issue. This matters more than it sounds: `ui.py` is still large
+enough that two features in it will conflict.
+
+### Claiming work
+
+**Open a draft PR on your first commit, before doing the work.** Title it for
+the issue it closes. That is the claim — it costs nothing extra, because the PR
+has to exist anyway, and unlike a status file it cannot drift out of date.
+
+```bash
+git checkout -b short-branch-name
+git commit                           # something small and real
+gh pr create --draft --title "..." --body "Closes #14"
+```
+
+Mark it ready for review when it is finished.
+
+### Reviewing
+
+**Whoever did not write it reviews it.** Then the maintainer merges. This has
+already earned its keep in both directions: a Codex review of PR #9 found three
+real defects, and a review of Codex's roadmap found four of its six stated
+prerequisites had already shipped.
+
+```bash
+gh pr diff 15
+gh pr review 15 --comment --body-file review.md
+```
+
+Say what you checked and what you could not check. A review that only lists
+findings hides how much of the change was actually looked at.
+
+Confirm a finding against the code before reporting it, and say whether you
+did. "This looks wrong" and "I ran it and it is wrong" are different claims.
+
+### Handing over
+
+Nothing special is required if the rules above are followed, because the state
+lives in git and on the issue tracker. If you stop mid-task, push what you have
+to the draft PR and write what is left in its description. An unpushed branch
+on someone's disk is invisible to everyone.
+
+---
+
+## How to work here
+
+These are not style preferences. Each one is here because ignoring it cost real
+time, and the history is in `docs/DEVELOPMENT.md`.
+
+### Measure. Do not assert.
+
+The single most important habit in this codebase.
+
+The colour handling is what it is because four candidate chains were measured
+by rendering to RGB and comparing, and the intuitive answer lost. A trim was
+documented as landing "exactly" for a whole release while it was in fact
+producing half a second of garbage on every mid-GOP cut. Both were found by
+measuring; neither was visible in the arguments.
+
+If you are about to write "this should be identical" or "this is faster",
+measure it and put the number in the commit message. If you cannot measure it,
+say that instead of implying you did.
+
+### Write down the trap, next to the code
+
+Comments here explain **why**, not what. Prefer the comment that saves the next
+person from re-deriving something painful:
+
+> Terminating ffmpeg makes `communicate()` return normally, so a cancelled
+> extraction reached the publishing code with whatever frames it had.
+
+That is worth ten comments saying what the line does.
+
+### Tests are sentences about what went wrong
+
+`test_a_mid_gop_trim_produces_no_corrupt_frames`, not `test_trim_2`. The
+docstring says what broke and what it looked like when it did. A test whose
+name does not describe a failure mode is usually testing the implementation
+rather than the behaviour.
+
+- `xfail(strict=True)` is the known-defects list. `xfail_strict` is on, so a
+  defect that gets fixed turns the test into an error telling you to delete the
+  marker. Never let it rot.
+- **Assert your fixtures.** Three attempts at an odd-dimensions fixture tested
+  nothing and passed while doing it, because the encoder quietly rounded the
+  size. If a fixture is meant to have an awkward property, check that it has it
+  and skip loudly if not.
+- **Compare paths as `Path`, never as strings.** To POSIX,
+  `C:\Program Files\...` is one long filename, so a string comparison silently
+  never matches and the test passes for the wrong reason.
+- Unit tests need no ffmpeg and no display. Integration tests
+  (`-m integration`) run real ffmpeg and inspect the file that comes out. They
+  exist because eighteen defects were once found in code where **every**
+  argument was correct.
+
+### Do not break these
+
+- **Do not reach for `QtMultimedia`.** Its Windows backend cannot decode HEVC
+  inside MPEG-TS, which is the only format this app exists for. It would pass
+  every test on synthetic footage and fail on every real recording. A test
+  asserts nothing imports it.
+- **Do not change the default colour mode** without re-running
+  `tools/compare_colour.py`. The numbers are in `docs/DEVELOPMENT.md`.
+- **Do not remove the preview's bounded frame queue.** The bound *is* the
+  back-pressure.
+- **Do not call `stop_process` from the UI thread.** It waits twice. Use
+  `request_stop`, which only asks; the worker that owns the process runs the
+  escalation in its own cleanup.
+
+---
+
+## Review checklist
+
+Things that have actually gone wrong in this repository. Check for them.
+
+- [ ] **Does the test fail without the fix?** Several defects were guarded by
+      tests that passed.
+- [ ] **Does a "measured" claim have a number behind it?**
+- [ ] **Mechanical moves:** does anything moved have test coverage on the paths
+      that moved? A missing import in a rarely-run path surfaced as a
+      segmentation fault in Qt, nowhere near its cause.
+- [ ] **Deferred measurement:** widget geometry read in the same handler that
+      changed it is stale. Qt has not laid out yet.
+- [ ] **Cancellation:** can it be stopped, and does stopping it leave nothing
+      half-written? A cancelled job that publishes partial output is worse than
+      one that cannot be cancelled.
+- [ ] **Silent wrongness:** would this fail loudly, or produce a plausible file
+      that is quietly wrong? This footage makes the second easy.
+- [ ] **Both themes**, if it draws anything. `AlternateBase` is eight values
+      from `Window` in the light theme.
+- [ ] **Offscreen rendering is not a screenshot.** That platform has no usable
+      fonts and draws every label as empty boxes. Fine for geometry, useless
+      for anything anyone reads.
+
+---
+
+## Practical
+
+```bash
+pip install -r requirements.txt pytest
+python -m flightdvr                     # run it
+python -m pytest -m "not integration"   # the fast loop, about a second
+python -m pytest                        # everything, about 30 seconds
+```
+
+Commit messages: what changed and **why**, in prose. Include measurements.
+End with:
+
+```
+Co-Authored-By: <your model name> <noreply@anthropic.com>
+```
+
+Licence is GPL v3. Every source file carries the header — copy it into new
+ones. Third-party notices are in `THIRD-PARTY-NOTICES.md` and must stay
+accurate; ffmpeg is bundled on Windows and its corresponding source is pinned
+in `packaging/ffmpeg-build.json`.
