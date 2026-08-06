@@ -212,6 +212,10 @@ TIGHT = 4       # between controls that belong together
 # two clips on a normal window whatever height the list was given.
 MIN_VISIBLE_CLIPS = 4
 
+# Small enough that a narrow window shrinks the picture rather than
+# eliding the clip's name, which is the one thing in the row you need.
+MIN_THUMB_WIDTH = 72
+
 # The clip list never gives up more than this to the picture, however wide the
 # left column is dragged.
 MIN_LIST_HEIGHT = 150
@@ -1608,13 +1612,18 @@ class MainWindow(QMainWindow):
         if not self._ready or self.table.rowCount() == 0:
             return
         available = self.table.columnWidth(0)
-        # Leave room for the filename itself alongside the picture.
-        width = max(96, min(THUMB_WIDTH, available - 120))
+        # Leave room for the filename itself alongside the picture. The reserve
+        # covers the tick box, the cell padding and the name, and the floor is
+        # low enough that a narrow window shrinks the picture rather than
+        # eliding the name — which is the one thing in the row you need, and
+        # which was coming out as "hdz_00…" for every clip.
+        width = max(MIN_THUMB_WIDTH, min(THUMB_WIDTH, available - 150))
 
         viewport = self.table.viewport().height()
         if viewport > 0:
             by_height = max(48, viewport // MIN_VISIBLE_CLIPS - 6)
-            width = max(96, min(width, round(by_height * 16 / 9)))
+            width = max(MIN_THUMB_WIDTH,
+                        min(width, round(by_height * 16 / 9)))
 
         height = round(width * 9 / 16)
         if self.table.iconSize().width() == width:
@@ -1776,7 +1785,11 @@ class MainWindow(QMainWindow):
         self.scan_button.setEnabled(True)
         self.table.setSortingEnabled(True)
         self.table.sortItems(0, Qt.SortOrder.AscendingOrder)
-        self._sync_thumbnail_size()
+        # Deferred, like the other callers: the columns that size to their
+        # contents have not done so yet, so the name column's width is still
+        # whatever it was before there were any rows. Sizing against that left
+        # the thumbnail too wide and every clip listed as "hdz_00…".
+        QTimer.singleShot(0, self._sync_thumbnail_size)
         self._refresh_export_markers()
         self._update_counts()
         if count == 0:
