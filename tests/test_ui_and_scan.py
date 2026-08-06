@@ -772,6 +772,44 @@ def test_stopping_nothing_is_harmless():
     stop_process(None, timeout=0.01)
 
 
+# -- asking, from the thread that has to keep painting ------------------------
+
+def test_asking_a_stubborn_process_to_stop_returns_at_once():
+    """The escalation waits twice — after terminate, then after kill. That is
+    right on a worker thread and a frozen window on the UI one, where
+    cancelling, seeking, changing clip and closing all arrive."""
+    import time
+    from flightdvr.media import request_stop
+
+    proc = FakeProcess(stubborn=True)
+    began = time.monotonic()
+    request_stop(proc)
+    assert time.monotonic() - began < 0.05
+    assert proc.terminated
+    # Not killed here: the worker that owns it does that in its own cleanup.
+    assert not proc.killed
+
+
+def test_asking_nothing_to_stop_is_harmless():
+    from flightdvr.media import request_stop
+    request_stop(None)
+    request_stop(FakeProcess())
+
+
+def test_the_ui_facing_stops_do_not_wait(window):
+    """Every one of these is reached from the UI thread."""
+    import inspect
+    from flightdvr import jobs, player, trim
+
+    for owner, name in ((jobs.ExportWorker, "cancel"),
+                        (player.DecodeWorker, "stop"),
+                        (trim.FilmstripLoader, "stop")):
+        body = inspect.getsource(getattr(owner, name))
+        assert "request_stop" in body, f"{owner.__name__}.{name} does not ask"
+        assert "stop_process" not in body, (
+            f"{owner.__name__}.{name} waits on the UI thread")
+
+
 def test_the_export_worker_uses_the_shared_helper():
     """Two copies of this escalation would drift, and only one of them would
     be the tested one."""
@@ -1376,6 +1414,129 @@ def test_adding_a_job_opens_the_queue(window):
         window.jobs = []
         window._rebuild_queue()
         window.queue_toggle.setChecked(False)
+
+
+# -- filmstrips finishing out of order ----------------------------------------
+
+def test_a_cancelled_extraction_publishes_nothing(tmp_path, monkeypatch):
+    """Terminating ffmpeg makes communicate() return normally, so a cancelled
+    extraction reached the publishing code with whatever frames it had got to.
+    The cache check only counts frames against times, so that truncated
+    filmstrip would then be believed for as long as the cache survived."""
+    from flightdvr import trim as trim_module
+
+    monkeypatch.setattr(trim_module, "cache_root", lambda: tmp_path)
+
+    class HalfDone:
+        """Writes two frames, then is stopped."""
+
+        returncode = -15
+
+        def __init__(self, staging):
+            self.staging = staging
+
+        def communicate(self, timeout=None):
+            for n in range(2):
+                (self.staging / f"f_{n:04d}.jpg").write_bytes(b"jpeg")
+            return "", "pts_time:0.0\npts_time:1.0\n"
+
+    made = {}
+
+    def fake_popen(command, **kwargs):
+        made["staging"] = Path(command[-1]).parent
+        return HalfDone(made["staging"])
+
+    monkeypatch.setattr(trim_module.subprocess, "Popen", fake_popen)
+
+    strip = trim_module.extract(TOOLS, clip(), cancelled=lambda: True)
+    assert not strip, "a cancelled extraction handed back frames"
+    published = [p for p in tmp_path.iterdir() if p.is_dir()]
+    assert not published, f"it left a cache behind: {published}"
+
+
+def test_a_failed_extraction_still_publishes_what_it_got(tmp_path, monkeypatch):
+    """Half a filmstrip of a damaged recording is worth having. Only a stop
+    that was asked for throws the work away."""
+    from flightdvr import trim as trim_module
+
+    monkeypatch.setattr(trim_module, "cache_root", lambda: tmp_path)
+
+    class Partial:
+        returncode = 1
+
+        def __init__(self, staging):
+            self.staging = staging
+
+        def communicate(self, timeout=None):
+            for n in range(2):
+                (self.staging / f"f_{n:04d}.jpg").write_bytes(b"jpeg")
+            return "", "pts_time:0.0\npts_time:1.0\n"
+
+    monkeypatch.setattr(
+        trim_module.subprocess, "Popen",
+        lambda command, **kwargs: Partial(Path(command[-1]).parent))
+
+    strip = trim_module.extract(TOOLS, clip(), cancelled=lambda: False)
+    assert len(strip.frames) == 2
+    assert all(frame.exists() for frame in strip.frames)
+
+def test_a_superseded_filmstrip_is_not_accepted(window):
+    """Select A, then B, then A again: the first extraction of A can finish
+    after the second has started. Same clip path, older frames — and matching
+    on the path alone would have taken them."""
+    from flightdvr.trim import Filmstrip
+
+    info = clip("hdz_077.ts")
+    window.clip_by_path[str(info.path)] = info
+    window._trim_clip = info
+    window._strip_generation = 7
+
+    stale = Filmstrip([Path("old.jpg")], [0.0])
+    window._strip_ready(6, str(info.path), stale)
+    assert window._strip is not stale, "an overtaken extraction was accepted"
+
+    fresh = Filmstrip([Path("new.jpg")], [0.0])
+    window._strip_ready(7, str(info.path), fresh)
+    assert window._strip is fresh
+
+
+def test_changing_clip_stops_the_extraction_it_leaves_behind(window,
+                                                             monkeypatch):
+    """Browsing the list starts a full decode pass per clip, all competing for
+    the same card."""
+    stopped = []
+
+    class Signalish:
+        def connect(self, _slot):
+            pass
+
+    class Fake:
+        def __init__(self, *_args, **_kwargs):
+            self.generation = 0
+            self.ready = Signalish()
+
+        def isRunning(self):
+            return True
+
+        def start(self):
+            pass
+
+        def stop(self):
+            stopped.append(True)
+
+        def wait(self, _ms=0):
+            return True
+
+    window._strip_loader = Fake()
+    window._trim_clip = None
+    info = clip("hdz_078.ts")
+    window.clip_by_path[str(info.path)] = info
+    monkeypatch.setattr(window, "_highlighted_clip", lambda: info)
+    monkeypatch.setattr("flightdvr.ui.FilmstripLoader",
+                        lambda *a, **k: Fake())
+
+    window._load_selected_clip()
+    assert stopped, "the previous extraction was left running"
 
 
 def test_the_about_box_links_to_the_source(window):

@@ -57,7 +57,9 @@ from PySide6.QtCore import QObject, QRect, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPalette
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-from .media import NO_WINDOW, ClipInfo, Tools, frame_rate_mode, stop_process
+from .media import (
+    NO_WINDOW, ClipInfo, Tools, frame_rate_mode, request_stop, stop_process,
+)
 
 # Frame sizes offered to the view. Every width gives a row of bytes divisible
 # by four, which keeps QImage's scanline alignment happy without padding.
@@ -303,9 +305,13 @@ class DecodeWorker(QThread):
         seen. Closing ffmpeg's end of the pipe is what makes that read return.
         Order matters: flag first, then the process, or the thread can start
         another read after the process is gone.
+
+        Asks without waiting, because seeking, changing clip, Escape and
+        closing all arrive here on the UI thread. The bounded wait and the
+        kill escalation happen in run()'s own cleanup, on this thread.
         """
         self._cancel = True
-        stop_process(self._process)
+        request_stop(self._process)
 
     def run(self) -> None:  # noqa: D102  (QThread entry point)
         command = build_command(self.tools, self.clip, self.start_at,
