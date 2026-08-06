@@ -30,10 +30,12 @@ from datetime import date, datetime
 from pathlib import Path
 
 from PySide6.QtCore import (
-    QDate, QSettings, QSize, Qt, QThread, QTimer, Signal,
+    QDate, QPoint, QRect, QRectF, QSettings, QSize, Qt, QThread, QTimer,
+    Signal,
 )
 from PySide6.QtGui import (
-    QColor, QIcon, QImage, QKeySequence, QPalette, QPixmap, QShortcut,
+    QColor, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPalette,
+    QPen, QPixmap, QShortcut,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
@@ -213,6 +215,73 @@ MIN_VISIBLE_CLIPS = 4
 # The clip list never gives up more than this to the picture, however wide the
 # left column is dragged.
 MIN_LIST_HEIGHT = 150
+
+
+class FramedBody(QWidget):
+    """The window's body, which also draws the surface under the preview.
+
+    The preview sits in the left column and the filmstrip spans the window, so
+    the region they make together is stepped and no Qt frame will draw it. This
+    paints it: the union of two rounded rectangles, which rounds the outer
+    corners and welds the step for free rather than plotting six corners and
+    their arcs by hand.
+
+    Painted by the parent rather than by a widget of its own, which is how it
+    was tried first. A child outside the layout has to be told where to be, and
+    being told is how it ends up in the wrong place — it was reported
+    overlapping things and leaving holes until the window was resized. A
+    parent's paintEvent runs before its children, with their geometry already
+    settled, so the shape here cannot be stale by construction.
+    """
+
+    RADIUS = 6
+    # The two rectangles overlap by this much before being unioned, so the seam
+    # between them closes and the inner corner rounds itself.
+    WELD = 12
+    # Outward, so the outline lands in the gap around the two widgets rather
+    # than through the edge of the picture.
+    PAD = 3
+
+    def __init__(self):
+        super().__init__()
+        self.top: QWidget | None = None
+        self.bottom: QWidget | None = None
+
+    def _shape(self) -> QPainterPath | None:
+        if self.top is None or self.bottom is None:
+            return None
+        if not self.top.isVisible() or self.top.width() < 2:
+            return None
+        pad = self.PAD
+        top = QRect(self.top.mapTo(self, QPoint(0, 0)), self.top.size())
+        bottom = QRect(self.bottom.mapTo(self, QPoint(0, 0)),
+                       self.bottom.size())
+        top = top.adjusted(-pad, -pad, pad, pad + self.WELD)
+        bottom = bottom.adjusted(-pad, -pad - self.WELD, pad, pad)
+
+        def rounded(rect: QRect) -> QPainterPath:
+            # Half a pixel in, or a one-pixel pen straddles the boundary, half
+            # of it gets clipped and the rest antialiases into nothing.
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5),
+                                self.RADIUS, self.RADIUS)
+            return path
+
+        return rounded(top).united(rounded(bottom))
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().paintEvent(event)
+        shape = self._shape()
+        if shape is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        palette = self.palette()
+        # Base rather than AlternateBase: the latter is eight values away from
+        # Window in the light theme, which is not a surface, it is a rumour.
+        painter.fillPath(shape, palette.color(QPalette.ColorRole.Base))
+        painter.strokePath(shape, QPen(palette.color(QPalette.ColorRole.Mid), 1))
+        painter.end()
 
 
 class PreviewPanel(QWidget):
@@ -590,7 +659,7 @@ class MainWindow(QMainWindow):
     # -- construction ---------------------------------------------------------
 
     def _build(self) -> None:
-        central = QWidget()
+        central = self.body = FramedBody()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
         outer.setContentsMargins(EDGE, EDGE, EDGE, EDGE)
@@ -640,6 +709,11 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._build_trim_band())
         outer.addSpacing(GAP - INNER)
         outer.addWidget(self._build_queue())
+
+        # Last, once both exist. The body draws the surface they sit on.
+        central.top = self.preview_box
+        central.bottom = self.trim_band
+
         self._install_shortcuts()
         self.statusBar().showMessage(f"{APP_TAGLINE}   ·   ffmpeg: {self.tools.ffmpeg}")
 
@@ -1428,6 +1502,9 @@ class MainWindow(QMainWindow):
         self.queue_body.setVisible(open_)
         self.queue_toggle.setArrowType(
             Qt.ArrowType.DownArrow if open_ else Qt.ArrowType.RightArrow)
+        # Everything above the queue moves, so the surface behind the
+        # preview is redrawn rather than left where it was.
+        QTimer.singleShot(0, self.body.update)
 
     def _open_queue(self) -> None:
         if not self.queue_toggle.isChecked():
@@ -1559,6 +1636,7 @@ class MainWindow(QMainWindow):
         # stop being. Sizing thumbnails against that gave rows too tall for the
         # list they ended up in. The frame is deferred for the same reason.
         QTimer.singleShot(0, self._sync_thumbnail_size)
+        self.body.update()
 
     def _sync_thumbnail_size(self) -> None:
         """Fit the thumbnails to the space the list actually has.

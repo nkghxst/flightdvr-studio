@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, QRect, QRectF
 
 # Must be set before any QApplication exists, so these tests need no display.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -1377,6 +1377,42 @@ def test_adding_a_job_opens_the_queue(window):
         window.jobs = []
         window._rebuild_queue()
         window.queue_toggle.setChecked(False)
+
+
+def test_the_surface_follows_the_two_widgets_it_sits_under(window, qt_app):
+    """Drawn by the body at paint time rather than by a widget of its own.
+
+    The first attempt was a child outside the layout that had to be told where
+    to be, and it was reported overlapping things and leaving holes. This
+    asserts the shape is still derived from live geometry: it has to change
+    when the queue opens and moves everything above it.
+    """
+    body = window.body
+    window.queue_toggle.setChecked(False)
+    qt_app.processEvents()
+    closed = body._shape().boundingRect()
+
+    window.queue_toggle.setChecked(True)
+    qt_app.processEvents()
+    opened = body._shape().boundingRect()
+
+    assert closed != opened, "the surface did not notice the queue opening"
+    for shape, label in ((closed, "closed"), (opened, "opened")):
+        assert shape.width() > window.preview_box.width(), label
+        assert shape.height() > window.preview_box.height(), label
+
+    window.queue_toggle.setChecked(False)
+    qt_app.processEvents()
+
+
+def test_the_surface_covers_both_the_preview_and_the_filmstrip(window, qt_app):
+    body = window.body
+    qt_app.processEvents()
+    shape = body._shape()
+    for widget in (window.preview_box, window.trim_band):
+        rect = QRect(widget.mapTo(body, QPoint(0, 0)), widget.size())
+        assert shape.contains(QRectF(rect)), (
+            f"{widget.objectName() or type(widget).__name__} is not covered")
 
 
 def test_toggling_the_queue_leaves_every_panel_intact(window, qt_app):
