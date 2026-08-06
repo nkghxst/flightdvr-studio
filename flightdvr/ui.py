@@ -715,13 +715,20 @@ class MainWindow(QMainWindow):
         self.update_bar.show()
 
     def _show_about(self) -> None:
+        self._build_about_box().exec()
+
+    def _build_about_box(self) -> QMessageBox:
         """The legal notice GPL v3 section 5(d) asks an interactive program to show.
 
         It has to state the copyright, disclaim warranty, say the work may be
         redistributed under the licence, and say how to read the licence.
+
+        Built here and shown by the caller, so a test can read what it says
+        without a modal dialog to dismiss.
         """
         from . import __version__
         from .media import is_bundled, packaged_file
+        from .updates import PROJECT_PAGE
 
         # Each package format puts the licence somewhere different, and only
         # the Windows installer carries its own ffmpeg. Saying otherwise in a
@@ -751,9 +758,20 @@ class MainWindow(QMainWindow):
             f"{ffmpeg_line} Qt's own licence is in "
             "<code>LICENSE.LGPL-3.0.txt</code>. See THIRD-PARTY-NOTICES.md for "
             "versions, origins and the offer of source.<br><br>"
+            # The source itself, which is the thing the licence above is
+            # promising. A notice that says you may redistribute the program
+            # is more use when it also says where the program is.
+            f"Source, releases and issues: <a href='{PROJECT_PAGE}'>"
+            "github.com/nkghxst/flightdvr-studio</a><br><br>"
             "Not affiliated with or endorsed by HDZero."
         )
         box.setTextFormat(Qt.TextFormat.RichText)
+        # A link nothing opens is decoration. QMessageBox does not turn this on
+        # for you, so the gnu.org link above has never done anything either.
+        for label in box.findChildren(QLabel):
+            label.setOpenExternalLinks(True)
+            label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextBrowserInteraction)
 
         # The only network access this program makes, so the switch for it
         # belongs next to the statement of what the program is.
@@ -770,7 +788,7 @@ class MainWindow(QMainWindow):
             lambda on: self.settings_store.setValue("check_for_updates", on)
         )
         box.setCheckBox(updates)
-        box.exec()
+        return box
 
     def _install_shortcuts(self) -> None:
         """Keyboard equivalents for the things you do on every card."""

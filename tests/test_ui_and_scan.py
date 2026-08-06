@@ -1377,6 +1377,34 @@ def test_adding_a_job_opens_the_queue(window):
         window.queue_toggle.setChecked(False)
 
 
+def test_the_about_box_links_to_the_source(window):
+    """The licence says you may redistribute the program. It is more use when
+    it also says where the program is."""
+    from flightdvr.updates import PROJECT_PAGE
+
+    box = window._build_about_box()
+    try:
+        text = box.informativeText()
+        assert PROJECT_PAGE in text
+        assert f"href='{PROJECT_PAGE}'" in text or f'href="{PROJECT_PAGE}"' in text
+    finally:
+        box.deleteLater()
+
+
+def test_the_about_box_links_actually_open(window):
+    """QMessageBox does not turn this on for you, so the gnu.org link that has
+    been in here since 1.1.1 never did anything when clicked."""
+    from PySide6.QtWidgets import QLabel
+
+    box = window._build_about_box()
+    try:
+        labels = box.findChildren(QLabel)
+        assert labels
+        assert all(label.openExternalLinks() for label in labels)
+    finally:
+        box.deleteLater()
+
+
 def test_the_preview_and_the_filmstrip_each_have_their_own_box(window):
     """One frame around both was tried twice — a child widget outside the
     layout, then something the body painted — and neither read as well as the
