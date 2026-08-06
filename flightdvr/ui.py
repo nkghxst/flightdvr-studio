@@ -217,87 +217,32 @@ MIN_VISIBLE_CLIPS = 4
 MIN_LIST_HEIGHT = 150
 
 
-class FramedBody(QWidget):
-    """The window's body, which also draws the surface under the preview.
+def _default_window_size() -> tuple[int, int]:
+    """How big to open when there is no remembered size.
 
-    The preview sits in the left column and the filmstrip spans the window, so
-    the region they make together is stepped and no Qt frame will draw it. This
-    paints it: the union of two rounded rectangles, which rounds the outer
-    corners and welds the step for free rather than plotting six corners and
-    their arcs by hand.
-
-    Painted by the parent rather than by a widget of its own, which is how it
-    was tried first. A child outside the layout has to be told where to be, and
-    being told is how it ends up in the wrong place — it was reported
-    overlapping things and leaving holes until the window was resized. A
-    parent's paintEvent runs before its children, with their geometry already
-    settled, so the shape here cannot be stale by construction.
+    Tall and fairly narrow: the clip list, the picture and the filmstrip are
+    stacked, so height is what the window wants and width past the point the
+    picture fills is spent on the export column. Clamped to the screen,
+    because a default taller than the desktop opens with its bottom edge and
+    the Add to queue button off the end of it.
     """
-
-    RADIUS = 6
-    # The two rectangles overlap by this much before being unioned, so the seam
-    # between them closes and the inner corner rounds itself.
-    WELD = 12
-    # Outward, so the outline lands in the gap around the two widgets rather
-    # than through the edge of the picture.
-    PAD = 3
-
-    def __init__(self):
-        super().__init__()
-        self.top: QWidget | None = None
-        self.bottom: QWidget | None = None
-
-    def _shape(self) -> QPainterPath | None:
-        if self.top is None or self.bottom is None:
-            return None
-        if not self.top.isVisible() or self.top.width() < 2:
-            return None
-        pad = self.PAD
-        top = QRect(self.top.mapTo(self, QPoint(0, 0)), self.top.size())
-        bottom = QRect(self.bottom.mapTo(self, QPoint(0, 0)),
-                       self.bottom.size())
-        top = top.adjusted(-pad, -pad, pad, pad + self.WELD)
-        bottom = bottom.adjusted(-pad, -pad - self.WELD, pad, pad)
-
-        def rounded(rect: QRect) -> QPainterPath:
-            # Half a pixel in, or a one-pixel pen straddles the boundary, half
-            # of it gets clipped and the rest antialiases into nothing.
-            path = QPainterPath()
-            path.addRoundedRect(QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5),
-                                self.RADIUS, self.RADIUS)
-            return path
-
-        return rounded(top).united(rounded(bottom))
-
-    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
-        super().paintEvent(event)
-        shape = self._shape()
-        if shape is None:
-            return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        palette = self.palette()
-        # Base rather than AlternateBase: the latter is eight values away from
-        # Window in the light theme, which is not a surface, it is a rumour.
-        painter.fillPath(shape, palette.color(QPalette.ColorRole.Base))
-        painter.strokePath(shape, QPen(palette.color(QPalette.ColorRole.Mid), 1))
-        painter.end()
+    wanted = (1060, 1300)
+    screen = QApplication.primaryScreen()
+    if screen is None:
+        return wanted
+    available = screen.availableGeometry()
+    return (min(wanted[0], available.width() - 40),
+            min(wanted[1], available.height() - 60))
 
 
-class PreviewPanel(QWidget):
+class PreviewPanel(QGroupBox):
     """The preview, as tall as its picture can fill and no taller.
 
-    Not a titled group box, and neither is the filmstrip below it. They are one
-    thing — a picture and the strip you scrub it with — and a frame around each
-    says they are two. The clip list above them has no frame either, so the
-    whole left column reads as one column rather than a stack of panels. The
-    export settings on the right keep theirs, because those genuinely are
-    separate groups of unrelated switches.
-
-    One frame around both was tried and taken out again. Qt has no L-shaped
-    frame, so it had to be a widget outside the layout overlapping its own
-    siblings, and a widget outside the layout is a widget that can be in the
-    wrong place. Proximity groups them well enough.
+    A titled group box, and so is the filmstrip beneath it. One frame around
+    both was tried twice — as a child widget outside the layout, and as
+    something the window's body painted — because the two really are one thing
+    and a frame around each says they are two. Neither read as well as the
+    plain boxes, and the first one drew in the wrong place. Two frames it is.
 
     A 16:9 frame in a box of any other shape letterboxes: past `width / aspect`
     every extra pixel of height is a black bar, and short of it every missing
@@ -311,8 +256,8 @@ class PreviewPanel(QWidget):
     look at. Widening the left column is what makes the picture bigger.
     """
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, title: str):
+        super().__init__(title)
         self.view: FrameView | None = None
         self.sidebar: QWidget | None = None
 
@@ -638,7 +583,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
-        self.resize(1240, 900)
+        self.resize(*_default_window_size())
         self._build()
         self._restore()
         self._ready = True
@@ -659,7 +604,7 @@ class MainWindow(QMainWindow):
     # -- construction ---------------------------------------------------------
 
     def _build(self) -> None:
-        central = self.body = FramedBody()
+        central = QWidget()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
         outer.setContentsMargins(EDGE, EDGE, EDGE, EDGE)
@@ -709,11 +654,6 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._build_trim_band())
         outer.addSpacing(GAP - INNER)
         outer.addWidget(self._build_queue())
-
-        # Last, once both exist. The body draws the surface they sit on.
-        central.top = self.preview_box
-        central.bottom = self.trim_band
-
         self._install_shortcuts()
         self.statusBar().showMessage(f"{APP_TAGLINE}   ·   ffmpeg: {self.tools.ffmpeg}")
 
@@ -991,9 +931,9 @@ class MainWindow(QMainWindow):
         ticks a box to find out what is behind it, so the feature this app
         exists for was hidden from everyone who had not been told about it.
         """
-        box = self.preview_box = PreviewPanel()
+        box = self.preview_box = PreviewPanel("Preview and trim")
         layout = QHBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(INNER, TIGHT, INNER, INNER)
         layout.setSpacing(INNER)
 
         self.frame_view = FrameView()
@@ -1106,9 +1046,9 @@ class MainWindow(QMainWindow):
         which is the difference when you are dragging an out point onto a
         particular moment.
         """
-        band = self.trim_band = QWidget()
+        band = self.trim_band = QGroupBox("Filmstrip")
         layout = QVBoxLayout(band)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(INNER, TIGHT, INNER, INNER)
 
         self.trim_bar = TrimBar()
         self.trim_bar.setToolTip(
@@ -1502,9 +1442,6 @@ class MainWindow(QMainWindow):
         self.queue_body.setVisible(open_)
         self.queue_toggle.setArrowType(
             Qt.ArrowType.DownArrow if open_ else Qt.ArrowType.RightArrow)
-        # Everything above the queue moves, so the surface behind the
-        # preview is redrawn rather than left where it was.
-        QTimer.singleShot(0, self.body.update)
 
     def _open_queue(self) -> None:
         if not self.queue_toggle.isChecked():
@@ -1636,7 +1573,6 @@ class MainWindow(QMainWindow):
         # stop being. Sizing thumbnails against that gave rows too tall for the
         # list they ended up in. The frame is deferred for the same reason.
         QTimer.singleShot(0, self._sync_thumbnail_size)
-        self.body.update()
 
     def _sync_thumbnail_size(self) -> None:
         """Fit the thumbnails to the space the list actually has.

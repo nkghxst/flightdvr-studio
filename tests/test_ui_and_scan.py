@@ -1274,18 +1274,16 @@ def test_the_filmstrip_comes_before_the_queue(window):
 
 @pytest.mark.parametrize("width", [700, 900, 1200])
 def test_the_preview_is_as_tall_as_its_picture_can_fill(window, width):
-    """No taller, or the extra is a black bar the clip list wanted; no
-    shorter, or the picture loses width it could have had."""
+    """Every extra pixel of width buys 1/aspect pixels of height and nothing
+    else. Asserting the slope rather than the number, because the number also
+    contains whatever the style charges for a group box's title and frame."""
     panel = window.preview_box
-    panel.resize(width, panel.height())
-    wanted = panel.useful_height(width)
-    sidebar = window.preview_sidebar.sizeHint()
-
-    for_picture = width - sidebar.width() - 24
-    expected = round(for_picture / window.frame_view.aspect)
-    assert wanted >= sidebar.height(), "the sidebar buttons would be clipped"
-    # Within the group box's own chrome, which is measured rather than assumed.
-    assert abs(wanted - expected) < 60
+    grew = 160
+    base = panel.useful_height(width)
+    wider = panel.useful_height(width + grew)
+    assert wider - base == pytest.approx(grew / window.frame_view.aspect, abs=2)
+    # And never so short that the sidebar's buttons get clipped off.
+    assert base >= window.preview_sidebar.sizeHint().height()
 
 
 def test_a_four_by_three_clip_gets_a_taller_box_than_a_widescreen_one(window):
@@ -1379,40 +1377,29 @@ def test_adding_a_job_opens_the_queue(window):
         window.queue_toggle.setChecked(False)
 
 
-def test_the_surface_follows_the_two_widgets_it_sits_under(window, qt_app):
-    """Drawn by the body at paint time rather than by a widget of its own.
+def test_the_preview_and_the_filmstrip_each_have_their_own_box(window):
+    """One frame around both was tried twice — a child widget outside the
+    layout, then something the body painted — and neither read as well as the
+    two plain boxes. This keeps them from quietly disappearing again."""
+    from PySide6.QtWidgets import QGroupBox
 
-    The first attempt was a child outside the layout that had to be told where
-    to be, and it was reported overlapping things and leaving holes. This
-    asserts the shape is still derived from live geometry: it has to change
-    when the queue opens and moves everything above it.
-    """
-    body = window.body
-    window.queue_toggle.setChecked(False)
-    qt_app.processEvents()
-    closed = body._shape().boundingRect()
-
-    window.queue_toggle.setChecked(True)
-    qt_app.processEvents()
-    opened = body._shape().boundingRect()
-
-    assert closed != opened, "the surface did not notice the queue opening"
-    for shape, label in ((closed, "closed"), (opened, "opened")):
-        assert shape.width() > window.preview_box.width(), label
-        assert shape.height() > window.preview_box.height(), label
-
-    window.queue_toggle.setChecked(False)
-    qt_app.processEvents()
+    assert isinstance(window.preview_box, QGroupBox)
+    assert window.preview_box.title() == "Preview and trim"
+    assert isinstance(window.trim_band, QGroupBox)
+    assert window.trim_band.title() == "Filmstrip"
+    assert not window.preview_box.isCheckable(), "not behind a tickbox again"
 
 
-def test_the_surface_covers_both_the_preview_and_the_filmstrip(window, qt_app):
-    body = window.body
-    qt_app.processEvents()
-    shape = body._shape()
-    for widget in (window.preview_box, window.trim_band):
-        rect = QRect(widget.mapTo(body, QPoint(0, 0)), widget.size())
-        assert shape.contains(QRectF(rect)), (
-            f"{widget.objectName() or type(widget).__name__} is not covered")
+def test_the_window_opens_no_bigger_than_the_screen(qt_app):
+    """A default taller than the desktop opens with the Add to queue button
+    off the bottom of it."""
+    from PySide6.QtWidgets import QApplication
+    from flightdvr.ui import _default_window_size
+
+    width, height = _default_window_size()
+    available = QApplication.primaryScreen().availableGeometry()
+    assert width <= available.width()
+    assert height <= available.height()
 
 
 def test_toggling_the_queue_leaves_every_panel_intact(window, qt_app):
