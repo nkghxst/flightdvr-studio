@@ -191,11 +191,11 @@ default order is by clip name, which is the DVR's own counter and the only
 reliable record of the order things were filmed in — see
 [the clock problem](#the-goggles-cannot-keep-time).
 
-**Open in player…** hands the highlighted clip to your usual video player, and
-double-clicking a row does the same. VLC or mpv is used when either is
-installed, because Windows registers `.ts` to Media Player, which opens the file
-and then often cannot decode the video inside. To watch a clip without leaving
-the app, use the preview below the list instead.
+Double-clicking a row plays it in the preview below the list. **Open in
+player…** hands the highlighted clip to your usual video player instead, for
+when you want a full screen or a scrubbing bar of your own. VLC or mpv is used
+when either is installed, because Windows registers `.ts` to Media Player,
+which opens the file and then often cannot decode the video inside.
 
 Clips that already have an export for the current preset are marked
 **✓ exported**, so on a full card you can see at a glance what is left to do.
@@ -344,7 +344,7 @@ time, weighted by footage length rather than job count.
 | `F9` | Start the export |
 | `Delete` | Remove the selected rows from the queue |
 | `Space` | Tick or untick the highlighted clip |
-| Double-click | A clip opens it in your player; a finished queue row opens the result |
+| Double-click | A clip plays it in the preview; a finished queue row opens the result |
 
 With the preview picture focused — click it, or press `Ctrl` `P` — these apply
 instead, and `Space` plays rather than ticking:

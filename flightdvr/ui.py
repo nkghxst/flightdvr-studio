@@ -30,10 +30,12 @@ from datetime import date, datetime
 from pathlib import Path
 
 from PySide6.QtCore import (
-    QDate, QSettings, QSize, Qt, QThread, QTimer, Signal,
+    QDate, QPoint, QRect, QRectF, QSettings, QSize, Qt, QThread, QTimer,
+    Signal,
 )
 from PySide6.QtGui import (
-    QColor, QIcon, QImage, QKeySequence, QPalette, QPixmap, QShortcut,
+    QColor, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPalette,
+    QPen, QPixmap, QShortcut,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
@@ -196,6 +198,15 @@ PLAYER_PATHS = [
 # macOS has no xdg-open. `open` is the equivalent and resolves app bundles.
 DESKTOP_OPEN = "open" if sys.platform == "darwin" else "xdg-open"
 
+# Every gap in the window is one of these four, and which one says how related
+# the two things either side of it are. Before this they were a dozen different
+# literals chosen a panel at a time, so the spacing varied in ways that meant
+# nothing and grouped nothing.
+EDGE = 10       # the window's own margin
+GAP = 12        # between regions that have nothing to do with each other
+INNER = 6       # between parts of one region
+TIGHT = 4       # between controls that belong together
+
 # How many clips the list should manage to show before thumbnails start giving
 # up size for it. Sized on width alone the rows came out 141 px tall, which is
 # two clips on a normal window whatever height the list was given.
@@ -204,6 +215,83 @@ MIN_VISIBLE_CLIPS = 4
 # The clip list never gives up more than this to the picture, however wide the
 # left column is dragged.
 MIN_LIST_HEIGHT = 150
+
+
+class RegionFrame(QWidget):
+    """One surface behind two widgets of different widths.
+
+    The preview sits in the left column and the filmstrip spans the window, so
+    the region they make together is stepped rather than rectangular and no Qt
+    frame will draw it. This paints it: the union of two rounded rectangles,
+    which gets the outer corners rounded and the step joined for free rather
+    than by plotting six corners and their arcs by hand.
+
+    It lives behind everything and takes no mouse events, so it can only ever
+    change how the window looks. What it must not do is drift — a frame a few
+    pixels out from what it is framing reads as a bug — so `follow` is called
+    from every one of the four things that move either widget.
+    """
+
+    RADIUS = 6
+    # The two rectangles are overlapped by this much before being unioned, so
+    # the seam between them closes and the inner corner rounds itself.
+    WELD = RADIUS * 2
+
+    def __init__(self, parent: QWidget, top: QWidget, bottom: QWidget):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._top = top
+        self._bottom = bottom
+        self.lower()
+
+    def follow(self) -> None:
+        """Sit exactly over the two widgets, whatever they have just done."""
+        parent = self.parentWidget()
+        if parent is None or not self._top.isVisible():
+            return
+        top = QRect(self._top.mapTo(parent, QPoint(0, 0)), self._top.size())
+        bottom = QRect(self._bottom.mapTo(parent, QPoint(0, 0)),
+                       self._bottom.size())
+        union = top.united(bottom)
+        if self.geometry() != union:
+            self.setGeometry(union)
+        self.lower()
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        origin = self.mapTo(parent, QPoint(0, 0))
+        top = QRect(self._top.mapTo(parent, QPoint(0, 0)),
+                    self._top.size()).translated(-origin)
+        bottom = QRect(self._bottom.mapTo(parent, QPoint(0, 0)),
+                       self._bottom.size()).translated(-origin)
+        top.adjust(0, 0, 0, self.WELD)
+        bottom.adjust(0, -self.WELD, 0, 0)
+
+        # Half a pixel in from the edges, or a one-pixel pen centred on the
+        # boundary has half of itself clipped away and antialiases the rest
+        # into nothing. The outline was invisible until this was inset.
+        inset = QRectF(0.5, 0.5, -0.5, -0.5)
+
+        def rounded(rect: QRect) -> QPainterPath:
+            box = QRectF(rect).adjusted(inset.x(), inset.y(),
+                                        inset.width(), inset.height())
+            path = QPainterPath()
+            path.addRoundedRect(box, self.RADIUS, self.RADIUS)
+            return path
+
+        shape = rounded(top).united(rounded(bottom))
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        palette = self.palette()
+        # Base rather than AlternateBase: the latter is eight values away from
+        # Window in the light theme, which is not a surface, it is a rumour.
+        painter.fillPath(shape, palette.color(QPalette.ColorRole.Base))
+        painter.strokePath(shape, QPen(palette.color(QPalette.ColorRole.Mid), 1))
+        painter.end()
 
 
 class PreviewPanel(QWidget):
@@ -227,6 +315,10 @@ class PreviewPanel(QWidget):
     why there is no splitter here: a handle could only choose how much black to
     look at. Widening the left column is what makes the picture bigger.
     """
+
+    # Emitted when this has decided its own height, because it does that in
+    # response to its own width and the window never otherwise finds out.
+    resized = Signal()
 
     def __init__(self):
         super().__init__()
@@ -275,6 +367,7 @@ class PreviewPanel(QWidget):
             wanted = min(wanted, max(1, parent.height() - MIN_LIST_HEIGHT))
         if self.height() != wanted:
             self.setFixedHeight(wanted)
+        self.resized.emit()
 
 
 def find_player() -> Path | None:
@@ -579,8 +672,8 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
-        outer.setContentsMargins(10, 10, 10, 10)
-        outer.setSpacing(6)
+        outer.setContentsMargins(EDGE, EDGE, EDGE, EDGE)
+        outer.setSpacing(INNER)
 
         outer.addWidget(self._build_update_bar())
         outer.addLayout(self._build_source_bar())
@@ -624,8 +717,16 @@ class MainWindow(QMainWindow):
         # filmstrip are one thing and the queue is another. Tight above the
         # filmstrip, loose above the queue.
         outer.addWidget(self._build_trim_band())
-        outer.addSpacing(8)
+        outer.addSpacing(GAP - INNER)
         outer.addWidget(self._build_queue())
+
+        # Last, so both widgets exist. It parents to the central widget rather
+        # than to either of them, because the region it draws belongs to
+        # neither: half of it is in the left column and half spans the window.
+        self.region_frame = RegionFrame(central, self.preview_box,
+                                        self.trim_band)
+        self.preview_box.resized.connect(self.region_frame.follow)
+
         self._install_shortcuts()
         self.statusBar().showMessage(f"{APP_TAGLINE}   ·   ffmpeg: {self.tools.ffmpeg}")
 
@@ -638,8 +739,8 @@ class MainWindow(QMainWindow):
         bar = self.update_bar = QWidget()
         bar.hide()
         row = QHBoxLayout(bar)
-        row.setContentsMargins(8, 4, 4, 4)
-        row.setSpacing(8)
+        row.setContentsMargins(INNER, TIGHT, TIGHT, TIGHT)
+        row.setSpacing(INNER)
 
         self.update_label = QLabel("")
         self.update_label.setOpenExternalLinks(True)
@@ -835,8 +936,7 @@ class MainWindow(QMainWindow):
         self.preview_button = QPushButton("Open in player…")
         self.preview_button.setToolTip(
             "Hand the highlighted clip to your usual video player.\n"
-            "Double-clicking a row does the same thing.\n"
-            "To watch it here instead, use Play below."
+            "Double-clicking a row plays it here instead."
         )
         self.preview_button.clicked.connect(self._preview_selected)
         header.addWidget(self.preview_button)
@@ -873,7 +973,7 @@ class MainWindow(QMainWindow):
         head.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         head.setToolTip("Click a column heading to sort by it")
         self.table.itemChanged.connect(self._on_item_changed)
-        self.table.itemDoubleClicked.connect(self._preview_item)
+        self.table.itemDoubleClicked.connect(self._play_item)
         self.table.itemSelectionChanged.connect(self._on_clip_selected)
         layout.addWidget(self.table, 1)
         return box
@@ -890,7 +990,7 @@ class MainWindow(QMainWindow):
         column = QWidget()
         layout = QVBoxLayout(column)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setSpacing(INNER)
         table = self._build_clip_table()
         table.setMinimumHeight(MIN_LIST_HEIGHT)
         layout.addWidget(table, 1)
@@ -906,8 +1006,10 @@ class MainWindow(QMainWindow):
         """
         box = self.preview_box = PreviewPanel()
         layout = QHBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        # Inset, so the frame drawn around this region has somewhere to go
+        # without the outline running under the edge of the picture.
+        layout.setContentsMargins(INNER, INNER, INNER, INNER)
+        layout.setSpacing(INNER)
 
         self.frame_view = FrameView()
         self.frame_view.clicked.connect(self._focus_player)
@@ -927,7 +1029,7 @@ class MainWindow(QMainWindow):
         side.setFixedWidth(190)
         column = QVBoxLayout(side)
         column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(4)
+        column.setSpacing(TIGHT)
         column.addStretch(1)
 
         # The name and the position are separate labels because the position
@@ -942,7 +1044,26 @@ class MainWindow(QMainWindow):
 
         self.trim_summary = dim(QLabel(""))
         column.addWidget(self.trim_summary)
-        column.addSpacing(10)
+        column.addSpacing(INNER)
+
+        # What you are looking at, which until now was only readable as columns
+        # in the list. These change once a clip, so they are set where the clip
+        # is loaded rather than in _update_trim_labels, which runs on every
+        # painted frame.
+        self.clip_format = dim(QLabel(""))
+        self.clip_format.setToolTip("Resolution, frame rate and codec")
+        column.addWidget(self.clip_format)
+
+        self.clip_size = dim(QLabel(""))
+        column.addWidget(self.clip_size)
+
+        self.clip_date = dim(QLabel(""))
+        self.clip_date.setToolTip(
+            "The timestamp on the card, not when you flew. The Box Pro has no "
+            "clock battery, so these are unreliable."
+        )
+        column.addWidget(self.clip_date)
+        column.addSpacing(GAP)
 
         self.play_button = QPushButton("Play")
         self.play_button.setToolTip(
@@ -997,9 +1118,9 @@ class MainWindow(QMainWindow):
         which is the difference when you are dragging an out point onto a
         particular moment.
         """
-        band = QWidget()
+        band = self.trim_band = QWidget()
         layout = QVBoxLayout(band)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(INNER, INNER, INNER, INNER)
 
         self.trim_bar = TrimBar()
         self.trim_bar.setToolTip(
@@ -1122,7 +1243,7 @@ class MainWindow(QMainWindow):
         """
         box = QWidget()
         layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 6, 0, 0)
+        layout.setContentsMargins(0, INNER, 0, 0)
 
         self.estimate_label = QLabel()
         self.estimate_label.setWordWrap(True)
@@ -1303,7 +1424,7 @@ class MainWindow(QMainWindow):
         box = QWidget()
         outer = QVBoxLayout(box)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(4)
+        outer.setSpacing(TIGHT)
 
         header = QHBoxLayout()
         self.queue_toggle = QToolButton()
@@ -1326,7 +1447,7 @@ class MainWindow(QMainWindow):
         self.overall_label = QLabel("")
         self.overall_label.setMinimumWidth(210)
         header.addWidget(self.overall_label)
-        header.addSpacing(12)
+        header.addSpacing(GAP)
 
         # These two stay on the header rather than inside the body. They are
         # the reason the whole panel cannot simply be hidden: About carries the
@@ -1393,6 +1514,9 @@ class MainWindow(QMainWindow):
         self.queue_body.setVisible(open_)
         self.queue_toggle.setArrowType(
             Qt.ArrowType.DownArrow if open_ else Qt.ArrowType.RightArrow)
+        # Opening the queue pushes everything above it up, so the frame has to
+        # be told. Deferred: the layout has not moved anything yet.
+        QTimer.singleShot(0, self.region_frame.follow)
 
     def _open_queue(self) -> None:
         if not self.queue_toggle.isChecked():
@@ -1522,8 +1646,9 @@ class MainWindow(QMainWindow):
         # Deferred, because the preview's height is settled by Qt's layout pass
         # and the clip list's viewport still reports the size it is about to
         # stop being. Sizing thumbnails against that gave rows too tall for the
-        # list they ended up in.
+        # list they ended up in. The frame is deferred for the same reason.
         QTimer.singleShot(0, self._sync_thumbnail_size)
+        QTimer.singleShot(0, self.region_frame.follow)
 
     def _sync_thumbnail_size(self) -> None:
         """Fit the thumbnails to the space the list actually has.
@@ -1928,6 +2053,13 @@ class MainWindow(QMainWindow):
             return
 
         self._trim_clip = clip
+        # Static for as long as this clip is the one loaded, so it is written
+        # here rather than alongside the playhead.
+        self.clip_format.setText(clip.format_label)
+        self.clip_format.setToolTip(clip.format_detail)
+        self.clip_size.setText(clip.size_label)
+        self.clip_date.setText(clip.modified.strftime("%d %b %Y  %H:%M"))
+
         # Whatever was playing is a different clip now.
         self.player.load(clip, position=clip.trim_in)
         if clip.width and clip.height:
@@ -2134,18 +2266,29 @@ class MainWindow(QMainWindow):
         clip = self._highlighted_clip()
         if clip is None:
             QMessageBox.information(
-                self, "Nothing to preview",
-                "Click a clip in the list first, or double-click one to open it.",
+                self, "Nothing to open",
+                "Click a clip in the list first. Double-clicking one plays it "
+                "here instead of opening it elsewhere.",
             )
             return
         self._open_externally(clip.path)
 
-    def _preview_item(self, item) -> None:
+    def _play_item(self, item) -> None:
+        """Double-click: play it here.
+
+        Plays rather than toggles. Double-clicking a clip that happens to be
+        running would otherwise pause it, which is not what a double-click
+        means anywhere else. Handing the file to another program is still
+        there, on the button and on Ctrl+Shift+P.
+        """
         clip = self.clip_by_path.get(
             self.table.item(item.row(), 0).data(Qt.ItemDataRole.UserRole)
         )
-        if clip is not None:
-            self._open_externally(clip.path)
+        if clip is None:
+            return
+        self._load_selected_clip()
+        self._focus_player()
+        self.player.play(self.frame_view.width())
 
     def _open_externally(self, path: Path) -> None:
         """Play the file, preferring a player that can actually decode it."""

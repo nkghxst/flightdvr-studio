@@ -1378,6 +1378,101 @@ def test_adding_a_job_opens_the_queue(window):
         window.queue_toggle.setChecked(False)
 
 
+def test_the_frame_covers_exactly_what_it_frames(window, qt_app):
+    """A frame a few pixels out from the thing it is framing reads as a bug,
+    and this one has to track a window resize, the preview choosing its own
+    height, a splitter and the queue opening."""
+    from PySide6.QtCore import QPoint, QRect
+
+    def union():
+        central = window.centralWidget()
+        preview = QRect(window.preview_box.mapTo(central, QPoint(0, 0)),
+                        window.preview_box.size())
+        band = QRect(window.trim_band.mapTo(central, QPoint(0, 0)),
+                     window.trim_band.size())
+        return preview.united(band)
+
+    for size in ((1240, 900), (1000, 760), (1400, 1000)):
+        window.resize(*size)
+        qt_app.processEvents()
+        window.region_frame.follow()
+        assert window.region_frame.geometry() == union(), f"drifted at {size}"
+
+    window.queue_toggle.setChecked(True)
+    qt_app.processEvents()
+    window.region_frame.follow()
+    assert window.region_frame.geometry() == union(), "drifted when the queue opened"
+    window.queue_toggle.setChecked(False)
+    window.resize(1240, 900)
+    qt_app.processEvents()
+
+
+def test_the_frame_never_swallows_a_click(window):
+    """It sits behind everything it frames and must stay out of the way."""
+    from PySide6.QtCore import Qt
+    assert window.region_frame.testAttribute(
+        Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+
+# -- what the sidebar says -----------------------------------------------------
+
+def test_the_sidebar_says_what_you_are_looking_at(window):
+    """Format, size and card date were only readable as columns in the list."""
+    window.clip_by_path.clear()
+    info = clip("hdz_042.ts")
+    window.clip_by_path[str(info.path)] = info
+    window._trim_clip = None
+    window._highlighted_clip = lambda: info
+    try:
+        window._load_selected_clip()
+        assert window.clip_format.text() == info.format_label
+        assert window.clip_size.text() == info.size_label
+        assert "2025" in window.clip_date.text()
+    finally:
+        del window._highlighted_clip
+
+
+def test_the_static_labels_are_not_rewritten_on_every_frame(window):
+    """_update_trim_labels runs from _preview_frame_ready, thirty times a
+    second. Text that changes once a clip has no business in it."""
+    window.clip_format.setText("sentinel")
+    window.clip_size.setText("sentinel")
+    window.clip_date.setText("sentinel")
+    window._update_trim_labels()
+    assert window.clip_format.text() == "sentinel"
+    assert window.clip_size.text() == "sentinel"
+    assert window.clip_date.text() == "sentinel"
+
+
+# -- double-click --------------------------------------------------------------
+
+def test_double_click_plays_here_rather_than_shelling_out(window, monkeypatch):
+    """It used to hand the file to VLC, which was right when there was no
+    player of our own."""
+    handed_over = []
+    monkeypatch.setattr(window, "_open_externally", handed_over.append)
+    played, toggled = [], []
+    monkeypatch.setattr(window.player, "play", lambda *a: played.append(a))
+    monkeypatch.setattr(window.player, "toggle", lambda *a: toggled.append(a))
+
+    info = clip("hdz_043.ts")
+    window.clip_by_path[str(info.path)] = info
+    window._scan_generation += 1
+    window._add_clip(window._scan_generation, info)
+    row = window.table.rowCount() - 1
+    try:
+        window._play_item(window.table.item(row, 0))
+        assert played, "double-click did not start the preview"
+        assert not handed_over, "double-click still shelled out to a player"
+        # Plays rather than toggles: double-clicking a clip that happens to be
+        # running would otherwise pause it, which is not what a double-click
+        # means anywhere else.
+        assert not toggled
+    finally:
+        window.table.setRowCount(0)
+        window.clips.clear()
+
+
 def test_the_strip_says_what_is_in_the_queue(window):
     from flightdvr.jobs import Job, JobStatus
     from flightdvr.presets import ExportSettings
