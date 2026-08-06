@@ -191,10 +191,11 @@ default order is by clip name, which is the DVR's own counter and the only
 reliable record of the order things were filmed in — see
 [the clock problem](#the-goggles-cannot-keep-time).
 
-**Preview** plays the highlighted clip in your usual video player, and
-double-clicking a row does the same. VLC or mpv is used when either is
-installed, because Windows registers `.ts` to Media Player, which opens the file
-and then often cannot decode the video inside.
+Double-clicking a row plays it in the preview below the list. **Open in
+player…** hands the highlighted clip to your usual video player instead, for
+when you want a full screen or a scrubbing bar of your own. VLC or mpv is used
+when either is installed, because Windows registers `.ts` to Media Player,
+which opens the file and then often cannot decode the video inside.
 
 Clips that already have an export for the current preset are marked
 **✓ exported**, so on a full card you can see at a glance what is left to do.
@@ -202,17 +203,28 @@ Clips that already have an export for the current preset are marked
 Widening the window makes the thumbnails bigger rather than leaving an empty
 filename column.
 
-## Trimming
+## Preview and trimming
 
-![The trim panel, showing the filmstrip and in and out points](docs/02-trim.png)
+![The preview panel, showing the filmstrip and in and out points](docs/02-trim.png)
 
-Open the **Trim** panel and select a clip to set where it starts and ends —
-mostly for cutting the minute or two spent sitting on the bench before arming.
+Select a clip and it loads into the preview under the list, with its filmstrip
+across the bottom of the window. **Play** runs it there — no other program, no
+handing the file to something that cannot decode it.
 
-Drag either handle on the filmstrip, or move the playhead and press **Set in** /
-**Set out**. **Reset** restores the whole clip. The clip list then shows the
-range next to the length, and the size estimate, progress and time remaining all
-follow the trimmed length.
+Trimming sets where a clip starts and ends, mostly for cutting the minute or two
+spent sitting on the bench before arming. Drag either handle on the filmstrip,
+or press **I** and **O** while the clip plays to cut at the picture in front of
+you. **Set in** / **Set out** do the same from the buttons, and **Reset**
+restores the whole clip. The list then shows the range next to the length, and
+the size estimate, progress and time remaining all follow the trimmed length.
+
+The preview is silent. Sound would need a second pipe and a second clock, and
+DVR audio is motor whine — an in point is something you find by eye.
+
+Playback decodes through ffmpeg rather than through Qt's video widget. On
+Windows that widget uses Media Foundation, the same decoder behind Media
+Player, which cannot handle HEVC inside an MPEG-TS — so it would work
+perfectly on test footage and fail on every real recording.
 
 Frames are pulled from the clip the first time you select it — a three minute
 recording takes about four seconds, and is cached afterwards, so dragging is
@@ -326,12 +338,25 @@ time, weighted by footage length rather than job count.
 | `F5` | Scan the current source |
 | `Ctrl` `A` | Tick every clip |
 | `Ctrl` `Shift` `A` | Untick every clip |
-| `Ctrl` `P` | Preview the highlighted clip |
+| `Ctrl` `P` | Play the highlighted clip in the preview |
+| `Ctrl` `Shift` `P` | Open it in your usual video player instead |
 | `Ctrl` `Enter` | Add ticked clips to the queue |
 | `F9` | Start the export |
 | `Delete` | Remove the selected rows from the queue |
 | `Space` | Tick or untick the highlighted clip |
-| Double-click | A clip previews it; a finished queue row opens the result |
+| Double-click | A clip plays it in the preview; a finished queue row opens the result |
+
+With the preview picture focused — click it, or press `Ctrl` `P` — these apply
+instead, and `Space` plays rather than ticking:
+
+| Key | Does |
+|---|---|
+| `Space` or `K` | Play or pause |
+| `I` / `O` | Set the in / out point at the playhead |
+| `←` `→` | Move a second |
+| `Shift` `←` `→` | Move five seconds |
+| `Home` / `End` | Jump to the in / out point |
+| `Esc` | Stop |
 
 ---
 

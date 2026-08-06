@@ -179,6 +179,26 @@ class TrimBar(QWidget):
         self.playhead = in_point
         self.update()
 
+    def set_playhead(self, seconds: float) -> None:
+        """Move the marker without telling anyone it moved.
+
+        playhead_moved is deliberately not emitted. The player is what moves
+        the playhead while a clip runs, and echoing the move back would send
+        the window off to paint a filmstrip still over the live video.
+
+        Repainting only when the marker changes pixel matters more than it
+        looks: paintEvent rescales every visible tile with a smooth transform,
+        so at thirty updates a second this widget would cost more than the
+        decoder does, and the decoder would get the blame.
+        """
+        seconds = max(0.0, seconds)
+        if self.duration > 0:
+            seconds = min(seconds, self.duration)
+        moved = self._x_for(seconds) != self._x_for(self.playhead)
+        self.playhead = seconds
+        if moved:
+            self.update()
+
     def set_strip(self, strip: Filmstrip) -> None:
         self._strip = strip
         self._pixmaps = []

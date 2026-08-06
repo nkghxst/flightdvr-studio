@@ -311,13 +311,21 @@ def _input_args(
     """
     args = ["-fflags", "+genpts", "-analyzeduration", "100M", "-probesize", "100M"]
 
-    lead_in = 0.0
-    if concat_file is None and clip is not None and clip.trim_in > 0.01:
+    seeking = concat_file is None and clip is not None and clip.trim_in > 0.01
+    if seeking:
         # Never seek past the start of the file.
-        lead_in = min(clip.trim_in, SEEK_LEAD_IN)
-        start = clip.trim_in - lead_in
+        start = max(0.0, clip.trim_in - SEEK_LEAD_IN)
         if start > 0.01:
             args += ["-ss", f"{start:.3f}"]
+        # Without these, whether the timeline gets rebased by the first seek
+        # depends on the file and on whether audio is being written, so the
+        # second seek sometimes counts from the position asked for and
+        # sometimes from the keyframe the first one landed on. Measured on a
+        # file whose audio starts 23 ms before its video: with the sound turned
+        # off, a trim asked to begin at 2.5 s produced a clean, correctly
+        # lengthed export beginning at 2.0 s. HDZero recordings start at zero
+        # and so never showed it.
+        args += ["-copyts", "-start_at_zero"]
 
     if concat_file is not None:
         args += ["-f", "concat", "-safe", "0", "-i", str(concat_file)]
@@ -325,9 +333,10 @@ def _input_args(
         args += ["-i", str(sources[0])]
 
     # Output-side seek: discards the lead-in after it has been decoded, which is
-    # what makes the first output frame correct.
-    if lead_in > 0.01:
-        args += ["-ss", f"{lead_in:.3f}"]
+    # what makes the first output frame correct. Measured from the start of the
+    # file, which is what -start_at_zero above guarantees.
+    if seeking:
+        args += ["-ss", f"{clip.trim_in:.3f}"]
     if concat_file is None and clip is not None and clip.is_trimmed:
         args += ["-t", f"{clip.trimmed_duration:.3f}"]
     return args

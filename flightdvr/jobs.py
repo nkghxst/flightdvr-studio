@@ -32,14 +32,11 @@ from typing import Iterable
 
 from PySide6.QtCore import QThread, Signal
 
-from .media import NO_WINDOW, ClipInfo, Tools
+from .media import NO_WINDOW, TERMINATE_SECONDS, ClipInfo, Tools, stop_process
 from .presets import PRESETS, ExportSettings, build_commands, join_problems
 
 # Pass 1 of a two-pass encode analyses without writing video, so it is quicker.
 PASS_WEIGHTS = (0.35, 0.65)
-
-# How long to let ffmpeg shut down politely before killing it.
-TERMINATE_SECONDS = 5
 
 # Enough stderr to explain a failure without holding a whole log in memory.
 STDERR_LINES = 200
@@ -194,24 +191,10 @@ class ExportWorker(QThread):
     def _stop(proc: subprocess.Popen) -> None:
         """Stop ffmpeg and make sure it has actually gone.
 
-        terminate() on its own is a request. An encode that ignores it used to
-        be left running while the app carried on, and closing the window could
-        orphan it entirely.
+        The escalation itself lives in media so the preview player can share
+        it; this stays as the name the rest of this class already calls.
         """
-        if proc.poll() is not None:
-            return
-        try:
-            proc.terminate()
-        except OSError:
-            return
-        try:
-            proc.wait(timeout=TERMINATE_SECONDS)
-        except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-                proc.wait(timeout=TERMINATE_SECONDS)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+        stop_process(proc, TERMINATE_SECONDS)
 
     # -- execution ------------------------------------------------------------
 

@@ -159,6 +159,37 @@ where it was first found.
 same way. That is why they are on the outstanding list rather than merely
 imperfect.
 
+**And the second seek was not measured from where it looked.** Found in 1.4.0,
+while measuring the preview player — which always passes `-an`, and so hit it
+constantly where the export only hit it sometimes.
+
+Whether the first seek rebases the timeline depends on the file *and* on
+whether audio is being written. So `-ss 0.5 -i clip.ts -ss 2.0` sometimes means
+2.5 s and sometimes means 2.0 s. Measured on a fixture whose audio begins 23 ms
+before its video, with the sound turned off, asking for 2.5 s produced a clean,
+correctly lengthed export of **2.0 s onwards** — 15.5 dB against the same
+footage, no ffmpeg error, right frame count. The same species of silent
+wrongness as the mid-GOP bug, in the fix for the mid-GOP bug.
+
+Nothing caught it because it needs a file whose format start time is not zero.
+HDZero recordings start at zero, so real footage was exact at every position
+tested, and every other trim test keeps the sound.
+
+`-copyts -start_at_zero` pins the timeline so both seeks are measured from the
+start of the file, and the second seek is now the in point itself rather than
+the distance from the first. Verified exact on both file types at the same
+speed. Untrimmed exports do not get the flags at all: nothing to seek to means
+nothing to pin, and their command is unchanged.
+
+| Candidate | Fixture with a 1.41 s start time | Real HDZero footage |
+|---|---|---|
+| Two seeks, as they were | 0.5 s early | exact |
+| `-copyts -start_at_zero` | exact | exact |
+| `-copyts` with an absolute target | 3.2 mean abs diff | exact |
+
+The lesson repeats the one above it: a documented trap needs checking
+everywhere it could apply, including inside the fix for it.
+
 **Two-pass x264 needs identical stream configuration in both passes.** The
 common advice to pass `-an` on the first pass shifts the video framing by one
 frame on these files, and the second pass then dies with *"2nd pass has more
@@ -403,6 +434,154 @@ updating a newer one.
 - **A library copy cannot be stopped part way through a single file.** Cancel
   is checked between files, so a large one runs to completion. Nothing is left
   behind either way.
+
+## The in-app preview player
+
+Shipped in 1.4.0. Requested by boomz on Discord: play a clip in the window and
+set trim points with a hotkey while it runs, the way avidemux does.
+
+### Why not Qt's video widget
+
+`QtMultimedia` decodes through Media Foundation on Windows — the same decoder
+behind Windows Media Player, which the README already documents as unable to
+play HEVC inside an MPEG-TS. That is the only format this app exists for, so
+the obvious approach would pass every test on synthetic footage and fail on
+every real recording. It is excluded from the packaged build, and
+`test_nothing_reaches_for_qt_multimedia` asserts nothing imports it. **Do not
+"simplify" the player by reaching for it.**
+
+### How it fits together
+
+`DecodeWorker` runs one ffmpeg per playback position, emitting raw `rgb24`
+down a pipe at a size this module chose, and pushes `(seconds, bytes)` into a
+bounded `queue.Queue`. `PreviewPlayer` drains that queue on a 30 Hz timer,
+paced against `time.monotonic`, and emits the frame it decided to show.
+`FrameView` paints it.
+
+Three things that look like implementation detail and are not:
+
+- **Frames travel by queue, lifecycle by signal.** A signal per frame piles up
+  in Qt's event queue the moment the window stops draining. The bounded queue
+  is also the back-pressure: UI stops taking frames → reader blocks → pipe
+  fills → ffmpeg blocks. Do not "optimise" the bound away.
+- **Late frames are dropped, not shown.** `PreviewPlayer._pick` takes the
+  newest queued frame that is not still in the future and throws the rest
+  away. Painting them would be catch-up in slow motion; the whole point of
+  pacing against a clock is that a slow repaint costs one frame rather than a
+  permanent lag.
+- **The playhead comes from the frame that was painted**, not from the clock,
+  so `I` means the picture on screen by construction.
+
+`rgb24` rather than MJPEG down the same pipe: a frame is exactly
+`width * height * 3` bytes, so framing is arithmetic and a short read
+unambiguously means the stream ended. MJPEG would mean scanning for markers, a
+JPEG round trip per frame, and generation loss in a preview whose job is to
+predict the export.
+
+### Two things measured that contradicted the design
+
+**The preview needs no range conversion.** The plan called for
+`scale=in_range=full:out_range=limited`, matching the export. Measured: in a
+chain that ends in `rgb24` the range filters are inert, because the conversion
+out of YUV already reads the source's range tag. Applying full-to-limited,
+applying its opposite, and applying neither all produce **byte-identical**
+frames, and all three match the export decoded back to RGB to within H.264's
+own loss (1.46 mean absolute difference per byte). The filter was removed. The
+export still needs its own, because the export's output *is* YUV.
+
+**The second seek was not measured from where it looked.** See the entry in
+"Traps in this footage" below — it turned out to be a live defect in the export
+path too.
+
+### Measured on real footage
+
+`F:\FPV clips\hdz_022.ts`, 720p60 full range, through `PreviewPlayer` with a
+real event loop:
+
+| | result |
+|---|---|
+| First frame, from 0 s | 0.16 s |
+| First frame, seek to 90 s | 0.38 s, landing exactly on 90.00 s |
+| Clock against picture | −12 ms of drift over 2.3 s |
+| A 1 s skip forward | served from the queue, no respawn, 0.00 s wait |
+| An accurate seek to 90 s, for comparison | 13.5 s — 42× slower |
+| Decoders left running after close | 0 |
+
+### Traps that were predicted, and held
+
+- **`_show_frame` is guarded with `if self.player.is_playing: return`.**
+  Without it every press of `I` goes through `_on_trim_changed` and paints a
+  stale filmstrip JPEG over the live video. `verify_window.py` in the
+  scratchpad exercises exactly this.
+- **`TrimBar.set_playhead` does not emit `playhead_moved`**, or the window
+  rebounds into `_show_frame`. It also repaints only when the marker changes
+  pixel: `paintEvent` rescales every visible tile with `SmoothTransformation`,
+  so at 30 Hz the bar would cost more than the decoder and the decoder would
+  get the blame.
+- **Retired workers are retained** until they stop running. A collected
+  `QThread` takes its process with it.
+- **Shutdown order is flag → stop the process → `wait()`.** The reader blocks
+  inside `readinto`, where a flag is never seen.
+
+### Two hazards the permanent panel created
+
+Making the panel permanent removed the checkbox that used to gate all of this,
+which turned two dormant problems into live ones:
+
+- Holding the down arrow through the clip list started a **full filmstrip
+  decode for every row it passed**. A 250 ms single-shot timer
+  (`_select_timer`) now debounces selection.
+- The previous `FilmstripLoader` was **dropped rather than retained** when a
+  new clip was selected. `_retired_strips` holds them, same as `_retired_scans`.
+
+### The layout around it
+
+The first run on a full card showed three things eating the same space, and
+they compound. Each fix is small and none is obvious from the code alone.
+
+**The preview's height follows from its width.** `PreviewPanel.resizeEvent`
+sets its own height to `useful_height(width)` — the height at which the picture
+exactly fills the box. Past that every pixel is a black bar; short of it every
+missing pixel is black down the sides. There is one right answer, so there is
+no vertical splitter: a handle could only choose how much black to look at.
+Widening the left column is what makes the picture bigger, and the clip list
+takes whatever the picture cannot use.
+
+Two attempts failed before this one, and both are worth not repeating:
+
+- Computing it in `MainWindow.resizeEvent` made the answer depend on which
+  resize Qt delivered first. The picture came out at 63% of the width it could
+  have had, and the number changed between runs.
+- `heightForWidth` looked like the Qt-native answer, but the layout took the
+  height from `sizeHint()`, which was computed from a stale `self.width()`.
+
+Driving it from the panel's own `resizeEvent` works because the panel's width
+is the only input and setting its height cannot change it, so it settles in one
+pass. `useful_height` measures the inset and the chrome off the picture rather
+than deriving them from `contentsMargins`: a group box's title and frame cost
+about twenty pixels more than the margins report, and deriving them left the
+picture short of the width every time.
+
+**Thumbnails are bounded by the list's height, not just its width.**
+`_sync_thumbnail_size` sized rows from the column width alone, and with
+`THUMB_WIDTH` at 240 that gave 141 px rows — two clips visible however much
+vertical space the list had. `MIN_VISIBLE_CLIPS` is the second bound. It is
+called deferred, via `QTimer.singleShot(0, ...)`, because at the moment the
+window resizes the list's viewport still reports the height it is about to stop
+having.
+
+**The queue starts collapsed.** An empty queue was holding two hundred pixels.
+`Open output folder` and `About` live on the always-visible header strip rather
+than in the body — About carries the GPL and LGPL notices, and a licence you
+can only reach by opening a queue you have no jobs in is not much of a notice.
+`_rebuild_queue` is the single funnel that opens it and writes the summary;
+`_start` opens it too, so Cancel is never hidden at the moment it is wanted.
+
+### Deliberately not done
+
+No audio — a second pipe, a second clock and an output device, for footage
+whose soundtrack is motor whine. No reverse play: a forward-only pipe cannot do
+it honestly. Both are said in the UI so their absence is not filed as a bug.
 
 ## Outstanding
 

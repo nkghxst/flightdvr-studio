@@ -37,6 +37,9 @@ from pathlib import Path
 # Keeps console windows from flashing up for every ffprobe call on Windows.
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
+# How long to let a child shut down politely before killing it.
+TERMINATE_SECONDS = 5
+
 # Checked after PATH. On Windows these are where people unpack the gyan.dev
 # builds; on Linux a package manager puts ffmpeg on PATH already, so those are
 # only for a manually installed or Flatpak-exported copy. The Homebrew prefixes
@@ -125,6 +128,34 @@ def frame_rate_mode(tools: "Tools", mode: str) -> list[str]:
     if _fps_mode_supported(str(tools.ffmpeg)):
         return ["-fps_mode", mode]
     return ["-vsync", mode]
+
+
+def stop_process(proc, timeout: float = TERMINATE_SECONDS) -> None:
+    """Stop a child process and make sure it has actually gone.
+
+    terminate() is a request, not an instruction. An ffmpeg that ignores it
+    used to be left running while the app carried on, and closing the window
+    could orphan it entirely — still holding the card open. So: ask, wait a
+    bounded time, then insist.
+
+    Lives here rather than in jobs.py because both the export queue and the
+    preview player need it, and the player importing the export queue would be
+    the wrong direction entirely.
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except OSError:
+        return
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            proc.wait(timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 def is_bundled(path: Path) -> bool:
@@ -439,6 +470,10 @@ def available_encoders(tools: Tools) -> set[str]:
     return names
 
 
+# A test encode is three frames of 320x240. Anything still going after this is
+# a driver that has hung rather than an encoder that is merely slow.
+PROBE_SECONDS = 45
+
 # Hardware H.264 encoders, best first. Whichever one this machine can actually
 # run is the one the app offers.
 HW_ENCODERS = [
@@ -449,12 +484,17 @@ HW_ENCODERS = [
 ]
 
 
-def _encoder_runs(tools: Tools, name: str) -> bool:
+def _encoder_runs(tools: Tools, name: str, register=None) -> bool:
     """Try a token encode.
 
     An encoder being compiled into ffmpeg says nothing about whether the
     hardware is present: a build with NVENC support still fails on a machine
     with no NVIDIA card, so the only reliable test is to run it once.
+
+    Popen rather than run_hidden because the caller has to be able to reach the
+    process: a test encode can sit there for the best part of a minute, and
+    somebody closing the window in the meantime should not be made to wait for
+    it. `register` is handed the process while it runs and None afterwards.
     """
     args = [
         str(tools.ffmpeg), "-hide_banner", "-v", "error", "-nostdin",
@@ -462,18 +502,39 @@ def _encoder_runs(tools: Tools, name: str) -> bool:
         "-c:v", name, "-frames:v", "3", "-f", "null", "-",
     ]
     try:
-        return run_hidden(args, timeout=45).returncode == 0
-    except (subprocess.TimeoutExpired, OSError):
+        proc = subprocess.Popen(
+            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=NO_WINDOW,
+        )
+    except OSError:
         return False
+    if register is not None:
+        register(proc)
+    try:
+        return proc.wait(timeout=PROBE_SECONDS) == 0
+    except subprocess.TimeoutExpired:
+        stop_process(proc)
+        return False
+    finally:
+        if register is not None:
+            register(None)
 
 
 def detect_hardware_encoder(
-    tools: Tools, encoders: set[str] | None = None
+    tools: Tools, encoders: set[str] | None = None,
+    should_stop=None, register=None,
 ) -> tuple[str, str] | None:
-    """The hardware encoder this machine can really use, or None."""
+    """The hardware encoder this machine can really use, or None.
+
+    `should_stop` is consulted before each candidate and `register` is passed
+    through to the test encode, so a caller that is going away can stop this
+    between candidates and part way through one.
+    """
     if encoders is None:
         encoders = available_encoders(tools)
     for name, label in HW_ENCODERS:
-        if name in encoders and _encoder_runs(tools, name):
+        if should_stop is not None and should_stop():
+            return None
+        if name in encoders and _encoder_runs(tools, name, register):
             return name, label
     return None

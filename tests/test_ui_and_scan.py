@@ -24,10 +24,12 @@ from __future__ import annotations
 import os
 import re
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QPoint, QRect, QRectF
 
 # Must be set before any QApplication exists, so these tests need no display.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -711,6 +713,73 @@ def test_trimming_a_clip_changes_its_concat_list():
     assert _clip_set_id([a, b]) != _clip_set_id([a, trimmed])
 
 
+# -- stopping a child process that does not want to stop ----------------------
+
+class FakeProcess:
+    """A child that ignores terminate() until told to notice it."""
+
+    def __init__(self, stubborn: bool = False):
+        self.stubborn = stubborn
+        self.terminated = False
+        self.killed = False
+        self._running = True
+
+    def poll(self):
+        return None if self._running else 0
+
+    def terminate(self):
+        self.terminated = True
+        if not self.stubborn:
+            self._running = False
+
+    def kill(self):
+        self.killed = True
+        self._running = False
+
+    def wait(self, timeout=None):
+        if self._running:
+            import subprocess as sp
+            raise sp.TimeoutExpired("ffmpeg", timeout)
+        return 0
+
+
+def test_a_cooperative_process_is_only_asked():
+    from flightdvr.media import stop_process
+    proc = FakeProcess()
+    stop_process(proc, timeout=0.01)
+    assert proc.terminated and not proc.killed
+
+
+def test_a_process_that_ignores_terminate_is_killed():
+    """terminate() is a request. An ffmpeg that ignored it used to be left
+    running while the app carried on, still holding the card open."""
+    from flightdvr.media import stop_process
+    proc = FakeProcess(stubborn=True)
+    stop_process(proc, timeout=0.01)
+    assert proc.terminated and proc.killed
+
+
+def test_a_process_that_has_already_exited_is_left_alone():
+    from flightdvr.media import stop_process
+    proc = FakeProcess()
+    proc._running = False
+    stop_process(proc, timeout=0.01)
+    assert not proc.terminated and not proc.killed
+
+
+def test_stopping_nothing_is_harmless():
+    from flightdvr.media import stop_process
+    stop_process(None, timeout=0.01)
+
+
+def test_the_export_worker_uses_the_shared_helper():
+    """Two copies of this escalation would drift, and only one of them would
+    be the tested one."""
+    source = (ROOT / "flightdvr" / "jobs.py").read_text(encoding="utf-8")
+    assert "stop_process" in source
+    assert source.count("proc.kill()") == 0, "jobs.py should not escalate itself"
+
+
 # -- the preset radio buttons and their options panels must stay in step ------
 
 def test_the_options_stack_is_built_in_preset_order():
@@ -1086,3 +1155,503 @@ def test_no_wrapped_label_hides_a_blank_line(qt_app):
         "these wrapped labels contain a blank line and will clip; "
         f"split them into separate labels: {offenders}"
     )
+
+
+# -- the preview panel ---------------------------------------------------------
+#
+# MainWindow is expensive to build, so these share one. They only read from it
+# or drive it through its own handlers, which is what a person would do.
+
+@pytest.fixture(scope="module")
+def window(qt_app):
+    from flightdvr.media import find_tools
+    from flightdvr.ui import MainWindow
+    made = MainWindow(find_tools())
+    # Shown, because half of what is being checked here is geometry and an
+    # unshown window reports zeroes for all of it. Offscreen, so no display.
+    made.resize(1240, 900)
+    made.show()
+    qt_app.processEvents()
+    yield made
+    made.close()
+
+
+def shortcuts_on(widget) -> dict:
+    from PySide6.QtGui import QShortcut
+    return {s.key().toString(): s for s in widget.findChildren(QShortcut)
+            if s.parent() is widget}
+
+
+def test_the_preview_is_always_there(window):
+    """It used to be behind an unticked checkbox, which meant that trimming —
+    the thing the app exists for — was hidden from everyone who had not been
+    told it was there."""
+    assert not hasattr(window, "trim_box")
+    assert window.frame_view.isVisibleTo(window.centralWidget())
+
+
+def test_the_picture_is_worth_looking_at(window):
+    """176x99 was enough to tell clips apart and not enough to find the moment
+    a flight starts, which is what the panel is for."""
+    assert window.frame_view.minimumWidth() >= 320
+    assert window.frame_view.minimumHeight() >= 180
+
+
+def test_the_filmstrip_spans_the_window(window):
+    """Beneath the queue rather than beside the video: on a five minute clip
+    that is the difference between a four pixel tile and a twelve pixel one."""
+    assert window.trim_bar.parentWidget() is not window.frame_view.parentWidget()
+    central = window.centralWidget()
+    assert window.trim_bar.parentWidget().parentWidget() is central
+
+
+def test_the_playback_keys_cannot_fire_from_the_clip_list(window):
+    """Space ticks the highlighted row, and that is worth more than anything a
+    window-wide binding could do with it. Scoping is what lets the player have
+    it too."""
+    from PySide6.QtCore import Qt
+
+    scoped = shortcuts_on(window.frame_view)
+    for key in ("Space", "I", "O", "Left", "Right", "Home", "End", "Esc"):
+        assert key in scoped, f"{key} is not bound on the picture"
+        assert scoped[key].context() == (
+            Qt.ShortcutContext.WidgetWithChildrenShortcut), (
+            f"{key} would fire while the clip list has focus"
+        )
+    assert "Space" not in shortcuts_on(window)
+
+
+def test_the_picture_can_take_focus(window):
+    """Without it the keys above can never fire at all."""
+    from PySide6.QtCore import Qt
+    assert window.frame_view.focusPolicy() != Qt.FocusPolicy.NoFocus
+
+
+def test_a_still_is_never_painted_over_a_running_preview(window, monkeypatch):
+    """The most likely integration bug in the whole feature: the playhead moves
+    for reasons other than scrubbing now, and every one of them used to land in
+    _show_frame and repaint a second-old keyframe over the live video."""
+    painted = []
+    monkeypatch.setattr(window.frame_view, "set_image", painted.append)
+    monkeypatch.setattr(window.player, "is_playing", True)
+
+    window._show_frame(1.0)
+    assert not painted, "a filmstrip still was painted while the clip was running"
+
+
+def test_selecting_a_clip_waits_before_decoding_its_filmstrip(window):
+    """Holding the down arrow walks the list. With the panel always open, each
+    row it passes through would otherwise start a full decode pass."""
+    assert window._select_timer.isSingleShot()
+    assert 100 <= window._select_timer.interval() <= 1000
+
+
+def test_ctrl_p_plays_here_and_ctrl_shift_p_hands_it_over(window):
+    bound = shortcuts_on(window)
+    assert "Ctrl+P" in bound and "Ctrl+Shift+P" in bound
+    assert "Open in player" in window.preview_button.text()
+
+
+def test_the_clip_name_and_the_playhead_are_separate_labels(window):
+    """The position relays thirty times a second and the name once a clip.
+    One short label doing it beats one long one."""
+    assert window.trim_title is not window.trim_position
+
+
+# -- making room ---------------------------------------------------------------
+
+def test_the_filmstrip_comes_before_the_queue(window):
+    """It scrubs the preview; a queue that is empty most of the time has no
+    business sitting between them."""
+    layout = window.centralWidget().layout()
+    order = [layout.itemAt(i).widget() for i in range(layout.count())]
+    strip = window.trim_bar.parentWidget()
+    queue = window.queue_toggle.parentWidget()
+    while queue is not None and queue not in order:
+        queue = queue.parentWidget()
+    assert strip in order and queue in order
+    assert order.index(strip) < order.index(queue)
+
+
+@pytest.mark.parametrize("width", [700, 900, 1200])
+def test_the_preview_is_as_tall_as_its_picture_can_fill(window, width):
+    """Every extra pixel of width buys 1/aspect pixels of height and nothing
+    else. Asserting the slope rather than the number, because the number also
+    contains whatever the style charges for a group box's title and frame."""
+    panel = window.preview_box
+    grew = 160
+    base = panel.useful_height(width)
+    wider = panel.useful_height(width + grew)
+    assert wider - base == pytest.approx(grew / window.frame_view.aspect, abs=2)
+    # And never so short that the sidebar's buttons get clipped off.
+    assert base >= window.preview_sidebar.sizeHint().height()
+
+
+def test_a_four_by_three_clip_gets_a_taller_box_than_a_widescreen_one(window):
+    """The aspect comes from the clip, not from an assumption about HDZero."""
+    panel = window.preview_box
+    window.frame_view.set_aspect(16 / 9)
+    wide = panel.useful_height(900)
+    window.frame_view.set_aspect(4 / 3)
+    tall = panel.useful_height(900)
+    window.frame_view.set_aspect(16 / 9)
+    assert tall > wide
+
+
+def test_the_clip_list_is_never_squeezed_out_entirely(window):
+    """However wide the left column is dragged, and whatever aspect the clip
+    has. Without the clamp a tall picture eats the list it is chosen from."""
+    from flightdvr.ui import MIN_LIST_HEIGHT
+    panel = window.preview_box
+    parent = panel.parentWidget()
+    assert parent.height() > MIN_LIST_HEIGHT, "the fixture window is too short"
+    assert panel.height() <= parent.height() - MIN_LIST_HEIGHT
+
+
+def test_thumbnails_shrink_so_the_list_can_show_several_clips(window):
+    """Sized on column width alone the rows came out 141px, so the list showed
+    two clips however much height it was given."""
+    from flightdvr.ui import MIN_VISIBLE_CLIPS
+
+    window.table.setRowCount(6)
+    window.table.resize(700, 300)
+    window._sync_thumbnail_size()
+    row = window.table.rowHeight(0)
+    assert row > 0
+    fits = window.table.viewport().height() // row
+    assert fits >= MIN_VISIBLE_CLIPS - 1, f"only {fits} clips fit, rows {row}px"
+    window.table.setRowCount(0)
+
+
+def test_thumbnails_still_grow_when_the_list_has_room(window):
+    window.table.setRowCount(6)
+    window.table.resize(700, 300)
+    window._sync_thumbnail_size()
+    small = window.table.iconSize().width()
+
+    window.table.resize(700, 1200)
+    window._sync_thumbnail_size()
+    assert window.table.iconSize().width() > small
+    window.table.setRowCount(0)
+
+
+# -- the collapsed queue -------------------------------------------------------
+
+def test_the_queue_starts_closed(window):
+    """An empty queue was taking two hundred pixels off a window where the
+    clip list and the picture are both short of it."""
+    assert not window.queue_toggle.isChecked()
+    assert not window.queue_body.isVisibleTo(window)
+    assert window.queue_toggle.text() == "Queue — empty"
+
+
+def test_the_licence_stays_reachable_while_the_queue_is_closed(window):
+    """About carries the GPL and LGPL notices. A licence you can only reach by
+    opening a queue you have no jobs in is not much of a notice."""
+    from PySide6.QtWidgets import QPushButton
+
+    assert not window.queue_toggle.isChecked(), "this test needs it closed"
+    collapsed = {b.text() for b in window.queue_body.findChildren(QPushButton)}
+    assert "About" not in collapsed
+    assert "Open output folder" not in collapsed
+
+    on_screen = {b.text() for b in window.findChildren(QPushButton)
+                 if b.isVisible()}
+    assert "About" in on_screen
+    assert "Open output folder" in on_screen
+    # And the things that only make sense with a queue are the ones that went.
+    assert "Start export" in collapsed and "Clear queue" in collapsed
+
+
+def test_adding_a_job_opens_the_queue(window):
+    from flightdvr.jobs import Job
+    from flightdvr.presets import ExportSettings
+
+    window.jobs = [Job([clip()], "master", ExportSettings(), Path("out.mp4"))]
+    try:
+        window._rebuild_queue()
+        assert window.queue_toggle.isChecked()
+        assert "waiting" in window.queue_toggle.text().lower()
+    finally:
+        window.jobs = []
+        window._rebuild_queue()
+        window.queue_toggle.setChecked(False)
+
+
+def test_the_about_box_links_to_the_source(window):
+    """The licence says you may redistribute the program. It is more use when
+    it also says where the program is."""
+    from flightdvr.updates import PROJECT_PAGE
+
+    box = window._build_about_box()
+    try:
+        text = box.informativeText()
+        assert PROJECT_PAGE in text
+        assert f"href='{PROJECT_PAGE}'" in text or f'href="{PROJECT_PAGE}"' in text
+    finally:
+        box.deleteLater()
+
+
+def test_the_about_box_links_actually_open(window):
+    """QMessageBox does not turn this on for you, so the gnu.org link that has
+    been in here since 1.1.1 never did anything when clicked."""
+    from PySide6.QtWidgets import QLabel
+
+    box = window._build_about_box()
+    try:
+        labels = box.findChildren(QLabel)
+        assert labels
+        assert all(label.openExternalLinks() for label in labels)
+    finally:
+        box.deleteLater()
+
+
+def test_the_preview_and_the_filmstrip_each_have_their_own_box(window):
+    """One frame around both was tried twice — a child widget outside the
+    layout, then something the body painted — and neither read as well as the
+    two plain boxes. This keeps them from quietly disappearing again."""
+    from PySide6.QtWidgets import QGroupBox
+
+    assert isinstance(window.preview_box, QGroupBox)
+    assert window.preview_box.title() == "Preview and trim"
+    assert isinstance(window.trim_band, QGroupBox)
+    assert window.trim_band.title() == "Filmstrip"
+    assert not window.preview_box.isCheckable(), "not behind a tickbox again"
+
+
+def test_the_window_opens_no_bigger_than_the_screen(qt_app):
+    """A default taller than the desktop opens with the Add to queue button
+    off the bottom of it."""
+    from PySide6.QtWidgets import QApplication
+    from flightdvr.ui import _default_window_size
+
+    width, height = _default_window_size()
+    available = QApplication.primaryScreen().availableGeometry()
+    assert width <= available.width()
+    assert height <= available.height()
+
+
+def test_toggling_the_queue_leaves_every_panel_intact(window, qt_app):
+    """Opening and closing the queue moved everything above it, and things
+    stopped being drawn until the window was resized. Nothing may end up with
+    no size, or outside the window, at either state."""
+    central = window.centralWidget()
+    panels = {
+        "clip table": window.table,
+        "preview": window.preview_box,
+        "picture": window.frame_view,
+        "sidebar": window.preview_sidebar,
+        "filmstrip": window.trim_bar,
+        "queue strip": window.queue_toggle,
+    }
+
+    for opening in (True, False, True, False):
+        window.queue_toggle.setChecked(opening)
+        qt_app.processEvents()
+        for name, widget in panels.items():
+            size = widget.size()
+            assert size.width() > 0 and size.height() > 0, (
+                f"{name} has no size with the queue "
+                f"{'open' if opening else 'closed'}")
+            top_left = widget.mapTo(central, QPoint(0, 0))
+            assert top_left.y() + size.height() <= central.height() + 1, (
+                f"{name} runs off the bottom with the queue "
+                f"{'open' if opening else 'closed'}")
+
+
+# -- what the sidebar says -----------------------------------------------------
+
+def test_the_sidebar_says_what_you_are_looking_at(window):
+    """Format, size and card date were only readable as columns in the list."""
+    window.clip_by_path.clear()
+    info = clip("hdz_042.ts")
+    window.clip_by_path[str(info.path)] = info
+    window._trim_clip = None
+    window._highlighted_clip = lambda: info
+    try:
+        window._load_selected_clip()
+        assert info.format_label in window.clip_format.text()
+        assert info.size_label in window.clip_format.text()
+        assert "2025" in window.clip_date.text()
+    finally:
+        del window._highlighted_clip
+
+
+def test_the_static_labels_are_not_rewritten_on_every_frame(window):
+    """_update_trim_labels runs from _preview_frame_ready, thirty times a
+    second. Text that changes once a clip has no business in it."""
+    window.clip_format.setText("sentinel")
+    window.clip_date.setText("sentinel")
+    window._update_trim_labels()
+    assert window.clip_format.text() == "sentinel"
+    assert window.clip_date.text() == "sentinel"
+
+
+# -- double-click --------------------------------------------------------------
+
+def test_double_click_plays_here_rather_than_shelling_out(window, monkeypatch):
+    """It used to hand the file to VLC, which was right when there was no
+    player of our own."""
+    handed_over = []
+    monkeypatch.setattr(window, "_open_externally", handed_over.append)
+    played, toggled = [], []
+    monkeypatch.setattr(window.player, "play", lambda *a: played.append(a))
+    monkeypatch.setattr(window.player, "toggle", lambda *a: toggled.append(a))
+
+    info = clip("hdz_043.ts")
+    window.clip_by_path[str(info.path)] = info
+    window._scan_generation += 1
+    window._add_clip(window._scan_generation, info)
+    row = window.table.rowCount() - 1
+    try:
+        window._play_item(window.table.item(row, 0))
+        assert played, "double-click did not start the preview"
+        assert not handed_over, "double-click still shelled out to a player"
+        # Plays rather than toggles: double-clicking a clip that happens to be
+        # running would otherwise pause it, which is not what a double-click
+        # means anywhere else.
+        assert not toggled
+    finally:
+        window.table.setRowCount(0)
+        window.clips.clear()
+
+
+def test_the_strip_says_what_is_in_the_queue(window):
+    from flightdvr.jobs import Job, JobStatus
+    from flightdvr.presets import ExportSettings
+
+    def job(status):
+        made = Job([clip()], "master", ExportSettings(), Path("out.mp4"))
+        made.status = status
+        return made
+
+    assert window._queue_summary() == "Queue — empty"
+    window.jobs = [job(JobStatus.RUNNING), job(JobStatus.PENDING),
+                   job(JobStatus.PENDING), job(JobStatus.DONE)]
+    try:
+        summary = window._queue_summary()
+        assert "1 encoding" in summary
+        assert "2 waiting" in summary
+        assert "1 done" in summary
+    finally:
+        window.jobs = []
+
+
+# -- closing while the hardware probe is still going ---------------------------
+#
+# The probe is a real test encode per candidate encoder, so it can easily
+# outlive the window that started it. Nothing waited for it, and a QThread
+# destroyed while running aborts the process — which is what the macOS CI
+# runner did, where a VideoToolbox probe is slow enough to still be there.
+
+def test_the_probe_is_asked_before_every_candidate():
+    """A probe told to stop must not start the next encoder's test encode."""
+    from flightdvr.media import detect_hardware_encoder
+
+    tried = []
+    stop = []
+
+    def ran(_tools, name, _register=None):
+        tried.append(name)
+        stop.append(True)          # cancelled while the first one is running
+        return False
+
+    with _swapped("_encoder_runs", ran):
+        found = detect_hardware_encoder(
+            TOOLS, encoders={name for name, _ in _all_hw_encoders()},
+            should_stop=lambda: bool(stop),
+        )
+
+    assert found is None
+    assert len(tried) == 1, f"kept probing after being told to stop: {tried}"
+
+
+def test_the_probe_hands_out_the_process_it_is_waiting_on():
+    """stop() has nothing to kill unless the encode registers itself."""
+    from flightdvr.media import detect_hardware_encoder
+
+    seen = []
+    with _swapped("_encoder_runs", lambda t, n, register=None: (
+            seen.append(register), False)[1]):
+        detect_hardware_encoder(
+            TOOLS, encoders={name for name, _ in _all_hw_encoders()},
+            register="the-callback",
+        )
+    assert seen and all(r == "the-callback" for r in seen)
+
+
+def test_closing_the_window_stops_a_probe_that_is_still_running(qt_app):
+    """The regression itself: build a window whose probe will not finish on
+    its own, close it, and it must be gone rather than left running."""
+    import threading
+
+    from flightdvr.media import find_tools
+    from flightdvr.ui import MainWindow
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def never_finishes(_tools, _name, register=None):
+        if register is not None:
+            register(_Stoppable(release))
+        started.set()
+        release.wait(30)
+        if register is not None:
+            register(None)
+        return False
+
+    with _swapped("_encoder_runs", never_finishes), \
+            _swapped("available_encoders", lambda *a, **k: {"h264_nvenc"}):
+        window = MainWindow(find_tools())
+        try:
+            assert started.wait(10), "the probe never got going"
+            assert window.hw_probe.isRunning()
+            window.close()
+            assert not window.hw_probe.isRunning(), (
+                "the probe outlived the window and will abort the process "
+                "when the window is collected"
+            )
+        finally:
+            release.set()
+            window.hw_probe.wait(5000)
+
+
+class _Stoppable:
+    """Stands in for the ffmpeg the probe would be waiting on."""
+
+    def __init__(self, release):
+        self._release = release
+
+    def poll(self):
+        return 0 if self._release.is_set() else None
+
+    def terminate(self):
+        self._release.set()
+
+    def wait(self, timeout=None):
+        self._release.wait(timeout)
+        return 0
+
+    def kill(self):
+        self._release.set()
+
+
+def _all_hw_encoders():
+    from flightdvr.media import HW_ENCODERS
+    return HW_ENCODERS
+
+
+@contextmanager
+def _swapped(name, replacement):
+    """Swap a media-module global for the duration of a block.
+
+    monkeypatch is per-test and these run inside a worker thread, so the
+    replacement has to still be in place when that thread reaches it.
+    """
+    from flightdvr import media
+    original = getattr(media, name)
+    setattr(media, name, replacement)
+    try:
+        yield
+    finally:
+        setattr(media, name, original)

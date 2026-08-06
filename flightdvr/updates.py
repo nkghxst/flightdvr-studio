@@ -48,10 +48,11 @@ from datetime import datetime, timedelta, timezone
 
 from PySide6.QtCore import QThread, Signal
 
+PROJECT_PAGE = "https://github.com/nkghxst/flightdvr-studio"
 RELEASES_URL = (
     "https://api.github.com/repos/nkghxst/flightdvr-studio/releases/latest"
 )
-RELEASES_PAGE = "https://github.com/nkghxst/flightdvr-studio/releases/latest"
+RELEASES_PAGE = f"{PROJECT_PAGE}/releases/latest"
 
 CHECK_INTERVAL_HOURS = 24
 TIMEOUT_SECONDS = 10
