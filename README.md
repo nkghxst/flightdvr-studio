@@ -533,6 +533,9 @@ There is more detail on the internals, the measured findings behind the colour
 handling, and the traps in this footage in
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
+Where this is going next — and what it deliberately will not do — is in
+[docs/ROADMAP.md](docs/ROADMAP.md).
+
 ### How it is put together
 
 | File | Contains |
