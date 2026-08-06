@@ -50,6 +50,7 @@ from . import scan
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
 from .media import (
     ClipInfo, Tools, available_encoders, detect_hardware_encoder, probe,
+    stop_process,
 )
 from .presets import (
     COLOUR_MODES, EDIT_CODECS, PRESET_ORDER, PRESETS, QUALITY_LEVELS,
@@ -427,19 +428,51 @@ class ScanWorker(QThread):
 
 
 class HardwareProbe(QThread):
-    """Works out which hardware encoder, if any, this machine can really use."""
+    """Works out which hardware encoder, if any, this machine can really use.
+
+    Cancellable, because the answer costs a real test encode per candidate. A
+    window closed while this is still going used to be destroyed with the
+    thread still running, which takes the process down with it — an abort on
+    macOS, where a VideoToolbox probe is slow enough to still be there.
+    """
 
     result = Signal(object)
 
     def __init__(self, tools: Tools, parent=None):
         super().__init__(parent)
         self.tools = tools
+        self._cancel = False
+        self._process: subprocess.Popen | None = None
+
+    def stop(self) -> None:
+        """Ask the probe to give up, and unblock it so it notices.
+
+        Order matters, as it does in the decoder: the flag first, then the
+        process, or the run can start another encode after the process is gone.
+        """
+        self._cancel = True
+        stop_process(self._process)
+
+    def _register(self, proc) -> None:
+        self._process = proc
+        # stop() can land between the encode starting and this assignment, in
+        # which case it found nothing to stop and this is the only thing that
+        # will stop it.
+        if self._cancel and proc is not None:
+            stop_process(proc)
 
     def run(self) -> None:
         try:
-            self.result.emit(detect_hardware_encoder(self.tools))
+            found = detect_hardware_encoder(
+                self.tools, should_stop=lambda: self._cancel,
+                register=self._register,
+            )
         except Exception:  # pragma: no cover - never block startup on this
-            self.result.emit(None)
+            found = None
+        # A cancelled probe has nothing to say, and the window it would say it
+        # to is on its way out.
+        if not self._cancel:
+            self.result.emit(found)
 
 
 class CopyWorker(QThread):
@@ -1643,7 +1676,8 @@ class MainWindow(QMainWindow):
         # QThread destroyed while running takes the process with it.
         if self.update_check and self.update_check.isRunning():
             self.update_check.wait(2000)
-        for thread in [self.scan_worker, self.copy_worker, *self._retired_scans]:
+        for thread in [self.hw_probe, self.scan_worker, self.copy_worker,
+                       *self._retired_scans]:
             if thread and thread.isRunning():
                 thread.stop()
                 thread.wait(2000)
