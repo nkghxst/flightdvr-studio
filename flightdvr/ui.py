@@ -206,8 +206,15 @@ MIN_VISIBLE_CLIPS = 4
 MIN_LIST_HEIGHT = 150
 
 
-class PreviewPanel(QGroupBox):
-    """The preview box, as tall as its picture can fill and no taller.
+class PreviewPanel(QWidget):
+    """The preview, as tall as its picture can fill and no taller.
+
+    Not a titled group box, and neither is the filmstrip below it. They are one
+    thing — a picture and the strip you scrub it with — and a frame around each
+    says they are two. The clip list above them has no frame either, so the
+    whole left column reads as one column rather than a stack of panels. The
+    export settings on the right keep theirs, because those genuinely are
+    separate groups of unrelated switches.
 
     A 16:9 frame in a box of any other shape letterboxes: past `width / aspect`
     every extra pixel of height is a black bar, and short of it every missing
@@ -221,8 +228,8 @@ class PreviewPanel(QGroupBox):
     look at. Widening the left column is what makes the picture bigger.
     """
 
-    def __init__(self, title: str):
-        super().__init__(title)
+    def __init__(self):
+        super().__init__()
         self.view: FrameView | None = None
         self.sidebar: QWidget | None = None
 
@@ -573,7 +580,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
         outer.setContentsMargins(10, 10, 10, 10)
-        outer.setSpacing(8)
+        outer.setSpacing(6)
 
         outer.addWidget(self._build_update_bar())
         outer.addLayout(self._build_source_bar())
@@ -613,11 +620,11 @@ class MainWindow(QMainWindow):
         splitter.splitterMoved.connect(lambda *_: self._relayout())
         outer.addWidget(splitter, 1)
 
-        # Directly under the preview it scrubs, and spanning the whole window
-        # rather than sitting beside the video. On a five minute clip full
-        # width takes each keyframe tile from about four pixels to twelve,
-        # which is the difference between scrubbing by eye and guessing.
+        # With no frames around them, the gaps are what say the picture and the
+        # filmstrip are one thing and the queue is another. Tight above the
+        # filmstrip, loose above the queue.
         outer.addWidget(self._build_trim_band())
+        outer.addSpacing(8)
         outer.addWidget(self._build_queue())
         self._install_shortcuts()
         self.statusBar().showMessage(f"{APP_TAGLINE}   ·   ffmpeg: {self.tools.ffmpeg}")
@@ -897,9 +904,9 @@ class MainWindow(QMainWindow):
         ticks a box to find out what is behind it, so the feature this app
         exists for was hidden from everyone who had not been told about it.
         """
-        box = self.preview_box = PreviewPanel("Preview and trim")
+        box = self.preview_box = PreviewPanel()
         layout = QHBoxLayout(box)
-        layout.setContentsMargins(8, 6, 8, 8)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
         self.frame_view = FrameView()
@@ -921,6 +928,7 @@ class MainWindow(QMainWindow):
         column = QVBoxLayout(side)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(4)
+        column.addStretch(1)
 
         # The name and the position are separate labels because the position
         # changes thirty times a second and the name changes once a clip. One
@@ -934,7 +942,7 @@ class MainWindow(QMainWindow):
 
         self.trim_summary = dim(QLabel(""))
         column.addWidget(self.trim_summary)
-        column.addStretch(1)
+        column.addSpacing(10)
 
         self.play_button = QPushButton("Play")
         self.play_button.setToolTip(
@@ -953,6 +961,11 @@ class MainWindow(QMainWindow):
             button.setToolTip(tip)
             button.clicked.connect(slot)
             column.addWidget(button)
+
+        # Labels and buttons stay together as one block, centred. Pinning the
+        # labels to the top and the buttons to the bottom left a hole down the
+        # middle, which the frame used to hide and no longer does.
+        column.addStretch(1)
 
         # Silence is said out loud so its absence is not filed as a bug. Audio
         # would need a second pipe, a second clock and an output device, and
@@ -977,20 +990,26 @@ class MainWindow(QMainWindow):
         return side
 
     def _build_trim_band(self) -> QWidget:
-        """The filmstrip, full width, under everything else."""
-        box = QGroupBox("Filmstrip")
-        box.setToolTip(
+        """The filmstrip, full width, directly under the preview it scrubs.
+
+        Full width is not decoration. On a three and a half minute clip it is
+        5.8 pixels per second of footage against 3.4 in the left column alone,
+        which is the difference when you are dragging an out point onto a
+        particular moment.
+        """
+        band = QWidget()
+        layout = QVBoxLayout(band)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.trim_bar = TrimBar()
+        self.trim_bar.setToolTip(
             "Every keyframe in the clip, a second apart. Click to move the "
             "playhead, drag either end to set where the export starts and ends."
         )
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(8, 4, 8, 6)
-
-        self.trim_bar = TrimBar()
         self.trim_bar.playhead_moved.connect(self._on_playhead)
         self.trim_bar.trim_changed.connect(self._on_trim_changed)
         layout.addWidget(self.trim_bar)
-        return box
+        return band
 
     def _build_export_panel(self) -> QWidget:
         panel = QWidget()
