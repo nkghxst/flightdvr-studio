@@ -22,6 +22,7 @@ source is tagged rather than on assumptions about the hardware.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -316,6 +317,23 @@ class ClipInfo:
         return f"{_clock(self.trim_in)}–{_clock(self.out_point)}"
 
     # -- convenience for the UI ------------------------------------------------
+
+    @property
+    def fingerprint(self) -> str:
+        """One name for this recording, as it is right now.
+
+        Path, size and modification time together — never the path alone.
+        Cards get reused and rewritten with the same filenames, so anything
+        keyed on the name would confidently hand last week's trim points to
+        this week's footage. Being wrong that way is worse than remembering
+        nothing, so a rewritten card looks like new material and is.
+
+        Everything that remembers something about a clip uses this: the
+        filmstrip cache, and the session.
+        """
+        stamp = self.modified.timestamp() if self.modified else 0.0
+        raw = f"{self.path}|{self.size}|{stamp}"
+        return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:20]
 
     @property
     def has_audio(self) -> bool:
