@@ -32,12 +32,19 @@ rewritten card looks like new material, and it is.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 SUFFIX = ".flightdvr.json"
+
+# How many sessions the "recent" list keeps. Long enough to cover the cards
+# somebody is actually working through, short enough that the list stays
+# readable rather than becoming an archive nobody prunes.
+RECENT_LIMIT = 12
 
 # Bumped whenever the stored shape changes in a way that a straight read would
 # get wrong. `_migrate` is where old versions become current ones, and there is
@@ -194,6 +201,161 @@ class Session:
             },
             path=Path(path),
         )
+
+
+def missing_from(session: Session, present: set[str]) -> list[ClipMarks]:
+    """Marks whose recording is not among the clips just scanned.
+
+    Either the file moved, or it was rewritten — the fingerprint cannot tell
+    those apart, and does not need to. What matters is being able to say "nine
+    clips you marked are not in this folder" rather than silently dropping the
+    work, which is what happens if nobody looks.
+    """
+    return [m for f, m in session.clips.items() if m and f not in present]
+
+
+def apply_to(session: Session, clips) -> int:
+    """Put remembered trim points back onto the clips just scanned.
+
+    Deliberately only the first select, because until several of them are
+    editable a clip still has exactly one in point and one out point. When
+    multi-select lands (#15) this is where the second and later ones start
+    being used, and nothing else has to change.
+
+    Returns how many clips got something back, which is what the window needs
+    in order to say so.
+    """
+    restored = 0
+    for clip in clips:
+        marks = session.clips.get(clip.fingerprint)
+        if marks is None or not marks.selects:
+            continue
+        first = marks.selects[0]
+        clip.trim_in = max(0.0, first.start)
+        clip.trim_out = first.end if first.end > first.start else 0.0
+        restored += 1
+    return restored
+
+
+def capture_from(session: Session, clips) -> None:
+    """Record the clips' current trims into the session.
+
+    A trim of the whole clip is not a decision, so it clears the select rather
+    than storing a range covering everything — otherwise resetting a clip would
+    leave a mark behind that looks like a choice somebody made.
+    """
+    for clip in clips:
+        if clip.is_trimmed:
+            marks = session.marks(clip.fingerprint, clip.path.name)
+            keep = Select(clip.trim_in, clip.out_point)
+            marks.selects = [keep] + marks.selects[1:]
+        else:
+            marks = session.clips.get(clip.fingerprint)
+            if marks is not None and marks.selects:
+                marks.selects = marks.selects[1:]
+
+
+def sessions_dir() -> Path:
+    base = Path.home() / ".flightdvr" / "sessions"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def autosave_path(source: Path | str) -> Path:
+    """Where the running session for a source folder is kept.
+
+    One per source, not one global file: reviewing a card, then another, then
+    coming back to the first has to find the first one's work. Keyed on the
+    folder rather than named after it because a path is not a filename.
+    """
+    text = os.path.normcase(str(source))
+    stamp = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
+    return sessions_dir() / f"auto-{stamp}{SUFFIX}"
+
+
+@dataclass
+class Recent:
+    """One line of the recent-sessions list."""
+
+    path: str
+    title: str = ""
+    source: str = ""
+    opened: str = ""
+
+    @property
+    def exists(self) -> bool:
+        return Path(self.path).exists()
+
+    @property
+    def label(self) -> str:
+        return self.title or Path(self.source).name or Path(self.path).stem
+
+
+def recent_path() -> Path:
+    return sessions_dir() / "recent.json"
+
+
+def recent_sessions() -> list[Recent]:
+    """Most recently opened first. A list that cannot be read is an empty list,
+    not an error: it is a convenience, and losing it should cost nothing."""
+    try:
+        raw = json.loads(recent_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for entry in raw:
+        if isinstance(entry, dict) and entry.get("path"):
+            out.append(Recent(path=str(entry["path"]),
+                              title=str(entry.get("title", "")),
+                              source=str(entry.get("source", "")),
+                              opened=str(entry.get("opened", ""))))
+    return out
+
+
+def remember(session: Session, now: datetime | None = None) -> None:
+    """Put a session at the top of the recent list.
+
+    Deduplicated on the path, so opening the same card repeatedly moves it up
+    rather than filling the list with itself.
+    """
+    if session.path is None:
+        return
+    here = str(session.path)
+    entries = [r for r in recent_sessions() if r.path != here]
+    entries.insert(0, Recent(
+        path=here,
+        title=session.title,
+        source=session.source,
+        opened=(now or datetime.now()).isoformat(timespec="seconds"),
+    ))
+    del entries[RECENT_LIMIT:]
+
+    target = recent_path()
+    temporary = target.with_name(target.name + ".part")
+    temporary.write_text(
+        json.dumps([r.__dict__ for r in entries], indent=2),
+        encoding="utf-8",
+    )
+    os.replace(temporary, target)
+
+
+def for_source(source: Path | str) -> Session:
+    """The session for a source folder — the one already going, or a new one.
+
+    This is also the crash recovery. A session is written after every change
+    and written atomically, so the autosave on disk is always the last complete
+    state; there is no separate recovery file to find, and nothing to ask the
+    user about on startup.
+    """
+    path = autosave_path(source)
+    if path.exists():
+        found = Session.load(path)
+        if not found.source:
+            found.source = str(source)
+        return found
+    return Session(source=str(source), title=Path(source).name, path=path)
 
 
 def _migrate(raw: dict) -> dict:

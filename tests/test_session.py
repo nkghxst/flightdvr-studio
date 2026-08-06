@@ -221,3 +221,194 @@ def test_marks_with_nothing_in_them_are_falsey():
     assert ClipMarks("abc", review=KEEP)
     assert ClipMarks("abc", selects=[Select(0, 1)])
     assert ClipMarks("abc", note="hm")
+
+
+# -- getting the work back onto the clips ---------------------------------------
+
+def test_remembered_trims_come_back_onto_the_clips():
+    from flightdvr.session import apply_to
+
+    session = Session()
+    session.marks(clip().fingerprint).selects = [Select(45.0, 150.5)]
+
+    found = clip()
+    assert apply_to(session, [found]) == 1
+    assert found.trim_in == pytest.approx(45.0)
+    assert found.trim_out == pytest.approx(150.5)
+
+
+def test_a_clip_nothing_was_decided_about_is_left_alone():
+    from flightdvr.session import apply_to
+
+    found = clip()
+    assert apply_to(Session(), [found]) == 0
+    assert found.trim_in == 0.0 and found.trim_out == 0.0
+
+
+def test_trims_are_recorded_back_into_the_session():
+    from flightdvr.session import capture_from
+
+    session = Session()
+    trimmed = clip()
+    trimmed.trim_in, trimmed.trim_out = 45.0, 150.5
+    capture_from(session, [trimmed])
+
+    kept = session.marks(trimmed.fingerprint).selects
+    assert [(s.start, s.end) for s in kept] == [(45.0, 150.5)]
+
+
+def test_resetting_a_clip_clears_the_mark_rather_than_storing_the_whole_thing():
+    """Otherwise Reset leaves behind a range covering everything, which looks
+    like a decision somebody made rather than the absence of one."""
+    from flightdvr.session import capture_from
+
+    session = Session()
+    marked = clip()
+    marked.trim_in, marked.trim_out = 45.0, 150.5
+    capture_from(session, [marked])
+
+    marked.trim_in = marked.trim_out = 0.0
+    capture_from(session, [marked])
+    assert session.marks(marked.fingerprint).selects == []
+
+
+def test_capturing_a_trim_leaves_the_other_selects_alone():
+    """Until #15 only the first is editable; the rest must survive a round trip
+    through a version that cannot see them."""
+    from flightdvr.session import capture_from
+
+    session = Session()
+    edited = clip()
+    session.marks(edited.fingerprint).selects = [
+        Select(1.0, 2.0), Select(60.0, 70.0, "tree dive"),
+    ]
+    edited.trim_in, edited.trim_out = 45.0, 150.5
+    capture_from(session, [edited])
+
+    kept = session.marks(edited.fingerprint).selects
+    assert [(s.start, s.end, s.name) for s in kept] == [
+        (45.0, 150.5, ""), (60.0, 70.0, "tree dive"),
+    ]
+
+
+# -- footage that is not there any more -----------------------------------------
+
+def test_marked_clips_missing_from_a_scan_are_reported():
+    """Either the file moved or the card was rewritten. The fingerprint cannot
+    tell those apart and does not need to — what matters is being able to say
+    "nine clips you marked are not in this folder" rather than dropping the
+    work silently, which is what happens when nobody looks."""
+    from flightdvr.session import missing_from
+
+    session = Session()
+    session.marks("here", "hdz_001.ts").review = KEEP
+    session.marks("gone", "hdz_002.ts").review = MAYBE
+    session.marks("untouched", "hdz_003.ts")        # nothing decided
+
+    absent = missing_from(session, present={"here"})
+    assert [m.name for m in absent] == ["hdz_002.ts"]
+
+
+def test_nothing_is_reported_missing_when_everything_is_there():
+    from flightdvr.session import missing_from
+    session = Session()
+    session.marks("a").review = KEEP
+    assert missing_from(session, present={"a", "b"}) == []
+
+
+# -- one session per source folder ----------------------------------------------
+
+def test_each_source_folder_gets_its_own_session(tmp_path, monkeypatch):
+    """Review a card, then another, then come back to the first: the first
+    one's work has to still be there."""
+    from flightdvr import session as module
+    monkeypatch.setattr(module, "sessions_dir", lambda: tmp_path)
+
+    assert module.autosave_path(r"G:\movies") != module.autosave_path(r"H:\movies")
+
+
+def test_the_same_folder_gets_the_same_session_however_it_is_spelled(tmp_path,
+                                                                     monkeypatch):
+    """Windows and macOS treat these as one folder, so the app must too."""
+    from flightdvr import session as module
+    monkeypatch.setattr(module, "sessions_dir", lambda: tmp_path)
+
+    assert module.autosave_path(r"G:\Movies") == module.autosave_path(r"g:\movies")
+
+
+def test_reopening_a_source_finds_the_work_left_there(tmp_path, monkeypatch):
+    """The whole point, and also the crash recovery: the autosave on disk is
+    always the last complete state, so there is nothing separate to recover."""
+    from flightdvr import session as module
+    monkeypatch.setattr(module, "sessions_dir", lambda: tmp_path)
+
+    first = module.for_source(r"G:\movies")
+    first.marks("fp1", "hdz_001.ts").review = KEEP
+    first.save()
+
+    again = module.for_source(r"G:\movies")
+    assert again.marks("fp1").review == KEEP
+    assert again.source == r"G:\movies"
+
+
+def test_an_untouched_source_starts_a_new_session(tmp_path, monkeypatch):
+    from flightdvr import session as module
+    monkeypatch.setattr(module, "sessions_dir", lambda: tmp_path)
+
+    fresh = module.for_source(tmp_path / "some card")
+    assert fresh.clips == {}
+    assert fresh.title == "some card"
+
+
+# -- the recent list ------------------------------------------------------------
+
+def test_recent_sessions_are_most_recent_first(tmp_path, monkeypatch):
+    from flightdvr import session as module
+    monkeypatch.setattr(module, "sessions_dir", lambda: tmp_path)
+
+    for name in ("one", "two", "three"):
+        s = Session(title=name, path=tmp_path / f"{name}{'.flightdvr.json'}")
+        module.remember(s)
+
+    assert [r.title for r in module.recent_sessions()] == ["three", "two", "one"]
+
+
+def test_reopening_a_session_moves_it_up_rather_than_repeating_it(tmp_path,
+                                                                  monkeypatch):
+    from flightdvr import session as module
+    monkeypatch.setattr(module, "sessions_dir", lambda: tmp_path)
+
+    a = Session(title="a", path=tmp_path / "a.flightdvr.json")
+    b = Session(title="b", path=tmp_path / "b.flightdvr.json")
+    module.remember(a)
+    module.remember(b)
+    module.remember(a)
+
+    titles = [r.title for r in module.recent_sessions()]
+    assert titles == ["a", "b"]
+
+
+def test_the_recent_list_does_not_grow_without_limit(tmp_path, monkeypatch):
+    from flightdvr import session as module
+    monkeypatch.setattr(module, "sessions_dir", lambda: tmp_path)
+
+    for n in range(module.RECENT_LIMIT + 6):
+        module.remember(Session(title=f"s{n}",
+                                path=tmp_path / f"s{n}{'.flightdvr.json'}"))
+
+    assert len(module.recent_sessions()) == module.RECENT_LIMIT
+
+
+def test_an_unreadable_recent_list_is_simply_empty(tmp_path, monkeypatch):
+    """It is a convenience. Losing it should cost nothing at all."""
+    from flightdvr import session as module
+    monkeypatch.setattr(module, "sessions_dir", lambda: tmp_path)
+    (tmp_path / "recent.json").write_text("{{{ not json")
+    assert module.recent_sessions() == []
+
+
+def test_a_recent_entry_labels_itself_from_whatever_it_has(tmp_path):
+    from flightdvr.session import Recent
+    assert Recent(path="x", title="Hampstead Heath").label == "Hampstead Heath"
+    assert Recent(path="x", source=r"G:\movies").label == "movies"
+    assert Recent(path=str(tmp_path / "card.flightdvr.json")).label.startswith("card")
