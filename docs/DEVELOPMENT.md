@@ -534,6 +534,49 @@ which turned two dormant problems into live ones:
 - The previous `FilmstripLoader` was **dropped rather than retained** when a
   new clip was selected. `_retired_strips` holds them, same as `_retired_scans`.
 
+### The layout around it
+
+The first run on a full card showed three things eating the same space, and
+they compound. Each fix is small and none is obvious from the code alone.
+
+**The preview's height follows from its width.** `PreviewPanel.resizeEvent`
+sets its own height to `useful_height(width)` — the height at which the picture
+exactly fills the box. Past that every pixel is a black bar; short of it every
+missing pixel is black down the sides. There is one right answer, so there is
+no vertical splitter: a handle could only choose how much black to look at.
+Widening the left column is what makes the picture bigger, and the clip list
+takes whatever the picture cannot use.
+
+Two attempts failed before this one, and both are worth not repeating:
+
+- Computing it in `MainWindow.resizeEvent` made the answer depend on which
+  resize Qt delivered first. The picture came out at 63% of the width it could
+  have had, and the number changed between runs.
+- `heightForWidth` looked like the Qt-native answer, but the layout took the
+  height from `sizeHint()`, which was computed from a stale `self.width()`.
+
+Driving it from the panel's own `resizeEvent` works because the panel's width
+is the only input and setting its height cannot change it, so it settles in one
+pass. `useful_height` measures the inset and the chrome off the picture rather
+than deriving them from `contentsMargins`: a group box's title and frame cost
+about twenty pixels more than the margins report, and deriving them left the
+picture short of the width every time.
+
+**Thumbnails are bounded by the list's height, not just its width.**
+`_sync_thumbnail_size` sized rows from the column width alone, and with
+`THUMB_WIDTH` at 240 that gave 141 px rows — two clips visible however much
+vertical space the list had. `MIN_VISIBLE_CLIPS` is the second bound. It is
+called deferred, via `QTimer.singleShot(0, ...)`, because at the moment the
+window resizes the list's viewport still reports the height it is about to stop
+having.
+
+**The queue starts collapsed.** An empty queue was holding two hundred pixels.
+`Open output folder` and `About` live on the always-visible header strip rather
+than in the body — About carries the GPL and LGPL notices, and a licence you
+can only reach by opening a queue you have no jobs in is not much of a notice.
+`_rebuild_queue` is the single funnel that opens it and writes the summary;
+`_start` opens it too, so Cancel is never hidden at the moment it is wanted.
+
 ### Deliberately not done
 
 No audio — a second pipe, a second clock and an output device, for footage

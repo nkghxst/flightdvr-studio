@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy,
     QSpinBox, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import scan
@@ -195,6 +195,79 @@ PLAYER_PATHS = [
 
 # macOS has no xdg-open. `open` is the equivalent and resolves app bundles.
 DESKTOP_OPEN = "open" if sys.platform == "darwin" else "xdg-open"
+
+# How many clips the list should manage to show before thumbnails start giving
+# up size for it. Sized on width alone the rows came out 141 px tall, which is
+# two clips on a normal window whatever height the list was given.
+MIN_VISIBLE_CLIPS = 4
+
+# The clip list never gives up more than this to the picture, however wide the
+# left column is dragged.
+MIN_LIST_HEIGHT = 150
+
+
+class PreviewPanel(QGroupBox):
+    """The preview box, as tall as its picture can fill and no taller.
+
+    A 16:9 frame in a box of any other shape letterboxes: past `width / aspect`
+    every extra pixel of height is a black bar, and short of it every missing
+    pixel is black down the sides. There is exactly one right height and it
+    follows from the width, so this is `heightForWidth` rather than something
+    recomputed in a resize handler — Qt solves it during layout, and the answer
+    stops depending on which resize happened to fire first.
+
+    Everything the picture cannot use goes to the clip list above it, which is
+    why there is no splitter here: a handle could only choose how much black to
+    look at. Widening the left column is what makes the picture bigger.
+    """
+
+    def __init__(self, title: str):
+        super().__init__(title)
+        self.view: FrameView | None = None
+        self.sidebar: QWidget | None = None
+
+    def useful_height(self, width: int) -> int:
+        """How tall this is worth being at a given width.
+
+        Measured off the picture where possible rather than derived from the
+        margins: a group box's title and frame cost more height than
+        contentsMargins reports, and deriving it left the picture twenty
+        pixels short of filling the width.
+        """
+        if self.view is None or self.sidebar is None:
+            return self.minimumHeight()
+        margins = self.contentsMargins()
+        spacing = self.layout().spacing() if self.layout() else 0
+        # Both measured off the picture once there is one, so the answer holds
+        # whatever the style charges for a group box's title and frame.
+        inset = (self.width() - self.view.width() if self.view.width() > 0
+                 else margins.left() + margins.right()
+                 + self.sidebar.sizeHint().width() + spacing)
+        chrome = (self.height() - self.view.height() if self.view.height() > 0
+                  else margins.top() + margins.bottom())
+        picture = round(max(1, width - inset) / self.view.aspect)
+        # The sidebar is taller than the picture at small sizes, and clipping
+        # the buttons off the bottom is a worse trade than a black bar.
+        floor = self.sidebar.sizeHint().height()
+        return max(picture, floor) + chrome
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        """Take the height its width has earned, and no more.
+
+        Driven by this widget's own width because that is the only input:
+        setting the height cannot change it, so this settles in one pass. Doing
+        it from the window's resize handler instead made the answer depend on
+        which resize Qt happened to deliver first, and the picture came out
+        two thirds of the width it could have had.
+        """
+        super().resizeEvent(event)
+        wanted = self.useful_height(self.width())
+        # Never at the cost of the clip list disappearing entirely.
+        parent = self.parentWidget()
+        if parent is not None:
+            wanted = min(wanted, max(1, parent.height() - MIN_LIST_HEIGHT))
+        if self.height() != wanted:
+            self.setFixedHeight(wanted)
 
 
 def find_player() -> Path | None:
@@ -450,7 +523,6 @@ class MainWindow(QMainWindow):
         self._queue_total = 1.0
         self._queue_done = 0.0
         self.splitter: QSplitter | None = None
-        self.left_splitter: QSplitter | None = None
         self._trim_clip: ClipInfo | None = None
         self._strip: Filmstrip = Filmstrip()
         self._strip_loader: FilmstripLoader | None = None
@@ -480,6 +552,7 @@ class MainWindow(QMainWindow):
         self._build()
         self._restore()
         self._ready = True
+        self._relayout()
         self._on_preset_changed()
         self._on_colour_changed()
         self._refresh_drives()
@@ -535,14 +608,17 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
         splitter.setSizes([720, 500])
+        # Widening the left column makes the picture usefully taller, so this
+        # is the control for trading list height against picture size.
+        splitter.splitterMoved.connect(lambda *_: self._relayout())
         outer.addWidget(splitter, 1)
 
-        outer.addWidget(self._build_queue())
-        # The filmstrip spans the whole window rather than sitting beside the
-        # video. On a five minute clip that takes each keyframe tile from about
-        # four pixels to twelve, which is the difference between scrubbing by
-        # eye and guessing.
+        # Directly under the preview it scrubs, and spanning the whole window
+        # rather than sitting beside the video. On a five minute clip full
+        # width takes each keyframe tile from about four pixels to twelve,
+        # which is the difference between scrubbing by eye and guessing.
         outer.addWidget(self._build_trim_band())
+        outer.addWidget(self._build_queue())
         self._install_shortcuts()
         self.statusBar().showMessage(f"{APP_TAGLINE}   ·   ffmpeg: {self.tools.ffmpeg}")
 
@@ -796,17 +872,22 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_left_column(self) -> QWidget:
-        """The clip list above the player, with the split between them movable.
+        """The clip list above the player.
 
-        Both want the height, and which one wants it more depends on whether
-        you are looking for a clip or looking inside one.
+        Not a splitter, deliberately. How tall the preview is worth being is
+        decided by how wide it is — see PreviewPanel — so there is nothing to
+        drag: the handle could only choose how much black to look at. Widening
+        the left column is what makes the picture bigger, and the clip list
+        takes everything the picture cannot use.
         """
-        column = self.left_splitter = QSplitter(Qt.Orientation.Vertical)
-        column.addWidget(self._build_clip_table())
-        column.addWidget(self._build_preview_panel())
-        column.setStretchFactor(0, 3)
-        column.setStretchFactor(1, 4)
-        column.setSizes([220, 420])
+        column = QWidget()
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        table = self._build_clip_table()
+        table.setMinimumHeight(MIN_LIST_HEIGHT)
+        layout.addWidget(table, 1)
+        layout.addWidget(self._build_preview_panel())
         return column
 
     def _build_preview_panel(self) -> QWidget:
@@ -816,35 +897,52 @@ class MainWindow(QMainWindow):
         ticks a box to find out what is behind it, so the feature this app
         exists for was hidden from everyone who had not been told about it.
         """
-        box = QGroupBox("Preview and trim")
-        layout = QVBoxLayout(box)
+        box = self.preview_box = PreviewPanel("Preview and trim")
+        layout = QHBoxLayout(box)
         layout.setContentsMargins(8, 6, 8, 8)
-        layout.setSpacing(6)
+        layout.setSpacing(8)
 
         self.frame_view = FrameView()
         self.frame_view.clicked.connect(self._focus_player)
         layout.addWidget(self.frame_view, 1)
 
-        transport = QHBoxLayout()
+        # Beside the picture rather than under it. A 16:9 frame in a wide, short
+        # box letterboxes to a third of the width, and that empty space is the
+        # only place these can go without taking height from the clip list.
+        layout.addWidget(self._build_preview_sidebar())
+
+        box.view = self.frame_view
+        box.sidebar = self.preview_sidebar
+        return box
+
+    def _build_preview_sidebar(self) -> QWidget:
+        side = self.preview_sidebar = QWidget()
+        side.setFixedWidth(190)
+        column = QVBoxLayout(side)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+
+        # The name and the position are separate labels because the position
+        # changes thirty times a second and the name changes once a clip. One
+        # short label relaying beats one long one doing it.
+        self.trim_title = QLabel("Select a clip")
+        self.trim_title.setWordWrap(True)
+        column.addWidget(self.trim_title)
+
+        self.trim_position = dim(QLabel(""))
+        column.addWidget(self.trim_position)
+
+        self.trim_summary = dim(QLabel(""))
+        column.addWidget(self.trim_summary)
+        column.addStretch(1)
+
         self.play_button = QPushButton("Play")
         self.play_button.setToolTip(
             "Play the highlighted clip here in the window.\n"
             "Space does the same once the picture has focus."
         )
         self.play_button.clicked.connect(self._toggle_play)
-        transport.addWidget(self.play_button)
-
-        self.trim_title = QLabel("Select a clip")
-        transport.addWidget(self.trim_title)
-        transport.addStretch(1)
-
-        # On the transport row rather than a line of its own. Four stacked
-        # panels are competing for the height and every line spent here is a
-        # row of the clip list nobody can see.
-        self.trim_summary = dim(QLabel(""))
-        self.trim_summary.setWordWrap(False)
-        transport.addWidget(self.trim_summary)
-        transport.addSpacing(8)
+        column.addWidget(self.play_button)
 
         for text, slot, tip in (
             ("Set in", self._set_in, "Start the export at the playhead  (I)"),
@@ -854,16 +952,12 @@ class MainWindow(QMainWindow):
             button = QPushButton(text)
             button.setToolTip(tip)
             button.clicked.connect(slot)
-            transport.addWidget(button)
-        layout.addLayout(transport)
+            column.addWidget(button)
 
         # Silence is said out loud so its absence is not filed as a bug. Audio
         # would need a second pipe, a second clock and an output device, and
         # DVR sound is motor whine — an in point is found by eye.
-        keys = dim(QLabel(
-            "Silent · click the picture, then Space plays and I and O set the "
-            "in and out points"
-        ))
+        keys = dim(QLabel("Silent · click the picture, then Space plays"))
         keys.setToolTip(
             "With the picture focused:\n"
             "Space or K — play or pause\n"
@@ -872,15 +966,15 @@ class MainWindow(QMainWindow):
             "Home / End — jump to the in / out point\n"
             "Esc — stop"
         )
-        layout.addWidget(keys)
+        column.addWidget(keys)
 
         self.trim_note = dim(QLabel(
-            "Remux cuts only at keyframes, so a trimmed rewrap can be a second "
-            "or so out. The re-encoding presets are exact."
+            "Remux cuts at keyframes, so a trimmed rewrap can be a second out. "
+            "The re-encoding presets are exact."
         ))
         self.trim_note.hide()
-        layout.addWidget(self.trim_note)
-        return box
+        column.addWidget(self.trim_note)
+        return side
 
     def _build_trim_band(self) -> QWidget:
         """The filmstrip, full width, under everything else."""
@@ -1179,8 +1273,62 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_queue(self) -> QWidget:
-        box = QGroupBox("Queue")
-        layout = QVBoxLayout(box)
+        """A one-line strip that opens into the queue when there is one.
+
+        Closed to start with, because an empty queue was taking two hundred
+        pixels of height off a window where the clip list and the picture are
+        both short of it. Not a saved setting: jobs do not survive a session
+        either, so "closed" and "closed unless there is something in it" are
+        the same thing on startup.
+        """
+        box = QWidget()
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
+
+        header = QHBoxLayout()
+        self.queue_toggle = QToolButton()
+        self.queue_toggle.setText("Queue — empty")
+        self.queue_toggle.setCheckable(True)
+        self.queue_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.queue_toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.queue_toggle.setAutoRaise(True)
+        self.queue_toggle.toggled.connect(self._on_queue_toggled)
+        header.addWidget(self.queue_toggle)
+
+        self.overall_bar = QProgressBar()
+        self.overall_bar.setRange(0, 1000)
+        self.overall_bar.setValue(0)
+        self.overall_bar.setTextVisible(True)
+        self.overall_bar.setFormat("idle")
+        self.overall_bar.setMinimumWidth(220)
+        header.addWidget(self.overall_bar, 1)
+        self.overall_label = QLabel("")
+        self.overall_label.setMinimumWidth(210)
+        header.addWidget(self.overall_label)
+        header.addSpacing(12)
+
+        # These two stay on the header rather than inside the body. They are
+        # the reason the whole panel cannot simply be hidden: About carries the
+        # GPL and LGPL notices, and a licence you can only reach by opening a
+        # queue you have no jobs in is not much of a notice.
+        open_out = QPushButton("Open output folder")
+        open_out.clicked.connect(lambda: reveal(Path(self.out_edit.currentText())))
+        header.addWidget(open_out)
+
+        about = QPushButton("About")
+        about.setToolTip("Version, licence and attribution")
+        about.clicked.connect(self._show_about)
+        header.addWidget(about)
+        outer.addLayout(header)
+
+        body = self.queue_body = QWidget()
+        body.hide()
+        outer.addWidget(body)
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(0, 0, 0, 0)
+
         self.queue_table = QTableWidget(0, 4)
         self.queue_table.setHorizontalHeaderLabels(["Clip", "Preset", "Progress", "Status"])
         self.queue_table.verticalHeader().setVisible(False)
@@ -1217,31 +1365,32 @@ class MainWindow(QMainWindow):
         clear.setToolTip("Empty the queue. Anything currently encoding carries on.")
         clear.clicked.connect(self._clear_queue)
         row.addWidget(clear)
-
-        row.addSpacing(12)
-        self.overall_bar = QProgressBar()
-        self.overall_bar.setRange(0, 1000)
-        self.overall_bar.setValue(0)
-        self.overall_bar.setTextVisible(True)
-        self.overall_bar.setFormat("idle")
-        self.overall_bar.setMinimumWidth(220)
-        row.addWidget(self.overall_bar, 1)
-        self.overall_label = QLabel("")
-        self.overall_label.setMinimumWidth(210)
-        row.addWidget(self.overall_label)
-        row.addSpacing(12)
-
-        open_out = QPushButton("Open output folder")
-        open_out.clicked.connect(lambda: reveal(Path(self.out_edit.currentText())))
-        row.addWidget(open_out)
-
-        about = QPushButton("About")
-        about.setToolTip("Version, licence and attribution")
-        about.clicked.connect(self._show_about)
-        row.addWidget(about)
+        row.addStretch(1)
 
         layout.addLayout(row)
         return box
+
+    def _on_queue_toggled(self, open_: bool) -> None:
+        self.queue_body.setVisible(open_)
+        self.queue_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if open_ else Qt.ArrowType.RightArrow)
+
+    def _open_queue(self) -> None:
+        if not self.queue_toggle.isChecked():
+            self.queue_toggle.setChecked(True)
+
+    def _queue_summary(self) -> str:
+        """What the strip says when it is closed, and while it is open."""
+        if not self.jobs:
+            return "Queue — empty"
+        counts: dict[JobStatus, int] = {}
+        for job in self.jobs:
+            counts[job.status] = counts.get(job.status, 0) + 1
+        order = [JobStatus.RUNNING, JobStatus.PENDING, JobStatus.DONE,
+                 JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.SKIPPED]
+        parts = [f"{counts[status]} {status.value.lower()}"
+                 for status in order if counts.get(status)]
+        return "Queue — " + ", ".join(parts)
 
     # -- settings -------------------------------------------------------------
 
@@ -1314,9 +1463,6 @@ class MainWindow(QMainWindow):
         state = store.value("splitter")
         if state and self.splitter is not None:
             self.splitter.restoreState(state)
-        state = store.value("left_splitter")
-        if state and self.left_splitter is not None:
-            self.left_splitter.restoreState(state)
 
         # The flight date is deliberately not remembered: it belongs to the
         # footage in front of you, and a stale one would mislabel a new card.
@@ -1335,8 +1481,6 @@ class MainWindow(QMainWindow):
         store.setValue("geometry", self.saveGeometry())
         if self.splitter is not None:
             store.setValue("splitter", self.splitter.saveState())
-        if self.left_splitter is not None:
-            store.setValue("left_splitter", self.left_splitter.saveState())
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         if (event.key() == Qt.Key.Key_Delete
@@ -1347,20 +1491,45 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         super().resizeEvent(event)
-        self._sync_thumbnail_size()
+        self._relayout()
+
+    def _relayout(self) -> None:
+        """Everything whose size depends on another widget's size.
+
+        Called on a window resize and whenever a splitter moves, because both
+        change how much room the clip list and the picture have without either
+        of them being resized directly.
+        """
+        # Deferred, because the preview's height is settled by Qt's layout pass
+        # and the clip list's viewport still reports the size it is about to
+        # stop being. Sizing thumbnails against that gave rows too tall for the
+        # list they ended up in.
+        QTimer.singleShot(0, self._sync_thumbnail_size)
 
     def _sync_thumbnail_size(self) -> None:
-        """Spend spare width on a bigger thumbnail rather than on white space.
+        """Fit the thumbnails to the space the list actually has.
 
-        The name column takes the slack when the window grows, and filenames are
-        short, so the preview grows into it instead. Capped at the width the
-        thumbnails are generated at, since scaling past that only blurs them.
+        Spare width goes to a bigger picture rather than an empty filename
+        column, capped at the width thumbnails are generated at since scaling
+        past that only blurs them.
+
+        Bounded by the height as well, which it was not: sized on width alone
+        at a normal window width the rows came out 141 px tall, so the list
+        showed two clips however much vertical space it was given. Whichever
+        bound is tighter wins, and the thumbnails still grow when the list is
+        given room.
         """
         if not self._ready or self.table.rowCount() == 0:
             return
         available = self.table.columnWidth(0)
         # Leave room for the filename itself alongside the picture.
         width = max(96, min(THUMB_WIDTH, available - 120))
+
+        viewport = self.table.viewport().height()
+        if viewport > 0:
+            by_height = max(48, viewport // MIN_VISIBLE_CLIPS - 6)
+            width = max(96, min(width, round(by_height * 16 / 9)))
+
         height = round(width * 9 / 16)
         if self.table.iconSize().width() == width:
             return
@@ -1742,6 +1911,10 @@ class MainWindow(QMainWindow):
         self._trim_clip = clip
         # Whatever was playing is a different clip now.
         self.player.load(clip, position=clip.trim_in)
+        if clip.width and clip.height:
+            self.frame_view.set_aspect(clip.width / clip.height)
+            # A 4:3 clip wants a different height from a 16:9 one.
+            self.preview_box.updateGeometry()
         self.trim_bar.set_clip(clip.duration, clip.trim_in, clip.out_point)
         self.trim_bar.set_strip(Filmstrip())
         self._strip = Filmstrip()
@@ -1894,8 +2067,9 @@ class MainWindow(QMainWindow):
         clip = self._trim_clip
         if clip is None:
             return
-        self.trim_title.setText(
-            f"{clip.path.name}   ·   {human_duration(self.trim_bar.playhead)}"
+        self.trim_title.setText(clip.path.name)
+        self.trim_position.setText(
+            f"{human_duration(self.trim_bar.playhead)}"
             f" of {human_duration(clip.duration)}"
         )
         kept = self.trim_bar.out_point - self.trim_bar.in_point
@@ -2213,6 +2387,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(note, 5000)
 
     def _rebuild_queue(self) -> None:
+        # The single funnel for anything that changes the queue, so this is
+        # where the strip learns what to say and when to open itself.
+        self.queue_toggle.setText(self._queue_summary())
+        if self.jobs:
+            self._open_queue()
+
         self.queue_table.setRowCount(len(self.jobs))
         for row, job in enumerate(self.jobs):
             # Showing what will be written, not what is being read, so the
@@ -2259,6 +2439,10 @@ class MainWindow(QMainWindow):
             return
         if not self._confirm_free_space(pending):
             return
+
+        # So Cancel is never behind a collapsed panel at the moment it is
+        # wanted. Closing it again from here on is a deliberate act.
+        self._open_queue()
 
         # Progress is weighted by footage length rather than job count, because
         # a five minute clip is not the same amount of work as a one minute one.

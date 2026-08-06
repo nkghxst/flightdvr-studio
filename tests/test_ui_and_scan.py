@@ -1165,6 +1165,11 @@ def window(qt_app):
     from flightdvr.media import find_tools
     from flightdvr.ui import MainWindow
     made = MainWindow(find_tools())
+    # Shown, because half of what is being checked here is geometry and an
+    # unshown window reports zeroes for all of it. Offscreen, so no display.
+    made.resize(1240, 900)
+    made.show()
+    qt_app.processEvents()
     yield made
     made.close()
 
@@ -1180,7 +1185,7 @@ def test_the_preview_is_always_there(window):
     the thing the app exists for — was hidden from everyone who had not been
     told it was there."""
     assert not hasattr(window, "trim_box")
-    assert window.frame_view.isVisibleTo(window.left_splitter)
+    assert window.frame_view.isVisibleTo(window.centralWidget())
 
 
 def test_the_picture_is_worth_looking_at(window):
@@ -1243,3 +1248,152 @@ def test_ctrl_p_plays_here_and_ctrl_shift_p_hands_it_over(window):
     bound = shortcuts_on(window)
     assert "Ctrl+P" in bound and "Ctrl+Shift+P" in bound
     assert "Open in player" in window.preview_button.text()
+
+
+def test_the_clip_name_and_the_playhead_are_separate_labels(window):
+    """The position relays thirty times a second and the name once a clip.
+    One short label doing it beats one long one."""
+    assert window.trim_title is not window.trim_position
+
+
+# -- making room ---------------------------------------------------------------
+
+def test_the_filmstrip_comes_before_the_queue(window):
+    """It scrubs the preview; a queue that is empty most of the time has no
+    business sitting between them."""
+    layout = window.centralWidget().layout()
+    order = [layout.itemAt(i).widget() for i in range(layout.count())]
+    strip = window.trim_bar.parentWidget()
+    queue = window.queue_toggle.parentWidget()
+    while queue is not None and queue not in order:
+        queue = queue.parentWidget()
+    assert strip in order and queue in order
+    assert order.index(strip) < order.index(queue)
+
+
+@pytest.mark.parametrize("width", [700, 900, 1200])
+def test_the_preview_is_as_tall_as_its_picture_can_fill(window, width):
+    """No taller, or the extra is a black bar the clip list wanted; no
+    shorter, or the picture loses width it could have had."""
+    panel = window.preview_box
+    panel.resize(width, panel.height())
+    wanted = panel.useful_height(width)
+    sidebar = window.preview_sidebar.sizeHint()
+
+    for_picture = width - sidebar.width() - 24
+    expected = round(for_picture / window.frame_view.aspect)
+    assert wanted >= sidebar.height(), "the sidebar buttons would be clipped"
+    # Within the group box's own chrome, which is measured rather than assumed.
+    assert abs(wanted - expected) < 60
+
+
+def test_a_four_by_three_clip_gets_a_taller_box_than_a_widescreen_one(window):
+    """The aspect comes from the clip, not from an assumption about HDZero."""
+    panel = window.preview_box
+    window.frame_view.set_aspect(16 / 9)
+    wide = panel.useful_height(900)
+    window.frame_view.set_aspect(4 / 3)
+    tall = panel.useful_height(900)
+    window.frame_view.set_aspect(16 / 9)
+    assert tall > wide
+
+
+def test_the_clip_list_is_never_squeezed_out_entirely(window):
+    """However wide the left column is dragged, and whatever aspect the clip
+    has. Without the clamp a tall picture eats the list it is chosen from."""
+    from flightdvr.ui import MIN_LIST_HEIGHT
+    panel = window.preview_box
+    parent = panel.parentWidget()
+    assert parent.height() > MIN_LIST_HEIGHT, "the fixture window is too short"
+    assert panel.height() <= parent.height() - MIN_LIST_HEIGHT
+
+
+def test_thumbnails_shrink_so_the_list_can_show_several_clips(window):
+    """Sized on column width alone the rows came out 141px, so the list showed
+    two clips however much height it was given."""
+    from flightdvr.ui import MIN_VISIBLE_CLIPS
+
+    window.table.setRowCount(6)
+    window.table.resize(700, 300)
+    window._sync_thumbnail_size()
+    row = window.table.rowHeight(0)
+    assert row > 0
+    fits = window.table.viewport().height() // row
+    assert fits >= MIN_VISIBLE_CLIPS - 1, f"only {fits} clips fit, rows {row}px"
+    window.table.setRowCount(0)
+
+
+def test_thumbnails_still_grow_when_the_list_has_room(window):
+    window.table.setRowCount(6)
+    window.table.resize(700, 300)
+    window._sync_thumbnail_size()
+    small = window.table.iconSize().width()
+
+    window.table.resize(700, 1200)
+    window._sync_thumbnail_size()
+    assert window.table.iconSize().width() > small
+    window.table.setRowCount(0)
+
+
+# -- the collapsed queue -------------------------------------------------------
+
+def test_the_queue_starts_closed(window):
+    """An empty queue was taking two hundred pixels off a window where the
+    clip list and the picture are both short of it."""
+    assert not window.queue_toggle.isChecked()
+    assert not window.queue_body.isVisibleTo(window)
+    assert window.queue_toggle.text() == "Queue — empty"
+
+
+def test_the_licence_stays_reachable_while_the_queue_is_closed(window):
+    """About carries the GPL and LGPL notices. A licence you can only reach by
+    opening a queue you have no jobs in is not much of a notice."""
+    from PySide6.QtWidgets import QPushButton
+
+    assert not window.queue_toggle.isChecked(), "this test needs it closed"
+    collapsed = {b.text() for b in window.queue_body.findChildren(QPushButton)}
+    assert "About" not in collapsed
+    assert "Open output folder" not in collapsed
+
+    on_screen = {b.text() for b in window.findChildren(QPushButton)
+                 if b.isVisible()}
+    assert "About" in on_screen
+    assert "Open output folder" in on_screen
+    # And the things that only make sense with a queue are the ones that went.
+    assert "Start export" in collapsed and "Clear queue" in collapsed
+
+
+def test_adding_a_job_opens_the_queue(window):
+    from flightdvr.jobs import Job
+    from flightdvr.presets import ExportSettings
+
+    window.jobs = [Job([clip()], "master", ExportSettings(), Path("out.mp4"))]
+    try:
+        window._rebuild_queue()
+        assert window.queue_toggle.isChecked()
+        assert "waiting" in window.queue_toggle.text().lower()
+    finally:
+        window.jobs = []
+        window._rebuild_queue()
+        window.queue_toggle.setChecked(False)
+
+
+def test_the_strip_says_what_is_in_the_queue(window):
+    from flightdvr.jobs import Job, JobStatus
+    from flightdvr.presets import ExportSettings
+
+    def job(status):
+        made = Job([clip()], "master", ExportSettings(), Path("out.mp4"))
+        made.status = status
+        return made
+
+    assert window._queue_summary() == "Queue — empty"
+    window.jobs = [job(JobStatus.RUNNING), job(JobStatus.PENDING),
+                   job(JobStatus.PENDING), job(JobStatus.DONE)]
+    try:
+        summary = window._queue_summary()
+        assert "1 encoding" in summary
+        assert "2 waiting" in summary
+        assert "1 done" in summary
+    finally:
+        window.jobs = []

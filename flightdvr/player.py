@@ -663,6 +663,20 @@ class FrameView(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._image = QImage()
         self._message = "Select a clip"
+        self._aspect = 16 / 9
+
+    @property
+    def aspect(self) -> float:
+        """Width over height of the pictures this is being given.
+
+        Read by the window to work out how tall this is worth making: past
+        `width / aspect` every extra pixel of height is a black bar, and the
+        clip list wants those pixels.
+        """
+        return self._aspect
+
+    def set_aspect(self, ratio: float) -> None:
+        self._aspect = ratio if ratio > 0.1 else 16 / 9
 
     def set_image(self, image: QImage) -> None:
         self._image = image
