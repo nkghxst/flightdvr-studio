@@ -825,17 +825,16 @@ def test_the_options_stack_is_built_in_preset_order():
     order pages are added in is load-bearing and nothing else checks it. Get it
     wrong and a preset shows another preset's options, silently."""
     from flightdvr.presets import PRESET_ORDER
-    source = (ROOT / "flightdvr" / "ui.py").read_text(encoding="utf-8")
-    added = re.findall(r"options_stack\.addWidget\(self\._build_(\w+?)_options\(\)\)",
-                       source)
-    assert added == PRESET_ORDER, (
-        f"pages are added as {added} but PRESET_ORDER is {PRESET_ORDER}"
-    )
+    source = (ROOT / "flightdvr" / "export_panel.py").read_text(encoding="utf-8")
+    builders = re.findall(r'"(\w+)": self\._build_\1_options', source)
+    assert builders == PRESET_ORDER
+    assert "for key in PRESET_ORDER:" in source
+    assert "self.options_stack.addWidget(builders[key]())" in source
 
 
 def test_every_preset_has_an_options_page():
     from flightdvr.presets import PRESET_ORDER
-    source = (ROOT / "flightdvr" / "ui.py").read_text(encoding="utf-8")
+    source = (ROOT / "flightdvr" / "export_panel.py").read_text(encoding="utf-8")
     for key in PRESET_ORDER:
         assert f"def _build_{key}_options" in source, key
 
@@ -953,6 +952,27 @@ def test_free_space_is_measured_against_a_folder_that_exists(tmp_path):
 def test_an_existing_destination_is_used_as_it_is(tmp_path):
     from flightdvr.ui import existing_ancestor
     assert existing_ancestor(tmp_path) == tmp_path
+
+
+def test_the_low_space_warning_names_the_drive_it_measured(tmp_path,
+                                                           monkeypatch):
+    """The warning used an unbound `target`, so the low-space branch crashed
+    instead of asking whether to continue."""
+    from PySide6.QtWidgets import QMessageBox
+    from flightdvr.jobs import Job
+    from flightdvr.presets import ExportSettings
+    from flightdvr.ui import MainWindow
+
+    out_path = tmp_path / "missing" / "master" / "clip.mp4"
+    job = Job([clip()], "master", ExportSettings(), out_path)
+    seen = []
+    monkeypatch.setattr(scan, "free_space", lambda _path: 1)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: (
+        seen.append(args[2]), QMessageBox.StandardButton.Cancel
+    )[1])
+
+    assert not MainWindow._confirm_free_space(object(), [job])
+    assert seen and tmp_path.anchor in seen[0]
 
 
 # -- an interrupted copy must not leave anything behind -----------------------
@@ -1181,8 +1201,10 @@ def test_no_wrapped_label_hides_a_blank_line(qt_app):
     labels instead. Message boxes are exempt: they lay their own text out and
     handle newlines correctly.
     """
-    source = (Path(__file__).resolve().parents[1] / "flightdvr" / "ui.py").read_text(
-        encoding="utf-8"
+    root = Path(__file__).resolve().parents[1] / "flightdvr"
+    source = "\n".join(
+        (root / name).read_text(encoding="utf-8")
+        for name in ("ui.py", "export_panel.py")
     )
     offenders = []
     for chunk in source.split("dim(QLabel(")[1:]:
@@ -1226,6 +1248,15 @@ def test_the_preview_is_always_there(window):
     told it was there."""
     assert not hasattr(window, "trim_box")
     assert window.frame_view.isVisibleTo(window.centralWidget())
+
+
+def test_export_widgets_do_not_leak_onto_the_main_window(window):
+    """Five option builders used to attach roughly thirty controls directly
+    to MainWindow, so changing an option page changed the window's API."""
+    assert hasattr(window, "export_panel")
+    for name in ("master_quality", "social_mode", "upload_height",
+                 "edit_codec_combo", "colour_combo", "join_check"):
+        assert not hasattr(window, name), name
 
 
 def test_the_picture_is_worth_looking_at(window):
