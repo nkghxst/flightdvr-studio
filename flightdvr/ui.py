@@ -30,20 +30,20 @@ from datetime import date, datetime
 from pathlib import Path
 
 from PySide6.QtCore import (
-    QPoint, QRect, QRectF, QSettings, QSize, Qt, QThread, QTimer, Signal,
+    QPoint, QRect, QRectF, QSettings, Qt, QThread, QTimer, Signal,
 )
 from PySide6.QtGui import (
     QColor, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPalette,
     QPen, QPixmap, QShortcut,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox,
-    QFileDialog, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QMainWindow,
-    QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter,
-    QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
+    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
+    QSizePolicy, QSplitter, QTableWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import scan
+from .browser_panel import BrowserPanel
 from .external import DESKTOP_OPEN, PLAYER_PATHS, find_player, reveal
 from .export_panel import ExportPanel, FPS_STEPS, RESOLUTION_STEPS
 from .format import (
@@ -59,13 +59,14 @@ from .presets import (
     ExportSettings, describe_join_problems, estimate_output_size, join_problems,
     output_path,
 )
-from .player import FrameView, PreviewPlayer
+from .player import PreviewPlayer
+from .preview_panel import PreviewView
+from .queue_panel import QueuePanel
 from .thumbs import THUMB_WIDTH, ThumbnailLoader
-from .trim import Filmstrip, FilmstripLoader, TrimBar
+from .trim import Filmstrip, FilmstripLoader
 from .widgets import (
     EDGE, GAP, INNER, MIN_LIST_HEIGHT, MIN_THUMB_WIDTH, MIN_VISIBLE_CLIPS,
-    TIGHT, DriveCombo, PreviewPanel, SortItem, _default_window_size, app_icon,
-    dim, resource,
+    TIGHT, DriveCombo, SortItem, _default_window_size, app_icon, dim, resource,
 )
 from .workers import CopyDialog, CopyWorker, HardwareProbe, ScanWorker
 
@@ -406,64 +407,39 @@ class MainWindow(QMainWindow):
         return row
 
     def _build_clip_table(self) -> QWidget:
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
+        panel = self.browser_panel = BrowserPanel(self)
+        panel.open_external_requested.connect(self._preview_selected)
+        panel.select_all_requested.connect(self._select_all)
+        panel.select_none_requested.connect(self._select_none)
+        panel.item_changed.connect(self._on_item_changed)
+        panel.item_activated.connect(self._play_item)
+        panel.selection_changed.connect(self._on_clip_selected)
+        return panel
 
-        header = QHBoxLayout()
-        self.clip_count_label = QLabel("No clips loaded")
-        header.addWidget(self.clip_count_label)
-        header.addStretch(1)
-        self.preview_button = QPushButton("Open in player…")
-        self.preview_button.setToolTip(
-            "Hand the highlighted clip to your usual video player.\n"
-            "Double-clicking a row plays it here instead."
-        )
-        self.preview_button.clicked.connect(self._preview_selected)
-        header.addWidget(self.preview_button)
-        for text, slot in (("All", self._select_all), ("None", self._select_none)):
-            button = QPushButton(text)
-            button.setFixedWidth(58)
-            button.clicked.connect(slot)
-            header.addWidget(button)
-        layout.addLayout(header)
+    # Compatibility views for the established MainWindow API. They keep
+    # integrations and UI tests working without making the widgets
+    # MainWindow-owned again.
+    @property
+    def table(self) -> QTableWidget:
+        return self.browser_panel.table
 
-        self.warning_label = dim(QLabel())
-        self.warning_label.hide()
-        layout.addWidget(self.warning_label)
+    @property
+    def clip_count_label(self) -> QLabel:
+        return self.browser_panel.clip_count_label
 
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(
-            ["Clip", "Length", "Size", "Card date", "Format"]
-        )
-        self.table.horizontalHeaderItem(3).setToolTip(
-            "The timestamp on the card, not when you flew. The Box Pro has no "
-            "clock battery, so these are unreliable."
-        )
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setIconSize(QSize(120, 68))
-        self.table.setSortingEnabled(True)
-        head = self.table.horizontalHeader()
-        # The name column takes the slack, but the thumbnail grows into it, so
-        # extra width buys a bigger preview rather than empty space.
-        head.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column in range(1, 5):
-            head.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
-        head.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
-        head.setToolTip("Click a column heading to sort by it")
-        self.table.itemChanged.connect(self._on_item_changed)
-        self.table.itemDoubleClicked.connect(self._play_item)
-        self.table.itemSelectionChanged.connect(self._on_clip_selected)
-        layout.addWidget(self.table, 1)
-        return box
+    @property
+    def warning_label(self) -> QLabel:
+        return self.browser_panel.warning_label
+
+    @property
+    def preview_button(self) -> QPushButton:
+        return self.browser_panel.preview_button
 
     def _build_left_column(self) -> QWidget:
         """The clip list above the player.
 
         Not a splitter, deliberately. How tall the preview is worth being is
-        decided by how wide it is — see PreviewPanel — so there is nothing to
+        decided by how wide its aspect-aware box is, so there is nothing to
         drag: the handle could only choose how much black to look at. Widening
         the left column is what makes the picture bigger, and the clip list
         takes everything the picture cannot use.
@@ -479,140 +455,68 @@ class MainWindow(QMainWindow):
         return column
 
     def _build_preview_panel(self) -> QWidget:
-        """The video and its transport.
+        view = self.preview_view = PreviewView(self)
+        view.frame_clicked.connect(self._focus_player)
+        view.play_requested.connect(self._toggle_play)
+        view.set_in_requested.connect(self._set_in)
+        view.set_out_requested.connect(self._set_out)
+        view.reset_requested.connect(self._reset_trim)
+        view.playhead_moved.connect(self._on_playhead)
+        view.trim_changed.connect(self._on_trim_changed)
+        return view.preview_box
 
-        Permanent, where trimming used to be behind an unticked box. Nobody
-        ticks a box to find out what is behind it, so the feature this app
-        exists for was hidden from everyone who had not been told about it.
-        """
-        box = self.preview_box = PreviewPanel("Preview and trim")
-        layout = QHBoxLayout(box)
-        layout.setContentsMargins(INNER, TIGHT, INNER, INNER)
-        layout.setSpacing(INNER)
+    # Compatibility views for the established MainWindow API. PreviewView
+    # owns the widgets; window workflows still address them by their old names.
+    @property
+    def preview_box(self) -> QWidget:
+        return self.preview_view.preview_box
 
-        self.frame_view = FrameView()
-        self.frame_view.clicked.connect(self._focus_player)
-        layout.addWidget(self.frame_view, 1)
+    @property
+    def frame_view(self) -> QWidget:
+        return self.preview_view.frame_view
 
-        # Beside the picture rather than under it. A 16:9 frame in a wide, short
-        # box letterboxes to a third of the width, and that empty space is the
-        # only place these can go without taking height from the clip list.
-        layout.addWidget(self._build_preview_sidebar())
+    @property
+    def preview_sidebar(self) -> QWidget:
+        return self.preview_view.sidebar
 
-        box.view = self.frame_view
-        box.sidebar = self.preview_sidebar
-        return box
+    @property
+    def trim_title(self) -> QLabel:
+        return self.preview_view.trim_title
 
-    def _build_preview_sidebar(self) -> QWidget:
-        side = self.preview_sidebar = QWidget()
-        side.setFixedWidth(190)
-        column = QVBoxLayout(side)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(TIGHT)
-        column.addStretch(1)
+    @property
+    def trim_position(self) -> QLabel:
+        return self.preview_view.trim_position
 
-        # The name and the position are separate labels because the position
-        # changes thirty times a second and the name changes once a clip. One
-        # short label relaying beats one long one doing it.
-        self.trim_title = QLabel("Select a clip")
-        self.trim_title.setWordWrap(True)
-        column.addWidget(self.trim_title)
+    @property
+    def trim_summary(self) -> QLabel:
+        return self.preview_view.trim_summary
 
-        self.trim_position = dim(QLabel(""))
-        column.addWidget(self.trim_position)
+    @property
+    def clip_format(self) -> QLabel:
+        return self.preview_view.clip_format
 
-        self.trim_summary = dim(QLabel(""))
-        column.addWidget(self.trim_summary)
-        column.addSpacing(TIGHT)
+    @property
+    def clip_date(self) -> QLabel:
+        return self.preview_view.clip_date
 
-        # What you are looking at, which until now was only readable as columns
-        # in the list. Two lines rather than three, and the buttons share a row:
-        # this column's height is the floor on how short the panel can get, so
-        # every line here is one the picture cannot have on a narrow window.
-        # These change once a clip, so they are set where the clip is loaded
-        # rather than in _update_trim_labels, which runs on every painted frame.
-        self.clip_format = dim(QLabel(""))
-        self.clip_format.setToolTip("Resolution, frame rate, codec and size")
-        column.addWidget(self.clip_format)
+    @property
+    def play_button(self) -> QPushButton:
+        return self.preview_view.play_button
 
-        self.clip_date = dim(QLabel(""))
-        self.clip_date.setToolTip(
-            "The timestamp on the card, not when you flew. The Box Pro has no "
-            "clock battery, so these are unreliable."
-        )
-        column.addWidget(self.clip_date)
-        column.addSpacing(INNER)
+    @property
+    def trim_note(self) -> QLabel:
+        return self.preview_view.trim_note
 
-        self.play_button = QPushButton("Play")
-        self.play_button.setToolTip(
-            "Play the highlighted clip here in the window.\n"
-            "Space does the same once the picture has focus."
-        )
-        self.play_button.clicked.connect(self._toggle_play)
-        column.addWidget(self.play_button)
+    @property
+    def trim_band(self) -> QWidget:
+        return self.preview_view.trim_band
 
-        trim_row = QHBoxLayout()
-        trim_row.setContentsMargins(0, 0, 0, 0)
-        trim_row.setSpacing(TIGHT)
-        for text, slot, tip in (
-            ("In", self._set_in, "Start the export at the playhead  (I)"),
-            ("Out", self._set_out, "End the export at the playhead  (O)"),
-            ("Reset", self._reset_trim, "Use the whole clip again"),
-        ):
-            button = QPushButton(text)
-            button.setToolTip(tip)
-            button.clicked.connect(slot)
-            trim_row.addWidget(button)
-        column.addLayout(trim_row)
-
-        # Labels and buttons stay together as one block, centred. Pinning the
-        # labels to the top and the buttons to the bottom left a hole down the
-        # middle of the column.
-        column.addStretch(1)
-
-        # Silence is said out loud so its absence is not filed as a bug. Audio
-        # would need a second pipe, a second clock and an output device, and
-        # DVR sound is motor whine — an in point is found by eye.
-        keys = dim(QLabel("Silent · click the picture, then Space plays"))
-        keys.setToolTip(
-            "With the picture focused:\n"
-            "Space or K — play or pause\n"
-            "I / O — set the in / out point at the playhead\n"
-            "Left / Right — move a second, with Shift five\n"
-            "Home / End — jump to the in / out point\n"
-            "Esc — stop"
-        )
-        column.addWidget(keys)
-
-        self.trim_note = dim(QLabel(
-            "Remux cuts at keyframes, so a trimmed rewrap can be a second out. "
-            "The re-encoding presets are exact."
-        ))
-        self.trim_note.hide()
-        column.addWidget(self.trim_note)
-        return side
+    @property
+    def trim_bar(self) -> QWidget:
+        return self.preview_view.trim_bar
 
     def _build_trim_band(self) -> QWidget:
-        """The filmstrip, full width, directly under the preview it scrubs.
-
-        Full width is not decoration. On a three and a half minute clip it is
-        5.8 pixels per second of footage against 3.4 in the left column alone,
-        which is the difference when you are dragging an out point onto a
-        particular moment.
-        """
-        band = self.trim_band = QGroupBox("Filmstrip")
-        layout = QVBoxLayout(band)
-        layout.setContentsMargins(INNER, TIGHT, INNER, INNER)
-
-        self.trim_bar = TrimBar()
-        self.trim_bar.setToolTip(
-            "Every keyframe in the clip, a second apart. Click to move the "
-            "playhead, drag either end to set where the export starts and ends."
-        )
-        self.trim_bar.playhead_moved.connect(self._on_playhead)
-        self.trim_bar.trim_changed.connect(self._on_trim_changed)
-        layout.addWidget(self.trim_bar)
-        return band
+        return self.preview_view.trim_band
 
     def _build_export_panel(self) -> QWidget:
         panel = self.export_panel = ExportPanel(self)
@@ -624,124 +528,55 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_queue(self) -> QWidget:
-        """A one-line strip that opens into the queue when there is one.
-
-        Closed to start with, because an empty queue was taking two hundred
-        pixels of height off a window where the clip list and the picture are
-        both short of it. Not a saved setting: jobs do not survive a session
-        either, so "closed" and "closed unless there is something in it" are
-        the same thing on startup.
-        """
-        box = QWidget()
-        outer = QVBoxLayout(box)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(TIGHT)
-
-        header = QHBoxLayout()
-        self.queue_toggle = QToolButton()
-        self.queue_toggle.setText("Queue — empty")
-        self.queue_toggle.setCheckable(True)
-        self.queue_toggle.setArrowType(Qt.ArrowType.RightArrow)
-        self.queue_toggle.setToolButtonStyle(
-            Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.queue_toggle.setAutoRaise(True)
-        self.queue_toggle.toggled.connect(self._on_queue_toggled)
-        header.addWidget(self.queue_toggle)
-
-        self.overall_bar = QProgressBar()
-        self.overall_bar.setRange(0, 1000)
-        self.overall_bar.setValue(0)
-        self.overall_bar.setTextVisible(True)
-        self.overall_bar.setFormat("idle")
-        self.overall_bar.setMinimumWidth(220)
-        header.addWidget(self.overall_bar, 1)
-        self.overall_label = QLabel("")
-        self.overall_label.setMinimumWidth(210)
-        header.addWidget(self.overall_label)
-        header.addSpacing(GAP)
-
-        # These two stay on the header rather than inside the body. They are
-        # the reason the whole panel cannot simply be hidden: About carries the
-        # GPL and LGPL notices, and a licence you can only reach by opening a
-        # queue you have no jobs in is not much of a notice.
-        open_out = QPushButton("Open output folder")
-        open_out.clicked.connect(lambda: reveal(Path(self.export_panel.output_text())))
-        header.addWidget(open_out)
-
-        about = QPushButton("About")
-        about.setToolTip("Version, licence and attribution")
-        about.clicked.connect(self._show_about)
-        header.addWidget(about)
-        outer.addLayout(header)
-
-        body = self.queue_body = QWidget()
-        body.hide()
-        outer.addWidget(body)
-        layout = QVBoxLayout(body)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self.queue_table = QTableWidget(0, 4)
-        self.queue_table.setHorizontalHeaderLabels(["Clip", "Preset", "Progress", "Status"])
-        self.queue_table.verticalHeader().setVisible(False)
-        self.queue_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.queue_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.queue_table.setSelectionMode(
-            QAbstractItemView.SelectionMode.ExtendedSelection
+        panel = self.queue_panel = QueuePanel(self)
+        panel.start_requested.connect(self._start)
+        panel.cancel_requested.connect(self._cancel)
+        panel.remove_requested.connect(self._remove_selected_jobs)
+        panel.clear_requested.connect(self._clear_queue)
+        panel.reveal_requested.connect(
+            lambda: reveal(Path(self.export_panel.output_text()))
         )
-        self.queue_table.itemDoubleClicked.connect(self._open_finished_job)
-        self.queue_table.setMaximumHeight(150)
-        head = self.queue_table.horizontalHeader()
-        # Filenames are short; the progress bar is the thing worth watching, so
-        # it gets the width rather than the name column.
-        head.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        head.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        head.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        head.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        layout.addWidget(self.queue_table)
-
-        row = QHBoxLayout()
-        self.start_button = QPushButton("Start export")
-        self.start_button.clicked.connect(self._start)
-        row.addWidget(self.start_button)
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setEnabled(False)
-        self.cancel_button.clicked.connect(self._cancel)
-        row.addWidget(self.cancel_button)
-        remove = QPushButton("Remove selected")
-        remove.setToolTip("Drop the selected rows. Delete key does the same.")
-        remove.clicked.connect(self._remove_selected_jobs)
-        row.addWidget(remove)
-
-        clear = QPushButton("Clear queue")
-        clear.setToolTip("Empty the queue. Anything currently encoding carries on.")
-        clear.clicked.connect(self._clear_queue)
-        row.addWidget(clear)
-        row.addStretch(1)
-
-        layout.addLayout(row)
-        return box
+        panel.about_requested.connect(self._show_about)
+        panel.item_activated.connect(self._open_finished_job)
+        return panel
 
     def _on_queue_toggled(self, open_: bool) -> None:
-        self.queue_body.setVisible(open_)
-        self.queue_toggle.setArrowType(
-            Qt.ArrowType.DownArrow if open_ else Qt.ArrowType.RightArrow)
+        self.queue_panel._on_toggled(open_)
 
     def _open_queue(self) -> None:
-        if not self.queue_toggle.isChecked():
-            self.queue_toggle.setChecked(True)
+        self.queue_panel.open_queue()
 
     def _queue_summary(self) -> str:
         """What the strip says when it is closed, and while it is open."""
-        if not self.jobs:
-            return "Queue — empty"
-        counts: dict[JobStatus, int] = {}
-        for job in self.jobs:
-            counts[job.status] = counts.get(job.status, 0) + 1
-        order = [JobStatus.RUNNING, JobStatus.PENDING, JobStatus.DONE,
-                 JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.SKIPPED]
-        parts = [f"{counts[status]} {status.value.lower()}"
-                 for status in order if counts.get(status)]
-        return "Queue — " + ", ".join(parts)
+        return self.queue_panel.summary(self.jobs)
+
+    @property
+    def queue_toggle(self) -> QToolButton:
+        return self.queue_panel.toggle
+
+    @property
+    def queue_body(self) -> QWidget:
+        return self.queue_panel.body
+
+    @property
+    def queue_table(self) -> QTableWidget:
+        return self.queue_panel.table
+
+    @property
+    def overall_bar(self) -> QProgressBar:
+        return self.queue_panel.overall_bar
+
+    @property
+    def overall_label(self) -> QLabel:
+        return self.queue_panel.overall_label
+
+    @property
+    def start_button(self) -> QPushButton:
+        return self.queue_panel.start_button
+
+    @property
+    def cancel_button(self) -> QPushButton:
+        return self.queue_panel.cancel_button
 
     # -- settings -------------------------------------------------------------
 
@@ -803,28 +638,9 @@ class MainWindow(QMainWindow):
         bound is tighter wins, and the thumbnails still grow when the list is
         given room.
         """
-        if not self._ready or self.table.rowCount() == 0:
+        if not self._ready:
             return
-        available = self.table.columnWidth(0)
-        # Leave room for the filename itself alongside the picture. The reserve
-        # covers the tick box, the cell padding and the name, and the floor is
-        # low enough that a narrow window shrinks the picture rather than
-        # eliding the name — which is the one thing in the row you need, and
-        # which was coming out as "hdz_00…" for every clip.
-        width = max(MIN_THUMB_WIDTH, min(THUMB_WIDTH, available - 150))
-
-        viewport = self.table.viewport().height()
-        if viewport > 0:
-            by_height = max(48, viewport // MIN_VISIBLE_CLIPS - 6)
-            width = max(MIN_THUMB_WIDTH,
-                        min(width, round(by_height * 16 / 9)))
-
-        height = round(width * 9 / 16)
-        if self.table.iconSize().width() == width:
-            return
-        self.table.setIconSize(QSize(width, height))
-        for row in range(self.table.rowCount()):
-            self.table.setRowHeight(row, height + 6)
+        self.browser_panel.sync_thumbnail_size()
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self._save()
@@ -1547,30 +1363,7 @@ class MainWindow(QMainWindow):
     def _rebuild_queue(self) -> None:
         # The single funnel for anything that changes the queue, so this is
         # where the strip learns what to say and when to open itself.
-        self.queue_toggle.setText(self._queue_summary())
-        if self.jobs:
-            self._open_queue()
-
-        self.queue_table.setRowCount(len(self.jobs))
-        for row, job in enumerate(self.jobs):
-            # Showing what will be written, not what is being read, so the
-            # effect of the flight-date setting is visible before you start.
-            name_item = QTableWidgetItem(job.out_path.name)
-            name_item.setToolTip(f"{job.name}\n  ->  {job.out_path}")
-            self.queue_table.setItem(row, 0, name_item)
-            self.queue_table.setItem(row, 1, QTableWidgetItem(job.preset_label))
-            bar = self.queue_table.cellWidget(row, 2)
-            if not isinstance(bar, QProgressBar):
-                bar = QProgressBar()
-                bar.setRange(0, 1000)
-                bar.setTextVisible(True)
-                self.queue_table.setCellWidget(row, 2, bar)
-            bar.setValue(int(job.progress * 1000))
-            bar.setFormat(f"{job.progress * 100:.0f}%")
-            status = job.status.value
-            if job.message and job.status in (JobStatus.DONE, JobStatus.FAILED):
-                status = f"{job.status.value} — {job.message}"
-            self.queue_table.setItem(row, 3, QTableWidgetItem(status))
+        self.queue_panel.rebuild(self.jobs)
 
     def _open_finished_job(self, item) -> None:
         """Double-clicking a finished row opens what it produced."""
@@ -1614,22 +1407,18 @@ class MainWindow(QMainWindow):
         self.worker.job_progress.connect(self._job_progress)
         self.worker.job_finished.connect(self._job_finished)
         self.worker.queue_finished.connect(self._queue_finished)
-        self.start_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)
+        self.queue_panel.set_running(True)
         self.worker.start()
 
     def _update_overall(self, done_seconds: float) -> None:
         fraction = max(0.0, min(1.0, done_seconds / self._queue_total))
-        self.overall_bar.setValue(int(fraction * 1000))
-        self.overall_bar.setFormat(f"overall {fraction * 100:.0f}%")
-
         elapsed = time.monotonic() - self._queue_started
         text = f"elapsed {human_duration(elapsed)}"
         # Wait until there is enough done for the rate to mean anything.
         if fraction > 0.02 and elapsed > 3:
             remaining = elapsed / fraction - elapsed
             text += f"  ·  about {human_duration(remaining)} left"
-        self.overall_label.setText(text)
+        self.queue_panel.set_overall(fraction, text)
 
     def _confirm_overwrites(self, pending: list[Job]) -> bool:
         """Nothing gets overwritten without being asked about first."""
@@ -1762,19 +1551,15 @@ class MainWindow(QMainWindow):
         _, row = self._reported_job(index)
         if row is None:
             return
-        item = self.queue_table.item(row, 3)
-        if item:
-            item.setText(JobStatus.RUNNING.value)
+        self.queue_panel.mark_started(row)
 
     def _job_progress(self, index: int, fraction: float, speed: str) -> None:
         job, row = self._reported_job(index)
         if job is None:
             return
         job.progress = fraction
-        bar = self.queue_table.cellWidget(row, 2) if row is not None else None
-        if isinstance(bar, QProgressBar):
-            bar.setValue(int(fraction * 1000))
-            bar.setFormat(f"{fraction * 100:.0f}%  {speed}".strip())
+        if row is not None:
+            self.queue_panel.mark_progress(row, fraction, speed)
         self._update_overall(self._queue_done + fraction * job.total_duration)
 
     def _job_finished(self, index: int, ok: bool, message: str) -> None:
@@ -1782,20 +1567,12 @@ class MainWindow(QMainWindow):
         if job is None:
             return
         if row is not None:
-            item = self.queue_table.item(row, 3)
-            if item:
-                item.setText(f"{job.status.value} — {message}" if message
-                             else job.status.value)
-            bar = self.queue_table.cellWidget(row, 2)
-            if isinstance(bar, QProgressBar) and ok:
-                bar.setValue(1000)
-                bar.setFormat("100%")
+            self.queue_panel.mark_finished(row, ok, job.status, message)
         self._queue_done += job.total_duration
         self._update_overall(self._queue_done)
 
     def _queue_finished(self, completed: int, failed: int) -> None:
-        self.start_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
+        self.queue_panel.set_running(False)
         # Newly written files mean more clips can be marked as done.
         self._refresh_export_markers()
         note = f"Finished: {completed} exported"
@@ -1804,9 +1581,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(note, 10000)
 
         total = time.monotonic() - self._queue_started
-        self.overall_bar.setValue(1000)
-        self.overall_bar.setFormat("done")
-        self.overall_label.setText(f"finished in {human_duration(total)}")
+        self.queue_panel.finish_overall(
+            f"finished in {human_duration(total)}"
+        )
 
     # -- ingest ---------------------------------------------------------------
 

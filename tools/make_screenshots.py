@@ -77,7 +77,7 @@ class Session:
 
     def start(self) -> None:
         w = self.w
-        w.out_edit.setCurrentText(OUTPUT_SHOWN)
+        w.export_panel.out_edit.setCurrentText(OUTPUT_SHOWN)
         w.source_combo.insertItem(0, str(self.source), str(self.source))
         w.source_combo.setCurrentIndex(0)
         w.recursive_check.setChecked(False)
@@ -90,7 +90,7 @@ class Session:
         w = self.w
         for row in range(min(3, w.table.rowCount())):
             w.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
-        w.preset_buttons["master"].setChecked(True)
+        w.export_panel.preset_buttons["master"].setChecked(True)
         w.table.selectRow(0)
         w.table.scrollToTop()
         print("capturing:")
@@ -101,9 +101,8 @@ class Session:
         w = self.w
         # Queue first, so the trim shot shows a window with work in it rather
         # than a large empty panel.
-        w.preset_buttons["social"].setChecked(True)
+        w.export_panel.preset_buttons["social"].setChecked(True)
         w._add_to_queue()
-        w.trim_box.setChecked(True)
         w.table.selectRow(1)
         w._on_clip_selected()
         # The filmstrip needs a moment; it decodes every keyframe once.
@@ -124,7 +123,6 @@ class Session:
 
     def queue_up(self) -> None:
         w = self.w
-        w.trim_box.setChecked(False)
         w._start()
         print("   encoding for the queue shot…")
         self.later(22000, self.queue_shot)

@@ -77,14 +77,20 @@ Windows.
 | `flightdvr/scan.py` | Drive detection, clip discovery, copying off the card |
 | `flightdvr/thumbs.py` | Thumbnail extraction and caching |
 | `flightdvr/trim.py` | Filmstrip extraction and the scrubbing bar widget |
-| `flightdvr/ui.py` | The window, and everything that is not one of the above |
+| `flightdvr/browser_panel.py` | Clip table construction and thumbnail sizing |
+| `flightdvr/preview_panel.py` | Preview, transport controls and filmstrip view |
+| `flightdvr/export_panel.py` | Export controls, settings and source-derived choices |
+| `flightdvr/queue_panel.py` | Queue widgets, summaries and progress rendering |
+| `flightdvr/ui.py` | MainWindow orchestration and workflows spanning panels |
 | `packaging/` | Per-platform build scripts, the PyInstaller spec, the icon |
 | `tools/` | Developer utilities: icon, screenshots, demo GIF, colour comparison |
 
-`ui.py` is by far the largest file. It has not been split because the widgets
-are heavily interdependent and every attempted seam so far has been arbitrary.
-If you do split it, the natural line is the trim panel and the queue table,
-which touch the rest through a small number of signals.
+Panel modules own their widgets and local presentation behaviour. They report
+user actions through signals; `MainWindow` coordinates scanning, playback and
+export work across those panels. Compatibility properties on `MainWindow`
+preserve the established integration surface without duplicating widget
+ownership. The preview is a `QObject` composition because its picture and
+full-width filmstrip deliberately live in different parent layouts.
 
 ---
 

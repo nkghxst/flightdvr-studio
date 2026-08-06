@@ -1204,7 +1204,10 @@ def test_no_wrapped_label_hides_a_blank_line(qt_app):
     root = Path(__file__).resolve().parents[1] / "flightdvr"
     source = "\n".join(
         (root / name).read_text(encoding="utf-8")
-        for name in ("ui.py", "export_panel.py")
+        for name in (
+            "ui.py", "browser_panel.py", "preview_panel.py",
+            "export_panel.py", "queue_panel.py",
+        )
     )
     offenders = []
     for chunk in source.split("dim(QLabel(")[1:]:
@@ -1257,6 +1260,31 @@ def test_export_widgets_do_not_leak_onto_the_main_window(window):
     for name in ("master_quality", "social_mode", "upload_height",
                  "edit_codec_combo", "colour_combo", "join_check"):
         assert not hasattr(window, name), name
+
+
+def test_capture_tools_follow_export_panel_ownership():
+    """The screenshot and demo paths are easy to miss because tests do not
+    normally run them; moved controls must not leave those tools broken."""
+    root = Path(__file__).resolve().parents[1] / "tools"
+    for name in ("make_screenshots.py", "make_demo_gif.py"):
+        source = (root / name).read_text(encoding="utf-8")
+        for old_reference in ("w.out_edit", "w.preset_buttons", "w.trim_box"):
+            assert old_reference not in source, f"{name}: {old_reference}"
+
+
+def test_clip_table_storage_belongs_to_the_browser_panel(window):
+    """The table and header controls used to be constructed and stored by
+    MainWindow, keeping scanning changes tied to the whole window."""
+    assert window.table is window.browser_panel.table
+    assert "table" not in window.__dict__
+
+
+def test_queue_widget_storage_belongs_to_the_queue_panel(window):
+    """Queue rendering used to make its table, strip and progress widgets part
+    of MainWindow even though export execution is the only shared concern."""
+    assert window.queue_table is window.queue_panel.table
+    for name in ("queue_table", "queue_toggle", "overall_bar", "start_button"):
+        assert name not in window.__dict__
 
 
 def test_the_picture_is_worth_looking_at(window):
@@ -1609,6 +1637,16 @@ def test_the_preview_and_the_filmstrip_each_have_their_own_box(window):
     assert isinstance(window.trim_band, QGroupBox)
     assert window.trim_band.title() == "Filmstrip"
     assert not window.preview_box.isCheckable(), "not behind a tickbox again"
+
+
+def test_preview_widget_storage_belongs_to_the_preview_view(window):
+    """Moving construction out of MainWindow is not a split if the window
+    quietly keeps owning the widgets through duplicate instance attributes."""
+    assert window.frame_view is window.preview_view.frame_view
+    assert window.trim_bar is window.preview_view.trim_bar
+    assert window.preview_sidebar is window.preview_view.sidebar
+    for name in ("frame_view", "trim_bar", "preview_sidebar"):
+        assert name not in window.__dict__
 
 
 def test_the_window_opens_no_bigger_than_the_screen(qt_app):

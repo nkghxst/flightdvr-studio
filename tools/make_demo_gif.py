@@ -107,8 +107,7 @@ class Recorder:
             self.hold(1)
         self.hold(3)
 
-        # Open the trim panel and let the filmstrip land.
-        self.do(lambda: w.trim_box.setChecked(True))
+        # Select a clip and let the permanent preview filmstrip land.
         self.do(lambda: (w.table.selectRow(1), w._on_clip_selected()))
         self.hold(int(FPS * 5.5))
 
@@ -123,8 +122,9 @@ class Recorder:
         self.hold(6)
 
         # Queue it and let the encode run.
-        self.do(lambda: w.trim_box.setChecked(False))
-        self.do(lambda: w.preset_buttons["social"].setChecked(True))
+        self.do(
+            lambda: w.export_panel.preset_buttons["social"].setChecked(True)
+        )
         self.hold(2)
         self.do(w._add_to_queue)
         self.hold(3)
@@ -155,7 +155,7 @@ class Recorder:
 
     def start(self) -> None:
         w = self.w
-        w.out_edit.setCurrentText(OUTPUT_SHOWN)
+        w.export_panel.out_edit.setCurrentText(OUTPUT_SHOWN)
         w.source_combo.insertItem(0, str(self.source), str(self.source))
         w.source_combo.setCurrentIndex(0)
         w.recursive_check.setChecked(False)
