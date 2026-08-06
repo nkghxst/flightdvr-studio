@@ -2044,7 +2044,10 @@ class MainWindow(QMainWindow):
             # Refused rather than exported wrongly. A join built from mismatched
             # clips does not fail; it produces a file that is silent after the
             # first clip, or the wrong length, and looks like it worked.
-            problems = join_problems(ordered)
+            # Remux is stricter, and has to be: it copies the streams rather
+            # than rebuilding them, so it cannot reconcile anything that
+            # differs and cannot cut inside a clip at all.
+            problems = join_problems(ordered, re_encoding=key != "remux")
             if problems:
                 QMessageBox.warning(self, "These clips cannot be joined",
                                     describe_join_problems(ordered, problems))

@@ -657,6 +657,55 @@ def test_a_remux_still_refuses_what_it_cannot_change(difference, expected):
     assert any("other presets" in p for p in problems), "no way forward offered"
 
 
+def test_a_remux_refuses_to_join_clips_that_are_trimmed():
+    """Measured, not assumed. A stream copy can only begin where a keyframe
+    already is, so the concat demuxer's inpoint hands the muxer frames whose
+    reference picture was never written. A mid-GOP trim of two clips decodes
+    with "Could not find ref with POC 64" and shows torn macroblocks — while
+    reporting success, which is the failure mode this project exists to stop.
+    """
+    from flightdvr.presets import join_problems
+
+    trimmed = joinable("b.ts")
+    trimmed.trim_in, trimmed.trim_out = 2.5, 4.5
+    problems = join_problems([joinable("a.ts"), trimmed], re_encoding=False)
+
+    assert problems, "a trimmed joined remux was allowed"
+    assert any("trimmed" in p for p in problems), problems
+    # And it has to say what to do instead, since both ways out are fine.
+    assert any("Reset the trims" in p and "re-encoding preset" in p
+               for p in problems), problems
+
+
+def test_re_encoding_joins_trimmed_clips_perfectly_well():
+    """The refusal above is about stream copy alone. Re-encoding decodes each
+    clip separately and trims in the filter graph, which is exact."""
+    from flightdvr.presets import join_problems
+
+    trimmed = joinable("b.ts")
+    trimmed.trim_in, trimmed.trim_out = 2.5, 4.5
+    assert join_problems([joinable("a.ts"), trimmed]) == []
+
+
+def test_an_untrimmed_remux_join_is_still_allowed():
+    """Stitching a flight recorded across several files, untouched, is the
+    whole point of the preset and must keep working."""
+    from flightdvr.presets import join_problems
+    assert join_problems([joinable("a.ts"), joinable("b.ts")],
+                         re_encoding=False) == []
+
+
+def test_the_queue_asks_remux_the_stricter_question(window):
+    """A one-line coupling that is easy to lose: the preset decides which set
+    of rules a join is checked against."""
+    import inspect
+    source = inspect.getsource(type(window)._add_to_queue)
+    assert "re_encoding=" in source, (
+        "every join is being checked with the re-encoding rules, so a remux "
+        "would be allowed to do things a stream copy cannot"
+    )
+
+
 @pytest.mark.parametrize("broken,expected", [
     (dict(width=0, height=0), "could not be read"),
     (dict(duration=0.0), "empty"),

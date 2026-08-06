@@ -155,9 +155,22 @@ frame count is correct, which is why nothing caught it: the test asserted that
 is that a documented trap needs checking everywhere it could apply, not only
 where it was first found.
 
-**Joined exports still carry this defect**, because concat `inpoint` seeks the
-same way. That is why they are on the outstanding list rather than merely
-imperfect.
+**Joined exports carried this defect too, and the two halves ended
+differently.** Re-encoding joins were reworked to decode each clip separately
+and trim in the filter graph, which is exact. A joined *remux* cannot be fixed
+the same way and is now refused instead.
+
+A stream copy can only begin where a keyframe already is. The concat demuxer's
+`inpoint` hands the muxer frames whose reference picture was never written, and
+the result decodes with `Could not find ref with POC 64` and torn macroblocks —
+while reporting success. Measured on the 1.000 s GOP fixture; the integration
+suite deliberately builds that file, around the guard, and asserts it really is
+broken. If a future ffmpeg handles it correctly that test fails, which is the
+only honest way to hold a restriction in place.
+
+A trimmed *single-clip* remux is fine and was measured to be: there the trim is
+a seek, ffmpeg snaps to the keyframe before it, and the result is the "second
+or so out" the README already promises rather than a torn picture.
 
 **And the second seek was not measured from where it looked.** Found in 1.4.0,
 while measuring the preview player — which always passes `-an`, and so hit it

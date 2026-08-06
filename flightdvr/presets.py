@@ -594,6 +594,27 @@ def join_problems(clips: list[ClipInfo], re_encoding: bool = True) -> list[str]:
 
     # Copying without re-encoding puts the clips end to end untouched, so
     # anything that differs between them has to match already.
+
+    # And it cannot cut inside one at all. A stream copy can only begin at a
+    # keyframe, so the concat demuxer's inpoint hands the muxer frames whose
+    # reference picture was never written — measured on a mid-GOP trim, the
+    # result decodes with "Could not find ref with POC 64" and shows torn
+    # macroblocks. It produces a file, reports success, and is wrong, which is
+    # the failure mode this project exists to avoid.
+    #
+    # A single clip is fine: there the trim is a seek, and ffmpeg snaps to the
+    # keyframe before it, which is the "a second or so out" the README already
+    # promises. Only the joined path has this.
+    trimmed = [c for c in clips if c.is_trimmed]
+    if trimmed:
+        listed = ", ".join(c.path.name for c in trimmed[:3])
+        problems.append(
+            f"{len(trimmed)} of them are trimmed ({listed}), and joining "
+            "without re-encoding cannot cut inside a clip — it can only start "
+            "one where a keyframe already is. Reset the trims to join them "
+            "untouched, or pick a re-encoding preset to keep the trims"
+        )
+
     sizes = distinct(lambda c: (c.width, c.height))
     if len(sizes) > 1:
         listed = ", ".join(f"{w}×{h}" for w, h in sizes)
