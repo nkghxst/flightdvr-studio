@@ -130,6 +130,27 @@ def frame_rate_mode(tools: "Tools", mode: str) -> list[str]:
     return ["-vsync", mode]
 
 
+def request_stop(proc) -> None:
+    """Ask a child to stop, without waiting to find out whether it did.
+
+    For calls made on the UI thread. `stop_process` waits — up to the timeout
+    after terminate(), and again after kill() — which is correct on a worker
+    thread and is a frozen window on this one. Cancelling an export, seeking,
+    changing clip and closing all reach the same escalation, and a child that
+    has stopped answering would hold the interface for several seconds.
+
+    Safe because the worker owning the process runs the full escalation in its
+    own cleanup: this only has to unblock the read that the worker is sitting
+    in, and terminate() does that by closing the pipe.
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+
+
 def stop_process(proc, timeout: float = TERMINATE_SECONDS) -> None:
     """Stop a child process and make sure it has actually gone.
 

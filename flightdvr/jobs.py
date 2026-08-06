@@ -32,7 +32,9 @@ from typing import Iterable
 
 from PySide6.QtCore import QThread, Signal
 
-from .media import NO_WINDOW, TERMINATE_SECONDS, ClipInfo, Tools, stop_process
+from .media import (
+    NO_WINDOW, TERMINATE_SECONDS, ClipInfo, Tools, request_stop, stop_process,
+)
 from .presets import PRESETS, ExportSettings, build_commands, join_problems
 
 # Pass 1 of a two-pass encode analyses without writing video, so it is quicker.
@@ -182,10 +184,13 @@ class ExportWorker(QThread):
         self._process: subprocess.Popen | None = None
 
     def cancel(self) -> None:
+        """Called from the UI thread, so it asks and does not wait.
+
+        The escalation runs in _run_one's own cleanup, on this worker. Waiting
+        here held the window still for as long as a stuck ffmpeg took to go.
+        """
         self._cancel = True
-        proc = self._process
-        if proc is not None:
-            self._stop(proc)
+        request_stop(self._process)
 
     @staticmethod
     def _stop(proc: subprocess.Popen) -> None:

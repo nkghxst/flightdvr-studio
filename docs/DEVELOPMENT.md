@@ -577,6 +577,49 @@ can only reach by opening a queue you have no jobs in is not much of a notice.
 `_rebuild_queue` is the single funnel that opens it and writes the summary;
 `_start` opens it too, so Cancel is never hidden at the moment it is wanted.
 
+### Two kinds of stop
+
+`media.py` has both `request_stop` and `stop_process`, and which one to call
+depends entirely on the thread you are on.
+
+`stop_process` is the escalation: terminate, wait, kill, wait. Two bounded
+waits. That is right on a worker thread and is a frozen window on the UI one —
+and cancelling an export, seeking, changing clip, pressing Escape and closing
+all arrive on the UI thread. `request_stop` only asks.
+
+It is safe to only ask because every worker runs the full escalation in its own
+cleanup. The ask exists to unblock the read the worker is sitting in, which
+terminating does by closing the pipe; the worker then tidies up after itself.
+A test asserts that none of the three UI-facing stops reaches `stop_process`.
+
+### Filmstrip extraction
+
+Rewritten after the PR #9 review. Three things it now does that it did not:
+
+**It can be stopped.** It was a blocking `subprocess.run(timeout=600)` with no
+handle on the process, so on a slow card or a damaged recording the window
+would not close. It is a `Popen` now, registered with the loader.
+
+**Frames are staged and moved into place.** Select A, then B, then A again, and
+a second extraction of A starts while the first is still going. Both used to
+delete and rewrite the same cache directory underneath each other. Each one
+now builds in a directory of its own and renames it into place at the end;
+whoever gets there first wins, and the loser reads what is already there. The
+rename is the whole mechanism — no locks.
+
+**A cancelled extraction publishes nothing.** This one was introduced by the
+rewrite and caught by running it: terminating ffmpeg makes `communicate()`
+return *normally*, so a cancelled extraction ran straight on into the
+publishing code with whatever frames it had reached. The cache check only
+counts frames against times, so that truncated filmstrip would then be believed
+for as long as the cache survived. A genuine decode *failure* still publishes
+what it managed — half a filmstrip of a damaged recording is worth having, half
+of one nobody waited for is not.
+
+Loaders also carry a generation, for the same reason `ScanWorker` does: matching
+on the clip's path alone accepts an overtaken extraction of the clip you are
+back on.
+
 ### Deliberately not done
 
 No audio — a second pipe, a second clock and an output device, for footage

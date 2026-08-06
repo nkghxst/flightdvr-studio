@@ -28,6 +28,7 @@ import hashlib
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -35,7 +36,9 @@ from PySide6.QtCore import QObject, QRect, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import QWidget
 
-from .media import NO_WINDOW, ClipInfo, Tools, frame_rate_mode
+from .media import (
+    NO_WINDOW, ClipInfo, Tools, frame_rate_mode, request_stop, stop_process,
+)
 
 FRAME_WIDTH = 160
 PTS = re.compile(r"pts_time:([0-9.]+)")
@@ -78,19 +81,50 @@ class Filmstrip:
         return self.frames[self.index_at(seconds)]
 
 
-def extract(tools: Tools, clip: ClipInfo) -> Filmstrip:
-    """Pull every keyframe out of a clip, reusing the cache when present."""
-    folder = cache_root() / _key(clip)
+def _read_cached(folder: Path) -> Filmstrip:
     times_file = folder / "times.txt"
-
-    if times_file.exists():
-        frames = sorted(folder.glob("f_*.jpg"))
+    if not times_file.exists():
+        return Filmstrip()
+    frames = sorted(folder.glob("f_*.jpg"))
+    try:
         times = [float(t) for t in times_file.read_text().split()]
-        if frames and len(frames) == len(times):
-            return Filmstrip(frames, times)
+    except (OSError, ValueError):
+        return Filmstrip()
+    if frames and len(frames) == len(times):
+        return Filmstrip(frames, times)
+    return Filmstrip()
 
-    shutil.rmtree(folder, ignore_errors=True)
-    folder.mkdir(parents=True, exist_ok=True)
+
+def extract(tools: Tools, clip: ClipInfo, register=None,
+            cancelled=None) -> Filmstrip:
+    """Pull every keyframe out of a clip, reusing the cache when present.
+
+    Frames are written to a staging directory of this extraction's own and
+    moved into place at the end. Selecting a clip, then another, then the first
+    again starts a second extraction of it while the first is still running,
+    and both used to delete and rewrite the one cache directory underneath each
+    other. Whoever finishes first now publishes; the loser throws its own work
+    away and reads what is already there.
+
+    `register` is handed the running ffmpeg so the caller can stop it. Without
+    it this blocked for up to ten minutes and could not be cancelled, which on
+    a slow card meant a window that would not close.
+
+    `cancelled` says whether the stop was asked for. Terminating ffmpeg makes
+    communicate() return normally, so without this a cancelled extraction
+    published the frames it had got to as though they were the whole clip —
+    and the cache check only counts frames against times, so that truncated
+    filmstrip would be believed from then on. A genuine decode failure still
+    publishes what it managed: half a filmstrip of a damaged recording is
+    worth having, half of one nobody waited for is not.
+    """
+    folder = cache_root() / _key(clip)
+
+    cached = _read_cached(folder)
+    if cached:
+        return cached
+
+    staging = Path(tempfile.mkdtemp(dir=cache_root(), prefix="building-"))
 
     filters = []
     if clip.is_full_range:
@@ -106,46 +140,100 @@ def extract(tools: Tools, clip: ClipInfo) -> Filmstrip:
         # 5.1, and on 4.4 this call failed, so the filmstrip stayed empty.
         *frame_rate_mode(tools, "passthrough"),
         "-vf", ",".join(filters), "-q:v", "6",
-        str(folder / "f_%04d.jpg"),
+        str(staging / "f_%04d.jpg"),
     ]
     try:
-        result = subprocess.run(
-            command, capture_output=True, text=True, timeout=600,
-            creationflags=NO_WINDOW,
+        proc = subprocess.Popen(
+            command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, creationflags=NO_WINDOW,
         )
-    except (subprocess.TimeoutExpired, OSError):
+    except OSError:
+        shutil.rmtree(staging, ignore_errors=True)
+        return Filmstrip()
+
+    if register is not None:
+        register(proc)
+    try:
+        _out, errors = proc.communicate(timeout=600)
+    except subprocess.TimeoutExpired:
+        stop_process(proc)
+        shutil.rmtree(staging, ignore_errors=True)
+        return Filmstrip()
+
+    if cancelled is not None and cancelled():
+        shutil.rmtree(staging, ignore_errors=True)
         return Filmstrip()
 
     # showinfo reports each frame it passed through, in order.
-    times = [float(m) for m in PTS.findall(result.stderr)]
-    frames = sorted(folder.glob("f_*.jpg"))
+    times = [float(m) for m in PTS.findall(errors or "")]
+    frames = sorted(staging.glob("f_*.jpg"))
     if not frames:
+        shutil.rmtree(staging, ignore_errors=True)
         return Filmstrip()
 
     times = times[:len(frames)]
     while len(times) < len(frames):
         times.append(times[-1] + 1.0 if times else 0.0)
+    (staging / "times.txt").write_text("\n".join(f"{t:.3f}" for t in times))
 
-    times_file.write_text("\n".join(f"{t:.3f}" for t in times))
-    return Filmstrip(frames, times)
+    try:
+        staging.rename(folder)
+    except OSError:
+        # Another extraction of this clip published first. Theirs is complete,
+        # so use it rather than fighting over the directory.
+        shutil.rmtree(staging, ignore_errors=True)
+        return _read_cached(folder)
+
+    return Filmstrip(sorted(folder.glob("f_*.jpg")), times)
 
 
 class FilmstripLoader(QThread):
-    """Builds one clip's filmstrip off the UI thread."""
+    """Builds one clip's filmstrip off the UI thread.
 
-    ready = Signal(str, object)
+    Carries a generation because browsing the list starts one of these per clip
+    and they finish in whatever order they finish. Matching on the clip's path
+    alone is not enough: select A, then B, then A again, and the first
+    extraction of A can land after the second has started and be accepted as
+    the current one.
+    """
 
-    def __init__(self, tools: Tools, clip: ClipInfo, parent=None):
+    ready = Signal(int, str, object)          # generation, clip path, strip
+
+    def __init__(self, tools: Tools, clip: ClipInfo, generation: int = 0,
+                 parent=None):
         super().__init__(parent)
         self.tools = tools
         self.clip = clip
+        self.generation = generation
+        self._process: subprocess.Popen | None = None
+        self._cancelled = False
+
+    def stop(self) -> None:
+        """Ask the extraction to stop. Asks without waiting: called from the
+        UI thread when the selection moves on, and when the window closes."""
+        self._cancelled = True
+        request_stop(self._process)
+
+    def _register(self, proc: subprocess.Popen) -> None:
+        self._process = proc
+        # Cancelled between starting the thread and ffmpeg starting, in which
+        # case nothing had been created yet for stop() to have found.
+        if self._cancelled:
+            request_stop(proc)
 
     def run(self) -> None:
         try:
-            strip = extract(self.tools, self.clip)
+            strip = extract(self.tools, self.clip,
+                            register=self._register,
+                            cancelled=lambda: self._cancelled)
         except Exception:  # pragma: no cover - never take the window down
             strip = Filmstrip()
-        self.ready.emit(str(self.clip.path), strip)
+        finally:
+            stop_process(self._process)
+            self._process = None
+        if self._cancelled:
+            return
+        self.ready.emit(self.generation, str(self.clip.path), strip)
 
 
 class TrimBar(QWidget):

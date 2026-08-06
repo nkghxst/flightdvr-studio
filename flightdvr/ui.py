@@ -601,6 +601,7 @@ class MainWindow(QMainWindow):
         # Same reason as _retired_scans: a running QThread that gets collected
         # takes its decode down with it.
         self._retired_strips: list[FilmstripLoader] = []
+        self._strip_generation = 0
         # Guards handlers that fire while the window is still being assembled.
         self._ready = False
 
@@ -1683,6 +1684,7 @@ class MainWindow(QMainWindow):
                 thread.wait(2000)
         for loader in [self._strip_loader, *self._retired_strips]:
             if loader and loader.isRunning():
+                loader.stop()
                 loader.wait(2000)
         self.thumbs.shutdown()
         super().closeEvent(event)
@@ -2060,19 +2062,30 @@ class MainWindow(QMainWindow):
         self.frame_view.set_message("reading frames…")
         self._update_trim_labels()
 
-        # Held rather than dropped. A FilmstripLoader cannot be told to stop
-        # mid-decode, and letting the last reference to a running QThread go is
+        # Stopped, then held rather than dropped: browsing the list starts
+        # one of these per clip, and each is a full decode pass competing for
+        # the same card. Letting the last reference to a running QThread go is
         # how Qt takes the process down with it.
         if self._strip_loader and self._strip_loader.isRunning():
-            self._strip_loader.wait(50)
+            self._strip_loader.stop()
             self._retired_strips.append(self._strip_loader)
         self._retired_strips = [t for t in self._retired_strips
                                 if t.isRunning()]
-        self._strip_loader = FilmstripLoader(self.tools, clip, self)
+        self._strip_generation += 1
+        self._strip_loader = FilmstripLoader(self.tools, clip,
+                                             self._strip_generation, self)
         self._strip_loader.ready.connect(self._strip_ready)
         self._strip_loader.start()
 
-    def _strip_ready(self, clip_path: str, strip) -> None:
+    def _strip_ready(self, generation: int, clip_path: str, strip) -> None:
+        """Take a filmstrip only from the extraction that is current.
+
+        The path alone does not settle it. Select A, then B, then A again, and
+        the first extraction of A can finish after the second has started —
+        same path, older frames, and it would have been accepted.
+        """
+        if generation != self._strip_generation:
+            return
         if self._trim_clip is None or str(self._trim_clip.path) != clip_path:
             return
         if not strip:
