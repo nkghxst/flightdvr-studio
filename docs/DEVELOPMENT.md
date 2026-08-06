@@ -585,6 +585,11 @@ it honestly. Both are said in the UI so their absence is not filed as a bug.
 
 ## Outstanding
 
+Planned work, and what is deliberately not planned, is in
+[ROADMAP.md](ROADMAP.md). What follows is the smaller stuff: known gaps with no
+release attached to them yet.
+
+
 - **VAAPI hardware encoding on Linux.** The current design swaps encoder
   arguments; VAAPI needs `-vaapi_device` before the input and
   `format=nv12,hwupload` in the filter chain, which does not fit that shape.
