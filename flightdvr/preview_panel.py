@@ -47,6 +47,7 @@ class PreviewView(QObject):
     select_added = Signal()
     select_removed = Signal()
     select_renamed = Signal(str)
+    activity_accepted = Signal()
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -149,7 +150,20 @@ class PreviewView(QObject):
         ))
         self.trim_note.hide()
         column.addWidget(self.trim_note)
+
         return side
+
+    def show_activity(self, text: str, offer: str = "") -> None:
+        """Say what the clip looks like, and offer a trim only if there is one.
+
+        Nothing here ever changes a trim on its own. A wrong guess that silently
+        cut footage would be worse than no guess at all, so the reading is a
+        sentence and the action is a button.
+        """
+        self.activity_note.setText(text)
+        self.activity_note.setVisible(bool(text))
+        self.activity_button.setText(offer)
+        self.activity_button.setVisible(bool(offer))
 
     def _build_selects_row(self) -> QHBoxLayout:
         """Which range is being edited, and how to add or drop one.
@@ -176,6 +190,34 @@ class PreviewView(QObject):
         self.select_name.textEdited.connect(
             lambda text: self.select_renamed.emit(text))
         row.addWidget(self.select_name)
+
+        # What the recording looks like it spends its time doing, and an offer
+        # to act on it. Beside the ranges rather than in the sidebar: the
+        # sidebar is 190px and already full, and putting two more widgets there
+        # clipped the lines above them.
+        self.activity_note = dim(QLabel(""))
+        # Explicitly unwrapped, and given room for the longest sentence it
+        # produces. A label in a row with an expanding stretch gets handed its
+        # minimum, and a wrapped one then makes the whole filmstrip box taller.
+        self.activity_note.setWordWrap(False)
+        self.activity_note.setMinimumWidth(340)
+        self.activity_note.setToolTip(
+            "Read from the filmstrip by comparing each second with the next. "
+            "A stopped quad and a flying one look very different; a noisy feed "
+            "can look like neither, and then this says so."
+        )
+        self.activity_note.hide()
+        row.addWidget(self.activity_note)
+
+        self.activity_button = QPushButton("")
+        self.activity_button.setToolTip(
+            "Sets the in and out points to the longest run of movement.\n"
+            "Nothing is trimmed until you press this."
+        )
+        self.activity_button.clicked.connect(
+            lambda *_: self.activity_accepted.emit())
+        self.activity_button.hide()
+        row.addWidget(self.activity_button)
         row.addStretch(1)
 
         add = QPushButton("Add select")

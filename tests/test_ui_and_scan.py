@@ -1673,6 +1673,7 @@ def test_changing_clip_stops_the_extraction_it_leaves_behind(window,
         def __init__(self, *_args, **_kwargs):
             self.generation = 0
             self.ready = Signalish()
+            self.activity_ready = Signalish()
 
         def isRunning(self):
             return True

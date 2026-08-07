@@ -129,6 +129,9 @@ class MainWindow(QMainWindow):
         # takes its decode down with it.
         self._retired_strips: list[FilmstripLoader] = []
         self._strip_generation = 0
+        # What the current clip's filmstrip says it spends its
+        # time doing. Never acted on without being asked.
+        self._activity = None
         # Guards handlers that fire while the window is still being assembled.
         self._ready = False
 
@@ -504,6 +507,7 @@ class MainWindow(QMainWindow):
         view.select_added.connect(self._add_select)
         view.select_removed.connect(self._remove_select)
         view.select_renamed.connect(self._rename_select)
+        view.activity_accepted.connect(self._accept_activity)
         return view.preview_box
 
     # Compatibility views for the established MainWindow API. PreviewView
@@ -1208,6 +1212,8 @@ class MainWindow(QMainWindow):
         self._show_selects()
         self.trim_bar.set_strip(Filmstrip())
         self._strip = Filmstrip()
+        self._activity = None
+        self.preview_view.show_activity("")
         self.frame_view.set_message("reading frames…")
         self._update_trim_labels()
 
@@ -1224,6 +1230,7 @@ class MainWindow(QMainWindow):
         self._strip_loader = FilmstripLoader(self.tools, clip,
                                              self._strip_generation, self)
         self._strip_loader.ready.connect(self._strip_ready)
+        self._strip_loader.activity_ready.connect(self._activity_ready)
         self._strip_loader.start()
 
     def _strip_ready(self, generation: int, clip_path: str, strip) -> None:
@@ -1402,6 +1409,53 @@ class MainWindow(QMainWindow):
         self._show_selects()
         self._update_estimate()
         self._touch_session()
+
+    # -- what the recording looks like it is doing ----------------------------
+
+    def _activity_ready(self, generation: int, clip_path: str, found) -> None:
+        """Say what the filmstrip suggests, and offer a trim if there is one.
+
+        Guarded on the generation for the same reason `_strip_ready` is: select
+        A, then B, then A again, and the first reading of A can land after the
+        second has started.
+        """
+        if generation != self._strip_generation:
+            return
+        clip = self._trim_clip
+        if clip is None or str(clip.path) != clip_path:
+            return
+
+        self._activity = found
+        offer = ""
+        span = found.suggestion
+        if span is not None and not clip.is_trimmed:
+            # Only offered on a clip nobody has trimmed. Overwriting a decision
+            # someone already made with a guess is the one thing this must not
+            # do, and a button that quietly does it is worse than no button.
+            offer = f"Trim to the flying  ({human_duration(span[1] - span[0])})"
+        self.preview_view.show_activity(found.describe(human_duration), offer)
+
+    def _accept_activity(self) -> None:
+        """Apply the suggestion, because somebody asked for it."""
+        clip = self._trim_clip
+        if clip is None or self._activity is None:
+            return
+        span = self._activity.suggestion
+        if span is None:
+            return
+        start, end = span
+        self.trim_bar.in_point, self.trim_bar.out_point = start, end
+        self.trim_bar.playhead = start
+        # Through the same seek every other way of moving the playhead uses.
+        # Painting the frame without moving the decoder leaves Play resuming
+        # from where it was — the identical fault Codex found in _pick_select,
+        # which I fixed there and wrote again here.
+        self.player.seek(start)
+        self._on_trim_changed(start, end)
+        self.preview_view.show_activity(
+            self._activity.describe(human_duration))
+        self.statusBar().showMessage(
+            "Trimmed to the longest run of movement — Reset puts it back", 8000)
 
     # -- several ranges out of one clip ---------------------------------------
 
