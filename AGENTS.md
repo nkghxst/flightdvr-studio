@@ -139,21 +139,29 @@ verification was unavailable.
 **The two machines hold different footage**, so a measurement on real media
 usually cannot be repeated by the other reviewer — the laptop has `D:\movies`,
 the desktop has `F:\FPV clips` and whatever card is in the reader. Identify the
-source with a content-derived review ID, not its DVR filename or local path:
-DVR filenames repeat after a card wipe, while the content remains the same when
-the source file is copied between machines. Compute the full-file SHA-256 and
-report its first 16 hexadecimal characters, normalised to lowercase:
+source with **both its filename and a content-derived review ID** — for example
+`hdz_022.ts (clip ecc754e09f6eed20)`.
+
+The filename is for the person reading the review, who knows his own card and
+cannot map a bare hash back to a recording without hashing all of them. The ID
+is for the claim: DVR filenames repeat after a card wipe, so a name alone stops
+meaning anything the moment the card is reused, and the content is what stays
+the same if a file ever moves between machines. Compute the full-file SHA-256
+and report its first 16 hexadecimal characters, normalised to lowercase:
 
 ```powershell
 (Get-FileHash -Algorithm SHA256 -LiteralPath $clip).Hash.Substring(0, 16).ToLowerInvariant()
 ```
 
-Do not use `ClipInfo.fingerprint` for this: it deliberately incorporates the
+It costs about a second on a 600 MB clip, so there is no reason to skip it.
+
+Do not use `ClipInfo.fingerprint` instead: it deliberately incorporates the
 local path and modification time for cache invalidation, so it changes across
-copies. Say what you measured against the review ID, for example
-`clip 8f2a1c4d7e9b1023`, and keep the filename and path out of public reviews. A
-review that says "I could not repeat this and here is why" is doing its job; one
-that quietly skips the check is not.
+copies — the opposite of what an identifier that travels needs.
+
+Folder names like `F:\FPV clips` or `G:\movies` are fine to write down; they
+say nothing worth withholding. A review that says "I could not repeat this and
+here is why" is doing its job; one that quietly skips the check is not.
 
 Offscreen Qt is not a substitute for either. It has no usable fonts, reports
 text widths roughly double the real ones, and no key mapper — so a layout
