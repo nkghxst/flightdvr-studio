@@ -48,11 +48,11 @@ from .external import DESKTOP_OPEN, PLAYER_PATHS, find_player, reveal
 from .export_panel import ExportPanel, FPS_STEPS, RESOLUTION_STEPS
 from .format import (
     _clip_set_id, canonical_path, existing_ancestor, human_duration,
-    human_size, natural_key, output_key, work_dir,
+    human_size, natural_key, output_key, select_stem, work_dir,
 )
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
 from .media import (
-    ClipInfo, Tools, available_encoders, detect_hardware_encoder, probe,
+    ClipInfo, Select, Tools, available_encoders, detect_hardware_encoder, probe,
     stop_process,
 )
 from .presets import (
@@ -377,6 +377,7 @@ class MainWindow(QMainWindow):
             ("Space", self._toggle_play),
             ("K", self._toggle_play),
             ("I", self._set_in),
+            ("N", self._add_select),
             ("O", self._set_out),
             ("Left", lambda: self._nudge(-1.0)),
             ("Right", lambda: self._nudge(1.0)),
@@ -490,6 +491,10 @@ class MainWindow(QMainWindow):
         view.reset_requested.connect(self._reset_trim)
         view.playhead_moved.connect(self._on_playhead)
         view.trim_changed.connect(self._on_trim_changed)
+        view.select_picked.connect(self._pick_select)
+        view.select_added.connect(self._add_select)
+        view.select_removed.connect(self._remove_select)
+        view.select_renamed.connect(self._rename_select)
         return view.preview_box
 
     # Compatibility views for the established MainWindow API. PreviewView
@@ -661,8 +666,13 @@ class MainWindow(QMainWindow):
         # merged: trims from the previous session survived on screen and were
         # then written into the file that was just opened, which had never
         # heard of them.
+        #
+        # The whole list, not `trim_in = trim_out = 0`. Those are a view onto
+        # the select being edited, so zeroing them leaves every other select on
+        # the clip — which is the same leak again, one range further along.
         for clip in self.clips:
-            clip.trim_in = clip.trim_out = 0.0
+            clip.selects = []
+            clip.current = 0
 
         self.session = found
         self._pending_session = None
@@ -1186,6 +1196,7 @@ class MainWindow(QMainWindow):
             # A 4:3 clip wants a different height from a 16:9 one.
             self.preview_box.updateGeometry()
         self.trim_bar.set_clip(clip.duration, clip.trim_in, clip.out_point)
+        self._show_selects()
         self.trim_bar.set_strip(Filmstrip())
         self._strip = Filmstrip()
         self.frame_view.set_message("reading frames…")
@@ -1352,12 +1363,92 @@ class MainWindow(QMainWindow):
         clip = self._trim_clip
         if clip is None:
             return
-        clip.trim_in = in_point if in_point > 0.01 else 0.0
-        clip.trim_out = out_point if out_point < clip.duration - 0.01 else 0.0
+        if len(clip.selects) > 1:
+            # One range of several that happens to span the whole recording is
+            # still a range. Normalising it to zero the way a lone trim is
+            # normalised left a row the filmstrip drew and the queue refused to
+            # export — two selects on screen, one file out, no complaint.
+            clip.trim_in, clip.trim_out = in_point, out_point
+        else:
+            # A lone trim covering everything is not a decision, so it clears.
+            clip.trim_in = in_point if in_point > 0.01 else 0.0
+            clip.trim_out = (out_point if out_point < clip.duration - 0.01
+                             else 0.0)
         self._show_frame(self.trim_bar.playhead)
         self._update_trim_labels()
         self._mark_trim_in_table(clip)
+        self._show_selects()
         self._update_estimate()
+        self._touch_session()
+
+    # -- several ranges out of one clip ---------------------------------------
+
+    def _show_selects(self) -> None:
+        """Put the clip's ranges on the bar and say which is being edited."""
+        clip = self._trim_clip
+        if clip is None:
+            self.preview_view.show_selects(0, 0, "")
+            return
+        ranges = [(s.start, s.end) for s in clip.selects]
+        self.trim_bar.ranges = [(a, b or clip.duration) for a, b in ranges]
+        self.trim_bar.selected = clip.current
+        self.trim_bar.update()
+
+        editing = clip.selects[clip.current] if ranges else None
+        self.preview_view.show_selects(len(ranges), clip.current,
+                                       editing.name if editing else "")
+
+    def _pick_select(self, index: int) -> None:
+        clip = self._trim_clip
+        if clip is None or not 0 <= index < len(clip.selects):
+            return
+        clip.current = index
+        chosen = clip.selects[index]
+        self.trim_bar.in_point = chosen.start
+        self.trim_bar.out_point = chosen.end or clip.duration
+        self.trim_bar.playhead = chosen.start
+        self._show_selects()
+        # Through the same seek an ordinary filmstrip click makes. Painting the
+        # still without moving the decoder left the picture showing one moment
+        # and Play resuming from another.
+        self.player.seek(chosen.start)
+        self._show_frame(chosen.start)
+        self._update_trim_labels()
+
+    def _add_select(self) -> None:
+        """Another range, starting at the playhead.
+
+        Two seconds long rather than empty, because a zero-length select is
+        not a range and would be dropped the moment it was written.
+        """
+        clip = self._trim_clip
+        if clip is None:
+            self.statusBar().showMessage("Click a clip in the list first", 4000)
+            return
+        start = min(self.trim_bar.playhead, max(0.0, clip.duration - 2.0))
+        clip.selects.append(Select(start, min(clip.duration, start + 2.0)))
+        clip.current = len(clip.selects) - 1
+        self._pick_select(clip.current)
+        self._mark_trim_in_table(clip)
+        self._update_estimate()
+        self._touch_session()
+
+    def _remove_select(self) -> None:
+        clip = self._trim_clip
+        if clip is None or len(clip.selects) < 2:
+            return
+        del clip.selects[clip.current]
+        clip.current = min(clip.current, len(clip.selects) - 1)
+        self._pick_select(clip.current)
+        self._mark_trim_in_table(clip)
+        self._update_estimate()
+        self._touch_session()
+
+    def _rename_select(self, name: str) -> None:
+        clip = self._trim_clip
+        if clip is None or not clip.selects:
+            return
+        clip.selects[clip.current].name = name
         self._touch_session()
 
     def _set_in(self) -> None:
@@ -1380,8 +1471,12 @@ class MainWindow(QMainWindow):
         clip = self._trim_clip
         if clip is None:
             return
-        clip.trim_in = clip.trim_out = 0.0
+        # Reset means the whole clip, so every range goes, not just the one
+        # being edited — otherwise Reset on a three-select clip leaves two.
+        clip.selects = []
+        clip.current = 0
         self.trim_bar.set_clip(clip.duration, 0.0, clip.duration)
+        self._show_selects()
         self._update_trim_labels()
         self._mark_trim_in_table(clip)
         self._update_estimate()
@@ -1580,16 +1675,21 @@ class MainWindow(QMainWindow):
             return
         settings = self.current_settings()
         key = self._preset_key()
-        total = sum(estimate_output_size(c, key, settings) for c in clips)
+        # Estimated over the same pieces the queue will actually make, so a
+        # clip with three selects reads as three files rather than one, and
+        # the size is the three ranges rather than the whole recording.
+        pieces = [piece for clip in clips for piece in clip.for_export()]
+        total = sum(estimate_output_size(c, key, settings) for c in pieces)
 
-        if self.export_panel.join_enabled() and len(clips) > 1:
+        if self.export_panel.join_enabled() and len(pieces) > 1:
             if key == "social" and settings.social_mode == "size":
                 total = settings.social_size_mb * 1024 * 1024
             summary = f"1 joined file, about {human_size(total)}"
         else:
-            summary = f"{len(clips)} files, about {human_size(total)} in total"
+            summary = f"{len(pieces)} files, about {human_size(total)} in total"
 
-        runtime = human_duration(sum(c.duration for c in clips))
+        runtime = human_duration(sum(c.trimmed_duration or c.duration
+                                     for c in pieces))
         self.export_panel.set_estimate(f"{summary}  ·  {runtime} of footage")
 
     # -- queue ----------------------------------------------------------------
@@ -1616,9 +1716,20 @@ class MainWindow(QMainWindow):
         }
         before = len(self.jobs)
 
-        if self.export_panel.join_enabled() and len(clips) > 1:
-            # Joined in DVR counter order: the file timestamps cannot be trusted.
-            ordered = sorted(clips, key=lambda c: (c.sequence, natural_key(c.path.name)))
+        # One clip with three selects becomes three ordinary clips here, and
+        # everything below this line carries on believing a recording has one
+        # in point and one out point. Joining comes free: join_inputs already
+        # takes a list of clips each carrying its own trim, so three selects of
+        # one flight join exactly as three separate clips would.
+        pieces = [piece for clip in clips for piece in clip.for_export()]
+
+        if self.export_panel.join_enabled() and len(pieces) > 1:
+            # Joined in DVR counter order: the file timestamps cannot be
+            # trusted. Selects of one clip keep the order they were made in,
+            # which is the order they appear along the recording.
+            ordered = sorted(pieces, key=lambda c: (c.sequence,
+                                                    natural_key(c.path.name),
+                                                    c.trim_in))
 
             # Refused rather than exported wrongly. A join built from mismatched
             # clips does not fail; it produces a file that is silent after the
@@ -1646,17 +1757,21 @@ class MainWindow(QMainWindow):
                                      out_dir=out_dir, stem=stem, subfolders=subfolders))
         else:
             for clip in clips:
-                target = output_path(out_dir, clip.stem, key, subfolders, stamp)
-                if output_key(target) in already:
-                    continue
-                already.add(output_key(target))
-                self.jobs.append(Job([clip], key, settings, target,
-                                     out_dir=out_dir, stem=clip.stem,
-                                     subfolders=subfolders))
+                parts = clip.for_export()
+                for index, piece in enumerate(parts):
+                    stem = select_stem(piece, index, len(parts))
+                    target = output_path(out_dir, stem, key, subfolders, stamp)
+                    if output_key(target) in already:
+                        continue
+                    already.add(output_key(target))
+                    self.jobs.append(Job([piece], key, settings, target,
+                                         out_dir=out_dir, stem=stem,
+                                         subfolders=subfolders))
 
         added = len(self.jobs) - before
         skipped = (
-            1 if self.export_panel.join_enabled() and len(clips) > 1 else len(clips)
+            1 if self.export_panel.join_enabled() and len(pieces) > 1
+            else len(pieces)
         ) - added
         self._rebuild_queue()
         note = f"{added} queued"

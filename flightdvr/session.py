@@ -40,6 +40,10 @@ from datetime import datetime
 from pathlib import Path
 
 from .format import canonical_path, folder_label
+# Select describes a recording, not a file format, so it lives with ClipInfo
+# and is re-exported here: everything that already imports it from this module
+# goes on working, and the dependency runs the way round it should.
+from .media import Select  # noqa: F401  (re-exported)
 
 SUFFIX = ".flightdvr.json"
 
@@ -56,30 +60,6 @@ SCHEMA = 1
 
 UNREVIEWED, KEEP, MAYBE, REJECT = "", "keep", "maybe", "reject"
 REVIEW_STATES = (UNREVIEWED, KEEP, MAYBE, REJECT)
-
-
-@dataclass
-class Select:
-    """One range worth keeping, out of a recording that may hold several."""
-
-    start: float
-    end: float
-    name: str = ""
-
-    @property
-    def duration(self) -> float:
-        return max(0.0, self.end - self.start)
-
-    def as_dict(self) -> dict:
-        return {"start": round(self.start, 3),
-                "end": round(self.end, 3),
-                "name": self.name}
-
-    @classmethod
-    def from_dict(cls, raw: dict) -> "Select":
-        return cls(start=float(raw.get("start", 0.0)),
-                   end=float(raw.get("end", 0.0)),
-                   name=str(raw.get("name", "")))
 
 
 @dataclass
@@ -222,12 +202,10 @@ def missing_from(session: Session, present: set[str]) -> list[ClipMarks]:
 
 
 def apply_to(session: Session, clips) -> int:
-    """Put remembered trim points back onto the clips just scanned.
+    """Put remembered selects back onto the clips just scanned.
 
-    Deliberately only the first select, because until several of them are
-    editable a clip still has exactly one in point and one out point. When
-    multi-select lands (#15) this is where the second and later ones start
-    being used, and nothing else has to change.
+    All of them, not just the first: a clip carries its own list now, and the
+    export path turns that list into one job each at queueing time.
 
     Returns how many clips got something back, which is what the window needs
     in order to say so.
@@ -237,29 +215,33 @@ def apply_to(session: Session, clips) -> int:
         marks = session.clips.get(clip.fingerprint)
         if marks is None or not marks.selects:
             continue
-        first = marks.selects[0]
-        clip.trim_in = max(0.0, first.start)
-        clip.trim_out = first.end if first.end > first.start else 0.0
+        # Copied rather than shared. The clip and the session would otherwise
+        # hold the same Select objects, and editing a trim would rewrite the
+        # stored one before anything decided to save it — which is fine until
+        # something wants to know what changed.
+        clip.selects = [Select(max(0.0, s.start), s.end, s.name)
+                        for s in marks.selects]
+        clip.current = 0
         restored += 1
     return restored
 
 
 def capture_from(session: Session, clips) -> None:
-    """Record the clips' current trims into the session.
+    """Record the clips' selects into the session.
 
-    A trim of the whole clip is not a decision, so it clears the select rather
-    than storing a range covering everything — otherwise resetting a clip would
-    leave a mark behind that looks like a choice somebody made.
+    A trim of the whole clip is not a decision, so an empty select is dropped
+    rather than stored as a range covering everything — otherwise resetting a
+    clip would leave a mark behind that looks like a choice somebody made.
     """
     for clip in clips:
-        if clip.is_trimmed:
+        ranges = clip.real_selects
+        if ranges:
             marks = session.marks(clip.fingerprint, clip.path.name)
-            keep = Select(clip.trim_in, clip.out_point)
-            marks.selects = [keep] + marks.selects[1:]
+            marks.selects = [Select(s.start, s.end, s.name) for s in ranges]
         else:
             marks = session.clips.get(clip.fingerprint)
-            if marks is not None and marks.selects:
-                marks.selects = marks.selects[1:]
+            if marks is not None:
+                marks.selects = []
 
 
 def sessions_dir() -> Path:

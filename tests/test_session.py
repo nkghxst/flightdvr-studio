@@ -272,23 +272,48 @@ def test_resetting_a_clip_clears_the_mark_rather_than_storing_the_whole_thing():
     assert session.marks(marked.fingerprint).selects == []
 
 
-def test_capturing_a_trim_leaves_the_other_selects_alone():
-    """Until #15 only the first is editable; the rest must survive a round trip
-    through a version that cannot see them."""
+def test_the_clip_is_what_the_session_is_written_from():
+    """This replaces a rule that #15 removed.
+
+    Before selects were editable, a clip carried only the first one, so
+    capture_from had to preserve the rest blind — it could not tell "the user
+    deleted them" from "this version cannot see them". Now the clip carries all
+    of them, so the clip is the truth and the stored list is replaced.
+    """
     from flightdvr.session import capture_from
 
     session = Session()
     edited = clip()
-    session.marks(edited.fingerprint).selects = [
-        Select(1.0, 2.0), Select(60.0, 70.0, "tree dive"),
-    ]
-    edited.trim_in, edited.trim_out = 45.0, 150.5
+    session.marks(edited.fingerprint).selects = [Select(1.0, 2.0)]
+    edited.selects = [Select(45.0, 150.5),
+                      Select(60.0, 70.0, "tree dive")]
     capture_from(session, [edited])
 
     kept = session.marks(edited.fingerprint).selects
     assert [(s.start, s.end, s.name) for s in kept] == [
         (45.0, 150.5, ""), (60.0, 70.0, "tree dive"),
     ]
+
+
+def test_deleting_a_select_sticks():
+    """The other half of the same rule, and the reason it had to change: while
+    the stored list was preserved blind, removing a select could not be
+    recorded, so it came back on the next visit."""
+    from flightdvr.session import apply_to, capture_from
+
+    session = Session()
+    first = clip()
+    session.marks(first.fingerprint).selects = [
+        Select(10.0, 20.0, "launch"), Select(60.0, 70.0, "tree dive"),
+    ]
+
+    later = clip()
+    apply_to(session, [later])
+    assert len(later.selects) == 2
+    del later.selects[1]                       # the user drops one
+    capture_from(session, [later])
+
+    assert [s.name for s in session.marks(later.fingerprint).selects] == ["launch"]
 
 
 # -- footage that is not there any more -----------------------------------------

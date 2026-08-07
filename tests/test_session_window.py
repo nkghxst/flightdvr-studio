@@ -382,6 +382,29 @@ def test_opening_a_session_replaces_what_is_on_screen(app, sessions_home, card,
     assert not window.clips[0].is_trimmed, "the old trim stayed on screen"
 
 
+def test_opening_a_session_clears_every_select_not_just_the_edited_one(
+        app, sessions_home, card, tmp_path):
+    """trim_in and trim_out are a view onto the select being edited, so
+    clearing them leaves the rest of the list on the clip — the same leak one
+    range further along."""
+    from flightdvr.media import Select
+    from flightdvr.session import SUFFIX, Session
+
+    foreign = Session(source=str(card), title="somewhere else",
+                      path=tmp_path / f"foreign2{SUFFIX}")
+    foreign.save()
+
+    window = open_window(app, card, [a_clip("hdz_001.ts")])
+    window.clips[0].selects = [Select(10, 40, "one"), Select(90, 120, "two"),
+                               Select(200, 230, "three")]
+    window._open_session_file(foreign.path)
+
+    assert window.clips[0].real_selects == [], (
+        "selects beyond the edited one survived the switch")
+    close(window)
+    assert not Session.load(foreign.path).clips
+
+
 def MainWindow_for(card):
     """A window pointed at a folder, with no clips and no scan run."""
     from flightdvr.media import find_tools

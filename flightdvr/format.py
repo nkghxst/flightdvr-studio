@@ -85,6 +85,33 @@ def folder_label(source: str) -> str:
     text = str(source).replace("\\", "/").rstrip("/")
     tail = text.rsplit("/", 1)[-1]
     return tail if tail and not tail.endswith(":") else text
+def safe_name(text: str) -> str:
+    """A select's name, reduced to something a filesystem will accept.
+
+    Names are typed by hand — "Tree dive!", "gap #2" — and go straight into a
+    filename. Windows refuses several of those characters outright and silently
+    strips a trailing dot or space.
+    """
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", text)
+    cleaned = re.sub(r"\s+", "-", cleaned.strip())
+    return cleaned.strip(". ")[:48]
+
+
+def select_stem(clip, index: int, total: int) -> str:
+    """What to call the file for one select of a clip.
+
+    A single select keeps the recording's own name, so a clip trimmed the way
+    every version until now trimmed it exports to the filename it always did.
+    Several of them need telling apart, and the name typed on the select is a
+    better answer than a number — with the number kept as a prefix so they sort
+    into the order they occur along the recording.
+    """
+    if total <= 1:
+        return clip.stem
+    named = ""
+    if clip.selects:
+        named = safe_name(clip.selects[0].name)
+    return f"{clip.stem}_{index + 1}" + (f"_{named}" if named else "")
 
 
 def output_key(path: Path) -> str:
