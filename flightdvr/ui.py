@@ -344,7 +344,17 @@ class MainWindow(QMainWindow):
 
         # The only network access this program makes, so the switch for it
         # belongs next to the statement of what the program is.
-        updates = QCheckBox("Check for new versions")
+        # Parented to the dialog. Without a parent this is a local that Python
+        # collects the moment this function returns: setCheckBox does not take
+        # ownership across the binding, so the C++ object went with it. The box
+        # then had no tickbox at all, and QMessageBox.checkBox() returned a
+        # dangling pointer that faults on touch.
+        #
+        # It survived by luck for a while — whether the collection happened
+        # before the dialog was shown depended on refcount timing that any
+        # unrelated change could shift, which is why this looked like it
+        # disappeared on its own.
+        updates = QCheckBox("Check for updates", box)
         updates.setChecked(
             self.settings_store.value("check_for_updates", True, type=bool)
         )
