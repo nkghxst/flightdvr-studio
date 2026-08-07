@@ -480,3 +480,40 @@ def test_picking_a_select_moves_the_player_too(window):
     assert window.player.position == 90, (
         f"the filmstrip moved to 90 and the player is still at "
         f"{window.player.position}")
+
+
+# -- a settled seek gets a real frame (#35) -----------------------------------
+
+def test_dragging_the_filmstrip_does_not_decode_per_move(window):
+    """Each precise decode is about a second of ffmpeg. A drag emits
+    continuously, so asking on every move would queue one per pixel."""
+    flight = loaded(window, clip())
+    asked = []
+    window.player.show_frame_at = lambda seconds: asked.append(seconds)
+
+    for tenth in range(40):
+        window.trim_bar.playhead = tenth
+        window._on_playhead(float(tenth))
+    assert asked == [], "decoded while the drag was still going"
+    assert window._sharpen_timer.isActive(), "nothing was scheduled"
+
+    window._sharpen()                      # what the timer does when it fires
+    assert asked == [39.0], f"asked for {asked}"
+
+
+def test_a_settled_seek_is_not_sharpened_during_playback(window):
+    """The precise decoder releases the playback stream, so this would stop the
+    video to sharpen a frame nobody is looking at."""
+    flight = loaded(window, clip())
+    asked = []
+    window.player.show_frame_at = lambda seconds: asked.append(seconds)
+
+    window.trim_bar.playhead = 30.0
+    window._on_playhead(30.0)
+    window.player.is_playing = True
+    window._sharpen()
+    assert asked == [], f"asked for {asked} while playing"
+
+    window.player.is_playing = False
+    window._sharpen()
+    assert asked == [30.0], "paused again and it still did nothing"

@@ -829,7 +829,38 @@ class PreviewPlayer(QObject):
         current = self._frame_pending
         if current is None:
             current = math.floor(max(0.0, self.position) * rate + 0.5)
-        target = max(0, min(current + frames, total - 1))
+        self._reach_frame(max(0, min(current + frames, total - 1)))
+
+    def show_frame_at(self, seconds: float) -> None:
+        """Decode and show the real frame at a moment, rather than near it.
+
+        Seeking paints the nearest filmstrip still, and those are extracted at
+        160px because that is all a strip tile needs — badly soft in a preview
+        four times that wide. This reaches the same decoder that comma and
+        period use, so a settled seek ends up as sharp as a stepped frame.
+
+        Absolute where `step_frames` is relative; everything after that is the
+        same, cache included, so a seek inside the window already decoded is
+        free.
+        """
+        clip = self.clip
+        if clip is None or clip.fps <= 0 or self.is_playing:
+            return
+        rate = clip.fps
+        total = max(1, math.ceil(max(0.0, clip.duration) * rate - 1e-9))
+        target = max(0, min(math.floor(max(0.0, seconds) * rate + 0.5),
+                            total - 1))
+        if self._frame_pending == target:
+            return
+        self._idle.stop()
+        self._release()
+        self._reach_frame(target)
+
+    def _reach_frame(self, target: int) -> None:
+        """Show source frame `target`, from the cache or by decoding for it."""
+        clip = self.clip
+        if clip is None:
+            return
         cached = self._frame_cache.get(target)
         if cached is not None:
             self._emit_precise(cached)
@@ -845,6 +876,7 @@ class PreviewPlayer(QObject):
             return
 
         self._frame_pending = target
+        rate = clip.fps if clip.fps > 0 else PREVIEW_FPS
         window = plan_frame_window(target / rate, clip.duration, rate)
         self._start_frame_window(window)
 
