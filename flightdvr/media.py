@@ -324,6 +324,11 @@ class ClipInfo:
     selects: list[Select] = field(default_factory=list)
     current: int = 0
 
+    # The browser's decision about the whole recording. Kept as a plain value
+    # here because session.py imports ClipInfo; importing the review constants
+    # back from there would make the model depend on its persistence layer.
+    review: str = ""
+
     # -- trimming --------------------------------------------------------------
 
     # trim_in and trim_out are the select currently being edited, and mean

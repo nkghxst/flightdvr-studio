@@ -223,7 +223,7 @@ def missing_from(session: Session, present: set[str]) -> list[ClipMarks]:
 
 
 def apply_to(session: Session, clips) -> int:
-    """Put remembered selects back onto the clips just scanned.
+    """Put remembered selects and review states onto the clips just scanned.
 
     All of them, not just the first: a clip carries its own list now, and the
     export path turns that list into one job each at queueing time.
@@ -234,7 +234,10 @@ def apply_to(session: Session, clips) -> int:
     restored = 0
     for clip in clips:
         marks = session.clips.get(clip.fingerprint)
-        if marks is None or not marks.selects:
+        if marks is None:
+            continue
+        clip.review = marks.review
+        if not marks.selects:
             continue
         # Copied rather than shared. The clip and the session would otherwise
         # hold the same Select objects, and editing a trim would rewrite the
@@ -271,7 +274,7 @@ def apply_settings(session: Session, panel) -> bool:
 
 
 def capture_from(session: Session, clips) -> None:
-    """Record the clips' selects into the session.
+    """Record the clips' selects and review states into the session.
 
     A trim of the whole clip is not a decision, so an empty select is dropped
     rather than stored as a range covering everything — otherwise resetting a
@@ -279,13 +282,16 @@ def capture_from(session: Session, clips) -> None:
     """
     for clip in clips:
         ranges = clip.real_selects
-        if ranges:
+        review = (clip.review if clip.review in REVIEW_STATES else UNREVIEWED)
+        if ranges or review:
             marks = session.marks(clip.fingerprint, clip.path.name)
             marks.selects = [Select(s.start, s.end, s.name) for s in ranges]
+            marks.review = review
         else:
             marks = session.clips.get(clip.fingerprint)
             if marks is not None:
                 marks.selects = []
+                marks.review = UNREVIEWED
 
 
 def sessions_dir() -> Path:
