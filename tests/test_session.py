@@ -329,11 +329,51 @@ def test_each_source_folder_gets_its_own_session(tmp_path, monkeypatch):
 
 def test_the_same_folder_gets_the_same_session_however_it_is_spelled(tmp_path,
                                                                      monkeypatch):
-    """Windows and macOS treat these as one folder, so the app must too."""
+    """Windows and macOS treat these as one folder, so the app must too.
+
+    Written with a real folder rather than a Windows drive letter: on Linux,
+    where case matters, `G:\\Movies` and `g:\\movies` genuinely are two
+    different names, and the earlier version of this test asserted Windows
+    semantics on every platform and failed on two of them.
+    """
     from flightdvr import session as module
     monkeypatch.setattr(module, "sessions_dir", lambda: tmp_path)
 
-    assert module.autosave_path(r"G:\Movies") == module.autosave_path(r"g:\movies")
+    card = tmp_path / "Movies"
+    card.mkdir()
+    spelled_differently = card.parent / card.name.lower()
+    if module.autosave_path(card) != module.autosave_path(spelled_differently):
+        pytest.skip("this filesystem is case-sensitive, so these are two folders")
+    assert module.autosave_path(card) == module.autosave_path(spelled_differently)
+
+
+def test_one_rule_decides_what_counts_as_the_same_path():
+    """The autosave filename and the clip fingerprint have to agree.
+
+    They did not: the filename was case-folded and the fingerprint hashed the
+    path as typed, so a card opened as G:\\Movies rather than g:\\movies found
+    its session and then reported every clip in it as missing.
+    """
+    from flightdvr.format import canonical_path
+
+    here = Path(__file__).resolve()
+    roundabout = here.parent / ".." / here.parent.name / here.name
+
+    # Case-folding is only observable where the filesystem folds case, so the
+    # rule is checked with a detour instead — true on every platform, and the
+    # same normalisation either way.
+    assert canonical_path(roundabout) == canonical_path(here)
+
+    direct = clip()
+    direct.path = here
+    detoured = clip()
+    detoured.path = roundabout
+    assert detoured.fingerprint == direct.fingerprint, (
+        "the fingerprint hashes the path as typed, so it can disagree with the "
+        "autosave filename about which folder this is")
+
+    from flightdvr.session import autosave_path
+    assert autosave_path(roundabout.parent) == autosave_path(here.parent)
 
 
 def test_reopening_a_source_finds_the_work_left_there(tmp_path, monkeypatch):
@@ -408,7 +448,54 @@ def test_an_unreadable_recent_list_is_simply_empty(tmp_path, monkeypatch):
 
 
 def test_a_recent_entry_labels_itself_from_whatever_it_has(tmp_path):
+    """The source string travels: written on Windows, quite possibly read on
+    Linux, where Path(r"G:\\movies").name is the whole string rather than the
+    folder. The label has to handle either spelling on either platform."""
     from flightdvr.session import Recent
     assert Recent(path="x", title="Hampstead Heath").label == "Hampstead Heath"
     assert Recent(path="x", source=r"G:\movies").label == "movies"
+    assert Recent(path="x", source="/media/card/movies").label == "movies"
+    assert Recent(path="x", source="/media/card/movies/").label == "movies"
     assert Recent(path=str(tmp_path / "card.flightdvr.json")).label.startswith("card")
+
+
+def test_valid_json_that_is_not_valid_session_data_opens_empty(tmp_path):
+    """A select whose start is the string "bad" parses as JSON perfectly well
+    and then raised out of from_dict, which is the one thing load promises not
+    to do — and it took Open Session and startup recovery with it."""
+    for name, payload in [
+        ("bad-number", {"schema": 1, "clips": {
+            "a": {"name": "x.ts", "selects": [{"start": "bad", "end": 2.0}]}}}),
+        ("selects-not-a-list", {"schema": 1, "clips": {
+            "a": {"name": "x.ts", "selects": 7}}}),
+        ("select-not-a-dict", {"schema": 1, "clips": {
+            "a": {"name": "x.ts", "selects": ["nope"]}}}),
+        ("exported-not-a-list", {"schema": 1, "clips": {
+            "a": {"name": "x.ts", "exported": 3}}}),
+    ]:
+        broken = tmp_path / f"{name}.flightdvr.json"
+        broken.write_text(json.dumps(payload))
+        assert Session.load(broken).path == broken, name
+
+
+def test_a_failure_between_writing_and_replacing_leaves_the_old_one(tmp_path,
+                                                                    monkeypatch):
+    """What atomic actually has to mean. The previous test saved twice and
+    called that atomic, which only shows that saving works."""
+    import os as os_module
+    from flightdvr import session as module
+
+    target = tmp_path / "s.flightdvr.json"
+    Session(title="the good one").save(target)
+
+    def die(*_args, **_kwargs):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(module.os, "replace", die)
+    try:
+        Session(title="the interrupted one").save(target)
+    except OSError:
+        pass
+
+    assert json.loads(target.read_text())["title"] == "the good one", (
+        "the old session was destroyed by a write that never completed")

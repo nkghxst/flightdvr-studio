@@ -47,8 +47,8 @@ from .browser_panel import BrowserPanel
 from .external import DESKTOP_OPEN, PLAYER_PATHS, find_player, reveal
 from .export_panel import ExportPanel, FPS_STEPS, RESOLUTION_STEPS
 from .format import (
-    _clip_set_id, existing_ancestor, human_duration, human_size, natural_key,
-    output_key, work_dir,
+    _clip_set_id, canonical_path, existing_ancestor, human_duration,
+    human_size, natural_key, output_key, work_dir,
 )
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
 from .media import (
@@ -648,6 +648,14 @@ class MainWindow(QMainWindow):
         state of a folder opened for the first time, and announcing it every
         time would train people to ignore the line that also reports losses.
         """
+        # Everything on screen is cleared first. apply_to only touches clips
+        # the new session has something to say about, so without this a switch
+        # merged: trims from the previous session survived on screen and were
+        # then written into the file that was just opened, which had never
+        # heard of them.
+        for clip in self.clips:
+            clip.trim_in = clip.trim_out = 0.0
+
         self.session = found
         self._pending_session = None
         # Only once there is a file. A folder opened for the first time has a
@@ -939,6 +947,12 @@ class MainWindow(QMainWindow):
             self.scan_worker.stop()
             self.scan_worker.wait(1500)
 
+        # Before the clips go. The session is written from them, and the write
+        # is debounced by a second and a half — so a trim set and then followed
+        # straight away by Scan, Browse or Find SD card had its only copy
+        # discarded here.
+        self._flush_session()
+
         self.settings_store.setValue("source_dir", str(folder))
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
@@ -1014,12 +1028,11 @@ class MainWindow(QMainWindow):
                 opened = self.session
             self._adopt_session(opened or for_source(source))
 
+        self.thumbs.resume()
+
     def _is_open_for(self, source: Path) -> bool:
         return (self.session is not None
-                and os.path.normcase(self.session.source)
-                == os.path.normcase(str(source)))
-
-        self.thumbs.resume()
+                and canonical_path(self.session.source) == canonical_path(source))
 
     def _add_clip(self, generation: int, clip: ClipInfo) -> None:
         # A worker from an earlier scan can still be finishing probes it had

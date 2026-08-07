@@ -35,6 +35,10 @@ from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
 
+# One rule for what counts as the same path, shared with the session so
+# the fingerprint and the autosave filename cannot disagree.
+from .format import canonical_path
+
 # Keeps console windows from flashing up for every ffprobe call on Windows.
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -332,7 +336,11 @@ class ClipInfo:
         filmstrip cache, and the session.
         """
         stamp = self.modified.timestamp() if self.modified else 0.0
-        raw = f"{self.path}|{self.size}|{stamp}"
+        # Canonical, and by the same rule the session uses to name its autosave
+        # file. Hashing the path as typed meant opening a card through
+        # G:\Movies rather than g:\movies found the right session and then
+        # reported every clip in it as missing.
+        raw = f"{canonical_path(self.path)}|{self.size}|{stamp}"
         return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:20]
 
     @property

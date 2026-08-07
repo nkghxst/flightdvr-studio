@@ -329,3 +329,64 @@ def test_opening_a_session_does_not_survive_the_scan_that_follows(
     assert window.clips[0].trim_in == pytest.approx(60.0), (
         "the folder's autosave loaded over the session that was opened")
     close(window)
+
+
+# -- what Codex's review of #22 found -----------------------------------------
+
+def test_scanning_resumes_the_thumbnail_loader(app, sessions_home, card):
+    """_scan pauses the loader and _scan_done resumes it. A method definition
+    got inserted between them, so resume() ended up unreachable inside the new
+    method and every thumbnail after a scan was held indefinitely."""
+    window = MainWindow_for(card)
+    window.thumbs.pause()
+    assert window.thumbs._paused
+    window._scan_done(window._scan_generation, 0)
+    assert not window.thumbs._paused, "thumbnails never start loading again"
+    close(window)
+
+
+def test_a_trim_survives_pressing_scan_immediately_after_it(app, sessions_home,
+                                                            card, tmp_path):
+    """The write is debounced by a second and a half, and _scan clears the
+    clips it would have been written from. Trim, then Scan straight away, and
+    the only copy was discarded."""
+    window = open_window(app, card, [a_clip("hdz_001.ts")])
+    window.clips[0].trim_in, window.clips[0].trim_out = 8.0, 44.0
+    window._touch_session()                       # pending, not yet written
+
+    window._scan()                                # user presses Scan at once
+    app.processEvents()
+    close(window)
+
+    assert session_module.for_source(card).clips, "the trim was thrown away"
+
+
+def test_opening_a_session_replaces_what_is_on_screen(app, sessions_home, card,
+                                                      tmp_path):
+    """apply_to only touches clips the new session knows about, so a switch
+    used to merge: trims from the old one survived and were then written into
+    the file that had just been opened and had never heard of them."""
+    from flightdvr.session import SUFFIX, Session
+
+    foreign = Session(source=str(tmp_path / "not-here"), title="somewhere else",
+                      path=tmp_path / f"foreign{SUFFIX}")
+    foreign.save()
+
+    window = open_window(app, card, [a_clip("hdz_001.ts")])
+    window.clips[0].trim_in, window.clips[0].trim_out = 8.0, 44.0
+    window._open_session_file(foreign.path)
+    close(window)
+
+    assert not Session.load(foreign.path).clips, (
+        "decisions from the previous session leaked into the opened one")
+    assert not window.clips[0].is_trimmed, "the old trim stayed on screen"
+
+
+def MainWindow_for(card):
+    """A window pointed at a folder, with no clips and no scan run."""
+    from flightdvr.media import find_tools
+    from flightdvr.ui import MainWindow
+    made = MainWindow(find_tools())
+    made.source_combo.insertItem(0, str(card), str(card))
+    made.source_combo.setCurrentIndex(0)
+    return made

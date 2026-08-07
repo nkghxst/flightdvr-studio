@@ -39,6 +39,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from .format import canonical_path, folder_label
+
 SUFFIX = ".flightdvr.json"
 
 # How many sessions the "recent" list keeps. Long enough to cover the cards
@@ -185,22 +187,27 @@ class Session:
         open the app because of them would be worse."""
         try:
             raw = json.loads(Path(path).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return cls(path=Path(path))
-        if not isinstance(raw, dict):
-            return cls(path=Path(path))
+            if not isinstance(raw, dict):
+                return cls(path=Path(path))
 
-        raw = _migrate(raw)
-        return cls(
-            title=str(raw.get("title", "")),
-            source=str(raw.get("source", "")),
-            clips={
-                str(f): ClipMarks.from_dict(str(f), m)
-                for f, m in (raw.get("clips") or {}).items()
-                if isinstance(m, dict)
-            },
-            path=Path(path),
-        )
+            raw = _migrate(raw)
+            return cls(
+                title=str(raw.get("title", "")),
+                source=str(raw.get("source", "")),
+                clips={
+                    str(f): ClipMarks.from_dict(str(f), m)
+                    for f, m in (raw.get("clips") or {}).items()
+                    if isinstance(m, dict)
+                },
+                path=Path(path),
+            )
+        # Valid JSON is not the same as valid session data. A select whose
+        # start is the string "bad" parses fine and then raises out of
+        # from_dict, which broke the promise this method makes and took Open
+        # Session and startup recovery down with it. The conversion belongs
+        # inside the guard, not after it.
+        except (OSError, ValueError, TypeError, AttributeError, KeyError):
+            return cls(path=Path(path))
 
 
 def missing_from(session: Session, present: set[str]) -> list[ClipMarks]:
@@ -268,8 +275,11 @@ def autosave_path(source: Path | str) -> Path:
     coming back to the first has to find the first one's work. Keyed on the
     folder rather than named after it because a path is not a filename.
     """
-    text = os.path.normcase(str(source))
-    stamp = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
+    # The same rule ClipInfo.fingerprint uses. When these two disagreed, a card
+    # opened through a differently-cased path found its session and then
+    # reported every clip in it as missing.
+    stamp = hashlib.sha1(
+        canonical_path(source).encode("utf-8", "replace")).hexdigest()[:16]
     return sessions_dir() / f"auto-{stamp}{SUFFIX}"
 
 
@@ -288,7 +298,7 @@ class Recent:
 
     @property
     def label(self) -> str:
-        return self.title or Path(self.source).name or Path(self.path).stem
+        return self.title or folder_label(self.source) or Path(self.path).stem
 
 
 def recent_path() -> Path:
