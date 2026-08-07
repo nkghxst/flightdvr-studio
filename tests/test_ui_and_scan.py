@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QPoint, QRect, QRectF
+from PySide6.QtCore import QPoint, QRect, QRectF, Qt
 
 # Must be set before any QApplication exists, so these tests need no display.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -37,7 +37,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from flightdvr import scan  # noqa: E402
+from flightdvr.browser_panel import (  # noqa: E402
+    FILTER_ALL, FILTER_EXPORTED, REVIEW_KEYS,
+)
 from flightdvr.media import ClipInfo, Tools  # noqa: E402
+from flightdvr.session import KEEP, MAYBE, REJECT, UNREVIEWED  # noqa: E402
 from flightdvr.thumbs import RESYNC_SECONDS, build_command  # noqa: E402
 from flightdvr.ui import (  # noqa: E402
     FPS_STEPS, RESOLUTION_STEPS, find_player, human_duration, natural_key,
@@ -1326,6 +1330,144 @@ def test_clip_table_storage_belongs_to_the_browser_panel(window):
     MainWindow, keeping scanning changes tied to the whole window."""
     assert window.table is window.browser_panel.table
     assert "table" not in window.__dict__
+
+
+def test_the_review_controls_belong_to_the_browser_panel(window):
+    """The split is real only if new browser controls stay with the browser."""
+    panel = window.browser_panel
+    assert [panel.review_filter.itemText(i)
+            for i in range(panel.review_filter.count())] == [
+        "All", "Unreviewed", "Keep", "Maybe", "Reject", "Exported",
+    ]
+    assert set(panel.review_buttons) == {UNREVIEWED, KEEP, MAYBE, REJECT}
+    assert {state: shortcut.key().toString()
+            for state, shortcut in panel.review_shortcuts.items()} == REVIEW_KEYS
+    assert all(
+        shortcut.context() == Qt.ShortcutContext.WidgetWithChildrenShortcut
+        for shortcut in panel.review_shortcuts.values()
+    ), "a window-wide K would conflict with the preview's K shortcut"
+    assert "review_filter" not in window.__dict__
+    assert "review_count_label" not in window.__dict__
+
+
+def test_each_review_filter_shows_only_the_rows_it_names(window, monkeypatch,
+                                                         tmp_path):
+    """The filter is the way through a 122-clip card, so every option gets a
+    behavioural check rather than only checking that its label exists."""
+    monkeypatch.setattr(window.thumbs, "request", lambda *_: None)
+    panel = window.browser_panel
+    panel.review_filter.setCurrentIndex(
+        panel.review_filter.findData(FILTER_ALL))
+    window.table.setSortingEnabled(False)
+    window.table.setRowCount(0)
+    window.clips.clear()
+    window.clip_by_path.clear()
+
+    clips = []
+    for number, state in enumerate((UNREVIEWED, KEEP, MAYBE, REJECT), 100):
+        made = clip(f"hdz_{number}.ts")
+        made.review = state
+        clips.append(made)
+        window._add_clip(window._scan_generation, made)
+
+    def visible_paths():
+        paths = set()
+        for row in range(window.table.rowCount()):
+            if not window.table.isRowHidden(row):
+                paths.add(window.table.item(row, 0).data(
+                    Qt.ItemDataRole.UserRole))
+        return paths
+
+    try:
+        assert panel.review_count_label.text() == "3 of 4 reviewed"
+        for state, expected in zip(
+            (UNREVIEWED, KEEP, MAYBE, REJECT), clips, strict=True
+        ):
+            panel.review_filter.setCurrentIndex(
+                panel.review_filter.findData(state))
+            assert visible_paths() == {str(expected.path)}, state
+
+        panel.review_filter.setCurrentIndex(panel.review_filter.findData(KEEP))
+        window._select_all()
+        ticked = {
+            window.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            for row in range(window.table.rowCount())
+            if window.table.item(row, 0).checkState() == Qt.CheckState.Checked
+        }
+        assert ticked == {str(clips[1].path)}, (
+            "All ignored the filter and selected hidden clips")
+        window._select_none()
+
+        # Exported means the same thing as the marker already shown in the
+        # name column: an output for the current settings exists and is not
+        # empty. Only one of these four targets exists.
+        monkeypatch.setattr(
+            "flightdvr.ui.output_path",
+            lambda _out, stem, *_args: tmp_path / f"{stem}.mp4",
+        )
+        (tmp_path / f"{clips[1].stem}.mp4").write_bytes(b"finished")
+        window._refresh_export_markers()
+        panel.review_filter.setCurrentIndex(
+            panel.review_filter.findData(FILTER_EXPORTED))
+        assert visible_paths() == {str(clips[1].path)}
+    finally:
+        panel.review_filter.setCurrentIndex(
+            panel.review_filter.findData(FILTER_ALL))
+        window.table.setRowCount(0)
+        window.clips.clear()
+        window.clip_by_path.clear()
+        window.table.setSortingEnabled(True)
+        window._refresh_review_controls()
+
+
+def test_marking_a_filtered_clip_moves_to_the_next_visible_one(window,
+                                                               monkeypatch):
+    """After K hides a row from Unreviewed, the next K must not keep changing
+    that hidden clip; keyboard review has to continue down the visible list."""
+    monkeypatch.setattr(window.thumbs, "request", lambda *_: None)
+    panel = window.browser_panel
+    panel.review_filter.setCurrentIndex(
+        panel.review_filter.findData(FILTER_ALL))
+    window.table.setSortingEnabled(False)
+    window.table.setRowCount(0)
+    window.clips.clear()
+    window.clip_by_path.clear()
+    clips = [clip("hdz_110.ts"), clip("hdz_111.ts")]
+    for made in clips:
+        window._add_clip(window._scan_generation, made)
+
+    try:
+        panel.review_filter.setCurrentIndex(
+            panel.review_filter.findData(UNREVIEWED))
+        window.table.setCurrentCell(0, 0)
+        window.table.selectRow(0)
+        window._set_review(KEEP)
+
+        assert clips[0].review == KEEP
+        assert window.table.isRowHidden(0)
+        assert window._highlighted_clip() is clips[1]
+        assert panel.review_count_label.text() == "1 of 2 reviewed"
+
+        window._set_review(MAYBE)
+        assert all(window.table.isRowHidden(row) for row in range(2))
+        assert window.table.currentRow() == -1, (
+            "keyboard actions still targeted a hidden clip")
+
+        panel.review_filter.setCurrentIndex(
+            panel.review_filter.findData(FILTER_ALL))
+        window.table.setCurrentCell(1, 0)
+        window.table.selectRow(1)
+        panel.review_buttons[REJECT].click()
+        assert clips[1].review == REJECT, "the mouse control was only decoration"
+        assert panel.review_count_label.text() == "2 of 2 reviewed"
+    finally:
+        panel.review_filter.setCurrentIndex(
+            panel.review_filter.findData(FILTER_ALL))
+        window.table.setRowCount(0)
+        window.clips.clear()
+        window.clip_by_path.clear()
+        window.table.setSortingEnabled(True)
+        window._refresh_review_controls()
 
 
 def test_queue_widget_storage_belongs_to_the_queue_panel(window):
