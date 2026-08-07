@@ -534,26 +534,41 @@ def test_precise_stepping_lands_on_the_source_frame_it_displays(
         tools, clip, qt_app):
     """The native-rate window must identify and display the same frame.
 
-    The control starts at zero; the second decode seeks mid-GOP to the window
-    around 2.5 s. Comparing the frame numbered 150 catches both a torn seek and
-    a timestamp/frame-number disagreement.
+    Two overlapping mid-GOP windows compare frame 150. That catches both a torn
+    seek and a timestamp/frame-number disagreement without requiring either
+    cache to be wider than the 121-frame production bound.
     """
     info = probed(tools, clip)
-    control, control_problems, _ = decode_frame_window(tools, info, 0.0)
+    control, control_problems, _ = decode_frame_window(tools, info, 2.0)
     sought, sought_problems, window = decode_frame_window(tools, info, 2.5)
 
     assert not control_problems and not sought_problems, (
         control_problems, sought_problems)
     assert len(sought) <= window.frame_count
-    assert len(sought) <= 361
+    assert len(sought) <= 121
 
     control_by_number = {frame.frame_number: frame for frame in control}
     sought_by_number = {frame.frame_number: frame for frame in sought}
+    assert min(sought_by_number) == window.first_frame
+    assert max(sought_by_number) == window.last_frame
+    assert len(sought_by_number) == window.frame_count
     assert 150 in control_by_number and 150 in sought_by_number
     assert sought_by_number[150].seconds == pytest.approx(2.5)
     difference = mean_abs_diff(
         control_by_number[150].pixels, sought_by_number[150].pixels)
     assert difference < 2.0, f"the displayed source frame differs by {difference:.1f}"
+
+
+def test_precise_window_returns_the_frames_it_planned(tools, clip, qt_app):
+    """An exact-boundary seek used to discard the first planned frame and
+    return one beyond the other edge, making a fresh cache miss at its start."""
+    info = probed(tools, clip)
+    frames, problems, window = decode_frame_window(tools, info, 3.0)
+
+    assert not problems, problems
+    assert frames[0].frame_number == window.first_frame
+    assert frames[-1].frame_number == window.last_frame
+    assert len(frames) == window.frame_count
 
 
 def test_the_preview_agrees_with_the_export_about_colour(tools, clip, tmp_path,

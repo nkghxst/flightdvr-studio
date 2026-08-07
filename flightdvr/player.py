@@ -92,13 +92,15 @@ STDERR_LINES = 100
 # eject. Resuming after it simply costs one seek.
 IDLE_STOP_SECONDS = 30
 
-# Four seconds at the fastest recording mode the goggles offer: roughly two
-# seconds either side of the cut, without a long clip ever turning into a
-# whole-file decode. The absolute cap also keeps an unexpected higher-rate
-# source bounded instead of trusting its metadata with memory.
+# Four seconds is the time bound for slower sources, but the frame bound wins
+# at the goggles' 60 and 90 fps modes. Keeping sixty frames either side is far
+# more than a cut needs, while 480x270 keeps precise stepping at least as sharp
+# as playback instead of making the picture softer exactly when it is examined.
+# The absolute cap also keeps an unexpected higher-rate source bounded instead
+# of trusting its metadata with memory.
 FRAME_WINDOW_SECONDS = 4.0
-FRAME_CACHE_MAX_FRAMES = 361
-FRAME_CACHE_SIZE = (320, 180)
+FRAME_CACHE_MAX_FRAMES = 121
+FRAME_CACHE_SIZE = (480, 270)
 
 SHOWINFO_TIME = re.compile(r"\bpts_time:([-+0-9.eE]+)")
 
@@ -162,6 +164,45 @@ class CachedFrame:
     frame_number: int
     seconds: float
     pixels: bytes
+
+
+def pair_precise_frames(window: FrameWindow, timestamps: list[float],
+                        pixels: list[bytes]) -> tuple[CachedFrame, ...]:
+    """Pair output pictures with showinfo PTS and prove the run is trustworthy.
+
+    ``showinfo`` also logs the lead-in discarded by the output-side seek, so
+    pictures pair with the tail of the timestamp list. Positional pairing is a
+    silent-wrongness risk: one unexpected trailing timestamp would shift every
+    source-frame number while leaving all of them plausible. The planned first
+    frame and a contiguous run turn that into a visible decode failure.
+    """
+    if len(timestamps) < len(pixels):
+        raise ValueError(
+            f"ffmpeg returned {len(pixels)} frames but "
+            f"{len(timestamps)} timestamps"
+        )
+    if not pixels:
+        return ()
+
+    paired = timestamps[-len(pixels):]
+    frames = tuple(
+        CachedFrame(
+            frame_number=max(0, math.floor(seconds * window.fps + 0.5)),
+            seconds=seconds,
+            pixels=data,
+        )
+        for seconds, data in zip(paired, pixels)
+    )
+    numbers = [frame.frame_number for frame in frames]
+    expected = list(range(window.first_frame,
+                          window.first_frame + len(frames)))
+    if numbers != expected:
+        raise ValueError(
+            "ffmpeg returned an untrustworthy source-frame timeline "
+            f"({numbers[0]}..{numbers[-1]}, expected "
+            f"{expected[0]}..{expected[-1]} contiguously)"
+        )
+    return frames
 
 
 class FrameCache:
@@ -290,7 +331,14 @@ def build_frame_window_command(tools: Tools, clip: ClipInfo,
     ``showinfo`` records each decoded frame's PTS on stderr while raw pixels
     remain arithmetically framed on stdout.
     """
-    start = window.seconds_for(window.first_frame)
+    # An output-side seek at a frame's exact timestamp can discard that frame
+    # as lying on the boundary. Real 60 fps footage then returned N+1..M+1 for
+    # a planned N..M window. Aim halfway between the preceding frame and N so
+    # N is unambiguously after the boundary without decoding another picture.
+    start = max(
+        0.0,
+        window.seconds_for(window.first_frame) - 0.5 / window.fps,
+    )
     fast, accurate = seek_pair(start)
     filters = [
         f"scale={size.width}:{size.height}:force_original_aspect_ratio=decrease",
@@ -582,29 +630,16 @@ class FrameWindowWorker(QThread):
             self.failed.emit(self.generation,
                              _describe(log) or f"ffmpeg stopped (code {code})")
             return
-        if len(timestamps) < len(pixels):
-            self.failed.emit(
-                self.generation,
-                f"ffmpeg returned {len(pixels)} frames but "
-                f"{len(timestamps)} timestamps",
-            )
-            return
-
         # showinfo runs before the accurate output-side seek discards the
-        # lead-in. Measured on the 60 fps integration fixture at a 0.5 s
-        # window start: 271 timestamps were logged for 241 output pictures;
-        # the first 30 describe frames deliberately thrown away. The pictures
-        # therefore pair with the tail, not the head, of the PTS list.
-        timestamps = timestamps[-len(pixels):]
-
-        frames = tuple(
-            CachedFrame(
-                frame_number=max(0, math.floor(seconds * self.window.fps + 0.5)),
-                seconds=seconds,
-                pixels=data,
-            )
-            for seconds, data in zip(timestamps, pixels)
-        )
+        # lead-in. Measured on real 60 fps footage: 241 timestamps were logged
+        # for 121 output pictures; the first 120 describe the two-second resync
+        # lead-in deliberately thrown away. The pictures therefore pair with
+        # the tail, not the head, of the PTS list.
+        try:
+            frames = pair_precise_frames(self.window, timestamps, pixels)
+        except ValueError as problem:
+            self.failed.emit(self.generation, str(problem))
+            return
         self.ready.emit(self.generation, frames)
 
     @staticmethod

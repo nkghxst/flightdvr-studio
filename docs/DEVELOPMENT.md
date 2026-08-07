@@ -642,30 +642,37 @@ back on.
 ### Precise frame window
 
 Playback is deliberately 30 fps; precise trimming is deliberately not. Comma
-and period decode a native-rate window around the paused playhead, roughly two
-seconds either side, and Shift moves ten source frames. The whole-clip
+and period decode 121 native-rate frames around the paused playhead — sixty
+steps either side — and Shift moves ten source frames. That is roughly one
+second each way at 60 fps and two thirds of a second at 90 fps. The whole-clip
 filmstrip remains the coarse navigation path.
 
-`FrameWindowWorker` emits 320x180 raw RGB frames with `showinfo` in the filter
-chain, so each cached picture carries the PTS ffmpeg reported rather than a
-timestamp invented by the UI. The source frame number is derived from that PTS
-and the probed source rate. A clip whose rate could not be probed is refused
-honestly; there is no exact frame number to show.
+`FrameWindowWorker` emits 480x270 raw RGB frames, the smallest playback size,
+with `showinfo` in the filter chain. Precise stepping used to drop to 320x180,
+so asking for the exact cut made the picture softer than playback. Each cached
+picture carries the PTS ffmpeg reported rather than a timestamp invented by the
+UI. The source frame number is derived from that PTS and the probed source rate.
+A clip whose rate could not be probed is refused honestly; there is no exact
+frame number to show.
 
-The cache has two bounds: the command receives `-frames:v`, and `FrameCache`
-independently stops accepting at 361 frames — four seconds at the goggles'
-fastest 90 fps mode. That is at most 59.5 MiB of pixels. A refill replaces the
-dictionary rather than extending it. Measured on real 720p60 footage
-(`D:\movies\hdz_047.ts`): 241 frames, 39.72 MiB, decoded in 1.53–1.61 s; source
-frame 600 decoded from two overlapping windows was byte-identical, with ffmpeg
-reporting PTS 9.999989 s both times.
+The cache has two bounds: the command receives `-frames:v 121`, and
+`FrameCache` independently stops accepting at 121 frames. That is 44.87 MiB of
+pixels at 480x270. A refill replaces the dictionary rather than extending it.
+Measured on real 720p60 footage (`D:\movies\hdz_047.ts`), two windows decoded in
+1.13–1.28 s and returned exactly their planned ranges, 540–660 and 600–720.
+Source frame 630 was byte-identical in both at PTS 10.499989 s.
 
-One ffmpeg ordering trap is now part of the implementation. `showinfo` runs
-before the accurate output-side seek throws away the resync lead-in. On the 60
-fps integration fixture, a window beginning at 0.5 s produced 241 pictures but
-logged 271 timestamps: the first 30 belonged to frames the seek discarded.
-Pixels therefore pair with the *tail* of the timestamp list. Pairing from the
-front gives plausible pictures with frame numbers half a second early.
+Two ffmpeg boundary traps are part of the implementation. An output-side seek
+at a frame's exact timestamp discarded that boundary frame on real footage, so
+a planned 180–420 cache held 181–421 instead. Seeking half a source-frame early
+puts the boundary between frames and returned the planned bounds in both real
+measurements. `showinfo` also runs before the accurate output-side seek throws
+away the resync lead-in: the 10 s real-footage window produced 121 pictures but
+logged 241 timestamps, the first 120 belonging to discarded lead-in frames.
+Pixels therefore pair with the *tail* of the timestamp list. The paired run is
+required to begin at the planned frame and remain contiguous; if positional
+pairing ever slips, precise stepping fails visibly instead of publishing
+plausible but wrong source-frame numbers.
 
 ### Deliberately not done
 

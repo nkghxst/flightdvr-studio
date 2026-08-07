@@ -32,10 +32,10 @@ from PySide6.QtCore import QObject, Qt, Signal
 from flightdvr.media import ClipInfo, Tools
 from flightdvr.player import (
     FRAME_CACHE_MAX_FRAMES, FRAME_CACHE_SIZE, PREVIEW_FPS, PREVIEW_SIZES,
-    QUEUE_FRAMES, SEEK_LEAD_IN, CachedFrame, FrameCache, PlayClock,
-    PreviewSize, build_command, build_frame_window_command, choose_size,
-    exact_timestamp, plan_frame_window, read_frames, seconds_for_index,
-    seek_pair, should_restart,
+    QUEUE_FRAMES, SEEK_LEAD_IN, CachedFrame, FrameCache, FrameWindow,
+    PlayClock, PreviewSize, build_command, build_frame_window_command,
+    choose_size, exact_timestamp, pair_precise_frames, plan_frame_window,
+    read_frames, seconds_for_index, seek_pair, should_restart,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,10 +103,16 @@ def test_frame_bytes_is_the_whole_picture():
 
 # -- the precise-frame cache window ------------------------------------------
 
-def test_the_frame_window_is_two_seconds_either_side_of_the_playhead():
+def test_the_frame_window_holds_sixty_steps_either_side_of_the_playhead():
     window = plan_frame_window(position=10.0, duration=60.0, fps=60.0)
-    assert window.seconds_for(window.first_frame) == pytest.approx(8.0)
-    assert window.seconds_for(window.last_frame) == pytest.approx(12.0)
+    assert window.first_frame == 540
+    assert window.last_frame == 660
+    assert window.frame_count == 121
+
+
+def test_precise_frames_use_the_smallest_playback_resolution():
+    """Looking more closely must not make the paused picture softer."""
+    assert FRAME_CACHE_SIZE == PREVIEW_SIZES[0] == (480, 270)
 
 
 def test_the_frame_window_never_grows_to_the_whole_recording():
@@ -296,7 +302,40 @@ def test_precise_window_seeking_keeps_the_source_timeline():
     input_at = command.index("-i")
     assert "-copyts" in command[:input_at]
     assert "-start_at_zero" in command[:input_at]
-    assert any(part == "8.000000" for part in command)
+    assert any(part == "8.991667" for part in command)
+
+
+def test_precise_pairing_uses_the_tail_and_returns_the_planned_run():
+    window = FrameWindow(first_frame=100, frame_count=3, fps=10.0)
+    frames = pair_precise_frames(
+        window,
+        timestamps=[8.0, 9.0, 10.0, 10.1, 10.2],
+        pixels=[b"a", b"b", b"c"],
+    )
+    assert [frame.frame_number for frame in frames] == [100, 101, 102]
+    assert [frame.pixels for frame in frames] == [b"a", b"b", b"c"]
+
+
+def test_precise_pairing_rejects_a_shifted_timeline():
+    """A trailing showinfo timestamp must fail loudly, not silently renumber
+    every picture by one plausible-looking source frame."""
+    window = FrameWindow(first_frame=100, frame_count=3, fps=10.0)
+    with pytest.raises(ValueError, match=r"101\.\.103.*100\.\.102"):
+        pair_precise_frames(
+            window,
+            timestamps=[8.0, 10.0, 10.1, 10.2, 10.3],
+            pixels=[b"a", b"b", b"c"],
+        )
+
+
+def test_precise_pairing_rejects_a_noncontiguous_timeline():
+    window = FrameWindow(first_frame=100, frame_count=3, fps=10.0)
+    with pytest.raises(ValueError, match="untrustworthy"):
+        pair_precise_frames(
+            window,
+            timestamps=[10.0, 10.2, 10.3],
+            pixels=[b"a", b"b", b"c"],
+        )
 
 
 # -- reading frames off a pipe -------------------------------------------------
@@ -820,7 +859,7 @@ def test_a_frame_step_decodes_a_bounded_native_rate_window(qt_app):
     worker = p.frame_workers[0]
     assert worker.started
     assert worker.window.fps == pytest.approx(60.0)
-    assert worker.window.frame_count == 241
+    assert worker.window.frame_count == 121
     assert worker.window.first_frame <= 601 <= worker.window.last_frame
 
 
