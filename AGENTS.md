@@ -96,6 +96,19 @@ If you are about to write "this should be identical" or "this is faster",
 measure it and put the number in the commit message. If you cannot measure it,
 say that instead of implying you did.
 
+**This applies to test data too, and that is the easiest place to forget it.**
+A detector for the still period before take-off was written with fourteen tests
+against synthetic curves. Every one passed. It then failed on every real clip,
+because there is no still period before take-off in this footage — the DVR
+records from arming. The tests had confirmed the author's idea of a recording,
+not a recording. Nothing about them was wrong except where the numbers came
+from.
+
+Synthetic data is fine, and often the only way to test an awkward shape. But
+**take the shapes from the world**: run the thing over a real card, look at what
+comes back, and build the fixtures from those numbers. If the tests and the
+footage disagree, the footage is right.
+
 ### Write down the trap, next to the code
 
 Comments here explain **why**, not what. Prefer the comment that saves the next
@@ -150,6 +163,9 @@ Things that have actually gone wrong in this repository. Check for them.
 
 - [ ] **Does the test fail without the fix?** Several defects were guarded by
       tests that passed.
+- [ ] **Where did the test data come from — the world, or the author's idea of
+      it?** Fourteen tests once passed against invented curves for a feature
+      that worked on none of the real footage.
 - [ ] **Does a "measured" claim have a number behind it?**
 - [ ] **Mechanical moves:** does anything moved have test coverage on the paths
       that moved? A missing import in a rarely-run path surfaced as a
