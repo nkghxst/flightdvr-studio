@@ -48,7 +48,7 @@ from .external import DESKTOP_OPEN, PLAYER_PATHS, find_player, reveal
 from .export_panel import ExportPanel, FPS_STEPS, RESOLUTION_STEPS
 from .format import (
     _clip_set_id, canonical_path, existing_ancestor, human_duration,
-    human_size, natural_key, output_key, work_dir,
+    human_size, natural_key, output_key, select_stem, work_dir,
 )
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
 from .media import (
@@ -653,8 +653,13 @@ class MainWindow(QMainWindow):
         # merged: trims from the previous session survived on screen and were
         # then written into the file that was just opened, which had never
         # heard of them.
+        #
+        # The whole list, not `trim_in = trim_out = 0`. Those are a view onto
+        # the select being edited, so zeroing them leaves every other select on
+        # the clip — which is the same leak again, one range further along.
         for clip in self.clips:
-            clip.trim_in = clip.trim_out = 0.0
+            clip.selects = []
+            clip.current = 0
 
         self.session = found
         self._pending_session = None
@@ -1556,9 +1561,20 @@ class MainWindow(QMainWindow):
         }
         before = len(self.jobs)
 
-        if self.export_panel.join_enabled() and len(clips) > 1:
-            # Joined in DVR counter order: the file timestamps cannot be trusted.
-            ordered = sorted(clips, key=lambda c: (c.sequence, natural_key(c.path.name)))
+        # One clip with three selects becomes three ordinary clips here, and
+        # everything below this line carries on believing a recording has one
+        # in point and one out point. Joining comes free: join_inputs already
+        # takes a list of clips each carrying its own trim, so three selects of
+        # one flight join exactly as three separate clips would.
+        pieces = [piece for clip in clips for piece in clip.for_export()]
+
+        if self.export_panel.join_enabled() and len(pieces) > 1:
+            # Joined in DVR counter order: the file timestamps cannot be
+            # trusted. Selects of one clip keep the order they were made in,
+            # which is the order they appear along the recording.
+            ordered = sorted(pieces, key=lambda c: (c.sequence,
+                                                    natural_key(c.path.name),
+                                                    c.trim_in))
 
             # Refused rather than exported wrongly. A join built from mismatched
             # clips does not fail; it produces a file that is silent after the
@@ -1586,17 +1602,21 @@ class MainWindow(QMainWindow):
                                      out_dir=out_dir, stem=stem, subfolders=subfolders))
         else:
             for clip in clips:
-                target = output_path(out_dir, clip.stem, key, subfolders, stamp)
-                if output_key(target) in already:
-                    continue
-                already.add(output_key(target))
-                self.jobs.append(Job([clip], key, settings, target,
-                                     out_dir=out_dir, stem=clip.stem,
-                                     subfolders=subfolders))
+                parts = clip.for_export()
+                for index, piece in enumerate(parts):
+                    stem = select_stem(piece, index, len(parts))
+                    target = output_path(out_dir, stem, key, subfolders, stamp)
+                    if output_key(target) in already:
+                        continue
+                    already.add(output_key(target))
+                    self.jobs.append(Job([piece], key, settings, target,
+                                         out_dir=out_dir, stem=stem,
+                                         subfolders=subfolders))
 
         added = len(self.jobs) - before
         skipped = (
-            1 if self.export_panel.join_enabled() and len(clips) > 1 else len(clips)
+            1 if self.export_panel.join_enabled() and len(pieces) > 1
+            else len(pieces)
         ) - added
         self._rebuild_queue()
         note = f"{added} queued"

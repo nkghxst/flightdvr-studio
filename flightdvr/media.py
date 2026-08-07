@@ -30,7 +30,7 @@ import shutil
 import subprocess
 import functools
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
@@ -269,6 +269,35 @@ def run_hidden(args: list[str], timeout: float | None = 60) -> subprocess.Comple
 
 
 @dataclass
+class Select:
+    """One range worth keeping, out of a recording that may hold several.
+
+    A four-minute flight usually has two or three moments in it. Naming them is
+    what makes a list of ranges reviewable a week later, and what the naming
+    templates planned for 1.6 have to work from.
+    """
+
+    start: float
+    end: float
+    name: str = ""
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
+
+    def as_dict(self) -> dict:
+        return {"start": round(self.start, 3),
+                "end": round(self.end, 3),
+                "name": self.name}
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "Select":
+        return cls(start=float(raw.get("start", 0.0)),
+                   end=float(raw.get("end", 0.0)),
+                   name=str(raw.get("name", "")))
+
+
+@dataclass
 class ClipInfo:
     """What a single DVR recording contains."""
 
@@ -289,16 +318,88 @@ class ClipInfo:
     bit_rate: int = 0
     error: str = ""
 
-    # In and out points in seconds. out_point of 0 means "to the end", so an
-    # untrimmed clip is all zeroes and needs no special casing.
-    trim_in: float = 0.0
-    trim_out: float = 0.0
+    # The ranges worth keeping out of this recording, and which of them is
+    # being edited. Empty means nobody has decided anything, which is not the
+    # same as a select covering the whole clip.
+    selects: list[Select] = field(default_factory=list)
+    current: int = 0
 
     # -- trimming --------------------------------------------------------------
+
+    # trim_in and trim_out are the select currently being edited, and mean
+    # exactly what they meant when there was only ever one of them. Everything
+    # downstream — the presets, the jobs, the whole export path — still sees a
+    # clip with a single in point and a single out point, because at queueing
+    # a clip with three selects becomes three copies each carrying one.
+    #
+    # Views rather than stored fields so there is one truth. Holding both a
+    # list and a separate pair meant keeping them in step on every edit, and
+    # the pair silently winning was the obvious way for a select to be lost.
+
+    @property
+    def _editing(self) -> Select | None:
+        if 0 <= self.current < len(self.selects):
+            return self.selects[self.current]
+        return None
+
+    def _editing_or_new(self) -> Select:
+        found = self._editing
+        if found is None:
+            found = Select(0.0, 0.0)
+            self.selects.append(found)
+            self.current = len(self.selects) - 1
+        return found
+
+    @property
+    def trim_in(self) -> float:
+        found = self._editing
+        return found.start if found else 0.0
+
+    @trim_in.setter
+    def trim_in(self, seconds: float) -> None:
+        self._editing_or_new().start = seconds
+
+    @property
+    def trim_out(self) -> float:
+        found = self._editing
+        return found.end if found else 0.0
+
+    @trim_out.setter
+    def trim_out(self, seconds: float) -> None:
+        self._editing_or_new().end = seconds
 
     @property
     def is_trimmed(self) -> bool:
         return self.trim_in > 0.01 or self.trim_out > 0.01
+
+    @property
+    def real_selects(self) -> list[Select]:
+        """The selects that are actually a range.
+
+        Clearing a trim leaves an empty select behind rather than deleting the
+        row the interface is pointing at, so "has selects" and "has decisions"
+        are not the same question.
+        """
+        return [s for s in self.selects
+                if s.start > 0.01 or s.end > 0.01]
+
+    def for_export(self) -> list["ClipInfo"]:
+        """This clip as the export path wants to see it: one trim each.
+
+        A clip with three selects becomes three ordinary clips, and everything
+        downstream — presets, jobs, joining — carries on believing a recording
+        has exactly one in point and one out point, because as far as it can
+        tell one does. No select is one clip covering the whole recording.
+        """
+        ranges = self.real_selects
+        if not ranges:
+            return [self]
+        # The Select is copied, not just the list holding it. A queued job
+        # keeps its clip until it runs, and sharing the range meant adjusting a
+        # select afterwards silently changed an export already in the queue.
+        return [replace(self, selects=[Select(one.start, one.end, one.name)],
+                        current=0)
+                for one in ranges]
 
     @property
     def out_point(self) -> float:
