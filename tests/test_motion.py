@@ -209,3 +209,65 @@ def test_no_filmstrip_means_no_answer():
     from flightdvr.trim import Filmstrip
     assert activity(Filmstrip()) is None
     assert activity(Filmstrip([Path("a.jpg")], [0.0])) is None
+
+
+# -- what the window is offered, and what it must never do --------------------
+
+def test_nothing_applies_a_suggestion_on_its_own():
+    """The rule the whole feature rests on, checked structurally rather than
+    by reading. A wrong guess that silently trimmed footage would be far worse
+    than no guess, so the only caller of `suggestion` outside this module must
+    be the handler behind the button."""
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "flightdvr" / "ui.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    callers = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "suggestion":
+            for enclosing in ast.walk(tree):
+                if (isinstance(enclosing, ast.FunctionDef)
+                        and enclosing.lineno <= node.lineno <= enclosing.end_lineno):
+                    callers.add(enclosing.name)
+    assert callers <= {"_activity_ready", "_accept_activity"}, (
+        f"a suggestion is read somewhere that could apply it: {callers}")
+
+
+def test_a_reading_that_cannot_be_trusted_offers_nothing():
+    found = Activity(duration=240.0, still=[], flying=[(10.0, 200.0)],
+                     quietest=9.0, readable=False)
+    assert found.suggestion is None
+    assert "no reading" in found.describe(str)
+
+
+def test_a_short_flight_is_not_worth_trimming_to():
+    """Twenty seconds of flying then four minutes of grass is a clip to skip,
+    not one to cut down — offering a trim would imply it is worth keeping."""
+    found = Activity(duration=240.0, still=[(20.0, 240.0)],
+                     flying=[(0.0, 20.0)], quietest=1.0)
+    assert found.suggestion is None
+
+
+def test_a_clip_that_flew_throughout_is_not_offered_a_trim():
+    """There is nothing to cut, so an offer would be noise."""
+    found = Activity(duration=240.0, still=[], flying=[(0.0, 240.0)],
+                     quietest=1.0)
+    assert found.suggestion is None
+
+
+def test_the_longest_flight_is_what_gets_offered():
+    """Not the first, and not the total: the number that decides whether a clip
+    is worth opening is the longest continuous run."""
+    found = Activity(duration=300.0,
+                     still=[(40.0, 90.0), (250.0, 300.0)],
+                     flying=[(0.0, 40.0), (90.0, 250.0)], quietest=1.0)
+    assert found.suggestion == (90.0, 250.0)
+
+
+def test_the_description_says_how_many_flights_when_there_are_several():
+    found = Activity(duration=300.0, still=[(40.0, 90.0)],
+                     flying=[(0.0, 40.0), (90.0, 250.0)], quietest=1.0)
+    said = found.describe(lambda s: f"{s:.0f}s")
+    assert "2 flights" in said
+    assert "longest 160s" in said

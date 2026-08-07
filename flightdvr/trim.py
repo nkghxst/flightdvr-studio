@@ -204,6 +204,11 @@ class FilmstripLoader(QThread):
     """
 
     ready = Signal(int, str, object)          # generation, clip path, strip
+    # generation, clip path, Activity — read from the strip this thread just
+    # built, because it already has every frame and the UI thread does not want
+    # the wait. Measured at 70–100 ms on a three-minute recording and about
+    # half a second on a fifteen-minute one, which is a visible freeze.
+    activity_ready = Signal(int, str, object)
 
     def __init__(self, tools: Tools, clip: ClipInfo, generation: int = 0,
                  parent=None):
@@ -240,6 +245,16 @@ class FilmstripLoader(QThread):
         if self._cancelled:
             return
         self.ready.emit(self.generation, str(self.clip.path), strip)
+
+        # After the strip, so the filmstrip appears the moment it is ready and
+        # the reading of it arrives a fraction later rather than holding it up.
+        try:
+            from .motion import activity
+            found = activity(strip)
+        except Exception:  # pragma: no cover - a guess must never cost a clip
+            found = None
+        if not self._cancelled and found is not None:
+            self.activity_ready.emit(self.generation, str(self.clip.path), found)
 
 
 class TrimBar(QWidget):

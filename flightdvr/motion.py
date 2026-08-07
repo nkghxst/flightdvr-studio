@@ -70,9 +70,19 @@ MIN_FLYING = 4
 
 # If even the quietest second of a clip is this busy, the feed's own noise is
 # louder than the thing being measured and no still time can be detected. Such
-# a clip gets an honest "cannot tell" rather than "flew throughout" — one card
-# in four behaves this way.
+# a clip gets an honest "cannot tell" rather than "flew throughout".
+#
+# Measured across fourteen recordings on a real card: readable clips scored
+# 0.59-3.81 at their quietest and unreadable ones 5.26-9.03, so this sits in a
+# gap with room either side. Five of the fourteen fell above it — more than the
+# "one in four" this was first written for, and worth knowing before treating a
+# refusal as unusual.
 UNREADABLE_FLOOR = 4.0
+
+# Below this there is nothing worth offering to trim to. Twenty seconds of
+# flying followed by four minutes of grass is a clip to skip, not one to cut
+# down — and suggesting a trim would imply it is worth keeping.
+MIN_SUGGESTION = 30.0
 
 
 @dataclass
@@ -115,6 +125,49 @@ class Activity:
         in particular holds several cycles in one recording.
         """
         return len(self.flying)
+
+    @property
+    def suggestion(self) -> tuple[float, float] | None:
+        """The longest run of flying, when trimming to it would drop anything.
+
+        Nothing is applied from this — it is what a button offers, never what
+        the app does on its own. A wrong guess that silently trimmed footage
+        would be far worse than no guess, and the whole point of the still
+        detection is that it is a reading rather than a fact.
+
+        None when the reading cannot be trusted, when there is no still time to
+        cut, or when the longest flight is so short that what is left would not
+        be worth keeping either.
+        """
+        if not self.readable or not self.flying:
+            return None
+        longest = max(self.flying, key=lambda span: span[1] - span[0])
+        if longest[1] - longest[0] < MIN_SUGGESTION:
+            return None
+        if longest[1] - longest[0] >= self.duration - MIN_STILL:
+            return None                     # nothing worth cutting
+        return longest
+
+    def describe(self, human) -> str:
+        """One line for the sidebar, saying only what was actually measured."""
+        if not self.readable:
+            return ("This feed is too noisy to tell flying from stopped — "
+                    "no reading")
+        if not self.flying:
+            return "Nothing here looks like flying"
+
+        # The two numbers that decide anything, and nothing else. How many
+        # times it flew, and how long the best run was — a clip with four
+        # minutes of flying and a crash at the end is worth watching, one with
+        # twenty seconds and four minutes of grass is not, and the totals do
+        # not tell those apart. Short enough to sit on one line, too.
+        if self.flights > 1:
+            return (f"{self.flights} flights · longest "
+                    f"{human(self.longest_flight)} of {human(self.duration)}")
+        if self.still_seconds > MIN_STILL:
+            return (f"{human(self.longest_flight)} moving "
+                    f"of {human(self.duration)}")
+        return f"moving throughout, {human(self.duration)}"
 
 
 def _runs(flags: list[bool], want: bool, minimum: int) -> list[tuple[int, int]]:
