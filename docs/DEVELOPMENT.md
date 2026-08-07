@@ -337,7 +337,7 @@ twelve seconds and requiring it to still be running.
 
 | Platform | Script | Output | Built where |
 |---|---|---|---|
-| Windows | `packaging/build.ps1` | per-user installer, ~110 MB | by hand |
+| Windows | `packaging/build.ps1` | per-user installer, ~95 MB | GitHub Actions, `windows-latest` |
 | Linux | `packaging/build-appimage.sh` | AppImage | GitHub Actions, `ubuntu-22.04` |
 | macOS | `packaging/build-macos.sh` | `.dmg` holding the `.app` | GitHub Actions, `macos-latest` |
 
@@ -365,7 +365,11 @@ account.
 rather than tidiness.** `packaging/ffmpeg-build.json` records the exact archive
 URL, its SHA-256, and the SHA-256 of both binaries. `build.ps1` refuses to
 package anything that does not match, and regenerates
-`ffmpeg-configuration.txt` from the binary it is actually shipping. The notices
+`ffmpeg-configuration.txt` from the binary it is actually shipping.
+`packaging/fetch-ffmpeg.ps1` downloads that archive by URL and checks it before
+unpacking, which is how the CI job gets one — fetching and verifying is a
+stronger guarantee than a folder maintained by hand, and on 7 August 2026 the
+pinned build had quietly vanished from the development machine. The notices
 name that build and offer its corresponding source, so a silent swap would make
 the attribution false; a test asserts the pin and the notices agree.
 
