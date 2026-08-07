@@ -63,8 +63,8 @@ from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
 from .queue_panel import QueuePanel
 from .session import (
-    SUFFIX as SESSION_SUFFIX, Session, apply_to, capture_from, for_source,
-    missing_from, recent_sessions, remember,
+    SUFFIX as SESSION_SUFFIX, Session, apply_settings, apply_to, capture_from,
+    capture_settings, for_source, missing_from, recent_sessions, remember,
 )
 from .thumbs import THUMB_WIDTH, ThumbnailLoader
 from .trim import Filmstrip, FilmstripLoader
@@ -692,6 +692,10 @@ class MainWindow(QMainWindow):
             remember(found)
         self._show_session_title()
 
+        # Before the clips, so the preset the marks were made under is the one
+        # the estimate and the export markers are computed against.
+        if apply_settings(found, self.export_panel):
+            self._on_preset_changed()
         restored = apply_to(found, self.clips)
         for clip in self.clips:
             self._mark_trim_in_table(clip)
@@ -732,6 +736,7 @@ class MainWindow(QMainWindow):
         if self.session is None:
             return
         capture_from(self.session, self.clips)
+        capture_settings(self.session, self.export_panel, self.clips)
         try:
             self.session.save()
         except OSError as problem:

@@ -413,3 +413,61 @@ def MainWindow_for(card):
     made.source_combo.insertItem(0, str(card), str(card))
     made.source_combo.setCurrentIndex(0)
     return made
+
+
+# -- export settings travel with the session (#36) ----------------------------
+
+def test_each_card_remembers_its_own_preset(app, sessions_home, card, tmp_path):
+    """Two cards, deliberately.
+
+    A single card proves nothing: the preset also lives in QSettings, so it
+    comes back on its own and the test passes with the session doing nothing at
+    all. The first version of this did exactly that. Two folders with different
+    presets can only work if the setting travels with the session, because
+    QSettings holds one.
+    """
+    other = tmp_path / "second-card"
+    other.mkdir()
+
+    first = open_window(app, card, [a_clip("hdz_001.ts")])
+    first.export_panel.preset_buttons["social"].setChecked(True)
+    first.clips[0].trim_in, first.clips[0].trim_out = 10.0, 40.0
+    first._touch_session()
+    close(first)
+
+    second = open_window(app, other, [a_clip("hdz_009.ts")])
+    second.export_panel.preset_buttons["upload"].setChecked(True)
+    second.clips[0].trim_in, second.clips[0].trim_out = 5.0, 25.0
+    second._touch_session()
+    close(second)
+
+    back = open_window(app, card, [a_clip("hdz_001.ts")])
+    assert back.export_panel.preset_key() == "social", (
+        "the second card's preset followed us back to the first")
+    close(back)
+
+
+def test_the_join_order_records_only_the_clips_that_were_marked(app,
+                                                                sessions_home,
+                                                                card):
+    first = open_window(app, card,
+                        [a_clip("hdz_001.ts"), a_clip("hdz_002.ts")])
+    first.clips[1].trim_in, first.clips[1].trim_out = 5.0, 20.0
+    first._touch_session()
+    first._flush_session()
+
+    stored = session_module.for_source(card)
+    assert stored.join_order == [first.clips[1].fingerprint]
+    close(first)
+
+
+def test_a_card_with_no_stored_settings_leaves_the_panel_alone(app,
+                                                               sessions_home,
+                                                               card):
+    """Opening a fresh folder must not reset the choices already on screen."""
+    window = open_window(app, card, [a_clip("hdz_001.ts")])
+    window.export_panel.preset_buttons["upload"].setChecked(True)
+
+    window._adopt_session(session_module.for_source(card))
+    assert window.export_panel.preset_key() == "upload"
+    close(window)

@@ -410,16 +410,46 @@ class ExportPanel(QWidget):
             ("use_gpu", self.gpu_check),
         ]
 
-    def restore(self, store: QSettings) -> None:
-        last_out = store.value("output_dir", str(Path.home() / "Videos" / "FPV"))
-        self.out_edit.addItem(str(last_out))
+    # There is one definition of "the export settings" — `capture` — and both
+    # the settings store and the session document use it. A session that
+    # serialised these separately would be a second list of keys to keep in
+    # step with this panel, and the two would part company the first time a
+    # control was added.
 
-        preset = store.value("preset", "master")
+    def capture(self) -> dict:
+        """Every export choice, as plain values."""
+        values = {
+            "output_dir": self.out_edit.currentText(),
+            "preset": self.preset_key(),
+            "social_size_mb": self.social_size.value(),
+        }
+        for key, combo in self._combo_settings():
+            values[key] = combo.currentData()
+        for key, combo in self._text_combo_settings():
+            values[key] = combo.currentText()
+        for key, check in self._check_settings():
+            values[key] = check.isChecked()
+        return values
+
+    def apply(self, values: dict) -> None:
+        """Put stored choices back. A key that is absent leaves its control be.
+
+        Values arrive as strings from QSettings and as real types from a
+        session's JSON, so every read here copes with both rather than
+        assuming which side it was called from.
+        """
+        out = values.get("output_dir")
+        if out:
+            if self.out_edit.findText(str(out)) < 0:
+                self.out_edit.addItem(str(out))
+            self.out_edit.setCurrentText(str(out))
+
+        preset = values.get("preset")
         if preset in self.preset_buttons:
             self.preset_buttons[preset].setChecked(True)
 
         for key, combo in self._combo_settings():
-            saved = store.value(key, None)
+            saved = values.get(key)
             if saved is None:
                 continue
             # Combo data is int for some, str for others; try both.
@@ -435,30 +465,38 @@ class ExportPanel(QWidget):
                 combo.setCurrentIndex(index)
 
         for key, combo in self._text_combo_settings():
-            saved = store.value(key, None)
+            saved = values.get(key)
             if saved is not None and combo.findText(str(saved)) >= 0:
                 combo.setCurrentText(str(saved))
 
         for key, check in self._check_settings():
-            saved = store.value(key, None)
+            saved = values.get(key)
             if saved is not None:
                 check.setChecked(str(saved).lower() in ("true", "1"))
 
-        self.social_size.setValue(int(store.value("social_size_mb", 45)))
+        size = values.get("social_size_mb")
+        if size is not None:
+            try:
+                self.social_size.setValue(int(size))
+            except (TypeError, ValueError):
+                pass
+
         self._on_preset_changed()
         self._on_colour_changed()
         self._on_quality_changed()
 
+    def restore(self, store: QSettings) -> None:
+        stored = {key: store.value(key, None) for key in self.capture()}
+        stored = {key: value for key, value in stored.items()
+                  if value is not None}
+        stored.setdefault("output_dir", str(Path.home() / "Videos" / "FPV"))
+        stored.setdefault("preset", "master")
+        stored.setdefault("social_size_mb", 45)
+        self.apply(stored)
+
     def save(self, store: QSettings) -> None:
-        store.setValue("output_dir", self.out_edit.currentText())
-        store.setValue("preset", self.preset_key())
-        for key, combo in self._combo_settings():
-            store.setValue(key, combo.currentData())
-        for key, combo in self._text_combo_settings():
-            store.setValue(key, combo.currentText())
-        for key, check in self._check_settings():
-            store.setValue(key, check.isChecked())
-        store.setValue("social_size_mb", self.social_size.value())
+        for key, value in self.capture().items():
+            store.setValue(key, value)
 
     def preset_key(self) -> str:
         for key, button in self.preset_buttons.items():
