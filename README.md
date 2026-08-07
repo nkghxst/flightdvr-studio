@@ -104,24 +104,35 @@ you downloaded is what was built. None of these are code-signed, so this is the
 only check that means anything.
 
 ```powershell
-Get-FileHash FlightDVRStudio-1.3.0-Setup.exe -Algorithm SHA256
+Get-FileHash FlightDVRStudio-1.4.0-Setup.exe -Algorithm SHA256
 ```
 
 ```bash
-sha256sum FlightDVR_Studio-1.3.0-x86_64.AppImage    # Linux
-shasum -a 256 FlightDVR-Studio-1.3.0-arm64.dmg      # macOS
+sha256sum FlightDVR_Studio-1.4.0-x86_64.AppImage    # Linux
+shasum -a 256 FlightDVR-Studio-1.4.0-arm64.dmg      # macOS
 ```
 
-**1.3.0**
+**1.4.0**
+
+| File | SHA-256 |
+|---|---|
+| `FlightDVRStudio-1.4.0-Setup.exe` | `a8b67589e472fb91f22846fba6b50d43fae43c209d2dd2fb5c11233fe04d6c9e` |
+| `FlightDVR_Studio-1.4.0-x86_64.AppImage` | `5ce81819683fc70e3a5153e40c915033eb26ce9165545cdd66fbf8c62634e54c` |
+| `FlightDVR-Studio-1.4.0-arm64.dmg` | `62f4828723f1b9ad62cee152bc3fc5c4fc6a72dad124246f58c848f7956f2fef` |
+
+<details>
+<summary>Earlier releases</summary>
+
+**1.3.0** — no player in the window, so trimming means setting two numbers and
+finding out afterwards. Joining trimmed clips with Remux writes a corrupt file
+instead of refusing, and the low-space warning raises an error rather than
+warning.
 
 | File | SHA-256 |
 |---|---|
 | `FlightDVRStudio-1.3.0-Setup.exe` | `9c3de6763e383e4f3bd4eb1be85918683bcdd695bc353f75a4611c814a4845d0` |
 | `FlightDVR_Studio-1.3.0-x86_64.AppImage` | `ad1fd20398fbba66ace8f88ac6518365ac8c0c0e4ab01d1d58b4ca255bc98600` |
 | `FlightDVR-Studio-1.3.0-arm64.dmg` | `b883f2e83afc0bb96c386d8745197e7a41c3e16d8856a2b1711ba758aaeecc55` |
-
-<details>
-<summary>Earlier releases</summary>
 
 **1.2.0** — no Upload preset and no update check, so it never tells you a newer
 version exists. Everything else works.
