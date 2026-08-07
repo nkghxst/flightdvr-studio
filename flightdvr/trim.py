@@ -250,6 +250,7 @@ class TrimBar(QWidget):
 
     playhead_moved = Signal(float)
     trim_changed = Signal(float, float)
+    select_picked = Signal(int)
 
     HANDLE = 7
 
@@ -266,12 +267,35 @@ class TrimBar(QWidget):
         self.playhead = 0.0
         self._dragging: str | None = None
 
-    def set_clip(self, duration: float, in_point: float, out_point: float) -> None:
+        # The other ranges on this clip, drawn but not edited. in_point and
+        # out_point remain the one being worked on, so dragging, I, O and Reset
+        # all mean what they meant when a clip had only one.
+        self.ranges: list[tuple[float, float]] = []
+        self.selected = 0
+
+    def set_clip(self, duration: float, in_point: float, out_point: float,
+                 ranges=None, selected: int = 0) -> None:
         self.duration = max(0.0, duration)
         self.in_point = in_point
         self.out_point = out_point or self.duration
         self.playhead = in_point
+        self.ranges = [(a, b or self.duration) for a, b in (ranges or [])]
+        self.selected = selected
         self.update()
+
+    def _kept(self) -> list[tuple[float, float]]:
+        """Every range that will be exported, the edited one included.
+
+        The edited range comes from in_point/out_point rather than from the
+        list, because dragging a handle moves those and the list is only
+        refreshed when the selection changes.
+        """
+        if not self.ranges:
+            return [(self.in_point, self.out_point)]
+        kept = list(self.ranges)
+        if 0 <= self.selected < len(kept):
+            kept[self.selected] = (self.in_point, self.out_point)
+        return kept
 
     def set_playhead(self, seconds: float) -> None:
         """Move the marker without telling anyone it moved.
@@ -344,17 +368,39 @@ class TrimBar(QWidget):
                                   Qt.TransformationMode.SmoothTransformation),
                 )
 
-        # Shade whatever is being cut away, heavily enough that the kept region
-        # reads at a glance rather than on close inspection.
+        # Shade whatever is being cut away, heavily enough that the kept
+        # regions read at a glance rather than on close inspection. Painted as
+        # the gaps between ranges rather than per range, so two selects that
+        # touch do not shade each other's footage.
         shade = QColor(base)
         shade.setAlpha(225)
+        kept = sorted(self._kept())
+        edge = 0
+        for start, end in kept:
+            left = self._x_for(start)
+            if left > edge:
+                painter.fillRect(QRect(edge, 0, left - edge, rect.height()), shade)
+            edge = max(edge, self._x_for(end))
+        if edge < rect.width():
+            painter.fillRect(
+                QRect(edge, 0, rect.width() - edge, rect.height()), shade)
+
+        # The ranges nobody is editing get a thin line rather than a handle:
+        # visible enough to show there is something there, quiet enough that
+        # the pair being dragged is obvious.
+        quiet = QColor(accent)
+        quiet.setAlpha(120)
+        painter.setPen(quiet)
+        painter.setBrush(quiet)
+        for index, (start, end) in enumerate(self.ranges):
+            if index == self.selected:
+                continue
+            for seconds in (start, end):
+                x = self._x_for(seconds)
+                painter.drawRect(QRect(x - 1, 0, 2, rect.height()))
+
         left = self._x_for(self.in_point)
         right = self._x_for(self.out_point)
-        if left > 0:
-            painter.fillRect(QRect(0, 0, left, rect.height()), shade)
-        if right < rect.width():
-            painter.fillRect(QRect(right, 0, rect.width() - right, rect.height()), shade)
-
         painter.setPen(accent)
         painter.setBrush(accent)
         for x in (left, right):
@@ -379,8 +425,27 @@ class TrimBar(QWidget):
         elif self._near(x, self.out_point):
             self._dragging = "out"
         else:
+            # Clicking inside another range picks it up, which is the only way
+            # to reach a select with the mouse. The handles are checked first,
+            # so overlapping ranges never steal a drag that had already begun.
+            picked = self._range_at(self._time_for(x))
+            if picked is not None and picked != self.selected:
+                self.select_picked.emit(picked)
+                return
             self._dragging = "head"
         self._apply(x)
+
+    def _range_at(self, seconds: float) -> int | None:
+        """Which range covers this moment, latest first.
+
+        Later selects win where two overlap: they are the ones drawn on top, so
+        they are the ones a click looks like it landed on.
+        """
+        for index in range(len(self.ranges) - 1, -1, -1):
+            start, end = self.ranges[index]
+            if start - 0.01 <= seconds <= end + 0.01:
+                return index
+        return None
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         x = event.position().toPoint().x()

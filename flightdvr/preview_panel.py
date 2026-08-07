@@ -19,7 +19,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (
-    QGroupBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout,
+    QWidget,
 )
 
 from .player import FrameView
@@ -42,6 +43,10 @@ class PreviewView(QObject):
     reset_requested = Signal()
     playhead_moved = Signal(float)
     trim_changed = Signal(float, float)
+    select_picked = Signal(int)
+    select_added = Signal()
+    select_removed = Signal()
+    select_renamed = Signal(str)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -144,11 +149,73 @@ class PreviewView(QObject):
         column.addWidget(self.trim_note)
         return side
 
+    def _build_selects_row(self) -> QHBoxLayout:
+        """Which range is being edited, and how to add or drop one.
+
+        Here rather than in the sidebar because it is about the ranges drawn
+        directly below it, and because the sidebar is 190px and already full.
+        Hidden entirely while a clip has one range or none: a card reviewed the
+        way every version until now reviewed it should not grow a control it
+        has no use for.
+        """
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(TIGHT)
+
+        self.select_label = dim(QLabel(""))
+        self.select_label.setMinimumWidth(96)
+        row.addWidget(self.select_label)
+
+        self.select_name = QLineEdit()
+        self.select_name.setPlaceholderText("Name this one — launch, tree dive…")
+        self.select_name.setMaximumWidth(280)
+        self.select_name.setToolTip(
+            "Used in the filename when a clip has more than one select")
+        self.select_name.textEdited.connect(
+            lambda text: self.select_renamed.emit(text))
+        row.addWidget(self.select_name)
+        row.addStretch(1)
+
+        add = QPushButton("Add select")
+        add.setToolTip("Keep another range out of this clip  (N)")
+        add.clicked.connect(lambda *_: self.select_added.emit())
+        row.addWidget(add)
+
+        self.select_remove = QPushButton("Remove")
+        self.select_remove.setToolTip("Drop the range being edited")
+        self.select_remove.clicked.connect(
+            lambda *_: self.select_removed.emit())
+        row.addWidget(self.select_remove)
+
+        self.select_add = add
+        # Everything except Add is about *which* of several ranges you are
+        # editing, so none of it means anything until there are several.
+        self._only_when_several = [self.select_label, self.select_name,
+                                   self.select_remove]
+        return row
+
+    def show_selects(self, count: int, index: int, name: str) -> None:
+        """Say which range is being edited, and hide what does not apply yet.
+
+        Add stays whatever happens: it is how a second range comes to exist,
+        and hiding it would leave the N key as the only way to reach a feature
+        nobody would know was there. The rest — which one of several, its name,
+        and dropping it — appears once there is more than one.
+        """
+        several = count > 1
+        for widget in self._only_when_several:
+            widget.setVisible(several)
+        self.select_label.setText(
+            f"Select {index + 1} of {count}" if several else "")
+        if self.select_name.text() != name:
+            self.select_name.setText(name)
+
     def _build_trim_band(self) -> QWidget:
         """The full-width filmstrip directly under the preview it scrubs."""
         band = QGroupBox("Filmstrip")
         layout = QVBoxLayout(band)
         layout.setContentsMargins(INNER, TIGHT, INNER, INNER)
+        layout.addLayout(self._build_selects_row())
 
         self.trim_bar = TrimBar()
         self.trim_bar.setToolTip(
@@ -162,6 +229,9 @@ class PreviewView(QObject):
             lambda in_point, out_point: self.trim_changed.emit(
                 in_point, out_point
             )
+        )
+        self.trim_bar.select_picked.connect(
+            lambda index: self.select_picked.emit(index)
         )
         layout.addWidget(self.trim_bar)
         return band

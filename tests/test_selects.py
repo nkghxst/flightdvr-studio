@@ -30,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from PySide6.QtWidgets import QApplication
 
 from flightdvr.format import safe_name, select_stem
 from flightdvr.media import ClipInfo, Select
@@ -252,3 +253,178 @@ def test_joined_selects_become_one_job_holding_them_in_order(window):
     assert len(jobs) == 1, [j.out_path.name for j in jobs]
     assert [(c.trim_in, c.out_point) for c in jobs[0].clips] == [
         (10, 40), (90, 120), (200, 230)], "not in the order they occur"
+
+
+# -- editing them in the window -----------------------------------------------
+
+def loaded(window, flight):
+    """A clip loaded into the preview the way selecting a row would."""
+    window._add_clip(window._scan_generation, flight)
+    window._trim_clip = flight
+    window.trim_bar.set_clip(flight.duration, flight.trim_in, flight.out_point)
+    window._show_selects()
+    return flight
+
+
+def test_adding_a_select_leaves_the_first_one_alone(window):
+    flight = loaded(window, clip())
+    flight.trim_in, flight.trim_out = 10.0, 40.0
+    window.trim_bar.playhead = 90.0
+
+    window._add_select()
+    assert [(s.start, s.end) for s in flight.selects] == [(10.0, 40.0),
+                                                          (90.0, 92.0)]
+    assert flight.current == 1, "the new one is not the one being edited"
+
+
+def test_a_new_select_is_a_range_not_a_point(window):
+    """A zero-length select is not a range, and would be dropped the moment it
+    was written — so adding one would look like nothing happened."""
+    flight = loaded(window, clip())
+    window.trim_bar.playhead = 100.0
+    window._add_select()
+    assert flight.real_selects, "the new select vanishes as soon as it is saved"
+
+
+def test_adding_at_the_very_end_stays_inside_the_clip(window):
+    flight = loaded(window, clip(duration=240.0))
+    window.trim_bar.playhead = 239.5
+    window._add_select()
+    added = flight.selects[flight.current]
+    assert added.end <= 240.0, "a select ran past the end of the recording"
+    assert added.end > added.start
+
+
+def test_removing_the_last_select_is_refused(window):
+    """Down to one, Reset is the way back to the whole clip — removing it would
+    leave the interface pointing at nothing."""
+    flight = loaded(window, clip())
+    flight.trim_in, flight.trim_out = 10.0, 40.0
+    window._show_selects()
+    window._remove_select()
+    assert len(flight.selects) == 1
+
+
+def test_removing_one_moves_the_editing_position_somewhere_real(window):
+    flight = loaded(window, clip())
+    flight.selects = [Select(10, 40), Select(90, 120), Select(200, 230)]
+    flight.current = 2
+    window._show_selects()
+
+    window._remove_select()
+    assert len(flight.selects) == 2
+    assert 0 <= flight.current < len(flight.selects)
+    assert flight.trim_in == 90, "left editing a select that no longer exists"
+
+
+def test_reset_clears_every_range_not_just_the_edited_one(window):
+    flight = loaded(window, clip())
+    flight.selects = [Select(10, 40), Select(90, 120), Select(200, 230)]
+    window._reset_trim()
+    assert flight.real_selects == [], "Reset left the other selects behind"
+    assert not flight.is_trimmed
+
+
+def test_picking_a_range_on_the_filmstrip_starts_editing_it(window):
+    flight = loaded(window, clip())
+    flight.selects = [Select(10, 40, "one"), Select(90, 120, "two")]
+    window._show_selects()
+
+    window.preview_view.select_picked.emit(1)
+    assert flight.current == 1
+    assert window.trim_bar.in_point == 90
+    assert window.trim_bar.out_point == 120
+
+
+def test_the_row_stays_hidden_until_there_is_more_than_one(window):
+    """A card reviewed the way every earlier version reviewed it should not
+    grow a control it has no use for."""
+    window.show()                       # isVisible is False for everything
+    QApplication.processEvents()        # in a window that was never shown
+
+    flight = loaded(window, clip())
+    view = window.preview_view
+    assert not view.select_remove.isVisible(), (
+        "Remove offered on a clip with one range")
+    assert not view.select_name.isVisible(), (
+        "a name field that would not reach the filename")
+    assert view.select_add.isVisible(), (
+        "no way to make a second range except a key nobody knows about")
+
+    flight.selects = [Select(10, 40), Select(90, 120)]
+    window._show_selects()
+    QApplication.processEvents()
+    assert view.select_remove.isVisible()
+    assert view.select_name.isVisible()
+    assert view.select_label.text() == "Select 1 of 2"
+
+
+def test_the_estimate_counts_the_files_the_queue_will_make(window):
+    from PySide6.QtCore import Qt
+    flight = loaded(window, clip())
+    flight.selects = [Select(10, 40), Select(90, 120), Select(200, 230)]
+    window.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    window._update_estimate()
+
+    said = window.export_panel.estimate_label.text()
+    assert "3 files" in said, said
+
+
+def test_clicking_inside_another_range_picks_it_up(app):
+    """The only way to reach a select with the mouse. Emitting the signal by
+    hand, as the test above does, skips the part that decides which range a
+    click landed in."""
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from flightdvr.trim import TrimBar
+
+    bar = TrimBar()
+    bar.resize(400, 60)
+    bar.set_clip(200.0, 90.0, 120.0,
+                 ranges=[(10, 40), (90, 120), (160, 190)], selected=1)
+
+    picked = []
+    bar.select_picked.connect(picked.append)
+
+    def click(seconds):
+        x = bar._x_for(seconds)
+        bar.mousePressEvent(QMouseEvent(
+            QMouseEvent.Type.MouseButtonPress, QPointF(x, 30),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier))
+
+    click(25.0)
+    assert picked == [0], f"clicking the first range picked {picked}"
+
+    picked.clear()
+    click(175.0)
+    assert picked == [2]
+
+    # Inside the range already being edited, a click is a playhead move.
+    picked.clear()
+    moved = []
+    bar.playhead_moved.connect(moved.append)
+    click(105.0)
+    assert picked == [], "re-picked the range already being edited"
+    assert moved, "the playhead did not move"
+
+
+def test_a_click_outside_every_range_just_moves_the_playhead(app):
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from flightdvr.trim import TrimBar
+
+    bar = TrimBar()
+    bar.resize(400, 60)
+    bar.set_clip(200.0, 90.0, 120.0, ranges=[(90, 120)], selected=0)
+    picked, moved = [], []
+    bar.select_picked.connect(picked.append)
+    bar.playhead_moved.connect(moved.append)
+
+    x = bar._x_for(60.0)
+    bar.mousePressEvent(QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress, QPointF(x, 30),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier))
+    assert picked == []
+    assert moved
