@@ -138,12 +138,29 @@ def verdict(page: dict, recent: list[dict] | None) -> tuple[bool, list[str]]:
              if r.get("status") == "queued"
              and _age_minutes(r.get("createdAt", "")) > STUCK_MINUTES]
     if stuck:
+        # A run that has sat queued for hours only proves something if nothing
+        # newer got picked up. The August outage ended with a handful of
+        # poisoned jobs that no runner would ever claim, sitting behind runs
+        # that were starting and passing normally — and this tool called that
+        # "not usable" while three runs went green underneath it.
+        oldest_stuck = min(_age_minutes(r.get("createdAt", "")) for r in stuck)
+        moved_since = [
+            r for r in recent
+            if r.get("status") != "queued"
+            and _age_minutes(r.get("createdAt", "")) < oldest_stuck
+        ]
         worst = max(_age_minutes(r.get("createdAt", "")) for r in stuck)
+        if not moved_since:
+            notes.append(
+                f"{len(stuck)} run(s) queued without starting, the oldest for "
+                f"{worst / 60:.1f} hours — no runner has picked them up"
+            )
+            return False, notes
         notes.append(
-            f"{len(stuck)} run(s) queued without starting, the oldest for "
-            f"{worst / 60:.1f} hours — no runner has picked them up"
+            f"{len(stuck)} run(s) stuck queued for up to {worst / 60:.1f} "
+            f"hours, but {len(moved_since)} newer run(s) were picked up — "
+            "treating the stuck ones as leftovers rather than evidence"
         )
-        return False, notes
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=RECENT_HOURS)
     finished = [
