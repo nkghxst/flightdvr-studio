@@ -662,17 +662,20 @@ Measured on real 720p60 footage (`D:\movies\hdz_047.ts`), two windows decoded in
 1.13–1.28 s and returned exactly their planned ranges, 540–660 and 600–720.
 Source frame 630 was byte-identical in both at PTS 10.499989 s.
 
-Two ffmpeg boundary traps are part of the implementation. An output-side seek
-at a frame's exact timestamp discarded that boundary frame on real footage, so
-a planned 180–420 cache held 181–421 instead. Seeking half a source-frame early
-puts the boundary between frames and returned the planned bounds in both real
-measurements. `showinfo` also runs before the accurate output-side seek throws
-away the resync lead-in: the 10 s real-footage window produced 121 pictures but
-logged 241 timestamps, the first 120 belonging to discarded lead-in frames.
-Pixels therefore pair with the *tail* of the timestamp list. The paired run is
-required to begin at the planned frame and remain contiguous; if positional
-pairing ever slips, precise stepping fails visibly instead of publishing
-plausible but wrong source-frame numbers.
+One ffmpeg boundary trap needed a different shape rather than a larger fudge.
+Output-side `-ss` disagrees across ffmpeg builds about the picture on its
+boundary: a planned 180–420 cache held 181–421 on real footage, and aiming half
+a frame earlier fixed the pinned Windows build but still returned N+1..M+1 in
+all three CI builds. The precise command now does only the fast input seek,
+decodes the two-second resync lead-in, and uses a timestamp selection filter
+halfway between frames N-1 and N. `showinfo` comes after that filter, so the
+current 10 s real-footage window produces 121 pictures and exactly 121
+timestamps rather than logging discarded frames too.
+
+Pairing requires one timestamp per picture, the planned first frame, and a
+contiguous run. A filter-order change, extra timestamp or broken timeline fails
+visibly instead of publishing plausible but wrong source-frame numbers. The
+real measurements still returned 540–660 and 600–720 exactly after this change.
 
 ### Deliberately not done
 

@@ -302,14 +302,15 @@ def test_precise_window_seeking_keeps_the_source_timeline():
     input_at = command.index("-i")
     assert "-copyts" in command[:input_at]
     assert "-start_at_zero" in command[:input_at]
-    assert any(part == "8.991667" for part in command)
+    assert "select='gte(t,8.991666667)'" in command[command.index("-vf") + 1]
+    assert "-ss" not in command[input_at + 1:]
 
 
-def test_precise_pairing_uses_the_tail_and_returns_the_planned_run():
+def test_precise_pairing_returns_the_planned_one_to_one_run():
     window = FrameWindow(first_frame=100, frame_count=3, fps=10.0)
     frames = pair_precise_frames(
         window,
-        timestamps=[8.0, 9.0, 10.0, 10.1, 10.2],
+        timestamps=[10.0, 10.1, 10.2],
         pixels=[b"a", b"b", b"c"],
     )
     assert [frame.frame_number for frame in frames] == [100, 101, 102]
@@ -317,13 +318,24 @@ def test_precise_pairing_uses_the_tail_and_returns_the_planned_run():
 
 
 def test_precise_pairing_rejects_a_shifted_timeline():
-    """A trailing showinfo timestamp must fail loudly, not silently renumber
-    every picture by one plausible-looking source frame."""
+    """A shifted PTS run must not silently renumber every picture by one
+    plausible-looking source frame."""
     window = FrameWindow(first_frame=100, frame_count=3, fps=10.0)
     with pytest.raises(ValueError, match=r"101\.\.103.*100\.\.102"):
         pair_precise_frames(
             window,
-            timestamps=[8.0, 10.0, 10.1, 10.2, 10.3],
+            timestamps=[10.1, 10.2, 10.3],
+            pixels=[b"a", b"b", b"c"],
+        )
+
+
+def test_precise_pairing_rejects_extra_showinfo_timestamps():
+    """Moving showinfo ahead of the selection filter must fail loudly."""
+    window = FrameWindow(first_frame=100, frame_count=3, fps=10.0)
+    with pytest.raises(ValueError, match="3 frames but 5 timestamps"):
+        pair_precise_frames(
+            window,
+            timestamps=[8.0, 9.0, 10.0, 10.1, 10.2],
             pixels=[b"a", b"b", b"c"],
         )
 

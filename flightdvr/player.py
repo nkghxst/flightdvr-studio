@@ -170,13 +170,12 @@ def pair_precise_frames(window: FrameWindow, timestamps: list[float],
                         pixels: list[bytes]) -> tuple[CachedFrame, ...]:
     """Pair output pictures with showinfo PTS and prove the run is trustworthy.
 
-    ``showinfo`` also logs the lead-in discarded by the output-side seek, so
-    pictures pair with the tail of the timestamp list. Positional pairing is a
-    silent-wrongness risk: one unexpected trailing timestamp would shift every
-    source-frame number while leaving all of them plausible. The planned first
-    frame and a contiguous run turn that into a visible decode failure.
+    The selection filter sits before ``showinfo``, so discarded lead-in frames
+    produce neither pixels nor timestamps. Anything other than one PTS per
+    picture is therefore a broken run, not something to pair positionally and
+    hope about. The planned first frame and contiguity prove the rest.
     """
-    if len(timestamps) < len(pixels):
+    if len(timestamps) != len(pixels):
         raise ValueError(
             f"ffmpeg returned {len(pixels)} frames but "
             f"{len(timestamps)} timestamps"
@@ -184,14 +183,13 @@ def pair_precise_frames(window: FrameWindow, timestamps: list[float],
     if not pixels:
         return ()
 
-    paired = timestamps[-len(pixels):]
     frames = tuple(
         CachedFrame(
             frame_number=max(0, math.floor(seconds * window.fps + 0.5)),
             seconds=seconds,
             pixels=data,
         )
-        for seconds, data in zip(paired, pixels)
+        for seconds, data in zip(timestamps, pixels)
     )
     numbers = [frame.frame_number for frame in frames]
     expected = list(range(window.first_frame,
@@ -331,16 +329,18 @@ def build_frame_window_command(tools: Tools, clip: ClipInfo,
     ``showinfo`` records each decoded frame's PTS on stderr while raw pixels
     remain arithmetically framed on stdout.
     """
-    # An output-side seek at a frame's exact timestamp can discard that frame
-    # as lying on the boundary. Real 60 fps footage then returned N+1..M+1 for
-    # a planned N..M window. Aim halfway between the preceding frame and N so
-    # N is unambiguously after the boundary without decoding another picture.
-    start = max(
+    # Output-side -ss disagrees across ffmpeg builds about the frame on its
+    # boundary: a planned N..M window can become N+1..M+1. Decode the usual
+    # two-second resync lead-in, then select from halfway between N-1 and N.
+    # Selection happens before showinfo, giving every output picture exactly
+    # one timestamp instead of logging the discarded lead-in too.
+    boundary = max(
         0.0,
         window.seconds_for(window.first_frame) - 0.5 / window.fps,
     )
-    fast, accurate = seek_pair(start)
+    fast = max(0.0, boundary - SEEK_LEAD_IN)
     filters = [
+        f"select='gte(t,{boundary:.9f})'",
         f"scale={size.width}:{size.height}:force_original_aspect_ratio=decrease",
         f"pad={size.width}:{size.height}:(ow-iw)/2:(oh-ih)/2",
         "showinfo",
@@ -349,8 +349,6 @@ def build_frame_window_command(tools: Tools, clip: ClipInfo,
     if fast > 0.01:
         command += ["-ss", f"{fast:.6f}"]
     command += ["-copyts", "-start_at_zero", "-i", str(clip.path)]
-    if accurate > 0.01:
-        command += ["-ss", f"{accurate:.6f}"]
     command += [
         "-an", "-vf", ",".join(filters),
         *frame_rate_mode(tools, "passthrough"),
@@ -630,11 +628,10 @@ class FrameWindowWorker(QThread):
             self.failed.emit(self.generation,
                              _describe(log) or f"ffmpeg stopped (code {code})")
             return
-        # showinfo runs before the accurate output-side seek discards the
-        # lead-in. Measured on real 60 fps footage: 241 timestamps were logged
-        # for 121 output pictures; the first 120 describe the two-second resync
-        # lead-in deliberately thrown away. The pictures therefore pair with
-        # the tail, not the head, of the PTS list.
+        # The timestamp selection filter is before showinfo, so the discarded
+        # resync lead-in produces neither pictures nor timestamps. Keeping the
+        # pairing and its invariant in one helper makes a future filter-order
+        # change fail visibly rather than silently shifting frame numbers.
         try:
             frames = pair_precise_frames(self.window, timestamps, pixels)
         except ValueError as problem:
