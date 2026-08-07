@@ -329,13 +329,23 @@ def test_precise_pairing_rejects_a_shifted_timeline():
         )
 
 
-def test_precise_pairing_rejects_extra_showinfo_timestamps():
-    """Moving showinfo ahead of the selection filter must fail loudly."""
+def test_precise_pairing_ignores_trailing_lookahead_timestamps():
+    """Some ffmpeg builds process beyond -frames:v before stopping output."""
     window = FrameWindow(first_frame=100, frame_count=3, fps=10.0)
-    with pytest.raises(ValueError, match="3 frames but 5 timestamps"):
+    frames = pair_precise_frames(
+        window,
+        timestamps=[10.0, 10.1, 10.2, 10.3, 10.4],
+        pixels=[b"a", b"b", b"c"],
+    )
+    assert [frame.frame_number for frame in frames] == [100, 101, 102]
+
+
+def test_precise_pairing_rejects_missing_showinfo_timestamps():
+    window = FrameWindow(first_frame=100, frame_count=3, fps=10.0)
+    with pytest.raises(ValueError, match="3 frames but 2 timestamps"):
         pair_precise_frames(
             window,
-            timestamps=[8.0, 9.0, 10.0, 10.1, 10.2],
+            timestamps=[10.0, 10.1],
             pixels=[b"a", b"b", b"c"],
         )
 

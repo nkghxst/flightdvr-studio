@@ -669,11 +669,15 @@ a frame earlier fixed the pinned Windows build but still returned N+1..M+1 in
 all three CI builds. The precise command now does only the fast input seek,
 decodes the two-second resync lead-in, and uses a timestamp selection filter
 halfway between frames N-1 and N. `showinfo` comes after that filter, so the
-current 10 s real-footage window produces 121 pictures and exactly 121
-timestamps rather than logging discarded frames too.
+current 10 s real-footage window produces 121 pictures and 121 timestamps rather
+than logging discarded frames too.
 
-Pairing requires one timestamp per picture, the planned first frame, and a
-contiguous run. A filter-order change, extra timestamp or broken timeline fails
+Hosted ffmpeg builds exposed one more ordering detail: `showinfo` can process
+one to six frames beyond `-frames:v` before output stops, so they log 122–127
+timestamps for 121 pictures. Because selection is before `showinfo`, those can
+only be trailing lookahead; pictures pair with the *head* of the PTS list.
+Pairing requires at least one timestamp per picture, the planned first frame,
+and a contiguous run. A filter-order change or broken timeline therefore fails
 visibly instead of publishing plausible but wrong source-frame numbers. The
 real measurements still returned 540–660 and 600–720 exactly after this change.
 

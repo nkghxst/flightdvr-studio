@@ -171,11 +171,12 @@ def pair_precise_frames(window: FrameWindow, timestamps: list[float],
     """Pair output pictures with showinfo PTS and prove the run is trustworthy.
 
     The selection filter sits before ``showinfo``, so discarded lead-in frames
-    produce neither pixels nor timestamps. Anything other than one PTS per
-    picture is therefore a broken run, not something to pair positionally and
-    hope about. The planned first frame and contiguity prove the rest.
+    produce neither pixels nor timestamps. Some ffmpeg builds process a few
+    frames beyond the output limit, which adds timestamps only at the tail.
+    Pictures therefore pair with the head; the planned first frame and a
+    contiguous run prove that assumption instead of merely trusting it.
     """
-    if len(timestamps) != len(pixels):
+    if len(timestamps) < len(pixels):
         raise ValueError(
             f"ffmpeg returned {len(pixels)} frames but "
             f"{len(timestamps)} timestamps"
@@ -189,7 +190,7 @@ def pair_precise_frames(window: FrameWindow, timestamps: list[float],
             seconds=seconds,
             pixels=data,
         )
-        for seconds, data in zip(timestamps, pixels)
+        for seconds, data in zip(timestamps[:len(pixels)], pixels)
     )
     numbers = [frame.frame_number for frame in frames]
     expected = list(range(window.first_frame,
