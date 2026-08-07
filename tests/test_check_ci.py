@@ -29,7 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from check_ci import verdict                                      # noqa: E402
+from check_ci import UNKNOWN, UNUSABLE, USABLE, verdict          # noqa: E402
 
 CLEAR = {"reachable": True, "component": "operational"}
 BROKEN = {"reachable": True, "component": "major_outage"}
@@ -43,29 +43,32 @@ def run(status: str, minutes_ago: float, conclusion: str | None = None) -> dict:
 
 
 def test_a_run_executing_now_settles_it():
-    usable, notes = verdict(BROKEN, [run("in_progress", 2)])
-    assert usable, notes
+    state, notes = verdict(BROKEN, [run("in_progress", 2)])
+    assert state == USABLE, notes
 
 
 def test_nothing_moving_for_hours_is_not_usable():
-    usable, notes = verdict(CLEAR, [run("queued", 400), run("queued", 300)])
-    assert not usable
+    state, notes = verdict(CLEAR, [run("queued", 400), run("queued", 300)])
+    assert state == UNUSABLE
     assert "no runner has picked them up" in " ".join(notes)
 
 
-def test_unreachable_api_is_treated_as_broken():
-    usable, notes = verdict(CLEAR, None)
-    assert not usable
+def test_an_unreachable_api_is_not_an_answer():
+    """Exit 2, not 1: "the checker broke" is not "Actions is down"."""
+    state, notes = verdict(CLEAR, None)
+    assert state == UNKNOWN, notes
 
 
-def test_a_clear_page_with_no_runs_at_all_is_believed_but_hedged():
-    usable, notes = verdict(CLEAR, [])
-    assert usable
-    assert "unproven" in " ".join(notes)
+def test_a_clear_page_with_no_runs_at_all_settles_nothing():
+    """This is the webhook-drop state exactly. Printing a green tick here is
+    the one failure this tool was written to avoid."""
+    state, notes = verdict(CLEAR, [])
+    assert state == UNKNOWN, notes
+    assert "nothing here proves it" in " ".join(notes)
 
 
-def test_the_same_silence_with_a_broken_page_is_not():
-    assert not verdict(BROKEN, [])[0]
+def test_the_same_silence_with_a_broken_page_is_a_no():
+    assert verdict(BROKEN, [])[0] == UNUSABLE
 
 
 def test_leftover_queued_runs_do_not_veto_newer_runs_that_passed():
@@ -82,8 +85,8 @@ def test_leftover_queued_runs_do_not_veto_newer_runs_that_passed():
         run("queued", 340),
         run("queued", 470),
     ]
-    usable, notes = verdict(CLEAR, recent)
-    assert usable, notes
+    state, notes = verdict(CLEAR, recent)
+    assert state == USABLE, notes
     assert "leftovers" in " ".join(notes), notes
 
 
@@ -94,5 +97,17 @@ def test_but_stale_queued_runs_still_count_when_nothing_newer_moved():
         run("queued", 340),
         run("completed", 600, "success"),      # older than the stuck ones
     ]
-    usable, notes = verdict(CLEAR, recent)
-    assert not usable, notes
+    state, notes = verdict(CLEAR, recent)
+    assert state == UNUSABLE, notes
+
+
+def test_a_run_executing_now_beats_a_stale_queue():
+    """Codex's finding, in the shape they described it: one 30-minute-old
+    queued run alongside something actually running used to read as a no."""
+    state, notes = verdict(CLEAR, [run("in_progress", 1), run("queued", 30)])
+    assert state == USABLE, notes
+
+
+def test_the_exit_codes_match_the_three_answers():
+    from check_ci import EXIT
+    assert (EXIT[USABLE], EXIT[UNUSABLE], EXIT[UNKNOWN]) == (0, 1, 2)

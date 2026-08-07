@@ -17,7 +17,7 @@
 
     python tools/check_ci.py                # answer once
     python tools/check_ci.py --watch        # keep checking until it is back
-    python tools/check_ci.py --dispatch     # prove it by running the workflow
+    python tools/check_ci.py --dispatch     # settle it by running the workflow
 
 Written during the outage of 6 August 2026, which is worth describing because
 it is why this asks the question the way it does.
@@ -32,8 +32,15 @@ So this weights what the repository is actually doing above what the status
 page claims. A job that starts is proof. A status page saying "operational"
 while nothing has run for three hours is a hypothesis.
 
+So this weights what the repository is actually doing above what the status
+page claims, and keeps a third answer for when neither settles it — a quiet
+repository with a clear status page is indistinguishable from one whose
+webhooks are being dropped, and saying so is more use than guessing.
+
 Exit codes, so it can be used in a script: 0 when Actions looks usable, 1 when
-it does not, 2 when the check itself could not run.
+it demonstrably is not, 2 when the check could not tell — either because it
+could not run, or because nothing has happened that would prove anything.
+Treat 2 as "ask a human", or pass --dispatch to go and create the evidence.
 """
 
 from __future__ import annotations
@@ -58,6 +65,20 @@ STUCK_MINUTES = 10
 
 # How far back to look for evidence that something actually ran.
 RECENT_HOURS = 2
+
+# The three answers, which are also the exit codes: 0 usable, 1 not, 2 cannot
+# tell. Anything that wants to gate on this should treat 2 as "ask a human",
+# because it is the state an outage looked like from the inside.
+USABLE, UNUSABLE, UNKNOWN = "usable", "unusable", "unknown"
+
+# How long to wait for a dispatched run to appear and be picked up. Creation is
+# normally seconds; the outage is precisely the case where it never happens.
+DISPATCH_WAIT = 180
+DISPATCH_POLL = 10
+
+EXIT = {USABLE: 0, UNUSABLE: 1, UNKNOWN: 2}
+WORDING = {USABLE: "looks usable", UNUSABLE: "is NOT usable",
+           UNKNOWN: "cannot be judged from here"}
 
 
 def _run(args: list[str]) -> str | None:
@@ -115,7 +136,10 @@ def runs(limit: int = 25) -> list[dict] | None:
     """This repository's recent workflow runs, newest first."""
     out = _run([
         "gh", "run", "list", "--limit", str(limit),
-        "--json", "status,conclusion,createdAt,updatedAt,displayTitle,headBranch",
+        # databaseId so a dispatched run can be told apart from what was
+        # already there — the only way to know a dispatch produced anything.
+        "--json", "databaseId,status,conclusion,createdAt,updatedAt,"
+                  "displayTitle,headBranch",
     ])
     if out is None:
         return None
@@ -125,14 +149,29 @@ def runs(limit: int = 25) -> list[dict] | None:
         return None
 
 
-def verdict(page: dict, recent: list[dict] | None) -> tuple[bool, list[str]]:
-    """Combine the claim and the evidence. The evidence wins."""
+def verdict(page: dict, recent: list[dict] | None) -> tuple[str, list[str]]:
+    """Combine the claim and the evidence. The evidence wins.
+
+    Three answers, not two. "I cannot tell" is a real state here and collapsing
+    it into either of the others is how a checker becomes worse than no checker:
+    fold it into usable and it prints a green tick for the exact webhook-drop
+    state this was written for, fold it into unusable and it cries wolf every
+    quiet evening.
+    """
     notes: list[str] = []
 
     if recent is None:
         notes.append("could not reach the Actions API through gh — which was "
                      "itself a symptom during the last outage")
-        return False, notes
+        return UNKNOWN, notes
+
+    # Positive evidence first, and unconditionally. A job that starts is proof,
+    # so nothing below is allowed to talk the tool out of it — during backlog
+    # recovery, work that will never start sits alongside work that is running.
+    running = [r for r in recent if r.get("status") == "in_progress"]
+    if running:
+        notes.append(f"{len(running)} run(s) actually executing right now")
+        return USABLE, notes
 
     stuck = [r for r in recent
              if r.get("status") == "queued"
@@ -140,9 +179,9 @@ def verdict(page: dict, recent: list[dict] | None) -> tuple[bool, list[str]]:
     if stuck:
         # A run that has sat queued for hours only proves something if nothing
         # newer got picked up. The August outage ended with a handful of
-        # poisoned jobs that no runner would ever claim, sitting behind runs
-        # that were starting and passing normally — and this tool called that
-        # "not usable" while three runs went green underneath it.
+        # poisoned jobs no runner would ever claim, sitting behind runs that
+        # were starting and passing normally — and this tool called that "not
+        # usable" while three runs went green underneath it.
         oldest_stuck = min(_age_minutes(r.get("createdAt", "")) for r in stuck)
         moved_since = [
             r for r in recent
@@ -155,7 +194,7 @@ def verdict(page: dict, recent: list[dict] | None) -> tuple[bool, list[str]]:
                 f"{len(stuck)} run(s) queued without starting, the oldest for "
                 f"{worst / 60:.1f} hours — no runner has picked them up"
             )
-            return False, notes
+            return UNUSABLE, notes
         notes.append(
             f"{len(stuck)} run(s) stuck queued for up to {worst / 60:.1f} "
             f"hours, but {len(moved_since)} newer run(s) were picked up — "
@@ -169,37 +208,69 @@ def verdict(page: dict, recent: list[dict] | None) -> tuple[bool, list[str]]:
         and r.get("updatedAt", "") and
         datetime.fromisoformat(r["updatedAt"].replace("Z", "+00:00")) > cutoff
     ]
-    running = [r for r in recent if r.get("status") == "in_progress"]
-
-    if running:
-        notes.append(f"{len(running)} run(s) actually executing right now")
-        return True, notes
     if finished:
         newest = max(finished, key=lambda r: r["updatedAt"])
         notes.append(
             f"a run completed {_age_minutes(newest['updatedAt']):.0f} minutes "
             f"ago ({newest.get('conclusion')})"
         )
-        return True, notes
+        return USABLE, notes
 
     # Nothing queued and nothing recent is genuinely ambiguous: it looks the
     # same whether things are healthy and idle, or whether webhooks are being
-    # dropped so nothing is being created in the first place.
+    # dropped so nothing is being created in the first place. --dispatch is the
+    # way out, because it stops waiting for evidence and goes and makes some.
     if page.get("reachable") and page.get("component") == "operational":
         notes.append("nothing queued, nothing run in the last "
                      f"{RECENT_HOURS} hours, and the status page is clear — "
-                     "probably fine, but unproven until something runs")
-        return True, notes
+                     "probably fine, but nothing here proves it. --dispatch "
+                     "settles it")
+        return UNKNOWN, notes
 
     notes.append(f"nothing has run in {RECENT_HOURS} hours and the status page "
                  "is not clear")
-    return False, notes
+    return UNUSABLE, notes
 
 
-def report(dispatch: bool = False) -> bool:
+def observe_dispatch(before: list[dict] | None) -> tuple[str, str]:
+    """Ask for a run, then wait to see one. Acceptance is not evidence.
+
+    `gh workflow run` returning 0 means GitHub accepted the request, which is
+    exactly what it did during the outage while webhooks were throttled and no
+    run was ever created. So this records what existed beforehand and waits for
+    something new to appear *and* be picked up.
+    """
+    known = {r.get("databaseId") for r in (before or [])}
+    if _run(["gh", "workflow", "run", "build.yml"]) is None:
+        return UNUSABLE, "the dispatch request itself failed"
+
+    deadline = time.monotonic() + DISPATCH_WAIT
+    appeared = None
+    while time.monotonic() < deadline:
+        time.sleep(DISPATCH_POLL)
+        current = runs()
+        if current is None:
+            continue
+        fresh = [r for r in current if r.get("databaseId") not in known]
+        if not fresh:
+            continue
+        appeared = fresh[0]
+        state = appeared.get("status")
+        if state in ("in_progress", "completed"):
+            return USABLE, (f"dispatched run {appeared.get('databaseId')} "
+                            f"reached {state}")
+
+    if appeared is None:
+        return UNUSABLE, (f"accepted the dispatch but no run appeared within "
+                          f"{DISPATCH_WAIT}s — the shape of the August outage")
+    return UNUSABLE, (f"run {appeared.get('databaseId')} was created but no "
+                      f"runner picked it up within {DISPATCH_WAIT}s")
+
+
+def report(dispatch: bool = False) -> str:
     page = status_page()
     recent = runs()
-    ok, notes = verdict(page, recent)
+    state, notes = verdict(page, recent)
 
     print("GitHub status page")
     if not page.get("reachable"):
@@ -226,29 +297,30 @@ def report(dispatch: bool = False) -> bool:
         print("  no runs at all")
     else:
         for entry in recent[:4]:
-            state = entry.get("status")
-            if state == "completed":
-                state = entry.get("conclusion") or "completed"
+            shown = entry.get("status")
+            if shown == "completed":
+                shown = entry.get("conclusion") or "completed"
             age = _age_minutes(entry.get("createdAt", ""))
-            print(f"  {state:12} {age / 60:5.1f}h  "
+            print(f"  {shown:12} {age / 60:5.1f}h  "
                   f"{entry.get('displayTitle', '')[:44]}")
 
     print("\nVerdict")
     for note in notes:
         print(f"  {note}")
-    print(f"  -> Actions {'looks usable' if ok else 'is NOT usable'}")
+    print(f"  -> Actions {WORDING[state]}")
 
-    if ok and dispatch:
-        print("\nDispatching a run to prove it…")
-        if _run(["gh", "workflow", "run", "build.yml"]) is None:
-            print("  dispatch failed")
-            return False
-        print("  dispatched — check with: gh run list --limit 3")
+    # Dispatching is worth most in the state the evidence cannot settle, so it
+    # runs there too rather than only once things already look fine.
+    if dispatch and state in (USABLE, UNKNOWN):
+        print(f"\nDispatching a run to settle it (up to {DISPATCH_WAIT}s)…")
+        state, why = observe_dispatch(recent)
+        print(f"  {why}")
+        print(f"  -> Actions {WORDING[state]}")
 
-    if not ok:
+    if state == UNUSABLE:
         print("\n  Nothing to fix on this side. Local tests are the fallback:")
         print("    python -m pytest")
-    return ok
+    return state
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -264,17 +336,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if not args.watch:
-        return 0 if report(dispatch=args.dispatch) else 1
+        return EXIT[report(dispatch=args.dispatch)]
 
     deadline = time.monotonic() + args.limit_hours * 3600
     while True:
         print(f"\n{'=' * 60}\n{datetime.now():%H:%M:%S}")
-        if report(dispatch=args.dispatch):
+        state = report(dispatch=args.dispatch)
+        if state == USABLE:
             print("\nBack. Stopping.")
-            return 0
+            return EXIT[USABLE]
+        # UNKNOWN keeps watching rather than stopping: not being able to tell
+        # is the reason to look again, not a reason to declare an answer.
         if time.monotonic() + args.every > deadline:
             print(f"\nGave up after {args.limit_hours} hours.")
-            return 1
+            return EXIT[state]
         time.sleep(args.every)
 
 
