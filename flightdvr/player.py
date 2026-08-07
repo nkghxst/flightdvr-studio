@@ -45,6 +45,7 @@ something you do by eye.
 
 from __future__ import annotations
 
+import math
 import queue
 import subprocess
 import threading
@@ -90,6 +91,13 @@ STDERR_LINES = 100
 # eject. Resuming after it simply costs one seek.
 IDLE_STOP_SECONDS = 30
 
+# Four seconds at the fastest recording mode the goggles offer: roughly two
+# seconds either side of the cut, without a long clip ever turning into a
+# whole-file decode. The absolute cap also keeps an unexpected higher-rate
+# source bounded instead of trusting its metadata with memory.
+FRAME_WINDOW_SECONDS = 4.0
+FRAME_CACHE_MAX_FRAMES = 361
+
 
 @dataclass(frozen=True)
 class PreviewSize:
@@ -103,6 +111,44 @@ class PreviewSize:
     @property
     def stride(self) -> int:
         return self.width * 3
+
+
+@dataclass(frozen=True)
+class FrameWindow:
+    """A bounded run of source frames to decode around one playhead."""
+
+    first_frame: int
+    frame_count: int
+    fps: float
+
+    @property
+    def last_frame(self) -> int:
+        return self.first_frame + self.frame_count - 1
+
+    def seconds_for(self, frame_number: int) -> float:
+        if not self.first_frame <= frame_number <= self.last_frame:
+            raise IndexError(frame_number)
+        return frame_number / self.fps
+
+
+def plan_frame_window(position: float, duration: float, fps: float) -> FrameWindow:
+    """The source-frame range worth caching around ``position``.
+
+    Frame numbers, rather than rounded seconds, are the authority. That keeps
+    stepping and the timestamp readout tied to the picture that was decoded.
+    """
+    rate = fps if fps > 0 else PREVIEW_FPS
+    total = max(1, math.ceil(max(0.0, duration) * rate - 1e-9))
+    target = math.floor(max(0.0, position) * rate + 0.5)
+    target = min(target, total - 1)
+    wanted = min(
+        total,
+        FRAME_CACHE_MAX_FRAMES,
+        math.floor(FRAME_WINDOW_SECONDS * rate + 0.5) + 1,
+    )
+    first = target - wanted // 2
+    first = max(0, min(first, total - wanted))
+    return FrameWindow(first, wanted, rate)
 
 
 def choose_size(view_width: int) -> PreviewSize:

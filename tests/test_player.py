@@ -31,9 +31,10 @@ from PySide6.QtCore import QObject, Qt, Signal
 
 from flightdvr.media import ClipInfo, Tools
 from flightdvr.player import (
-    PREVIEW_FPS, PREVIEW_SIZES, QUEUE_FRAMES, SEEK_LEAD_IN, PlayClock,
-    PreviewSize, build_command, choose_size, read_frames, seconds_for_index,
-    seek_pair, should_restart,
+    FRAME_CACHE_MAX_FRAMES, PREVIEW_FPS, PREVIEW_SIZES, QUEUE_FRAMES,
+    SEEK_LEAD_IN, PlayClock, PreviewSize, build_command, choose_size,
+    plan_frame_window, read_frames, seconds_for_index, seek_pair,
+    should_restart,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -97,6 +98,44 @@ def test_frame_bytes_is_the_whole_picture():
     size = PreviewSize(640, 360)
     assert size.frame_bytes == 640 * 360 * 3
     assert size.stride == 640 * 3
+
+
+# -- the precise-frame cache window ------------------------------------------
+
+def test_the_frame_window_is_two_seconds_either_side_of_the_playhead():
+    window = plan_frame_window(position=10.0, duration=60.0, fps=60.0)
+    assert window.seconds_for(window.first_frame) == pytest.approx(8.0)
+    assert window.seconds_for(window.last_frame) == pytest.approx(12.0)
+
+
+def test_the_frame_window_never_grows_to_the_whole_recording():
+    """A 90 fps flight can be several minutes long; precise stepping must not
+    turn selecting one cut into tens of thousands of cached frames."""
+    window = plan_frame_window(position=120.0, duration=300.0, fps=90.0)
+    assert window.frame_count == FRAME_CACHE_MAX_FRAMES
+    assert window.frame_count < 300.0 * 90.0
+
+
+def test_seeking_away_replaces_the_window_instead_of_extending_it():
+    first = plan_frame_window(position=10.0, duration=300.0, fps=90.0)
+    second = plan_frame_window(position=200.0, duration=300.0, fps=90.0)
+    assert first.frame_count == second.frame_count == FRAME_CACHE_MAX_FRAMES
+    assert first.last_frame < second.first_frame
+
+
+def test_a_frame_number_has_one_exact_timestamp():
+    window = plan_frame_window(position=10.0, duration=60.0, fps=60.0)
+    current = round(10.0 * window.fps)
+    assert window.seconds_for(current + 1) - window.seconds_for(current) == (
+        pytest.approx(1 / 60.0)
+    )
+
+
+def test_the_frame_window_stays_inside_short_clips():
+    window = plan_frame_window(position=99.0, duration=1.0, fps=60.0)
+    assert window.first_frame == 0
+    assert window.last_frame == 59
+    assert window.frame_count == 60
 
 
 # -- seeking -------------------------------------------------------------------
