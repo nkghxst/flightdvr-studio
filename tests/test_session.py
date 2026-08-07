@@ -245,6 +245,17 @@ def test_a_clip_nothing_was_decided_about_is_left_alone():
     assert found.trim_in == 0.0 and found.trim_out == 0.0
 
 
+def test_a_remembered_review_state_comes_back_onto_the_clip():
+    from flightdvr.session import apply_to
+
+    session = Session()
+    session.marks(clip().fingerprint).review = MAYBE
+
+    found = clip()
+    assert apply_to(session, [found]) == 0  # no trim was restored
+    assert found.review == MAYBE
+
+
 def test_trims_are_recorded_back_into_the_session():
     from flightdvr.session import capture_from
 
@@ -255,6 +266,30 @@ def test_trims_are_recorded_back_into_the_session():
 
     kept = session.marks(trimmed.fingerprint).selects
     assert [(s.start, s.end) for s in kept] == [(45.0, 150.5)]
+
+
+def test_a_review_state_is_recorded_back_into_the_session():
+    from flightdvr.session import capture_from
+
+    session = Session()
+    decided = clip()
+    decided.review = REJECT
+    capture_from(session, [decided])
+
+    assert session.marks(decided.fingerprint).review == REJECT
+
+
+def test_returning_a_clip_to_unreviewed_clears_the_stored_decision():
+    from flightdvr.session import capture_from
+
+    session = Session()
+    reconsidered = clip()
+    session.marks(reconsidered.fingerprint).review = KEEP
+
+    reconsidered.review = UNREVIEWED
+    capture_from(session, [reconsidered])
+
+    assert session.marks(reconsidered.fingerprint).review == UNREVIEWED
 
 
 def test_resetting_a_clip_clears_the_mark_rather_than_storing_the_whole_thing():
