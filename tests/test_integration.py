@@ -571,3 +571,80 @@ def test_a_corrupt_source_fails_rather_than_hanging(tools, tmp_path, qt_app):
     assert problems, "a file that decodes to nothing reported success"
     assert problems[0] and "exit code" not in problems[0].lower(), problems
     assert not frames
+
+
+# -- what a stream copy cannot do ----------------------------------------------
+
+def decode_complaints(tools, path: Path) -> str:
+    """What ffmpeg says while decoding a file all the way through.
+
+    Frame counts and durations do not catch this: the corrupt file has the
+    right length and reports success. The decoder is the thing that notices.
+    """
+    return subprocess.run(
+        [str(tools.ffmpeg), "-hide_banner", "-nostdin", "-v", "error",
+         "-i", str(path), "-f", "null", "-"],
+        capture_output=True, text=True,
+    ).stderr.strip()
+
+
+def test_a_trimmed_joined_remux_would_be_corrupt(tools, clip, second_clip,
+                                                 tmp_path):
+    """The measurement behind refusing it, kept so the reason stays checkable.
+
+    This deliberately builds the export the app now refuses to build, and
+    asserts that it really is broken. If a future ffmpeg starts handling this
+    correctly, this test fails and the refusal can be reconsidered — which is
+    the only honest way to hold a restriction in place.
+    """
+    from flightdvr.jobs import write_concat_file
+    from flightdvr.presets import build_commands
+
+    clips = [probed(tools, clip, 2.5, 4.5), probed(tools, second_clip, 2.5, 4.5)]
+    assert clip.is_mid_gop(2.5), "this test is pointless on a keyframe"
+
+    concat = write_concat_file(clips, tmp_path, "trimmed_join")
+    out = target(tmp_path, "trimmed_join", "remux")
+
+    # Around the guard on purpose: the export path refuses this now, and the
+    # point here is to keep checking that the refusal is still deserved.
+    command = build_commands(
+        tools, clips[0], "remux", ExportSettings(), out, tmp_path,
+        clips=clips, concat_file=concat, total_duration=4.0,
+    )[0]
+    done = subprocess.run([str(c) for c in command], capture_output=True,
+                          text=True)
+    assert done.returncode == 0, done.stderr[-400:]
+    assert out.exists(), "ffmpeg produced nothing to examine"
+
+    complaints = decode_complaints(tools, out)
+    assert complaints, (
+        "a trimmed joined remux decoded cleanly — ffmpeg may have changed, and "
+        "the refusal in join_problems should be reconsidered"
+    )
+    assert "POC" in complaints or "ref" in complaints.lower(), complaints
+
+
+def test_an_untrimmed_joined_remux_is_clean(tools, clip, second_clip, tmp_path):
+    """Stitching a flight recorded across several files, untouched, is what the
+    preset is for and has to keep working."""
+    from flightdvr.jobs import write_concat_file
+
+    clips = [probed(tools, clip), probed(tools, second_clip)]
+    concat = write_concat_file(clips, tmp_path, "plain_join")
+    out = target(tmp_path, "plain_join", "remux")
+    ok, message = export(tools, tmp_path, clips, "remux", out, concat=concat)
+    assert ok, message
+    assert decode_complaints(tools, out) == ""
+    assert probe_output(tools, out)["duration"] == pytest.approx(12.0, abs=0.5)
+
+
+def test_a_trimmed_single_clip_remux_is_clean(tools, clip, tmp_path):
+    """Only the joined path has this. A single clip's trim is a seek, and
+    ffmpeg snaps to the keyframe before it — the "second or so out" the README
+    already promises, rather than a torn picture."""
+    out = target(tmp_path, "single_remux", "remux")
+    ok, message = export(tools, tmp_path, [probed(tools, clip, 2.5, 4.5)],
+                         "remux", out)
+    assert ok, message
+    assert decode_complaints(tools, out) == ""
