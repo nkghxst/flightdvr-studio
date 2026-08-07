@@ -1313,8 +1313,17 @@ class MainWindow(QMainWindow):
         clip = self._trim_clip
         if clip is None:
             return
-        clip.trim_in = in_point if in_point > 0.01 else 0.0
-        clip.trim_out = out_point if out_point < clip.duration - 0.01 else 0.0
+        if len(clip.selects) > 1:
+            # One range of several that happens to span the whole recording is
+            # still a range. Normalising it to zero the way a lone trim is
+            # normalised left a row the filmstrip drew and the queue refused to
+            # export — two selects on screen, one file out, no complaint.
+            clip.trim_in, clip.trim_out = in_point, out_point
+        else:
+            # A lone trim covering everything is not a decision, so it clears.
+            clip.trim_in = in_point if in_point > 0.01 else 0.0
+            clip.trim_out = (out_point if out_point < clip.duration - 0.01
+                             else 0.0)
         self._show_frame(self.trim_bar.playhead)
         self._update_trim_labels()
         self._mark_trim_in_table(clip)
@@ -1349,6 +1358,10 @@ class MainWindow(QMainWindow):
         self.trim_bar.out_point = chosen.end or clip.duration
         self.trim_bar.playhead = chosen.start
         self._show_selects()
+        # Through the same seek an ordinary filmstrip click makes. Painting the
+        # still without moving the decoder left the picture showing one moment
+        # and Play resuming from another.
+        self.player.seek(chosen.start)
         self._show_frame(chosen.start)
         self._update_trim_labels()
 

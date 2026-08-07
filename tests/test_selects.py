@@ -428,3 +428,55 @@ def test_a_click_outside_every_range_just_moves_the_playhead(app):
         Qt.KeyboardModifier.NoModifier))
     assert picked == []
     assert moved
+
+
+# -- what Codex's review of #34 found -----------------------------------------
+
+def test_a_select_covering_the_whole_clip_is_still_exported(window):
+    """A lone trim spanning everything is not a decision and clears. One range
+    of several that happens to span everything is still a range — normalising it
+    away left a row the filmstrip drew and the queue refused, so two selects on
+    screen produced one file with no complaint."""
+    flight = loaded(window, clip())
+    flight.selects = [Select(10, 40), Select(90, 120)]
+    flight.current = 1
+    window.trim_bar.set_clip(flight.duration, 90, 120,
+                             ranges=[(10, 40), (90, 120)], selected=1)
+    window._show_selects()
+
+    # what a drag does: move the bar's own points, then announce them
+    window.trim_bar.in_point, window.trim_bar.out_point = 0.0, flight.duration
+    window._on_trim_changed(0.0, flight.duration)
+
+    drawn = sorted(window.trim_bar._kept())
+    exported = sorted((p.trim_in, p.out_point) for p in flight.for_export())
+    assert drawn == exported, (
+        f"the filmstrip draws {drawn} and the queue exports {exported}")
+    assert window.preview_view.select_label.text() == "Select 2 of 2"
+
+
+def test_a_lone_trim_covering_everything_still_clears(window):
+    """The other half of that rule, or it is just a special case nobody asked
+    for: with one select, whole-clip means untrimmed exactly as before."""
+    flight = loaded(window, clip())
+    flight.trim_in, flight.trim_out = 10.0, 40.0
+    window._show_selects()
+
+    window.trim_bar.in_point, window.trim_bar.out_point = 0.0, flight.duration
+    window._on_trim_changed(0.0, flight.duration)
+    assert not flight.is_trimmed
+    assert flight.real_selects == []
+
+
+def test_picking_a_select_moves_the_player_too(window):
+    """The picture said one moment and Play resumed from another."""
+    flight = loaded(window, clip())
+    flight.selects = [Select(10, 40), Select(90, 120)]
+    window._show_selects()
+    window.player.seek(33.0)
+
+    window._pick_select(1)
+    assert window.trim_bar.playhead == 90
+    assert window.player.position == 90, (
+        f"the filmstrip moved to 90 and the player is still at "
+        f"{window.player.position}")
