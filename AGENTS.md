@@ -136,6 +136,18 @@ failed. GitHub itself has outages and capacity problems. Check the current run
 and its logs before calling a CI failure a code failure, and say when remote
 verification was unavailable.
 
+**The two machines hold different footage**, so a measurement on real media
+usually cannot be repeated by the other reviewer — the laptop has `D:\movies`,
+the desktop has `F:\FPV clips` and whatever card is in the reader. Name the clip
+and say what you measured, so the claim can be judged on its own terms rather
+than only believed or not. A review that says "I could not repeat this and here
+is why" is doing its job; one that quietly skips the check is not.
+
+Offscreen Qt is not a substitute for either. It has no usable fonts, reports
+text widths roughly double the real ones, and no key mapper — so a layout
+"verified" there says nothing about the real window, and a shortcut that does
+not fire there may well fire on a keyboard. Both mistakes have been made.
+
 ### Handing over
 
 Nothing special is required if the rules above are followed, because the state
