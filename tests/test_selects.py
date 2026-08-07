@@ -583,3 +583,22 @@ def test_an_unreadable_feed_says_so_rather_than_guessing(window):
 
     assert "no reading" in window.preview_view.activity_note.text()
     assert window.preview_view.activity_button.text() == ""
+
+
+def test_accepting_the_suggestion_moves_the_player_too(window):
+    """The picture and the label went to the suggested start while Play resumed
+    from wherever it had been — the same fault as picking a select, written
+    again in a second handler."""
+    from flightdvr.motion import Activity
+
+    flight = loaded(window, clip(duration=300.0))
+    window._activity = Activity(duration=300.0, still=[(40.0, 90.0)],
+                                flying=[(0.0, 40.0), (90.0, 250.0)],
+                                quietest=1.0)
+    window.player.seek(33.0)
+    window._accept_activity()
+
+    assert window.trim_bar.playhead == 90.0
+    assert window.player.position == 90.0, (
+        f"the filmstrip moved to 90 and the player is at "
+        f"{window.player.position}")

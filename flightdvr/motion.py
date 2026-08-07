@@ -95,6 +95,11 @@ class Activity:
     quietest: float
     readable: bool = True
 
+    # The last keyframe the filmstrip sampled, which is not the end of the
+    # recording. Kept separately so a span reaching it can be told from one
+    # that merely ends late.
+    last_sample: float = 0.0
+
     @property
     def still_seconds(self) -> float:
         return sum(b - a for a, b in self.still)
@@ -146,7 +151,19 @@ class Activity:
             return None
         if longest[1] - longest[0] >= self.duration - MIN_STILL:
             return None                     # nothing worth cutting
-        return longest
+
+        # A flight that runs to the last sampled keyframe runs to the end of the
+        # recording. The filmstrip samples a keyframe a second, so its final
+        # sample is up to a second before EOF — stopping the export there would
+        # silently drop the tail, which on a clip that ends mid-flight is the
+        # part somebody wanted.
+        start, end = longest
+        # Only when the last sample is actually known. It defaults to zero, and
+        # without this guard every span satisfies "reaches the end" and every
+        # suggestion silently runs to the clip's duration.
+        if self.last_sample > 0.0 and end >= self.last_sample - 0.001:
+            end = max(end, self.duration)
+        return (start, end)
 
     def describe(self, human) -> str:
         """One line for the sidebar, saying only what was actually measured."""
@@ -253,7 +270,7 @@ def frame_differences(frames: list[Path]) -> list[float]:
     return values
 
 
-def activity(strip) -> Activity | None:
+def activity(strip, duration: float = 0.0) -> Activity | None:
     """What this recording spends its time doing, or None without a filmstrip.
 
     `readable` is False when the feed's own noise is louder than the difference
@@ -268,14 +285,37 @@ def activity(strip) -> Activity | None:
     if not values:
         return None
 
-    ordered = sorted(values)
-    quietest = ordered[max(0, len(ordered) // 20)]        # 5th percentile
     still, flying = segment(values, strip.times)
 
+    # The quietest the feed actually got. The fifth percentile was standing in
+    # for this and was wrong whenever the stop was short: a six-second stop in a
+    # four-minute clip is under 3% of the samples, so the percentile landed back
+    # in the moving part, `readable` came out false, and a stop that had already
+    # been detected was thrown away for being brief.
+    #
+    # A stop that segment() accepted is direct evidence the feed was readable
+    # there, so it decides. With no stop at all there is nothing to have seen,
+    # and the floor of the whole clip is the only thing left to judge by.
+    if still:
+        quietest = min(values[i] for i in _sample_indices(still, strip.times))
+    else:
+        quietest = min(values)
+
+    last = strip.times[-1] if strip.times else 0.0
     return Activity(
-        duration=strip.times[-1] if strip.times else 0.0,
+        duration=max(duration, last),
         still=still,
         flying=flying,
         quietest=quietest,
         readable=quietest < UNREADABLE_FLOOR,
+        last_sample=last,
     )
+
+
+def _sample_indices(spans, times) -> list[int]:
+    """Which difference samples fall inside these spans."""
+    inside = []
+    for index, when in enumerate(times[1:]):     # values[i] compares i and i+1
+        if any(a <= when <= b for a, b in spans):
+            inside.append(min(index, len(times) - 2))
+    return inside or [0]

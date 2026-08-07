@@ -37,6 +37,43 @@ from flightdvr.motion import (
 )
 
 
+class _Frames(list):
+    """A frame list that carries the differences it stands for."""
+
+    values: list[float]
+
+
+class FakeStrip:
+    """A filmstrip whose frame differences are already known.
+
+    `activity` reads the cached thumbnails to work them out, which needs real
+    files on disk. These tests are about what is done with the numbers rather
+    than about getting them, so the numbers ride along on the frame list and
+    the fixture below hands them straight back.
+    """
+
+    def __init__(self, values: list[float]):
+        # One more frame than differences: values[i] compares i and i+1.
+        self.frames = _Frames(Path(f"f_{n:04d}.jpg")
+                              for n in range(len(values) + 1))
+        self.frames.values = list(values)
+        self.times = [float(n) for n in range(len(values) + 1)]
+
+    def __bool__(self) -> bool:
+        return True
+
+
+@pytest.fixture(autouse=True)
+def _supply_differences(monkeypatch):
+    """A FakeStrip returns its own differences; anything else is measured."""
+    from flightdvr import motion
+
+    real = motion.frame_differences
+    monkeypatch.setattr(
+        motion, "frame_differences",
+        lambda frames: list(getattr(frames, "values", None) or real(frames)))
+
+
 def curve(*runs: tuple[float, int], jitter: float = 0.0, seed: int = 7):
     """A difference curve from (level, seconds) runs, at one value a second."""
     rng = random.Random(seed)
@@ -271,3 +308,60 @@ def test_the_description_says_how_many_flights_when_there_are_several():
     said = found.describe(lambda s: f"{s:.0f}s")
     assert "2 flights" in said
     assert "longest 160s" in said
+
+
+# -- what Codex's review of #25 found ------------------------------------------
+
+def test_a_flight_running_to_the_end_keeps_the_tail():
+    """The filmstrip samples a keyframe a second, so its last sample is up to a
+    second before EOF. Stopping the export there drops the part somebody wanted
+    on a clip that ends mid-flight."""
+    found = Activity(duration=212.7, still=[(0.0, 10.0)],
+                     flying=[(10.0, 212.0)], quietest=1.0, last_sample=212.0)
+    assert found.suggestion == (10.0, 212.7)
+
+
+def test_a_flight_that_stops_before_the_end_is_left_where_it_stops():
+    """The other half, or it is just "always extend to the end"."""
+    found = Activity(duration=300.0, still=[(0.0, 10.0), (200.0, 300.0)],
+                     flying=[(10.0, 200.0)], quietest=1.0, last_sample=299.0)
+    assert found.suggestion == (10.0, 200.0)
+
+
+def test_an_unknown_last_sample_never_extends():
+    """It defaults to zero, and without a guard every span satisfies "reaches
+    the end" and every suggestion silently runs to the clip's duration."""
+    found = Activity(duration=300.0, still=[(250.0, 300.0)],
+                     flying=[(0.0, 250.0)], quietest=1.0)
+    assert found.suggestion == (0.0, 250.0)
+
+
+def test_a_short_stop_in_a_long_clip_is_still_a_reading():
+    """The fifth percentile was standing in for "the quietest the feed got",
+    and was wrong whenever the stop was brief: six seconds in four minutes is
+    under 3% of the samples, so the percentile landed back in the moving part
+    and threw away a stop that had already been found."""
+    from flightdvr.motion import activity
+
+    values = [12.0] * 240
+    for i in range(100, 106):
+        values[i] = 1.0
+    strip = FakeStrip(values)
+
+    found = activity(strip, duration=240.0)
+    assert found is not None
+    assert found.still, "the stop was not detected at all"
+    assert found.readable, (
+        f"a detected stop was discarded as unreadable (quietest "
+        f"{found.quietest})")
+
+
+def test_a_genuinely_noisy_feed_is_still_refused():
+    """The rule has to cut both ways. With no stop anywhere, the floor of the
+    whole clip is all there is to judge by."""
+    from flightdvr.motion import activity
+
+    found = activity(FakeStrip([9.0] * 240), duration=240.0)
+    assert found is not None
+    assert not found.still
+    assert not found.readable

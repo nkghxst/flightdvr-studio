@@ -250,7 +250,7 @@ class FilmstripLoader(QThread):
         # the reading of it arrives a fraction later rather than holding it up.
         try:
             from .motion import activity
-            found = activity(strip)
+            found = activity(strip, self.clip.duration)
         except Exception:  # pragma: no cover - a guess must never cost a clip
             found = None
         if not self._cancelled and found is not None:

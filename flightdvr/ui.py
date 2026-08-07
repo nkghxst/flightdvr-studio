@@ -1446,6 +1446,11 @@ class MainWindow(QMainWindow):
         start, end = span
         self.trim_bar.in_point, self.trim_bar.out_point = start, end
         self.trim_bar.playhead = start
+        # Through the same seek every other way of moving the playhead uses.
+        # Painting the frame without moving the decoder leaves Play resuming
+        # from where it was — the identical fault Codex found in _pick_select,
+        # which I fixed there and wrote again here.
+        self.player.seek(start)
         self._on_trim_changed(start, end)
         self.preview_view.show_activity(
             self._activity.describe(human_duration))
