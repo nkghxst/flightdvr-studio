@@ -639,6 +639,34 @@ Loaders also carry a generation, for the same reason `ScanWorker` does: matching
 on the clip's path alone accepts an overtaken extraction of the clip you are
 back on.
 
+### Precise frame window
+
+Playback is deliberately 30 fps; precise trimming is deliberately not. Comma
+and period decode a native-rate window around the paused playhead, roughly two
+seconds either side, and Shift moves ten source frames. The whole-clip
+filmstrip remains the coarse navigation path.
+
+`FrameWindowWorker` emits 320x180 raw RGB frames with `showinfo` in the filter
+chain, so each cached picture carries the PTS ffmpeg reported rather than a
+timestamp invented by the UI. The source frame number is derived from that PTS
+and the probed source rate. A clip whose rate could not be probed is refused
+honestly; there is no exact frame number to show.
+
+The cache has two bounds: the command receives `-frames:v`, and `FrameCache`
+independently stops accepting at 361 frames — four seconds at the goggles'
+fastest 90 fps mode. That is at most 59.5 MiB of pixels. A refill replaces the
+dictionary rather than extending it. Measured on real 720p60 footage
+(`D:\movies\hdz_047.ts`): 241 frames, 39.72 MiB, decoded in 1.53–1.61 s; source
+frame 600 decoded from two overlapping windows was byte-identical, with ffmpeg
+reporting PTS 9.999989 s both times.
+
+One ffmpeg ordering trap is now part of the implementation. `showinfo` runs
+before the accurate output-side seek throws away the resync lead-in. On the 60
+fps integration fixture, a window beginning at 0.5 s produced 241 pictures but
+logged 271 timestamps: the first 30 belonged to frames the seek discarded.
+Pixels therefore pair with the *tail* of the timestamp list. Pairing from the
+front gives plausible pictures with frame numbers half a second early.
+
 ### Deliberately not done
 
 No audio — a second pipe, a second clock and an output device, for footage

@@ -81,6 +81,7 @@ class PreviewView(QObject):
         column.addWidget(self.trim_title)
 
         self.trim_position = dim(QLabel(""))
+        self.trim_position.setWordWrap(True)
         column.addWidget(self.trim_position)
         self.trim_summary = dim(QLabel(""))
         column.addWidget(self.trim_summary)
@@ -130,6 +131,7 @@ class PreviewView(QObject):
             "With the picture focused:\n"
             "Space or K — play or pause\n"
             "I / O — set the in / out point at the playhead\n"
+            ", / . — previous / next source frame, with Shift ten\n"
             "Left / Right — move a second, with Shift five\n"
             "Home / End — jump to the in / out point\n"
             "Esc — stop"

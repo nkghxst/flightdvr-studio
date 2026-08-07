@@ -230,6 +230,11 @@ you. **Set in** / **Set out** do the same from the buttons, and **Reset**
 restores the whole clip. The list then shows the range next to the length, and
 the size estimate, progress and time remaining all follow the trimmed length.
 
+For the exact cut, pause and use **,** / **.** to step through real source
+frames (hold **Shift** for ten). The preview decodes only a small window around
+the playhead, shows its exact timestamp and source frame number, and replaces
+that window when you seek elsewhere rather than decoding the whole recording.
+
 The preview is silent. Sound would need a second pipe and a second clock, and
 DVR audio is motor whine — an in point is something you find by eye.
 
@@ -370,6 +375,8 @@ instead, and `Space` plays rather than ticking:
 |---|---|
 | `Space` or `K` | Play or pause |
 | `I` / `O` | Set the in / out point at the playhead |
+| `,` / `.` | Previous / next source frame |
+| `Shift` `,` / `Shift` `.` | Move ten source frames |
 | `←` `→` | Move a second |
 | `Shift` `←` `→` | Move five seconds |
 | `Home` / `End` | Jump to the in / out point |

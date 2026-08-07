@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import math
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -97,6 +98,9 @@ IDLE_STOP_SECONDS = 30
 # source bounded instead of trusting its metadata with memory.
 FRAME_WINDOW_SECONDS = 4.0
 FRAME_CACHE_MAX_FRAMES = 361
+FRAME_CACHE_SIZE = (320, 180)
+
+SHOWINFO_TIME = re.compile(r"\bpts_time:([-+0-9.eE]+)")
 
 
 @dataclass(frozen=True)
@@ -149,6 +153,49 @@ def plan_frame_window(position: float, duration: float, fps: float) -> FrameWind
     first = target - wanted // 2
     first = max(0, min(first, total - wanted))
     return FrameWindow(first, wanted, rate)
+
+
+@dataclass(frozen=True)
+class CachedFrame:
+    """One decoded source frame, with the timestamp ffmpeg reported for it."""
+
+    frame_number: int
+    seconds: float
+    pixels: bytes
+
+
+class FrameCache:
+    """The current precise window. Refill replaces; it never accumulates."""
+
+    def __init__(self, limit: int = FRAME_CACHE_MAX_FRAMES):
+        self.limit = max(1, limit)
+        self._frames: dict[int, CachedFrame] = {}
+
+    def replace(self, frames) -> None:
+        replacement: dict[int, CachedFrame] = {}
+        for frame in frames:
+            if len(replacement) >= self.limit:
+                break
+            replacement[frame.frame_number] = frame
+        self._frames = replacement
+
+    def clear(self) -> None:
+        self._frames.clear()
+
+    def get(self, frame_number: int) -> CachedFrame | None:
+        return self._frames.get(frame_number)
+
+    def __len__(self) -> int:
+        return len(self._frames)
+
+
+def exact_timestamp(seconds: float) -> str:
+    """A clip timestamp precise enough to distinguish adjacent DVR frames."""
+    millis = max(0, round(seconds * 1000))
+    hours, millis = divmod(millis, 3_600_000)
+    minutes, millis = divmod(millis, 60_000)
+    whole, millis = divmod(millis, 1000)
+    return f"{hours:02d}:{minutes:02d}:{whole:02d}.{millis:03d}"
 
 
 def choose_size(view_width: int) -> PreviewSize:
@@ -228,6 +275,38 @@ def build_command(tools: Tools, clip: ClipInfo, start: float,
         "-an",
         "-vf", ",".join(filters),
         *frame_rate_mode(tools, "cfr"),
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+    ]
+    return command
+
+
+def build_frame_window_command(tools: Tools, clip: ClipInfo,
+                               window: FrameWindow,
+                               size: PreviewSize) -> list[str]:
+    """Decode only ``window`` at the source rate, retaining source PTS.
+
+    Playback deliberately converts to 30 fps. Precise stepping cannot: at 60
+    or 90 fps that would discard the very frames this path exists to reach.
+    ``showinfo`` records each decoded frame's PTS on stderr while raw pixels
+    remain arithmetically framed on stdout.
+    """
+    start = window.seconds_for(window.first_frame)
+    fast, accurate = seek_pair(start)
+    filters = [
+        f"scale={size.width}:{size.height}:force_original_aspect_ratio=decrease",
+        f"pad={size.width}:{size.height}:(ow-iw)/2:(oh-ih)/2",
+        "showinfo",
+    ]
+    command = [str(tools.ffmpeg), "-hide_banner", "-nostdin", "-v", "info"]
+    if fast > 0.01:
+        command += ["-ss", f"{fast:.6f}"]
+    command += ["-copyts", "-start_at_zero", "-i", str(clip.path)]
+    if accurate > 0.01:
+        command += ["-ss", f"{accurate:.6f}"]
+    command += [
+        "-an", "-vf", ",".join(filters),
+        *frame_rate_mode(tools, "passthrough"),
+        "-frames:v", str(window.frame_count),
         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
     ]
     return command
@@ -441,6 +520,113 @@ def _describe(log: deque[str]) -> str:
     return _describe_failure(list(log), 1)
 
 
+class FrameWindowWorker(QThread):
+    """Decode one bounded native-rate window for paused frame stepping."""
+
+    ready = Signal(int, object)           # generation, tuple[CachedFrame, ...]
+    failed = Signal(int, str)
+
+    def __init__(self, tools: Tools, clip: ClipInfo, window: FrameWindow,
+                 size: PreviewSize, generation: int, parent=None):
+        super().__init__(parent)
+        self.tools = tools
+        self.clip = clip
+        self.window = window
+        self.size = size
+        self.generation = generation
+        self._cancel = False
+        self._process: subprocess.Popen | None = None
+
+    def stop(self) -> None:
+        self._cancel = True
+        request_stop(self._process)
+
+    def run(self) -> None:  # noqa: D102
+        command = build_frame_window_command(
+            self.tools, self.clip, self.window, self.size)
+        try:
+            proc = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                bufsize=1 << 20, creationflags=NO_WINDOW,
+            )
+        except OSError as exc:
+            self.failed.emit(self.generation, f"Could not start ffmpeg: {exc}")
+            return
+
+        self._process = proc
+        if self._cancel:
+            stop_process(proc)
+
+        log: deque[str] = deque(maxlen=STDERR_LINES)
+        timestamps: list[float] = []
+        reader = threading.Thread(
+            target=self._drain, args=(proc.stderr, log, timestamps), daemon=True)
+        reader.start()
+
+        pixels: list[bytes] = []
+        try:
+            for frame in read_frames(proc.stdout, self.size.frame_bytes,
+                                     should_stop=lambda: self._cancel):
+                if len(pixels) >= FRAME_CACHE_MAX_FRAMES:
+                    break
+                pixels.append(frame)
+        finally:
+            stop_process(proc)
+            reader.join(timeout=2)
+            code = proc.poll()
+            self._process = None
+
+        if self._cancel:
+            return
+        if code not in (0, None):
+            self.failed.emit(self.generation,
+                             _describe(log) or f"ffmpeg stopped (code {code})")
+            return
+        if len(timestamps) < len(pixels):
+            self.failed.emit(
+                self.generation,
+                f"ffmpeg returned {len(pixels)} frames but "
+                f"{len(timestamps)} timestamps",
+            )
+            return
+
+        # showinfo runs before the accurate output-side seek discards the
+        # lead-in. Measured on the 60 fps integration fixture at a 0.5 s
+        # window start: 271 timestamps were logged for 241 output pictures;
+        # the first 30 describe frames deliberately thrown away. The pictures
+        # therefore pair with the tail, not the head, of the PTS list.
+        timestamps = timestamps[-len(pixels):]
+
+        frames = tuple(
+            CachedFrame(
+                frame_number=max(0, math.floor(seconds * self.window.fps + 0.5)),
+                seconds=seconds,
+                pixels=data,
+            )
+            for seconds, data in zip(timestamps, pixels)
+        )
+        self.ready.emit(self.generation, frames)
+
+    @staticmethod
+    def _drain(pipe, log: deque[str], timestamps: list[float]) -> None:
+        """Drain stderr concurrently, separating showinfo PTS from errors."""
+        if pipe is None:
+            return
+        try:
+            for line in pipe:
+                text = line.decode("utf-8", "replace").strip()
+                match = SHOWINFO_TIME.search(text)
+                if match:
+                    try:
+                        timestamps.append(float(match.group(1)))
+                    except ValueError:
+                        log.append(text)
+                elif text:
+                    log.append(text)
+        except (OSError, ValueError):
+            pass
+
+
 class PreviewPlayer(QObject):
     """Turns a queue of decoded frames into a picture that plays at real speed.
 
@@ -456,12 +642,15 @@ class PreviewPlayer(QObject):
     """
 
     frame_ready = Signal(object, float)   # QImage, seconds into the clip
+    precise_frame_ready = Signal(object, float, int)  # image, seconds, source frame
+    precise_loading = Signal(bool)
+    precise_failed = Signal(str)
     state_changed = Signal(bool)          # playing
     failed = Signal(str)
     ended = Signal()
 
     def __init__(self, tools: Tools, parent=None, clock=time.monotonic,
-                 worker_factory=None):
+                 worker_factory=None, frame_worker_factory=None):
         super().__init__(parent)
         self.tools = tools
         self.clip: ClipInfo | None = None
@@ -470,6 +659,7 @@ class PreviewPlayer(QObject):
         self.is_playing = False
         self._clock_source = clock
         self._make_worker = worker_factory or DecodeWorker
+        self._make_frame_worker = frame_worker_factory or FrameWindowWorker
 
         self._generation = 0
         self._worker: DecodeWorker | None = None
@@ -483,6 +673,13 @@ class PreviewPlayer(QObject):
         self._playclock = PlayClock(clock=clock)
         self._starved = True
         self._stream_ended = False
+
+        self._frame_size = PreviewSize(*FRAME_CACHE_SIZE)
+        self._frame_cache = FrameCache()
+        self._frame_generation = 0
+        self._frame_worker: FrameWindowWorker | None = None
+        self._frame_retired: list[FrameWindowWorker] = []
+        self._frame_pending: int | None = None
 
         self._timer = QTimer(self)
         # The default coarse timer rounds to about 15 ms on Windows, which at
@@ -501,12 +698,14 @@ class PreviewPlayer(QObject):
     def load(self, clip: ClipInfo | None, position: float = 0.0) -> None:
         """Point at a clip. Nothing decodes until somebody presses play."""
         self.stop()
+        self._clear_frame_cache()
         self.clip = clip
         self.position = max(0.0, position)
 
     def play(self, view_width: int = 0) -> None:
         if self.clip is None or self.is_playing:
             return
+        self._clear_frame_cache()
         self._idle.stop()
         if self._worker is None:
             # Chosen once, on the way in. Resizing the window mid-clip must not
@@ -544,6 +743,7 @@ class PreviewPlayer(QObject):
         self._timer.stop()
         self._idle.stop()
         self._release()
+        self._cancel_frame_window()
         if was_playing:
             self.state_changed.emit(False)
 
@@ -557,6 +757,7 @@ class PreviewPlayer(QObject):
         target = max(0.0, seconds)
         if self.clip is not None and self.clip.duration > 0:
             target = min(target, self.clip.duration)
+        self._cancel_frame_window()
         if not self.is_playing:
             # A paused decoder is holding frames from where it was paused, and
             # they are now the wrong ones. Dropping it here rather than letting
@@ -573,6 +774,47 @@ class PreviewPlayer(QObject):
     def step(self, seconds: float) -> None:
         self.seek(self.position + seconds)
 
+    def step_frames(self, frames: int) -> None:
+        """Pause and move by real source frames, decoding a window if needed."""
+        clip = self.clip
+        if clip is None or not frames:
+            return
+        if clip.fps <= 0:
+            self.precise_failed.emit(
+                "Could not determine this clip's source frame rate")
+            return
+        if self.is_playing:
+            self.pause()
+        # The playback decoder is a forward-only 30 fps stream. Keeping it
+        # while a native-rate window is decoded would hold the card twice and
+        # retain frames that can no longer resume from this exact position.
+        self._idle.stop()
+        self._release()
+
+        rate = clip.fps if clip.fps > 0 else PREVIEW_FPS
+        total = max(1, math.ceil(max(0.0, clip.duration) * rate - 1e-9))
+        current = self._frame_pending
+        if current is None:
+            current = math.floor(max(0.0, self.position) * rate + 0.5)
+        target = max(0, min(current + frames, total - 1))
+        cached = self._frame_cache.get(target)
+        if cached is not None:
+            self._emit_precise(cached)
+            return
+
+        worker = self._frame_worker
+        if (worker is not None
+                and worker.window.first_frame <= target <= worker.window.last_frame):
+            # Key presses can arrive during the real-footage refill measured at
+            # about 1.5 s. Remember the latest target inside the window already
+            # on its way instead of cancelling and spawning the same decode.
+            self._frame_pending = target
+            return
+
+        self._frame_pending = target
+        window = plan_frame_window(target / rate, clip.duration, rate)
+        self._start_frame_window(window)
+
     def set_speed(self, speed: float) -> None:
         self._playclock.speed = max(0.1, speed)
 
@@ -588,6 +830,12 @@ class PreviewPlayer(QObject):
                 worker.stop()
                 worker.wait(2000)
         self._retired.clear()
+        self._cancel_frame_window()
+        for worker in self._frame_retired:
+            if worker.isRunning():
+                worker.stop()
+                worker.wait(2000)
+        self._frame_retired.clear()
 
     # -- the decoder ----------------------------------------------------------
 
@@ -634,6 +882,69 @@ class PreviewPlayer(QObject):
             self.state_changed.emit(False)
         self.failed.emit(message)
 
+    # -- the paused native-frame window --------------------------------------
+
+    def _start_frame_window(self, window: FrameWindow) -> None:
+        self._cancel_frame_window(clear_pending=False)
+        self._frame_generation += 1
+        worker = self._make_frame_worker(
+            self.tools, self.clip, window, self._frame_size,
+            self._frame_generation, self)
+        worker.ready.connect(self._frame_window_ready)
+        worker.failed.connect(self._frame_window_failed)
+        self._frame_worker = worker
+        worker.start()
+        self.precise_loading.emit(True)
+
+    def _cancel_frame_window(self, clear_pending: bool = True) -> None:
+        worker, self._frame_worker = self._frame_worker, None
+        if worker is not None:
+            worker.stop()
+            self._frame_retired.append(worker)
+            self._frame_generation += 1
+            self.precise_loading.emit(False)
+        self._frame_retired = [w for w in self._frame_retired if w.isRunning()]
+        if clear_pending:
+            self._frame_pending = None
+
+    def _clear_frame_cache(self) -> None:
+        self._cancel_frame_window()
+        self._frame_cache.clear()
+
+    def _frame_window_ready(self, generation: int, frames) -> None:
+        if generation != self._frame_generation:
+            return
+        worker, self._frame_worker = self._frame_worker, None
+        if worker is not None and worker.isRunning():
+            self._frame_retired.append(worker)
+        self._frame_cache.replace(frames)
+        self.precise_loading.emit(False)
+        target, self._frame_pending = self._frame_pending, None
+        cached = self._frame_cache.get(target) if target is not None else None
+        if cached is None:
+            self.precise_failed.emit(
+                "The exact source frame was not returned by ffmpeg")
+            return
+        self._emit_precise(cached)
+
+    def _frame_window_failed(self, generation: int, message: str) -> None:
+        if generation != self._frame_generation:
+            return
+        worker, self._frame_worker = self._frame_worker, None
+        if worker is not None and worker.isRunning():
+            self._frame_retired.append(worker)
+        self._frame_pending = None
+        self.precise_loading.emit(False)
+        self.precise_failed.emit(message)
+
+    def _emit_precise(self, frame: CachedFrame) -> None:
+        self.position = frame.seconds
+        self.precise_frame_ready.emit(
+            self._to_image(frame.pixels, self._frame_size),
+            frame.seconds,
+            frame.frame_number,
+        )
+
     # -- the clock ------------------------------------------------------------
 
     def _tick(self) -> None:
@@ -667,7 +978,7 @@ class PreviewPlayer(QObject):
                 return chosen
             chosen, self._pending = self._pending, None
 
-    def _to_image(self, data: bytes) -> QImage:
+    def _to_image(self, data: bytes, size: PreviewSize | None = None) -> QImage:
         """Raw RGB into something Qt will paint.
 
         Done here rather than on the decode thread on purpose: frames that
@@ -679,8 +990,9 @@ class PreviewPlayer(QObject):
         QImage does not copy the buffer it is handed and `data` is about to go
         out of scope.
         """
-        image = QImage(data, self.size.width, self.size.height,
-                       self.size.stride, QImage.Format.Format_RGB888)
+        size = size or self.size
+        image = QImage(data, size.width, size.height,
+                       size.stride, QImage.Format.Format_RGB888)
         return image.convertToFormat(QImage.Format.Format_RGB32)
 
     def _finish(self) -> None:
