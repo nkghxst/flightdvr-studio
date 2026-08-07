@@ -14,6 +14,11 @@ Use the short-lived-token workflow in `AGENTS.md` to open future PRs. Commits
 and pushes still use the normal maintainer identity; reviews and merges must
 also use the normal identity with `GH_TOKEN` unset.
 
+Current workstation note: `git push` works through Windows Credential Manager,
+but `gh auth status` reports the saved `nkghxst` CLI token as invalid. Run
+`gh auth login -h github.com` before the next review command. Do not work around
+that by reviewing with the app token; the app is only the PR author.
+
 Codex has completed these reviews:
 
 - [PR #24](https://github.com/nkghxst/flightdvr-studio/pull/24) needs changes;
