@@ -59,7 +59,7 @@ from .presets import (
     ExportSettings, describe_join_problems, estimate_output_size, join_problems,
     output_path,
 )
-from .player import PreviewPlayer
+from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
 from .queue_panel import QueuePanel
 from .session import (
@@ -122,6 +122,7 @@ class MainWindow(QMainWindow):
         self._queue_done = 0.0
         self.splitter: QSplitter | None = None
         self._trim_clip: ClipInfo | None = None
+        self._precise_frame_number: int | None = None
         self._strip: Filmstrip = Filmstrip()
         self._strip_loader: FilmstripLoader | None = None
         # Same reason as _retired_scans: a running QThread that gets collected
@@ -155,6 +156,9 @@ class MainWindow(QMainWindow):
 
         self.player = PreviewPlayer(tools, self)
         self.player.frame_ready.connect(self._preview_frame_ready)
+        self.player.precise_frame_ready.connect(self._precise_frame_ready)
+        self.player.precise_loading.connect(self._precise_loading)
+        self.player.precise_failed.connect(self._precise_failed)
         self.player.state_changed.connect(self._preview_state_changed)
         self.player.failed.connect(self._preview_failed)
         self.player.ended.connect(self._preview_ended)
@@ -378,6 +382,10 @@ class MainWindow(QMainWindow):
             ("Right", lambda: self._nudge(1.0)),
             ("Shift+Left", lambda: self._nudge(-5.0)),
             ("Shift+Right", lambda: self._nudge(5.0)),
+            (",", lambda: self._step_frames(-1)),
+            (".", lambda: self._step_frames(1)),
+            ("Shift+,", lambda: self._step_frames(-10)),
+            ("Shift+.", lambda: self._step_frames(10)),
             ("Home", lambda: self._jump(self.trim_bar.in_point)),
             ("End", lambda: self._jump(self.trim_bar.out_point)),
             ("Esc", self._stop_preview),
@@ -1164,6 +1172,7 @@ class MainWindow(QMainWindow):
             return
 
         self._trim_clip = clip
+        self._precise_frame_number = None
         # Static for as long as this clip is the one loaded, so it is written
         # here rather than alongside the playhead.
         self.clip_format.setText(f"{clip.format_label} · {clip.size_label}")
@@ -1226,6 +1235,11 @@ class MainWindow(QMainWindow):
         """
         if self.player.is_playing:
             return
+        if (self._precise_frame_number is not None
+                and self._trim_clip is not None
+                and abs(seconds - self.player.position)
+                < 0.5 / max(1.0, self._trim_clip.fps)):
+            return
         frame = self._strip.frame_at(seconds) if self._strip else None
         if frame is None:
             return
@@ -1235,6 +1249,7 @@ class MainWindow(QMainWindow):
 
     def _on_playhead(self, seconds: float) -> None:
         """The filmstrip was clicked or dragged."""
+        self._precise_frame_number = None
         self.player.seek(seconds)
         self._show_frame(seconds)
         self._update_trim_labels()
@@ -1270,10 +1285,23 @@ class MainWindow(QMainWindow):
         """
         self._jump(self.trim_bar.playhead + seconds)
 
+    def _step_frames(self, frames: int) -> None:
+        """Move by decoded source frames; comma/period use this path."""
+        clip = self._trim_clip
+        if clip is None:
+            self._load_selected_clip()
+            clip = self._trim_clip
+        if clip is None:
+            self.statusBar().showMessage("Click a clip in the list first", 4000)
+            return
+        self._focus_player()
+        self.player.step_frames(frames)
+
     def _jump(self, seconds: float) -> None:
         clip = self._trim_clip
         if clip is None:
             return
+        self._precise_frame_number = None
         seconds = max(0.0, min(seconds, clip.duration))
         self.player.seek(seconds)
         self.trim_bar.set_playhead(seconds)
@@ -1281,16 +1309,38 @@ class MainWindow(QMainWindow):
         self._update_trim_labels()
 
     def _preview_frame_ready(self, image, seconds: float) -> None:
+        self._precise_frame_number = None
         self.frame_view.set_image(image)
         # From the frame that was painted, not from the clock, so that pressing
         # I always means the picture on screen.
         self.trim_bar.set_playhead(seconds)
         self._update_trim_labels()
 
+    def _precise_frame_ready(self, image, seconds: float,
+                             frame_number: int) -> None:
+        """Paint the exact source frame and make it the trim authority."""
+        self._precise_frame_number = frame_number
+        self.frame_view.set_image(image)
+        self.trim_bar.set_playhead(seconds)
+        self._update_trim_labels()
+
+    def _precise_loading(self, loading: bool) -> None:
+        if loading:
+            self.trim_position.setText("reading exact frames…")
+
+    def _precise_failed(self, message: str) -> None:
+        self._precise_frame_number = None
+        self.statusBar().showMessage(f"Precise frames: {message}", 8000)
+        self._show_frame(self.trim_bar.playhead)
+        self._update_trim_labels()
+
     def _preview_state_changed(self, playing: bool) -> None:
+        if playing:
+            self._precise_frame_number = None
         self.play_button.setText("Pause" if playing else "Play")
 
     def _preview_failed(self, message: str) -> None:
+        self._precise_frame_number = None
         self.frame_view.set_message("could not play this clip")
         self.statusBar().showMessage(f"Preview: {message}", 8000)
         self._show_frame(self.trim_bar.playhead)
@@ -1345,10 +1395,20 @@ class MainWindow(QMainWindow):
         if clip is None:
             return
         self.trim_title.setText(clip.path.name)
-        self.trim_position.setText(
-            f"{human_duration(self.trim_bar.playhead)}"
-            f" of {human_duration(clip.duration)}"
-        )
+        if self._precise_frame_number is not None:
+            self.trim_position.setText(
+                f"{exact_timestamp(self.trim_bar.playhead)}\nsource frame "
+                f"{self._precise_frame_number + 1:,}"
+            )
+            self.trim_position.setToolTip(
+                "Exact decoded timestamp and one-based source frame number"
+            )
+        else:
+            self.trim_position.setText(
+                f"{human_duration(self.trim_bar.playhead)}"
+                f" of {human_duration(clip.duration)}"
+            )
+            self.trim_position.setToolTip("")
         kept = self.trim_bar.out_point - self.trim_bar.in_point
         if clip.is_trimmed:
             self.trim_summary.setText(

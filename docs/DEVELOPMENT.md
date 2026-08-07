@@ -639,6 +639,48 @@ Loaders also carry a generation, for the same reason `ScanWorker` does: matching
 on the clip's path alone accepts an overtaken extraction of the clip you are
 back on.
 
+### Precise frame window
+
+Playback is deliberately 30 fps; precise trimming is deliberately not. Comma
+and period decode 121 native-rate frames around the paused playhead — sixty
+steps either side — and Shift moves ten source frames. That is roughly one
+second each way at 60 fps and two thirds of a second at 90 fps. The whole-clip
+filmstrip remains the coarse navigation path.
+
+`FrameWindowWorker` emits 480x270 raw RGB frames, the smallest playback size,
+with `showinfo` in the filter chain. Precise stepping used to drop to 320x180,
+so asking for the exact cut made the picture softer than playback. Each cached
+picture carries the PTS ffmpeg reported rather than a timestamp invented by the
+UI. The source frame number is derived from that PTS and the probed source rate.
+A clip whose rate could not be probed is refused honestly; there is no exact
+frame number to show.
+
+The cache has two bounds: the command receives `-frames:v 121`, and
+`FrameCache` independently stops accepting at 121 frames. That is 44.87 MiB of
+pixels at 480x270. A refill replaces the dictionary rather than extending it.
+Measured on real 720p60 footage (`D:\movies\hdz_047.ts`), two windows decoded in
+1.16–1.29 s and returned exactly their planned ranges, 540–660 and 600–720.
+Source frame 630 was byte-identical in both at PTS 10.499989 s.
+
+One ffmpeg boundary trap needed a different shape rather than a larger fudge.
+Output-side `-ss` disagrees across ffmpeg builds about the picture on its
+boundary: a planned 180–420 cache held 181–421 on real footage, and aiming half
+a frame earlier fixed the pinned Windows build but still returned N+1..M+1 in
+all three CI builds. The precise command now does only the fast input seek,
+decodes the two-second resync lead-in, and uses a timestamp selection filter
+halfway between frames N-1 and N. `showinfo` comes after that filter, so the
+current 10 s real-footage window produces 121 pictures and 121 timestamps rather
+than logging discarded frames too.
+
+Hosted ffmpeg builds exposed one more ordering detail: `showinfo` can process
+one to six frames beyond `-frames:v` before output stops, so they log 122–127
+timestamps for 121 pictures. Because selection is before `showinfo`, those can
+only be trailing lookahead; pictures pair with the *head* of the PTS list.
+Pairing requires at least one timestamp per picture, the planned first frame,
+and a contiguous run. A filter-order change or broken timeline therefore fails
+visibly instead of publishing plausible but wrong source-frame numbers. The
+real measurements still returned 540–660 and 600–720 exactly after this change.
+
 ### Deliberately not done
 
 No audio — a second pipe, a second clock and an output device, for footage

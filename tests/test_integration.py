@@ -476,6 +476,19 @@ def preview_frame(tools, info, start, size=PREVIEW):
     return b""
 
 
+def decode_frame_window(tools, info, position):
+    """Run the native-rate precise worker and return its bounded cache."""
+    from flightdvr.player import FrameWindowWorker, plan_frame_window
+
+    window = plan_frame_window(position, info.duration, info.fps)
+    worker = FrameWindowWorker(tools, info, window, PREVIEW, 1)
+    ready, problems = [], []
+    worker.ready.connect(lambda _generation, frames: ready.append(frames))
+    worker.failed.connect(lambda _generation, message: problems.append(message))
+    worker.run()
+    return (ready[0] if ready else ()), problems, window
+
+
 def test_the_preview_decoder_actually_produces_frames(tools, clip, qt_app):
     """The whole point of this file. Every argument can be right and the
     result still be an empty pipe."""
@@ -515,6 +528,47 @@ def test_a_preview_seek_lands_on_the_right_frame_not_a_torn_one(tools, clip,
         f"the first frame after a seek is wrong: {differences[0]:.1f}")
     assert max(differences) < 2.0, f"worst frame differs by {max(differences):.1f}"
     assert from_seek[0][0] == pytest.approx(2.5)
+
+
+def test_precise_stepping_lands_on_the_source_frame_it_displays(
+        tools, clip, qt_app):
+    """The native-rate window must identify and display the same frame.
+
+    Two overlapping mid-GOP windows compare frame 150. That catches both a torn
+    seek and a timestamp/frame-number disagreement without requiring either
+    cache to be wider than the 121-frame production bound.
+    """
+    info = probed(tools, clip)
+    control, control_problems, _ = decode_frame_window(tools, info, 2.0)
+    sought, sought_problems, window = decode_frame_window(tools, info, 2.5)
+
+    assert not control_problems and not sought_problems, (
+        control_problems, sought_problems)
+    assert len(sought) <= window.frame_count
+    assert len(sought) <= 121
+
+    control_by_number = {frame.frame_number: frame for frame in control}
+    sought_by_number = {frame.frame_number: frame for frame in sought}
+    assert min(sought_by_number) == window.first_frame
+    assert max(sought_by_number) == window.last_frame
+    assert len(sought_by_number) == window.frame_count
+    assert 150 in control_by_number and 150 in sought_by_number
+    assert sought_by_number[150].seconds == pytest.approx(2.5)
+    difference = mean_abs_diff(
+        control_by_number[150].pixels, sought_by_number[150].pixels)
+    assert difference < 2.0, f"the displayed source frame differs by {difference:.1f}"
+
+
+def test_precise_window_returns_the_frames_it_planned(tools, clip, qt_app):
+    """An exact-boundary seek used to discard the first planned frame and
+    return one beyond the other edge, making a fresh cache miss at its start."""
+    info = probed(tools, clip)
+    frames, problems, window = decode_frame_window(tools, info, 3.0)
+
+    assert not problems, problems
+    assert frames[0].frame_number == window.first_frame
+    assert frames[-1].frame_number == window.last_frame
+    assert len(frames) == window.frame_count
 
 
 def test_the_preview_agrees_with_the_export_about_colour(tools, clip, tmp_path,

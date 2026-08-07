@@ -31,9 +31,11 @@ from PySide6.QtCore import QObject, Qt, Signal
 
 from flightdvr.media import ClipInfo, Tools
 from flightdvr.player import (
-    PREVIEW_FPS, PREVIEW_SIZES, QUEUE_FRAMES, SEEK_LEAD_IN, PlayClock,
-    PreviewSize, build_command, choose_size, read_frames, seconds_for_index,
-    seek_pair, should_restart,
+    FRAME_CACHE_MAX_FRAMES, FRAME_CACHE_SIZE, PREVIEW_FPS, PREVIEW_SIZES,
+    QUEUE_FRAMES, SEEK_LEAD_IN, CachedFrame, FrameCache, FrameWindow,
+    PlayClock, PreviewSize, build_command, build_frame_window_command,
+    choose_size, exact_timestamp, pair_precise_frames, plan_frame_window,
+    read_frames, seconds_for_index, seek_pair, should_restart,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -97,6 +99,71 @@ def test_frame_bytes_is_the_whole_picture():
     size = PreviewSize(640, 360)
     assert size.frame_bytes == 640 * 360 * 3
     assert size.stride == 640 * 3
+
+
+# -- the precise-frame cache window ------------------------------------------
+
+def test_the_frame_window_holds_sixty_steps_either_side_of_the_playhead():
+    window = plan_frame_window(position=10.0, duration=60.0, fps=60.0)
+    assert window.first_frame == 540
+    assert window.last_frame == 660
+    assert window.frame_count == 121
+
+
+def test_precise_frames_use_the_smallest_playback_resolution():
+    """Looking more closely must not make the paused picture softer."""
+    assert FRAME_CACHE_SIZE == PREVIEW_SIZES[0] == (480, 270)
+
+
+def test_the_frame_window_never_grows_to_the_whole_recording():
+    """A 90 fps flight can be several minutes long; precise stepping must not
+    turn selecting one cut into tens of thousands of cached frames."""
+    window = plan_frame_window(position=120.0, duration=300.0, fps=90.0)
+    assert window.frame_count == FRAME_CACHE_MAX_FRAMES
+    assert window.frame_count < 300.0 * 90.0
+
+
+def test_seeking_away_replaces_the_window_instead_of_extending_it():
+    first = plan_frame_window(position=10.0, duration=300.0, fps=90.0)
+    second = plan_frame_window(position=200.0, duration=300.0, fps=90.0)
+    assert first.frame_count == second.frame_count == FRAME_CACHE_MAX_FRAMES
+    assert first.last_frame < second.first_frame
+
+
+def test_a_frame_number_has_one_exact_timestamp():
+    window = plan_frame_window(position=10.0, duration=60.0, fps=60.0)
+    current = round(10.0 * window.fps)
+    assert window.seconds_for(current + 1) - window.seconds_for(current) == (
+        pytest.approx(1 / 60.0)
+    )
+
+
+def test_the_frame_window_stays_inside_short_clips():
+    window = plan_frame_window(position=99.0, duration=1.0, fps=60.0)
+    assert window.first_frame == 0
+    assert window.last_frame == 59
+    assert window.frame_count == 60
+
+
+def test_refilling_the_cache_discards_the_old_window():
+    cache = FrameCache(limit=3)
+    cache.replace(CachedFrame(n, n / 60, bytes([n])) for n in range(3))
+    cache.replace(CachedFrame(n, n / 60, bytes([n])) for n in range(100, 103))
+    assert len(cache) == 3
+    assert cache.get(1) is None
+    assert cache.get(101).pixels == bytes([101])
+
+
+def test_even_bad_metadata_cannot_overfill_the_cache():
+    cache = FrameCache(limit=3)
+    cache.replace(CachedFrame(n, n / 60, b"") for n in range(20))
+    assert len(cache) == 3
+
+
+def test_exact_timestamps_keep_adjacent_frames_distinguishable():
+    assert exact_timestamp(10.0) == "00:00:10.000"
+    assert exact_timestamp(10.0 + 1 / 60) == "00:00:10.017"
+    assert exact_timestamp(3661.234) == "01:01:01.234"
 
 
 # -- seeking -------------------------------------------------------------------
@@ -208,6 +275,89 @@ def test_the_probe_settings_are_left_at_their_defaults():
     command = flatten(build_command(TOOLS, clip(), 0.0, PreviewSize(640, 360)))
     assert "-analyzeduration" not in command
     assert "-probesize" not in command
+
+
+def test_precise_frames_are_not_thinned_to_the_playback_rate():
+    window = plan_frame_window(10.0, 60.0, 60.0)
+    command = build_frame_window_command(
+        TOOLS, clip(), window, PreviewSize(*FRAME_CACHE_SIZE))
+    filters = command[command.index("-vf") + 1]
+    assert "fps=" not in filters
+    assert "showinfo" in filters
+    assert "passthrough" in command
+
+
+def test_ffmpeg_is_told_the_same_bound_as_the_cache():
+    window = plan_frame_window(120.0, 300.0, 90.0)
+    command = build_frame_window_command(
+        TOOLS, clip(fps=90.0), window, PreviewSize(*FRAME_CACHE_SIZE))
+    frame_limit = command.index("-frames:v")
+    assert command[frame_limit + 1] == str(FRAME_CACHE_MAX_FRAMES)
+
+
+def test_precise_window_seeking_keeps_the_source_timeline():
+    window = plan_frame_window(10.0, 60.0, 60.0)
+    command = build_frame_window_command(
+        TOOLS, clip(), window, PreviewSize(*FRAME_CACHE_SIZE))
+    input_at = command.index("-i")
+    assert "-copyts" in command[:input_at]
+    assert "-start_at_zero" in command[:input_at]
+    assert "select='gte(t,8.991666667)'" in command[command.index("-vf") + 1]
+    assert "-ss" not in command[input_at + 1:]
+
+
+def test_precise_pairing_returns_the_planned_one_to_one_run():
+    window = FrameWindow(first_frame=100, frame_count=3, fps=10.0)
+    frames = pair_precise_frames(
+        window,
+        timestamps=[10.0, 10.1, 10.2],
+        pixels=[b"a", b"b", b"c"],
+    )
+    assert [frame.frame_number for frame in frames] == [100, 101, 102]
+    assert [frame.pixels for frame in frames] == [b"a", b"b", b"c"]
+
+
+def test_precise_pairing_rejects_a_shifted_timeline():
+    """A shifted PTS run must not silently renumber every picture by one
+    plausible-looking source frame."""
+    window = FrameWindow(first_frame=100, frame_count=3, fps=10.0)
+    with pytest.raises(ValueError, match=r"101\.\.103.*100\.\.102"):
+        pair_precise_frames(
+            window,
+            timestamps=[10.1, 10.2, 10.3],
+            pixels=[b"a", b"b", b"c"],
+        )
+
+
+def test_precise_pairing_ignores_trailing_lookahead_timestamps():
+    """Some ffmpeg builds process beyond -frames:v before stopping output."""
+    window = FrameWindow(first_frame=100, frame_count=3, fps=10.0)
+    frames = pair_precise_frames(
+        window,
+        timestamps=[10.0, 10.1, 10.2, 10.3, 10.4],
+        pixels=[b"a", b"b", b"c"],
+    )
+    assert [frame.frame_number for frame in frames] == [100, 101, 102]
+
+
+def test_precise_pairing_rejects_missing_showinfo_timestamps():
+    window = FrameWindow(first_frame=100, frame_count=3, fps=10.0)
+    with pytest.raises(ValueError, match="3 frames but 2 timestamps"):
+        pair_precise_frames(
+            window,
+            timestamps=[10.0, 10.1],
+            pixels=[b"a", b"b", b"c"],
+        )
+
+
+def test_precise_pairing_rejects_a_noncontiguous_timeline():
+    window = FrameWindow(first_frame=100, frame_count=3, fps=10.0)
+    with pytest.raises(ValueError, match="untrustworthy"):
+        pair_precise_frames(
+            window,
+            timestamps=[10.0, 10.2, 10.3],
+            pixels=[b"a", b"b", b"c"],
+        )
 
 
 # -- reading frames off a pipe -------------------------------------------------
@@ -404,18 +554,53 @@ class FakeWorker(QObject):
         return True
 
 
+class FakeFrameWorker(QObject):
+    ready = Signal(int, object)
+    failed = Signal(int, str)
+
+    def __init__(self, tools, clip_info, window, size, generation,
+                 parent=None):
+        super().__init__(parent)
+        self.window = window
+        self.size = size
+        self.generation = generation
+        self.started = False
+        self.stopped = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def isRunning(self) -> bool:  # noqa: N802
+        return self.started and not self.stopped
+
+    def wait(self, _msecs=0) -> bool:
+        return True
+
+
 def player(fake_clock):
     from flightdvr.player import PreviewPlayer
-    made = []
+    made, frame_workers = [], []
 
     def factory(*args, **kwargs):
         worker = FakeWorker(*args, **kwargs)
         made.append(worker)
         return worker
 
-    instance = PreviewPlayer(TOOLS, clock=fake_clock, worker_factory=factory)
+    def frame_factory(*args, **kwargs):
+        worker = FakeFrameWorker(*args, **kwargs)
+        frame_workers.append(worker)
+        return worker
+
+    instance = PreviewPlayer(
+        TOOLS, clock=fake_clock, worker_factory=factory,
+        frame_worker_factory=frame_factory,
+    )
     instance.load(clip())
     instance.workers = made
+    instance.frame_workers = frame_workers
     return instance
 
 
@@ -677,6 +862,120 @@ def test_a_frame_becomes_an_image_that_owns_its_pixels(qt_app):
     assert image.width() == 4 and image.height() == 2
     assert image.format() == QImage.Format.Format_RGB32
     assert image.pixelColor(0, 0).red() == 255
+
+
+# -- paused source-frame stepping --------------------------------------------
+
+def precise_frames(worker, *numbers):
+    payload = b"\0" * worker.size.frame_bytes
+    return tuple(CachedFrame(n, n / worker.window.fps, payload)
+                 for n in numbers)
+
+
+def test_a_frame_step_decodes_a_bounded_native_rate_window(qt_app):
+    p = player(FakeClock())
+    p.seek(10.0)
+    p.step_frames(1)
+
+    assert len(p.frame_workers) == 1
+    worker = p.frame_workers[0]
+    assert worker.started
+    assert worker.window.fps == pytest.approx(60.0)
+    assert worker.window.frame_count == 121
+    assert worker.window.first_frame <= 601 <= worker.window.last_frame
+
+
+def test_stepping_lands_on_the_exact_frame_it_displays(qt_app):
+    p = player(FakeClock())
+    p.seek(10.0)
+    shown = []
+    p.precise_frame_ready.connect(
+        lambda _image, seconds, number: shown.append((seconds, number)))
+
+    p.step_frames(1)
+    worker = p.frame_workers[0]
+    worker.ready.emit(worker.generation, precise_frames(worker, 600, 601, 602))
+
+    assert shown == [(pytest.approx(601 / 60), 601)]
+    assert p.position == pytest.approx(601 / 60)
+
+
+def test_a_second_step_inside_the_cache_spawns_nothing(qt_app):
+    p = player(FakeClock())
+    p.seek(10.0)
+    shown = []
+    p.precise_frame_ready.connect(
+        lambda _image, _seconds, number: shown.append(number))
+
+    p.step_frames(1)
+    worker = p.frame_workers[0]
+    worker.ready.emit(worker.generation, precise_frames(worker, 600, 601, 602))
+    p.step_frames(1)
+
+    assert len(p.frame_workers) == 1
+    assert shown == [601, 602]
+
+
+def test_quick_steps_accumulate_while_the_window_is_still_loading(qt_app):
+    p = player(FakeClock())
+    p.seek(10.0)
+    shown = []
+    p.precise_frame_ready.connect(
+        lambda _image, _seconds, number: shown.append(number))
+
+    p.step_frames(1)
+    p.step_frames(1)
+    worker = p.frame_workers[0]
+    worker.ready.emit(worker.generation, precise_frames(worker, 601, 602))
+
+    assert len(p.frame_workers) == 1
+    assert shown == [602]
+
+
+def test_seeking_outside_the_cache_starts_a_replacement_window(qt_app):
+    p = player(FakeClock())
+    p.seek(10.0)
+    p.step_frames(1)
+    first = p.frame_workers[0]
+    first.ready.emit(first.generation, precise_frames(first, 600, 601, 602))
+
+    p.seek(200.0)
+    p.step_frames(1)
+    second = p.frame_workers[1]
+    second.ready.emit(
+        second.generation, precise_frames(second, 12000, 12001, 12002))
+
+    assert len(p._frame_cache) == 3
+    assert p._frame_cache.get(601) is None
+    assert p._frame_cache.get(12001) is not None
+
+
+def test_shift_sized_steps_move_ten_source_frames(qt_app):
+    p = player(FakeClock())
+    p.seek(10.0)
+    p.step_frames(10)
+    worker = p.frame_workers[0]
+    worker.ready.emit(worker.generation, precise_frames(worker, 610))
+    assert p.position == pytest.approx(610 / 60)
+
+
+def test_frame_stepping_pauses_and_retires_the_playback_decoder(qt_app):
+    p = player(FakeClock())
+    p.play(view_width=640)
+    playback = p.workers[0]
+    p.step_frames(1)
+    assert not p.is_playing
+    assert playback.stopped
+
+
+def test_frame_stepping_refuses_to_invent_an_unknown_source_rate(qt_app):
+    p = player(FakeClock())
+    p.load(clip(fps=0.0))
+    problems = []
+    p.precise_failed.connect(problems.append)
+    p.step_frames(1)
+    assert problems and "frame rate" in problems[0]
+    assert not p.frame_workers
 
 
 # -- the view ------------------------------------------------------------------

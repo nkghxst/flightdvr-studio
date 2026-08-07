@@ -1358,7 +1358,8 @@ def test_the_playback_keys_cannot_fire_from_the_clip_list(window):
     from PySide6.QtCore import Qt
 
     scoped = shortcuts_on(window.frame_view)
-    for key in ("Space", "I", "O", "Left", "Right", "Home", "End", "Esc"):
+    for key in ("Space", "I", "O", "Left", "Right", ",", ".",
+                "Shift+,", "Shift+.", "Home", "End", "Esc"):
         assert key in scoped, f"{key} is not bound on the picture"
         assert scoped[key].context() == (
             Qt.ShortcutContext.WidgetWithChildrenShortcut), (
@@ -1383,6 +1384,56 @@ def test_a_still_is_never_painted_over_a_running_preview(window, monkeypatch):
 
     window._show_frame(1.0)
     assert not painted, "a filmstrip still was painted while the clip was running"
+
+
+def test_a_filmstrip_still_never_replaces_an_exact_paused_frame(
+        window, monkeypatch):
+    """Pressing I or O routes through _on_trim_changed. The exact source frame
+    must remain visible rather than being replaced by the one-second strip."""
+    old_clip = window._trim_clip
+    old_number = window._precise_frame_number
+    old_position = window.player.position
+    painted = []
+    try:
+        window._trim_clip = clip("hdz_exact.ts")
+        window._precise_frame_number = 601
+        window.player.position = 601 / 60
+        monkeypatch.setattr(window.frame_view, "set_image", painted.append)
+        window._show_frame(601 / 60)
+        assert not painted
+    finally:
+        window._trim_clip = old_clip
+        window._precise_frame_number = old_number
+        window.player.position = old_position
+
+
+def test_exact_frame_readout_names_the_timestamp_and_source_frame(window):
+    from PySide6.QtGui import QImage
+
+    old_clip = window._trim_clip
+    old_number = window._precise_frame_number
+    try:
+        window._trim_clip = clip("hdz_exact.ts")
+        window._precise_frame_ready(QImage(8, 8, QImage.Format.Format_RGB32),
+                                    10 + 1 / 60, 601)
+        assert "00:00:10.017" in window.trim_position.text()
+        assert "source frame 602" in window.trim_position.text()
+    finally:
+        window._trim_clip = old_clip
+        window._precise_frame_number = old_number
+
+
+def test_comma_and_period_delegate_real_frame_counts(window, monkeypatch):
+    old_clip = window._trim_clip
+    moved = []
+    try:
+        window._trim_clip = clip("hdz_exact.ts")
+        monkeypatch.setattr(window.player, "step_frames", moved.append)
+        window._step_frames(-1)
+        window._step_frames(10)
+        assert moved == [-1, 10]
+    finally:
+        window._trim_clip = old_clip
 
 
 def test_selecting_a_clip_waits_before_decoding_its_filmstrip(window):
