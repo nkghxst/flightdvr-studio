@@ -30,24 +30,22 @@ from datetime import date, datetime
 from pathlib import Path
 
 from PySide6.QtCore import (
-    QDate, QPoint, QRect, QRectF, QSettings, QSize, Qt, QThread, QTimer,
-    Signal,
+    QPoint, QRect, QRectF, QSettings, Qt, QThread, QTimer, Signal,
 )
 from PySide6.QtGui import (
     QColor, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPalette,
     QPen, QPixmap, QShortcut,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
-    QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
-    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox,
-    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy,
-    QSpinBox, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem,
-    QToolButton, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
+    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
+    QSizePolicy, QSplitter, QTableWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import scan
+from .browser_panel import BrowserPanel
 from .external import DESKTOP_OPEN, PLAYER_PATHS, find_player, reveal
+from .export_panel import ExportPanel, FPS_STEPS, RESOLUTION_STEPS
 from .format import (
     _clip_set_id, existing_ancestor, human_duration, human_size, natural_key,
     output_key, work_dir,
@@ -58,17 +56,17 @@ from .media import (
     stop_process,
 )
 from .presets import (
-    COLOUR_MODES, EDIT_CODECS, PRESET_ORDER, PRESETS, QUALITY_LEVELS,
-    SOCIAL_QUALITY_LEVELS, SPEEDS, ExportSettings, describe_join_problems,
-    edit_bitrate_mbps, estimate_output_size, join_problems, output_path,
+    ExportSettings, describe_join_problems, estimate_output_size, join_problems,
+    output_path,
 )
-from .player import FrameView, PreviewPlayer
+from .player import PreviewPlayer
+from .preview_panel import PreviewView
+from .queue_panel import QueuePanel
 from .thumbs import THUMB_WIDTH, ThumbnailLoader
-from .trim import Filmstrip, FilmstripLoader, TrimBar
+from .trim import Filmstrip, FilmstripLoader
 from .widgets import (
     EDGE, GAP, INNER, MIN_LIST_HEIGHT, MIN_THUMB_WIDTH, MIN_VISIBLE_CLIPS,
-    TIGHT, DriveCombo, PreviewPanel, SortItem, _default_window_size, app_icon,
-    dim, resource,
+    TIGHT, DriveCombo, SortItem, _default_window_size, app_icon, dim, resource,
 )
 from .workers import CopyDialog, CopyWorker, HardwareProbe, ScanWorker
 
@@ -76,13 +74,6 @@ APP_NAME = "FlightDVR Studio"
 APP_TAGLINE = "Browse, trim and convert HDZero goggle DVR footage"
 ORG = "FlightDVR Studio"
 COPYRIGHT_HOLDER = "Isadu Nkemi"
-
-# Offered as downscale targets when the footage is taller than they are. Every
-# HDZero goggle records .ts the same way, but not at the same size: the Box Pro
-# does 720p60, other modes do 720p90 and 1080p30, and the Goggle 2 goes to 1080p.
-# Nothing here is assumed about the source; the choices are built from the clips.
-RESOLUTION_STEPS = [1440, 1080, 720, 540, 480, 360]
-FPS_STEPS = [90, 60, 50, 30, 25]
 
 # Probing is I/O bound on a card reader, so a few at once helps a lot; beyond
 # about four the reader becomes the limit and it gets slower again.
@@ -158,7 +149,6 @@ class MainWindow(QMainWindow):
         self._ready = True
         self._relayout()
         self._on_preset_changed()
-        self._on_colour_changed()
         self._refresh_drives()
         self._update_estimate()
 
@@ -185,29 +175,7 @@ class MainWindow(QMainWindow):
         splitter = self.splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_left_column())
 
-        # The export settings scroll, so nothing is ever cut off, but the
-        # estimate and the Add button sit below the scroll area and stay put.
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(0)
-
-        scroller = QScrollArea()
-        scroller.setWidgetResizable(True)
-        scroller.setFrameShape(QFrame.Shape.NoFrame)
-        scroller.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroller.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        # The Windows 11 style hides scrollbars until you hover, which made it
-        # look as though content had simply vanished. Give it a solid width.
-        scroller.verticalScrollBar().setStyleSheet(
-            "QScrollBar:vertical { width: 12px; }"
-        )
-        scroller.setWidget(self._build_export_panel())
-        right_layout.addWidget(scroller, 1)
-        right_layout.addWidget(self._build_export_actions())
-
-        right.setMinimumWidth(330)
-        splitter.addWidget(right)
+        splitter.addWidget(self._build_export_panel())
 
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
@@ -439,64 +407,39 @@ class MainWindow(QMainWindow):
         return row
 
     def _build_clip_table(self) -> QWidget:
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
+        panel = self.browser_panel = BrowserPanel(self)
+        panel.open_external_requested.connect(self._preview_selected)
+        panel.select_all_requested.connect(self._select_all)
+        panel.select_none_requested.connect(self._select_none)
+        panel.item_changed.connect(self._on_item_changed)
+        panel.item_activated.connect(self._play_item)
+        panel.selection_changed.connect(self._on_clip_selected)
+        return panel
 
-        header = QHBoxLayout()
-        self.clip_count_label = QLabel("No clips loaded")
-        header.addWidget(self.clip_count_label)
-        header.addStretch(1)
-        self.preview_button = QPushButton("Open in player…")
-        self.preview_button.setToolTip(
-            "Hand the highlighted clip to your usual video player.\n"
-            "Double-clicking a row plays it here instead."
-        )
-        self.preview_button.clicked.connect(self._preview_selected)
-        header.addWidget(self.preview_button)
-        for text, slot in (("All", self._select_all), ("None", self._select_none)):
-            button = QPushButton(text)
-            button.setFixedWidth(58)
-            button.clicked.connect(slot)
-            header.addWidget(button)
-        layout.addLayout(header)
+    # Compatibility views for the established MainWindow API. They keep
+    # integrations and UI tests working without making the widgets
+    # MainWindow-owned again.
+    @property
+    def table(self) -> QTableWidget:
+        return self.browser_panel.table
 
-        self.warning_label = dim(QLabel())
-        self.warning_label.hide()
-        layout.addWidget(self.warning_label)
+    @property
+    def clip_count_label(self) -> QLabel:
+        return self.browser_panel.clip_count_label
 
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(
-            ["Clip", "Length", "Size", "Card date", "Format"]
-        )
-        self.table.horizontalHeaderItem(3).setToolTip(
-            "The timestamp on the card, not when you flew. The Box Pro has no "
-            "clock battery, so these are unreliable."
-        )
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setIconSize(QSize(120, 68))
-        self.table.setSortingEnabled(True)
-        head = self.table.horizontalHeader()
-        # The name column takes the slack, but the thumbnail grows into it, so
-        # extra width buys a bigger preview rather than empty space.
-        head.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column in range(1, 5):
-            head.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
-        head.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
-        head.setToolTip("Click a column heading to sort by it")
-        self.table.itemChanged.connect(self._on_item_changed)
-        self.table.itemDoubleClicked.connect(self._play_item)
-        self.table.itemSelectionChanged.connect(self._on_clip_selected)
-        layout.addWidget(self.table, 1)
-        return box
+    @property
+    def warning_label(self) -> QLabel:
+        return self.browser_panel.warning_label
+
+    @property
+    def preview_button(self) -> QPushButton:
+        return self.browser_panel.preview_button
 
     def _build_left_column(self) -> QWidget:
         """The clip list above the player.
 
         Not a splitter, deliberately. How tall the preview is worth being is
-        decided by how wide it is — see PreviewPanel — so there is nothing to
+        decided by how wide its aspect-aware box is, so there is nothing to
         drag: the handle could only choose how much black to look at. Widening
         the left column is what makes the picture bigger, and the clip list
         takes everything the picture cannot use.
@@ -512,605 +455,134 @@ class MainWindow(QMainWindow):
         return column
 
     def _build_preview_panel(self) -> QWidget:
-        """The video and its transport.
+        view = self.preview_view = PreviewView(self)
+        view.frame_clicked.connect(self._focus_player)
+        view.play_requested.connect(self._toggle_play)
+        view.set_in_requested.connect(self._set_in)
+        view.set_out_requested.connect(self._set_out)
+        view.reset_requested.connect(self._reset_trim)
+        view.playhead_moved.connect(self._on_playhead)
+        view.trim_changed.connect(self._on_trim_changed)
+        return view.preview_box
 
-        Permanent, where trimming used to be behind an unticked box. Nobody
-        ticks a box to find out what is behind it, so the feature this app
-        exists for was hidden from everyone who had not been told about it.
-        """
-        box = self.preview_box = PreviewPanel("Preview and trim")
-        layout = QHBoxLayout(box)
-        layout.setContentsMargins(INNER, TIGHT, INNER, INNER)
-        layout.setSpacing(INNER)
+    # Compatibility views for the established MainWindow API. PreviewView
+    # owns the widgets; window workflows still address them by their old names.
+    @property
+    def preview_box(self) -> QWidget:
+        return self.preview_view.preview_box
 
-        self.frame_view = FrameView()
-        self.frame_view.clicked.connect(self._focus_player)
-        layout.addWidget(self.frame_view, 1)
+    @property
+    def frame_view(self) -> QWidget:
+        return self.preview_view.frame_view
 
-        # Beside the picture rather than under it. A 16:9 frame in a wide, short
-        # box letterboxes to a third of the width, and that empty space is the
-        # only place these can go without taking height from the clip list.
-        layout.addWidget(self._build_preview_sidebar())
+    @property
+    def preview_sidebar(self) -> QWidget:
+        return self.preview_view.sidebar
 
-        box.view = self.frame_view
-        box.sidebar = self.preview_sidebar
-        return box
+    @property
+    def trim_title(self) -> QLabel:
+        return self.preview_view.trim_title
 
-    def _build_preview_sidebar(self) -> QWidget:
-        side = self.preview_sidebar = QWidget()
-        side.setFixedWidth(190)
-        column = QVBoxLayout(side)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(TIGHT)
-        column.addStretch(1)
+    @property
+    def trim_position(self) -> QLabel:
+        return self.preview_view.trim_position
 
-        # The name and the position are separate labels because the position
-        # changes thirty times a second and the name changes once a clip. One
-        # short label relaying beats one long one doing it.
-        self.trim_title = QLabel("Select a clip")
-        self.trim_title.setWordWrap(True)
-        column.addWidget(self.trim_title)
+    @property
+    def trim_summary(self) -> QLabel:
+        return self.preview_view.trim_summary
 
-        self.trim_position = dim(QLabel(""))
-        column.addWidget(self.trim_position)
+    @property
+    def clip_format(self) -> QLabel:
+        return self.preview_view.clip_format
 
-        self.trim_summary = dim(QLabel(""))
-        column.addWidget(self.trim_summary)
-        column.addSpacing(TIGHT)
+    @property
+    def clip_date(self) -> QLabel:
+        return self.preview_view.clip_date
 
-        # What you are looking at, which until now was only readable as columns
-        # in the list. Two lines rather than three, and the buttons share a row:
-        # this column's height is the floor on how short the panel can get, so
-        # every line here is one the picture cannot have on a narrow window.
-        # These change once a clip, so they are set where the clip is loaded
-        # rather than in _update_trim_labels, which runs on every painted frame.
-        self.clip_format = dim(QLabel(""))
-        self.clip_format.setToolTip("Resolution, frame rate, codec and size")
-        column.addWidget(self.clip_format)
+    @property
+    def play_button(self) -> QPushButton:
+        return self.preview_view.play_button
 
-        self.clip_date = dim(QLabel(""))
-        self.clip_date.setToolTip(
-            "The timestamp on the card, not when you flew. The Box Pro has no "
-            "clock battery, so these are unreliable."
-        )
-        column.addWidget(self.clip_date)
-        column.addSpacing(INNER)
+    @property
+    def trim_note(self) -> QLabel:
+        return self.preview_view.trim_note
 
-        self.play_button = QPushButton("Play")
-        self.play_button.setToolTip(
-            "Play the highlighted clip here in the window.\n"
-            "Space does the same once the picture has focus."
-        )
-        self.play_button.clicked.connect(self._toggle_play)
-        column.addWidget(self.play_button)
+    @property
+    def trim_band(self) -> QWidget:
+        return self.preview_view.trim_band
 
-        trim_row = QHBoxLayout()
-        trim_row.setContentsMargins(0, 0, 0, 0)
-        trim_row.setSpacing(TIGHT)
-        for text, slot, tip in (
-            ("In", self._set_in, "Start the export at the playhead  (I)"),
-            ("Out", self._set_out, "End the export at the playhead  (O)"),
-            ("Reset", self._reset_trim, "Use the whole clip again"),
-        ):
-            button = QPushButton(text)
-            button.setToolTip(tip)
-            button.clicked.connect(slot)
-            trim_row.addWidget(button)
-        column.addLayout(trim_row)
-
-        # Labels and buttons stay together as one block, centred. Pinning the
-        # labels to the top and the buttons to the bottom left a hole down the
-        # middle of the column.
-        column.addStretch(1)
-
-        # Silence is said out loud so its absence is not filed as a bug. Audio
-        # would need a second pipe, a second clock and an output device, and
-        # DVR sound is motor whine — an in point is found by eye.
-        keys = dim(QLabel("Silent · click the picture, then Space plays"))
-        keys.setToolTip(
-            "With the picture focused:\n"
-            "Space or K — play or pause\n"
-            "I / O — set the in / out point at the playhead\n"
-            "Left / Right — move a second, with Shift five\n"
-            "Home / End — jump to the in / out point\n"
-            "Esc — stop"
-        )
-        column.addWidget(keys)
-
-        self.trim_note = dim(QLabel(
-            "Remux cuts at keyframes, so a trimmed rewrap can be a second out. "
-            "The re-encoding presets are exact."
-        ))
-        self.trim_note.hide()
-        column.addWidget(self.trim_note)
-        return side
+    @property
+    def trim_bar(self) -> QWidget:
+        return self.preview_view.trim_bar
 
     def _build_trim_band(self) -> QWidget:
-        """The filmstrip, full width, directly under the preview it scrubs.
-
-        Full width is not decoration. On a three and a half minute clip it is
-        5.8 pixels per second of footage against 3.4 in the left column alone,
-        which is the difference when you are dragging an out point onto a
-        particular moment.
-        """
-        band = self.trim_band = QGroupBox("Filmstrip")
-        layout = QVBoxLayout(band)
-        layout.setContentsMargins(INNER, TIGHT, INNER, INNER)
-
-        self.trim_bar = TrimBar()
-        self.trim_bar.setToolTip(
-            "Every keyframe in the clip, a second apart. Click to move the "
-            "playhead, drag either end to set where the export starts and ends."
-        )
-        self.trim_bar.playhead_moved.connect(self._on_playhead)
-        self.trim_bar.trim_changed.connect(self._on_trim_changed)
-        layout.addWidget(self.trim_bar)
-        return band
+        return self.preview_view.trim_band
 
     def _build_export_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        preset_box = QGroupBox("Export preset")
-        preset_layout = QVBoxLayout(preset_box)
-        # Only the chosen preset explains itself. Showing all four descriptions
-        # at once filled the panel and pushed the Output box and the Add button
-        # off the bottom of the window.
-        button_row = QHBoxLayout()
-        self.preset_group = QButtonGroup(self)
-        self.preset_buttons: dict[str, QRadioButton] = {}
-        for key in PRESET_ORDER:
-            button = QRadioButton(PRESETS[key].label)
-            button.setToolTip(PRESETS[key].blurb)
-            self.preset_group.addButton(button)
-            self.preset_buttons[key] = button
-            button_row.addWidget(button)
-            button.toggled.connect(self._on_preset_changed)
-        button_row.addStretch(1)
-        preset_layout.addLayout(button_row)
-        self.preset_help = dim(QLabel())
-        preset_layout.addWidget(self.preset_help)
-        self.preset_buttons["master"].setChecked(True)
-        layout.addWidget(preset_box)
-
-        self.options_stack = QStackedWidget()
-        self.options_stack.addWidget(self._build_edit_options())
-        self.options_stack.addWidget(self._build_master_options())
-        self.options_stack.addWidget(self._build_social_options())
-        self.options_stack.addWidget(self._build_upload_options())
-        self.options_stack.addWidget(self._build_remux_options())
-        layout.addWidget(self.options_stack)
-
-        colour_box = QGroupBox("Colour")
-        colour_layout = QVBoxLayout(colour_box)
-        self.colour_combo = QComboBox()
-        for key, label, _ in COLOUR_MODES:
-            self.colour_combo.addItem(label, key)
-        self.colour_combo.currentIndexChanged.connect(self._on_colour_changed)
-        colour_layout.addWidget(self.colour_combo)
-        self.colour_help = dim(QLabel())
-        colour_layout.addWidget(self.colour_help)
-        layout.addWidget(colour_box)
-
-        out_box = QGroupBox("Output")
-        out_layout = QVBoxLayout(out_box)
-        row = QHBoxLayout()
-        self.out_edit = QComboBox()
-        self.out_edit.setEditable(True)
-        self.out_edit.setMinimumWidth(240)
-        row.addWidget(self.out_edit, 1)
-        pick = QPushButton("…")
-        pick.setFixedWidth(34)
-        pick.clicked.connect(self._browse_output)
-        row.addWidget(pick)
-        out_layout.addLayout(row)
-
-        self.subfolder_check = QCheckBox("Put each preset in its own subfolder")
-        self.subfolder_check.setChecked(True)
-        self.subfolder_check.toggled.connect(self._on_output_changed)
-        out_layout.addWidget(self.subfolder_check)
-
-        self.audio_check = QCheckBox("Keep the audio track")
-        self.audio_check.setChecked(True)
-        self.audio_check.setToolTip(
-            "DVR audio is mostly motor noise and wind. Dropping it makes a "
-            "small file smaller, and there is less to distract an editor."
-        )
-        self.audio_check.toggled.connect(self._update_estimate)
-        out_layout.addWidget(self.audio_check)
-
-        self.join_check = QCheckBox("Join the ticked clips into one file")
-        self.join_check.setToolTip(
-            "Useful when the DVR split a single flight across several recordings"
-        )
-        self.join_check.toggled.connect(self._update_estimate)
-        out_layout.addWidget(self.join_check)
-
-        date_row = QHBoxLayout()
-        self.date_check = QCheckBox("Start filenames with the flight date")
-        self.date_check.toggled.connect(self._on_date_toggled)
-        date_row.addWidget(self.date_check)
-        self.export_date = QDateEdit(QDate.currentDate())
-        self.export_date.setCalendarPopup(True)
-        self.export_date.setDisplayFormat("dd MMM yyyy")
-        self.export_date.setEnabled(False)
-        self.export_date.dateChanged.connect(self._retarget_pending)
-        date_row.addWidget(self.export_date)
-        date_row.addStretch(1)
-        out_layout.addLayout(date_row)
-
-        self.date_help = dim(QLabel(
-            "Exports are named after the clip, which carries no usable date. "
-            "Tick this to get 2026-07-27_hdz_022_master.mp4 instead."
-        ))
-        out_layout.addWidget(self.date_help)
-        layout.addWidget(out_box)
-
-        layout.addStretch(1)
+        panel = self.export_panel = ExportPanel(self)
+        panel.preset_changed.connect(self._on_preset_changed)
+        panel.settings_changed.connect(self._update_estimate)
+        panel.output_changed.connect(self._on_output_changed)
+        panel.date_changed.connect(self._on_date_changed)
+        panel.add_requested.connect(self._add_to_queue)
         return panel
 
-    def _build_export_actions(self) -> QWidget:
-        """Estimate and Add button, kept out of the scroll area.
-
-        These are the things you always need to reach, so they stay pinned to
-        the bottom of the panel however far the settings above are scrolled.
-        """
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, INNER, 0, 0)
-
-        self.estimate_label = QLabel()
-        self.estimate_label.setWordWrap(True)
-        layout.addWidget(self.estimate_label)
-
-        add = QPushButton("Add to queue")
-        add.setMinimumHeight(30)
-        add.clicked.connect(self._add_to_queue)
-        layout.addWidget(add)
-        return box
-
-    def _build_edit_options(self) -> QWidget:
-        box = QWidget()
-        form = QFormLayout(box)
-        self.edit_codec_combo = QComboBox()
-        for key, (label, _, _, _) in EDIT_CODECS.items():
-            # The GB/hour figure depends on the footage, so it is filled in by
-            # _refresh_output_options once there are clips to measure.
-            self.edit_codec_combo.addItem(label, key)
-        self.edit_codec_combo.currentIndexChanged.connect(self._update_estimate)
-        form.addRow("Codec:", self.edit_codec_combo)
-        form.addRow(dim(QLabel(
-            "Mezzanine codecs are deliberately large. They decode a frame at a "
-            "time, so scrubbing is instant and the free DaVinci Resolve can read "
-            "them, which it cannot do with the original HEVC."
-        )))
-        return box
-
-    def _build_upload_options(self) -> QWidget:
-        box = QWidget()
-        form = QFormLayout(box)
-
-        self.upload_height = QComboBox()
-        self.upload_height.currentIndexChanged.connect(self._update_estimate)
-        self.upload_height.setToolTip(
-            "The resolution you hand the platform, not the resolution the "
-            "goggles recorded."
-        )
-        form.addRow("Upload at:", self.upload_height)
-
-        self.upload_quality = QComboBox()
-        for crf, name, _ in QUALITY_LEVELS:
-            self.upload_quality.addItem(name, crf)
-        self.upload_quality.setCurrentIndex(1)          # High
-        self.upload_quality.currentIndexChanged.connect(self._on_quality_changed)
-        form.addRow("Quality:", self.upload_quality)
-
-        self.upload_quality_help = dim(QLabel())
-        form.addRow(self.upload_quality_help)
-
-        self.upload_speed = QComboBox()
-        self.upload_speed.addItems(SPEEDS)
-        self.upload_speed.setCurrentText("slow")
-        form.addRow("Encoder effort:", self.upload_speed)
-
-        # Two labels rather than one paragraph: Qt underestimates the height of
-        # a wrapped label containing newlines, and the text gets clipped.
-        form.addRow(dim(QLabel(
-            "These sites re-encode everything you send them and decide how much "
-            "bitrate to spend based on the resolution you arrived at. Sending "
-            "1080p buys a bigger allowance than sending 720p, so more of your "
-            "footage survives their encode."
-        )))
-        form.addRow(dim(QLabel(
-            "It does not add detail the goggles never recorded. The picture is "
-            "the same; the difference is how kindly the platform treats it."
-        )))
-        return box
-
-    def _build_master_options(self) -> QWidget:
-        box = QWidget()
-        form = QFormLayout(box)
-
-        self.master_quality = QComboBox()
-        for crf, name, _ in QUALITY_LEVELS:
-            self.master_quality.addItem(name, crf)
-        self.master_quality.setCurrentIndex(1)          # High
-        self.master_quality.currentIndexChanged.connect(self._on_quality_changed)
-        form.addRow("Quality:", self.master_quality)
-
-        self.master_quality_help = dim(QLabel())
-        form.addRow(self.master_quality_help)
-
-        self.master_speed = QComboBox()
-        self.master_speed.addItems(SPEEDS)
-        self.master_speed.setCurrentText("slow")
-        self.master_speed.setToolTip(
-            "How long the encoder thinks about each frame. Slower gives a "
-            "smaller file at the same quality; it does not change how it looks."
-        )
-        form.addRow("Encoder effort:", self.master_speed)
-
-        self.gpu_check = QCheckBox("Use hardware encoding")
-        self.gpu_check.setEnabled(False)
-        self.gpu_check.setText("Use hardware encoding (checking…)")
-        self.gpu_check.toggled.connect(self._update_estimate)
-        form.addRow(self.gpu_check)
-
-        self.gpu_help = dim(QLabel(
-            "Hands the encoding to a dedicated chip on your graphics card "
-            "instead of the processor. Roughly three times faster, slightly "
-            "larger for the same quality."
-        ))
-        form.addRow(self.gpu_help)
-        return box
-
-    def _build_social_options(self) -> QWidget:
-        box = QWidget()
-        form = QFormLayout(box)
-        self.social_mode = QComboBox()
-        self.social_mode.addItem("Target a file size", "size")
-        self.social_mode.addItem("Target a quality", "quality")
-        self.social_mode.currentIndexChanged.connect(self._on_social_mode)
-        form.addRow("Mode:", self.social_mode)
-
-        self.social_size = QSpinBox()
-        self.social_size.setRange(4, 2000)
-        self.social_size.setValue(45)
-        self.social_size.setSuffix(" MB")
-        self.social_size.valueChanged.connect(self._update_estimate)
-        form.addRow("File size:", self.social_size)
-
-        self.social_quality = QComboBox()
-        for crf, name, _ in SOCIAL_QUALITY_LEVELS:
-            self.social_quality.addItem(name, crf)
-        self.social_quality.setCurrentIndex(1)
-        self.social_quality.currentIndexChanged.connect(self._on_quality_changed)
-        form.addRow("Quality:", self.social_quality)
-
-        self.social_quality_help = dim(QLabel())
-        form.addRow(self.social_quality_help)
-
-        # Both of these are rebuilt from whatever is ticked; see
-        # _refresh_output_options. Nothing about the source size is hardcoded.
-        self.social_height = QComboBox()
-        self.social_height.addItem("Keep original", 0)
-        self.social_height.currentIndexChanged.connect(self._update_estimate)
-        form.addRow("Resolution:", self.social_height)
-
-        self.social_fps = QComboBox()
-        self.social_fps.addItem("Keep original", 0)
-        self.social_fps.currentIndexChanged.connect(self._update_estimate)
-        form.addRow("Frame rate:", self.social_fps)
-
-        form.addRow(dim(QLabel(
-            "Targeting a size uses a two-pass encode, which lands within a few "
-            "percent of the number you ask for."
-        )))
-        self._on_social_mode()
-        return box
-
-    def _build_remux_options(self) -> QWidget:
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        # Two labels rather than one with a blank line in it: Qt underestimates
-        # the height a wrapped label needs when the text contains newlines, and
-        # the last lines get clipped.
-        layout.addWidget(dim(QLabel(
-            "Nothing to configure. The video and audio are copied across "
-            "untouched, so this finishes almost instantly and loses nothing."
-        )))
-        layout.addWidget(dim(QLabel(
-            "Because the video stays HEVC, the free DaVinci Resolve still will "
-            "not read it. Use Edit for anything going on a timeline."
-        )))
-        layout.addStretch(1)
-        return box
-
     def _build_queue(self) -> QWidget:
-        """A one-line strip that opens into the queue when there is one.
-
-        Closed to start with, because an empty queue was taking two hundred
-        pixels of height off a window where the clip list and the picture are
-        both short of it. Not a saved setting: jobs do not survive a session
-        either, so "closed" and "closed unless there is something in it" are
-        the same thing on startup.
-        """
-        box = QWidget()
-        outer = QVBoxLayout(box)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(TIGHT)
-
-        header = QHBoxLayout()
-        self.queue_toggle = QToolButton()
-        self.queue_toggle.setText("Queue — empty")
-        self.queue_toggle.setCheckable(True)
-        self.queue_toggle.setArrowType(Qt.ArrowType.RightArrow)
-        self.queue_toggle.setToolButtonStyle(
-            Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.queue_toggle.setAutoRaise(True)
-        self.queue_toggle.toggled.connect(self._on_queue_toggled)
-        header.addWidget(self.queue_toggle)
-
-        self.overall_bar = QProgressBar()
-        self.overall_bar.setRange(0, 1000)
-        self.overall_bar.setValue(0)
-        self.overall_bar.setTextVisible(True)
-        self.overall_bar.setFormat("idle")
-        self.overall_bar.setMinimumWidth(220)
-        header.addWidget(self.overall_bar, 1)
-        self.overall_label = QLabel("")
-        self.overall_label.setMinimumWidth(210)
-        header.addWidget(self.overall_label)
-        header.addSpacing(GAP)
-
-        # These two stay on the header rather than inside the body. They are
-        # the reason the whole panel cannot simply be hidden: About carries the
-        # GPL and LGPL notices, and a licence you can only reach by opening a
-        # queue you have no jobs in is not much of a notice.
-        open_out = QPushButton("Open output folder")
-        open_out.clicked.connect(lambda: reveal(Path(self.out_edit.currentText())))
-        header.addWidget(open_out)
-
-        about = QPushButton("About")
-        about.setToolTip("Version, licence and attribution")
-        about.clicked.connect(self._show_about)
-        header.addWidget(about)
-        outer.addLayout(header)
-
-        body = self.queue_body = QWidget()
-        body.hide()
-        outer.addWidget(body)
-        layout = QVBoxLayout(body)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self.queue_table = QTableWidget(0, 4)
-        self.queue_table.setHorizontalHeaderLabels(["Clip", "Preset", "Progress", "Status"])
-        self.queue_table.verticalHeader().setVisible(False)
-        self.queue_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.queue_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.queue_table.setSelectionMode(
-            QAbstractItemView.SelectionMode.ExtendedSelection
+        panel = self.queue_panel = QueuePanel(self)
+        panel.start_requested.connect(self._start)
+        panel.cancel_requested.connect(self._cancel)
+        panel.remove_requested.connect(self._remove_selected_jobs)
+        panel.clear_requested.connect(self._clear_queue)
+        panel.reveal_requested.connect(
+            lambda: reveal(Path(self.export_panel.output_text()))
         )
-        self.queue_table.itemDoubleClicked.connect(self._open_finished_job)
-        self.queue_table.setMaximumHeight(150)
-        head = self.queue_table.horizontalHeader()
-        # Filenames are short; the progress bar is the thing worth watching, so
-        # it gets the width rather than the name column.
-        head.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        head.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        head.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        head.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        layout.addWidget(self.queue_table)
-
-        row = QHBoxLayout()
-        self.start_button = QPushButton("Start export")
-        self.start_button.clicked.connect(self._start)
-        row.addWidget(self.start_button)
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setEnabled(False)
-        self.cancel_button.clicked.connect(self._cancel)
-        row.addWidget(self.cancel_button)
-        remove = QPushButton("Remove selected")
-        remove.setToolTip("Drop the selected rows. Delete key does the same.")
-        remove.clicked.connect(self._remove_selected_jobs)
-        row.addWidget(remove)
-
-        clear = QPushButton("Clear queue")
-        clear.setToolTip("Empty the queue. Anything currently encoding carries on.")
-        clear.clicked.connect(self._clear_queue)
-        row.addWidget(clear)
-        row.addStretch(1)
-
-        layout.addLayout(row)
-        return box
+        panel.about_requested.connect(self._show_about)
+        panel.item_activated.connect(self._open_finished_job)
+        return panel
 
     def _on_queue_toggled(self, open_: bool) -> None:
-        self.queue_body.setVisible(open_)
-        self.queue_toggle.setArrowType(
-            Qt.ArrowType.DownArrow if open_ else Qt.ArrowType.RightArrow)
+        self.queue_panel._on_toggled(open_)
 
     def _open_queue(self) -> None:
-        if not self.queue_toggle.isChecked():
-            self.queue_toggle.setChecked(True)
+        self.queue_panel.open_queue()
 
     def _queue_summary(self) -> str:
         """What the strip says when it is closed, and while it is open."""
-        if not self.jobs:
-            return "Queue — empty"
-        counts: dict[JobStatus, int] = {}
-        for job in self.jobs:
-            counts[job.status] = counts.get(job.status, 0) + 1
-        order = [JobStatus.RUNNING, JobStatus.PENDING, JobStatus.DONE,
-                 JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.SKIPPED]
-        parts = [f"{counts[status]} {status.value.lower()}"
-                 for status in order if counts.get(status)]
-        return "Queue — " + ", ".join(parts)
+        return self.queue_panel.summary(self.jobs)
+
+    @property
+    def queue_toggle(self) -> QToolButton:
+        return self.queue_panel.toggle
+
+    @property
+    def queue_body(self) -> QWidget:
+        return self.queue_panel.body
+
+    @property
+    def queue_table(self) -> QTableWidget:
+        return self.queue_panel.table
+
+    @property
+    def overall_bar(self) -> QProgressBar:
+        return self.queue_panel.overall_bar
+
+    @property
+    def overall_label(self) -> QLabel:
+        return self.queue_panel.overall_label
+
+    @property
+    def start_button(self) -> QPushButton:
+        return self.queue_panel.start_button
+
+    @property
+    def cancel_button(self) -> QPushButton:
+        return self.queue_panel.cancel_button
 
     # -- settings -------------------------------------------------------------
 
-    def _combo_settings(self) -> list[tuple[str, QComboBox]]:
-        """Combos whose choice is carried in the item data."""
-        return [
-            ("colour", self.colour_combo),
-            ("edit_codec", self.edit_codec_combo),
-            ("master_quality", self.master_quality),
-            ("social_mode", self.social_mode),
-            ("social_quality", self.social_quality),
-            ("social_height", self.social_height),
-            ("social_fps", self.social_fps),
-            ("upload_height", self.upload_height),
-            ("upload_quality", self.upload_quality),
-        ]
-
-    def _text_combo_settings(self) -> list[tuple[str, QComboBox]]:
-        """Combos built from plain strings, which carry no item data at all."""
-        return [("master_speed", self.master_speed),
-                ("upload_speed", self.upload_speed)]
-
-    def _check_settings(self) -> list[tuple[str, QCheckBox]]:
-        return [
-            ("subfolders", self.subfolder_check),
-            ("keep_audio", self.audio_check),
-            ("use_gpu", self.gpu_check),
-        ]
-
     def _restore(self) -> None:
         store = self.settings_store
-        last_out = store.value("output_dir", str(Path.home() / "Videos" / "FPV"))
-        self.out_edit.addItem(str(last_out))
-
-        preset = store.value("preset", "master")
-        if preset in self.preset_buttons:
-            self.preset_buttons[preset].setChecked(True)
-
-        for key, combo in self._combo_settings():
-            saved = store.value(key, None)
-            if saved is None:
-                continue
-            # Combo data is int for some, str for others; try both.
-            index = combo.findData(saved)
-            if index < 0:
-                try:
-                    index = combo.findData(int(saved))
-                except (TypeError, ValueError):
-                    index = -1
-            if index < 0:
-                index = combo.findText(str(saved))
-            if index >= 0:
-                combo.setCurrentIndex(index)
-
-        for key, combo in self._text_combo_settings():
-            saved = store.value(key, None)
-            if saved is not None and combo.findText(str(saved)) >= 0:
-                combo.setCurrentText(str(saved))
-
-        for key, check in self._check_settings():
-            saved = store.value(key, None)
-            if saved is not None:
-                check.setChecked(str(saved).lower() in ("true", "1"))
-
-        self.social_size.setValue(int(store.value("social_size_mb", 45)))
+        self.export_panel.restore(store)
 
         geometry = store.value("geometry")
         if geometry:
@@ -1124,15 +596,7 @@ class MainWindow(QMainWindow):
 
     def _save(self) -> None:
         store = self.settings_store
-        store.setValue("output_dir", self.out_edit.currentText())
-        store.setValue("preset", self._preset_key())
-        for key, combo in self._combo_settings():
-            store.setValue(key, combo.currentData())
-        for key, combo in self._text_combo_settings():
-            store.setValue(key, combo.currentText())
-        for key, check in self._check_settings():
-            store.setValue(key, check.isChecked())
-        store.setValue("social_size_mb", self.social_size.value())
+        self.export_panel.save(store)
         store.setValue("geometry", self.saveGeometry())
         if self.splitter is not None:
             store.setValue("splitter", self.splitter.saveState())
@@ -1174,28 +638,9 @@ class MainWindow(QMainWindow):
         bound is tighter wins, and the thumbnails still grow when the list is
         given room.
         """
-        if not self._ready or self.table.rowCount() == 0:
+        if not self._ready:
             return
-        available = self.table.columnWidth(0)
-        # Leave room for the filename itself alongside the picture. The reserve
-        # covers the tick box, the cell padding and the name, and the floor is
-        # low enough that a narrow window shrinks the picture rather than
-        # eliding the name — which is the one thing in the row you need, and
-        # which was coming out as "hdz_00…" for every clip.
-        width = max(MIN_THUMB_WIDTH, min(THUMB_WIDTH, available - 150))
-
-        viewport = self.table.viewport().height()
-        if viewport > 0:
-            by_height = max(48, viewport // MIN_VISIBLE_CLIPS - 6)
-            width = max(MIN_THUMB_WIDTH,
-                        min(width, round(by_height * 16 / 9)))
-
-        height = round(width * 9 / 16)
-        if self.table.iconSize().width() == width:
-            return
-        self.table.setIconSize(QSize(width, height))
-        for row in range(self.table.rowCount()):
-            self.table.setRowHeight(row, height + 6)
+        self.browser_panel.sync_thumbnail_size()
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self._save()
@@ -1223,25 +668,9 @@ class MainWindow(QMainWindow):
     # -- hardware -------------------------------------------------------------
 
     def _hardware_found(self, found) -> None:
-        if not found:
-            self.gpu_check.setChecked(False)
-            self.gpu_check.setEnabled(False)
-            self.gpu_check.setText("Hardware encoding unavailable on this PC")
-            self.gpu_help.setText(
-                "No usable hardware encoder was found, so exports will use the "
-                "processor. Nothing is missing: the result is the same, and "
-                "generally a little smaller for the same quality."
-            )
-            return
-        self.hw_encoder, self.hw_label = found
-        self.gpu_check.setEnabled(True)
-        self.gpu_check.setText(f"Use hardware encoding ({self.hw_label})")
-        self.gpu_help.setText(
-            f"Hands the encoding to the video chip on your {self.hw_label} "
-            "hardware instead of the processor. Roughly three times faster, and "
-            "slightly larger for the same quality. Detected by running a test "
-            "encode, so it is known to work on this machine."
-        )
+        self.export_panel.set_hardware(found)
+        if found:
+            self.hw_encoder, self.hw_label = found
 
     # -- source handling ------------------------------------------------------
 
@@ -1474,83 +903,7 @@ class MainWindow(QMainWindow):
         Different HDZero goggles record at different sizes, so offering a fixed
         "Keep 720p" is wrong the moment someone points this at 1080p footage.
         """
-        clips = self._relevant_clips()
-        heights = sorted({c.height for c in clips if c.height})
-        rates = sorted({round(c.fps) for c in clips if c.fps})
-
-        top_height = heights[-1] if heights else 0
-        top_rate = rates[-1] if rates else 0
-        mixed_height = len(heights) > 1
-        mixed_rate = len(rates) > 1
-
-        keep_height = "Keep original"
-        if top_height and not mixed_height:
-            keep_height = f"Keep original ({top_height}p)"
-        elif mixed_height:
-            keep_height = "Keep original (mixed sizes)"
-
-        options = [(keep_height, 0)]
-        for step in RESOLUTION_STEPS:
-            if top_height and step < top_height:
-                options.append((f"Downscale to {step}p", step))
-        self._repopulate(self.social_height, options)
-
-        # Upload is the one preset that goes the other way. Everything from the
-        # source height upwards is offered, because the whole point of it is to
-        # arrive in a higher resolution tier than the footage was recorded in.
-        upload_options = []
-        for step in sorted(RESOLUTION_STEPS):
-            if not top_height or step < top_height:
-                continue
-            if step == top_height:
-                upload_options.append((f"Keep {step}p", step))
-            else:
-                upload_options.append((f"Upscale to {step}p", step))
-        if not upload_options:
-            upload_options = [(keep_height, 0)]
-        self._repopulate(self.upload_height, upload_options)
-
-        keep_rate = "Keep original"
-        if top_rate and not mixed_rate:
-            keep_rate = f"Keep original ({top_rate} fps)"
-        elif mixed_rate:
-            keep_rate = "Keep original (mixed rates)"
-
-        options = [(keep_rate, 0)]
-        for step in FPS_STEPS:
-            if top_rate and step < top_rate:
-                options.append((f"{step} fps", step))
-        self._repopulate(self.social_fps, options)
-
-        self._refresh_codec_labels(clips)
-
-    @staticmethod
-    def _repopulate(combo: QComboBox, options: list[tuple[str, int]]) -> None:
-        """Replace a combo's contents, keeping the current choice if it survives."""
-        previous = combo.currentData()
-        combo.blockSignals(True)
-        combo.clear()
-        for text, value in options:
-            combo.addItem(text, value)
-        index = combo.findData(previous)
-        combo.setCurrentIndex(index if index >= 0 else 0)
-        combo.blockSignals(False)
-
-    def _refresh_codec_labels(self, clips: list[ClipInfo]) -> None:
-        """Show mezzanine sizes for the footage in hand, not for 720p60."""
-        sample = max(clips, key=lambda c: c.width * c.height * (c.fps or 60), default=None)
-        previous = self.edit_codec_combo.currentData()
-        self.edit_codec_combo.blockSignals(True)
-        self.edit_codec_combo.clear()
-        for key, (label, _, _, _) in EDIT_CODECS.items():
-            if sample is not None and sample.width:
-                gb_per_hour = edit_bitrate_mbps(key, sample) * 450 / 1000
-                self.edit_codec_combo.addItem(f"{label}  ~{gb_per_hour:.0f} GB/hour", key)
-            else:
-                self.edit_codec_combo.addItem(label, key)
-        index = self.edit_codec_combo.findData(previous)
-        self.edit_codec_combo.setCurrentIndex(index if index >= 0 else 0)
-        self.edit_codec_combo.blockSignals(False)
+        self.export_panel.refresh_source_options(self._relevant_clips())
 
     # -- trimming -------------------------------------------------------------
 
@@ -1848,64 +1201,17 @@ class MainWindow(QMainWindow):
     # -- options --------------------------------------------------------------
 
     def _preset_key(self) -> str:
-        for key, button in self.preset_buttons.items():
-            if button.isChecked():
-                return key
-        return "master"
+        return self.export_panel.preset_key()
 
-    def _on_preset_changed(self) -> None:
+    def _on_preset_changed(self, key: str | None = None) -> None:
         if not self._ready:
             return
-        key = self._preset_key()
-        self.preset_help.setText(PRESETS[key].blurb)
-        self.options_stack.setCurrentIndex(PRESET_ORDER.index(key))
-        self.colour_combo.setEnabled(key != "remux")
-        self.audio_check.setEnabled(key != "remux")
+        key = key or self._preset_key()
         self.trim_note.setVisible(key == "remux")
-        self._on_colour_changed()
-        self._on_quality_changed()
         self._refresh_export_markers()
         self._update_estimate()
 
-    def _on_colour_changed(self) -> None:
-        if not self._ready:
-            return
-        if self._preset_key() == "remux":
-            # The help text stays legible even though the control above it is
-            # not available, because it is explaining why.
-            self.colour_help.setText(
-                "Remux copies the video stream as it is, so there is no colour "
-                "processing to choose."
-            )
-            return
-        key = self.colour_combo.currentData()
-        for mode_key, _, description in COLOUR_MODES:
-            if mode_key == key:
-                self.colour_help.setText(description)
-                break
-
-    def _on_quality_changed(self) -> None:
-        if not self._ready:
-            return
-        crf = self.master_quality.currentData()
-        for value, _, description in QUALITY_LEVELS:
-            if value == crf:
-                self.master_quality_help.setText(f"{description}  (CRF {value})")
-                break
-        crf = self.social_quality.currentData()
-        for value, _, description in SOCIAL_QUALITY_LEVELS:
-            if value == crf:
-                self.social_quality_help.setText(f"{description}  (CRF {value})")
-                break
-        crf = self.upload_quality.currentData()
-        for value, _, description in QUALITY_LEVELS:
-            if value == crf:
-                self.upload_quality_help.setText(f"{description}  (CRF {value})")
-                break
-        self._update_estimate()
-
-    def _on_date_toggled(self, checked: bool) -> None:
-        self.export_date.setEnabled(checked)
+    def _on_date_changed(self) -> None:
         self._retarget_pending()
         self._refresh_export_markers()
 
@@ -1921,9 +1227,9 @@ class MainWindow(QMainWindow):
         """
         if not self._ready or not self.clips:
             return
-        out_dir = Path(self.out_edit.currentText().strip() or ".")
+        out_dir = Path(self.export_panel.output_text().strip() or ".")
         key = self._preset_key()
-        subfolders = self.subfolder_check.isChecked()
+        subfolders = self.export_panel.subfolders_enabled()
         stamp = self.flight_date()
 
         self.table.blockSignals(True)
@@ -1957,47 +1263,25 @@ class MainWindow(QMainWindow):
 
     def flight_date(self) -> date | None:
         """The date to stamp on output, or None to leave names alone."""
-        if not self.date_check.isChecked():
-            return None
-        return self.export_date.date().toPython()
-
-    def _on_social_mode(self) -> None:
-        by_size = self.social_mode.currentData() == "size"
-        self.social_size.setEnabled(by_size)
-        self.social_quality.setEnabled(not by_size)
-        self._update_estimate()
+        return self.export_panel.flight_date()
 
     def current_settings(self) -> ExportSettings:
-        return ExportSettings(
-            colour=self.colour_combo.currentData(),
-            edit_codec=self.edit_codec_combo.currentData(),
-            master_crf=self.master_quality.currentData(),
-            master_speed=self.master_speed.currentText(),
-            social_mode=self.social_mode.currentData(),
-            social_size_mb=self.social_size.value(),
-            social_crf=self.social_quality.currentData(),
-            social_height=self.social_height.currentData(),
-            social_fps=self.social_fps.currentData(),
-            upload_height=self.upload_height.currentData() or 1080,
-            upload_crf=self.upload_quality.currentData(),
-            upload_speed=self.upload_speed.currentText(),
-            use_gpu=self.gpu_check.isChecked() and self.gpu_check.isEnabled(),
-            hw_encoder=self.hw_encoder,
-            keep_audio=self.audio_check.isChecked(),
-        )
+        return self.export_panel.settings(self.hw_encoder)
 
     def _update_estimate(self) -> None:
         if not self._ready:
             return
         clips = self.selected_clips()
         if not clips:
-            self.estimate_label.setText("Tick some clips to see an estimated output size.")
+            self.export_panel.set_estimate(
+                "Tick some clips to see an estimated output size."
+            )
             return
         settings = self.current_settings()
         key = self._preset_key()
         total = sum(estimate_output_size(c, key, settings) for c in clips)
 
-        if self.join_check.isChecked() and len(clips) > 1:
+        if self.export_panel.join_enabled() and len(clips) > 1:
             if key == "social" and settings.social_mode == "size":
                 total = settings.social_size_mb * 1024 * 1024
             summary = f"1 joined file, about {human_size(total)}"
@@ -2005,29 +1289,23 @@ class MainWindow(QMainWindow):
             summary = f"{len(clips)} files, about {human_size(total)} in total"
 
         runtime = human_duration(sum(c.duration for c in clips))
-        self.estimate_label.setText(f"{summary}  ·  {runtime} of footage")
+        self.export_panel.set_estimate(f"{summary}  ·  {runtime} of footage")
 
     # -- queue ----------------------------------------------------------------
-
-    def _browse_output(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Choose where exports go")
-        if folder:
-            self.out_edit.insertItem(0, folder)
-            self.out_edit.setCurrentIndex(0)
 
     def _add_to_queue(self) -> None:
         clips = self.selected_clips()
         if not clips:
             QMessageBox.warning(self, "Nothing ticked", "Tick at least one clip first.")
             return
-        out_dir = Path(self.out_edit.currentText().strip())
+        out_dir = Path(self.export_panel.output_text().strip())
         if not str(out_dir).strip():
             QMessageBox.warning(self, "No output folder", "Choose where the exports should go.")
             return
 
         key = self._preset_key()
         settings = self.current_settings()
-        subfolders = self.subfolder_check.isChecked()
+        subfolders = self.export_panel.subfolders_enabled()
         stamp = self.flight_date()
 
         # Two jobs writing the same filename would just overwrite each other.
@@ -2037,7 +1315,7 @@ class MainWindow(QMainWindow):
         }
         before = len(self.jobs)
 
-        if self.join_check.isChecked() and len(clips) > 1:
+        if self.export_panel.join_enabled() and len(clips) > 1:
             # Joined in DVR counter order: the file timestamps cannot be trusted.
             ordered = sorted(clips, key=lambda c: (c.sequence, natural_key(c.path.name)))
 
@@ -2076,7 +1354,9 @@ class MainWindow(QMainWindow):
                                      subfolders=subfolders))
 
         added = len(self.jobs) - before
-        skipped = (1 if self.join_check.isChecked() and len(clips) > 1 else len(clips)) - added
+        skipped = (
+            1 if self.export_panel.join_enabled() and len(clips) > 1 else len(clips)
+        ) - added
         self._rebuild_queue()
         note = f"{added} queued"
         if skipped > 0:
@@ -2086,30 +1366,7 @@ class MainWindow(QMainWindow):
     def _rebuild_queue(self) -> None:
         # The single funnel for anything that changes the queue, so this is
         # where the strip learns what to say and when to open itself.
-        self.queue_toggle.setText(self._queue_summary())
-        if self.jobs:
-            self._open_queue()
-
-        self.queue_table.setRowCount(len(self.jobs))
-        for row, job in enumerate(self.jobs):
-            # Showing what will be written, not what is being read, so the
-            # effect of the flight-date setting is visible before you start.
-            name_item = QTableWidgetItem(job.out_path.name)
-            name_item.setToolTip(f"{job.name}\n  ->  {job.out_path}")
-            self.queue_table.setItem(row, 0, name_item)
-            self.queue_table.setItem(row, 1, QTableWidgetItem(job.preset_label))
-            bar = self.queue_table.cellWidget(row, 2)
-            if not isinstance(bar, QProgressBar):
-                bar = QProgressBar()
-                bar.setRange(0, 1000)
-                bar.setTextVisible(True)
-                self.queue_table.setCellWidget(row, 2, bar)
-            bar.setValue(int(job.progress * 1000))
-            bar.setFormat(f"{job.progress * 100:.0f}%")
-            status = job.status.value
-            if job.message and job.status in (JobStatus.DONE, JobStatus.FAILED):
-                status = f"{job.status.value} — {job.message}"
-            self.queue_table.setItem(row, 3, QTableWidgetItem(status))
+        self.queue_panel.rebuild(self.jobs)
 
     def _open_finished_job(self, item) -> None:
         """Double-clicking a finished row opens what it produced."""
@@ -2153,22 +1410,18 @@ class MainWindow(QMainWindow):
         self.worker.job_progress.connect(self._job_progress)
         self.worker.job_finished.connect(self._job_finished)
         self.worker.queue_finished.connect(self._queue_finished)
-        self.start_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)
+        self.queue_panel.set_running(True)
         self.worker.start()
 
     def _update_overall(self, done_seconds: float) -> None:
         fraction = max(0.0, min(1.0, done_seconds / self._queue_total))
-        self.overall_bar.setValue(int(fraction * 1000))
-        self.overall_bar.setFormat(f"overall {fraction * 100:.0f}%")
-
         elapsed = time.monotonic() - self._queue_started
         text = f"elapsed {human_duration(elapsed)}"
         # Wait until there is enough done for the rate to mean anything.
         if fraction > 0.02 and elapsed > 3:
             remaining = elapsed / fraction - elapsed
             text += f"  ·  about {human_duration(remaining)} left"
-        self.overall_label.setText(text)
+        self.queue_panel.set_overall(fraction, text)
 
     def _confirm_overwrites(self, pending: list[Job]) -> bool:
         """Nothing gets overwritten without being asked about first."""
@@ -2216,7 +1469,8 @@ class MainWindow(QMainWindow):
                     estimate_output_size(c, job.preset_key, job.settings)
                     for c in job.clips
                 )
-        available = scan.free_space(existing_ancestor(pending[0].out_path.parent))
+        target = existing_ancestor(pending[0].out_path.parent)
+        available = scan.free_space(target)
         if not available or needed < available * 0.95:
             return True
 
@@ -2300,19 +1554,15 @@ class MainWindow(QMainWindow):
         _, row = self._reported_job(index)
         if row is None:
             return
-        item = self.queue_table.item(row, 3)
-        if item:
-            item.setText(JobStatus.RUNNING.value)
+        self.queue_panel.mark_started(row)
 
     def _job_progress(self, index: int, fraction: float, speed: str) -> None:
         job, row = self._reported_job(index)
         if job is None:
             return
         job.progress = fraction
-        bar = self.queue_table.cellWidget(row, 2) if row is not None else None
-        if isinstance(bar, QProgressBar):
-            bar.setValue(int(fraction * 1000))
-            bar.setFormat(f"{fraction * 100:.0f}%  {speed}".strip())
+        if row is not None:
+            self.queue_panel.mark_progress(row, fraction, speed)
         self._update_overall(self._queue_done + fraction * job.total_duration)
 
     def _job_finished(self, index: int, ok: bool, message: str) -> None:
@@ -2320,20 +1570,12 @@ class MainWindow(QMainWindow):
         if job is None:
             return
         if row is not None:
-            item = self.queue_table.item(row, 3)
-            if item:
-                item.setText(f"{job.status.value} — {message}" if message
-                             else job.status.value)
-            bar = self.queue_table.cellWidget(row, 2)
-            if isinstance(bar, QProgressBar) and ok:
-                bar.setValue(1000)
-                bar.setFormat("100%")
+            self.queue_panel.mark_finished(row, ok, job.status, message)
         self._queue_done += job.total_duration
         self._update_overall(self._queue_done)
 
     def _queue_finished(self, completed: int, failed: int) -> None:
-        self.start_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
+        self.queue_panel.set_running(False)
         # Newly written files mean more clips can be marked as done.
         self._refresh_export_markers()
         note = f"Finished: {completed} exported"
@@ -2342,9 +1584,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(note, 10000)
 
         total = time.monotonic() - self._queue_started
-        self.overall_bar.setValue(1000)
-        self.overall_bar.setFormat("done")
-        self.overall_label.setText(f"finished in {human_duration(total)}")
+        self.queue_panel.finish_overall(
+            f"finished in {human_duration(total)}"
+        )
 
     # -- ingest ---------------------------------------------------------------
 
@@ -2358,14 +1600,13 @@ class MainWindow(QMainWindow):
             return
 
         needed = sum(c.size for c in clips)
-        dialog = CopyDialog(len(clips), needed, self.export_date.date(), self)
+        dialog = CopyDialog(len(clips), needed, self.export_panel.qdate(), self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         # One flight date for the session: setting it here fills it in for
         # exports too, so both routes off the card end up labelled the same.
-        self.export_date.setDate(QDate(dialog.flight_date))
-        self.date_check.setChecked(True)
+        self.export_panel.set_flight_date(dialog.flight_date)
 
         base = dialog.folder
         if not str(base).strip():
