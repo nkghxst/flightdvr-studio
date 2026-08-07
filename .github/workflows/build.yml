@@ -1,10 +1,10 @@
-# Tests on all three platforms, and packaged builds for the two that cannot be
-# built on the developer's Windows machine.
+# Tests on all three platforms, and a packaged build for each of them.
 #
-# The Windows installer is still built locally with packaging/build.ps1. It is
-# not here yet because the bundled ffmpeg has to be the exact build described in
-# packaging/ffmpeg-configuration.txt — a CI job that downloaded whatever is
-# current would quietly make that GPL attribution wrong.
+# The Windows installer bundles ffmpeg, and THIRD-PARTY-NOTICES.md names the
+# exact build it bundles and offers that build's corresponding source. That is
+# why packaging/ffmpeg-build.json carries an immutable URL and hashes: the job
+# fetches precisely that archive and refuses anything else, which is the same
+# check packaging/build.ps1 makes locally rather than a weaker substitute.
 
 name: Build
 
@@ -161,10 +161,56 @@ jobs:
           path: dist/*.dmg
           if-no-files-found: error
 
+  windows-installer:
+    name: Windows installer
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pytest
+
+      # Exactly the build described in packaging/ffmpeg-build.json, verified by
+      # hash before it is unpacked. A different binary would make the offer of
+      # corresponding source in THIRD-PARTY-NOTICES.md false.
+      - name: Fetch the pinned ffmpeg
+        id: ffmpeg
+        shell: pwsh
+        run: |
+          $folder = ./packaging/fetch-ffmpeg.ps1 -Into "$env:RUNNER_TEMP/ffmpeg" |
+            Select-Object -Last 1
+          "dir=$folder" >> $env:GITHUB_OUTPUT
+
+      # The same script the maintainer runs, so there is one build rather than
+      # two that can drift. It verifies the binaries against the pin again,
+      # bundles, launches the packaged app to prove it starts without ffmpeg on
+      # PATH, and only then builds the installer.
+      #
+      # -SkipTests because this job needs the test job, which has already run
+      # the suite on this platform; the local default still runs them.
+      - name: Build the installer
+        shell: pwsh
+        run: ./packaging/build.ps1 -FfmpegDir "${{ steps.ffmpeg.outputs.dir }}" -SkipTests
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/installer/*.exe
+          if-no-files-found: error
+
   release:
     name: Attach to the release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [appimage, macos]
+    needs: [appimage, macos, windows-installer]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -174,8 +220,8 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      # Drafted rather than published: the Windows installer is still built by
-      # hand, so a person has to add it and write the notes before this goes out.
+      # Drafted rather than published. What is automated is the building, not
+      # the shipping: a person still writes the notes and decides to publish.
       - name: Upload the built files
         env:
           GH_TOKEN: ${{ github.token }}
@@ -187,6 +233,6 @@ jobs:
             || gh release create "$GITHUB_REF_NAME" \
                  --repo "$GITHUB_REPOSITORY" --draft \
                  --title "$GITHUB_REF_NAME" \
-                 --notes "Linux and macOS builds attached automatically. The Windows installer is added by hand."
+                 --notes "Windows, Linux and macOS builds attached automatically."
           gh release upload "$GITHUB_REF_NAME" artifacts/* \
             --repo "$GITHUB_REPOSITORY" --clobber
