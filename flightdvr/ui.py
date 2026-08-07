@@ -1754,9 +1754,7 @@ class MainWindow(QMainWindow):
             # Joined in DVR counter order: the file timestamps cannot be
             # trusted. Selects of one clip keep the order they were made in,
             # which is the order they appear along the recording.
-            ordered = sorted(pieces, key=lambda c: (c.sequence,
-                                                    natural_key(c.path.name),
-                                                    c.trim_in))
+            ordered = sorted(pieces, key=self._join_rank)
 
             # Refused rather than exported wrongly. A join built from mismatched
             # clips does not fail; it produces a file that is silent after the
@@ -1805,6 +1803,27 @@ class MainWindow(QMainWindow):
         if skipped > 0:
             note += f", {skipped} already in the queue"
         self.statusBar().showMessage(note, 5000)
+
+    def _join_rank(self, piece) -> tuple:
+        """Where a piece goes in a joined export.
+
+        The session's order first, when it has an opinion about this clip. That
+        is the whole point of storing it: DVR counter order is a sensible
+        default and not always the one somebody chose.
+
+        Anything the stored order has never heard of — a clip added since, or a
+        session written before the field existed — sorts after the remembered
+        ones by counter, which is exactly what happened before there was an
+        order to remember. Selects of one clip stay in the order they occur
+        along the recording.
+        """
+        remembered = self.session.join_order if self.session else []
+        try:
+            position = remembered.index(piece.fingerprint)
+        except ValueError:
+            position = len(remembered)
+        return (position, piece.sequence, natural_key(piece.path.name),
+                piece.trim_in)
 
     def _rebuild_queue(self) -> None:
         # The single funnel for anything that changes the queue, so this is

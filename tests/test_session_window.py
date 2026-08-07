@@ -471,3 +471,53 @@ def test_a_card_with_no_stored_settings_leaves_the_panel_alone(app,
     window._adopt_session(session_module.for_source(card))
     assert window.export_panel.preset_key() == "upload"
     close(window)
+
+
+def test_the_remembered_join_order_decides_the_queue(app, sessions_home, card):
+    """The field round-tripped through JSON and nothing read it, so it was
+    inert: every joined export still came out in DVR counter order. Asserting
+    the stored list is not enough — this asserts the jobs."""
+    from PySide6.QtCore import Qt
+
+    first, second = a_clip("hdz_001.ts"), a_clip("hdz_002.ts")
+    window = open_window(app, card, [first, second])
+    window.export_panel.out_edit.setCurrentText(str(sessions_home / "out"))
+
+    # Deliberately the reverse of counter order, which is what makes this
+    # distinguishable from the default at all.
+    window.session.join_order = [second.fingerprint, first.fingerprint]
+
+    for row in range(window.table.rowCount()):
+        window.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+    window.export_panel.join_check.setChecked(True)
+    window.jobs.clear()
+    window._add_to_queue()
+
+    assert len(window.jobs) == 1, [j.out_path.name for j in window.jobs]
+    names = [c.path.name for c in window.jobs[0].clips]
+    assert names == ["hdz_002.ts", "hdz_001.ts"], names
+    close(window)
+
+
+def test_a_clip_the_order_never_heard_of_goes_after_the_ones_it_did(
+        app, sessions_home, card):
+    """A clip added since, or a session written before the field existed. It
+    sorts by counter after the remembered ones, which is what happened when
+    there was no order to remember."""
+    from PySide6.QtCore import Qt
+
+    one, two, three = (a_clip("hdz_001.ts"), a_clip("hdz_002.ts"),
+                       a_clip("hdz_003.ts"))
+    window = open_window(app, card, [one, two, three])
+    window.export_panel.out_edit.setCurrentText(str(sessions_home / "out"))
+    window.session.join_order = [three.fingerprint, two.fingerprint]
+
+    for row in range(window.table.rowCount()):
+        window.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+    window.export_panel.join_check.setChecked(True)
+    window.jobs.clear()
+    window._add_to_queue()
+
+    names = [c.path.name for c in window.jobs[0].clips]
+    assert names == ["hdz_003.ts", "hdz_002.ts", "hdz_001.ts"], names
+    close(window)
