@@ -138,10 +138,22 @@ verification was unavailable.
 
 **The two machines hold different footage**, so a measurement on real media
 usually cannot be repeated by the other reviewer — the laptop has `D:\movies`,
-the desktop has `F:\FPV clips` and whatever card is in the reader. Name the clip
-and say what you measured, so the claim can be judged on its own terms rather
-than only believed or not. A review that says "I could not repeat this and here
-is why" is doing its job; one that quietly skips the check is not.
+the desktop has `F:\FPV clips` and whatever card is in the reader. Identify the
+source with a content-derived review ID, not its DVR filename or local path:
+DVR filenames repeat after a card wipe, while the content remains the same when
+the source file is copied between machines. Compute the full-file SHA-256 and
+report its first 16 hexadecimal characters, normalised to lowercase:
+
+```powershell
+(Get-FileHash -Algorithm SHA256 -LiteralPath $clip).Hash.Substring(0, 16).ToLowerInvariant()
+```
+
+Do not use `ClipInfo.fingerprint` for this: it deliberately incorporates the
+local path and modification time for cache invalidation, so it changes across
+copies. Say what you measured against the review ID, for example
+`clip 8f2a1c4d7e9b1023`, and keep the filename and path out of public reviews. A
+review that says "I could not repeat this and here is why" is doing its job; one
+that quietly skips the check is not.
 
 Offscreen Qt is not a substitute for either. It has no usable fonts, reports
 text widths roughly double the real ones, and no key mapper — so a layout
