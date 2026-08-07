@@ -67,6 +67,11 @@ installation token in `gh` configuration. Its ACL deliberately denies the
 assistant sandbox; request a one-time host-side approval to mint a token rather
 than weakening that boundary.
 
+The app never needs its own persistent `gh auth login`. Assigning the token to
+`GH_TOKEN` temporarily selects the app identity for exactly that command; removing
+the variable restores the normal `nkghxst` login. The laptop and desktop may mint
+separate short-lived tokens at the same time from their own private keys.
+
 Mark it ready for review when it is finished.
 
 ### Reviewing
@@ -78,19 +83,70 @@ prerequisites had already shipped.
 
 ```bash
 gh pr diff 15
-gh pr review 15 --comment --body-file review.md
+gh pr view 15 --json author --jq .author.login
 ```
 
-Reviews and merges use the maintainer's normal `gh` login, never the app token.
-Make sure `GH_TOKEN` is unset before reviewing. PRs opened before the app was
-introduced remain authored by `nkghxst`; GitHub cannot reassign them, so their
-cross-assistant reviews can only be recorded as comments.
+**Every review starts by naming its actual reviewer**, because Claude and Codex
+share the same app identity. Use the first line of the review body:
+
+```
+Reviewer: Codex (<current model>)
+```
+
+or:
+
+```
+Reviewer: Claude Code (<current model>)
+```
+
+The review must be submitted by the identity that did **not** open the PR:
+
+- If the PR author is `app/flightdvr-assistant-nkghxst`, review with the normal
+  `nkghxst` login. Make sure `GH_TOKEN` is unset first.
+- If the PR author is `nkghxst`, review with a short-lived app token. This is the
+  fallback for a PR accidentally opened under the human identity; it preserves a
+  distinct maker and reviewer without adding another persistent login.
+- Never review an app-authored PR with the app, or a human-authored PR with the
+  human login. GitHub does not allow an author to approve its own PR.
+
+Use the review result that matches the evidence: `--approve` when it is ready,
+`--request-changes` for confirmed blocking findings, or `--comment` when there is
+no binary verdict. For a human-authored PR:
+
+```powershell
+$env:GH_TOKEN = & .\tools\github_app_token.ps1
+try {
+    gh pr review 15 --approve --body-file review.md
+} finally {
+    Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
+}
+```
+
+Reviews and merges are different operations: only the maintainer merges, always
+under the normal `nkghxst` login with `GH_TOKEN` unset.
 
 Say what you checked and what you could not check. A review that only lists
 findings hides how much of the change was actually looked at.
 
 Confirm a finding against the code before reporting it, and say whether you
 did. "This looks wrong" and "I ran it and it is wrong" are different claims.
+
+A queued, absent or cancelled GitHub Actions job is not evidence that the code
+failed. GitHub itself has outages and capacity problems. Check the current run
+and its logs before calling a CI failure a code failure, and say when remote
+verification was unavailable.
+
+**The two machines hold different footage**, so a measurement on real media
+usually cannot be repeated by the other reviewer — the laptop has `D:\movies`,
+the desktop has `F:\FPV clips` and whatever card is in the reader. Name the clip
+and say what you measured, so the claim can be judged on its own terms rather
+than only believed or not. A review that says "I could not repeat this and here
+is why" is doing its job; one that quietly skips the check is not.
+
+Offscreen Qt is not a substitute for either. It has no usable fonts, reports
+text widths roughly double the real ones, and no key mapper — so a layout
+"verified" there says nothing about the real window, and a shortcut that does
+not fire there may well fire on a keyboard. Both mistakes have been made.
 
 ### Handing over
 

@@ -7,30 +7,48 @@ by reading different rules.
 **Read it before starting.** In particular: check `gh pr list` before picking
 anything up, claim work with a draft PR, and review what the other one wrote.
 
-## Current handoff — 7 August 2026
+## GitHub identity on each computer
 
-The separate PR identity is now the `flightdvr-assistant-nkghxst` GitHub App.
-Use the short-lived-token workflow in `AGENTS.md` to open future PRs. Commits
-and pushes still use the normal maintainer identity; reviews and merges must
-also use the normal identity with `GH_TOKEN` unset.
+The `flightdvr-assistant-nkghxst` GitHub App is installed on this repository
+once, but its private keys and local Git settings do not travel with the clone.
+The laptop and desktop may use the app at the same time. Give each computer its
+own key so one can be revoked without interrupting the other.
 
-Current workstation note: `git push` works through Windows Credential Manager,
-but `gh auth status` reports the saved `nkghxst` CLI token as invalid. Run
-`gh auth login -h github.com` before the next review command. Do not work around
-that by reviewing with the app token; the app is only the PR author.
+On a computer that has not used the app before:
 
-Codex has completed these reviews:
+1. Run `gh auth status`. The normal `nkghxst` login is for commits, pushes and
+   merges, and for reviewing PRs opened by the app. Authenticate it with
+   `gh auth login -h github.com` if needed. This is the computer's only
+   persistent GitHub CLI login; **do not log the app into `gh`**.
+2. **Maintainer step:** in the app's [General settings](https://github.com/settings/apps/flightdvr-assistant-nkghxst),
+   generate a private key for this computer. Do not reinstall the app. Store
+   the key in a user-only location outside every checkout and give Claude only
+   the path needed for the next step. Claude must not generate, move, display,
+   or weaken the ACL on the key, and the other computer's key must not be copied.
+3. **Assistant step, after the maintainer supplies the path:** set the
+   non-secret IDs and that computer's key path in this clone:
 
-- [PR #24](https://github.com/nkghxst/flightdvr-studio/pull/24) needs changes;
-  four confirmed findings were left inline.
-- [PR #26](https://github.com/nkghxst/flightdvr-studio/pull/26) is ready from
-  review. This identity branch is based on it because it already changes
-  `AGENTS.md`.
-- [PR #27](https://github.com/nkghxst/flightdvr-studio/pull/27) is ready from
-  review; unit, UI, integration and full-suite checks passed locally.
-- [PR #28](https://github.com/nkghxst/flightdvr-studio/pull/28) is Codex's
-  implementation and is ready for Claude's review.
+   ```powershell
+   git config --local flightdvr.githubAppId 4511822
+   git config --local flightdvr.githubAppInstallationId 151828984
+   git config --local flightdvr.githubAppKeyPath "D:/secure/location/flightdvr-assistant.private-key.pem"
+   ```
 
-GitHub Actions was recovering from an outage during these reviews, so a queued
-or absent remote job is not by itself evidence of a code failure. Check the
-current run before drawing a conclusion.
+   Linked worktrees share these values; a separate clone needs them once.
+4. Follow the identity matrix in `AGENTS.md` when opening or reviewing a PR.
+   Push normally, run `tools/github_app_token.ps1` with one-time host approval
+   if the sandbox cannot read the key, assign the short-lived result to
+   `GH_TOKEN` only around the one `gh pr create` or `gh pr review` command, and
+   remove `GH_TOKEN` immediately afterwards. Removing it automatically returns
+   `gh` to the normal human login; no logout, second login, or account switching
+   is needed.
+
+At the start of every review body, state the assistant and current model exactly
+as `Reviewer: Claude Code (<current model>)`. Codex uses the equivalent Codex
+line. If the PR was opened by `nkghxst`, review as the app; if the PR was opened
+by the app, review as `nkghxst`. Never use the same GitHub identity for both
+maker and reviewer.
+
+If setup fails, report which of `gh auth status`, the three local settings, the
+private-key path, or token generation failed. Do not weaken the key's ACL as a
+workaround.
