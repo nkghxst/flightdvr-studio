@@ -42,11 +42,30 @@ enough that two features in it will conflict.
 the issue it closes. That is the claim — it costs nothing extra, because the PR
 has to exist anyway, and unlike a status file it cannot drift out of date.
 
-```bash
+Commits and branch pushes use the maintainer's normal Git identity, but the PR
+itself must be opened with the `flightdvr-assistant-nkghxst` GitHub App. GitHub
+then records the app as the PR author, so `nkghxst` can submit a real approval
+or request changes. The app is installed only on this repository and has only
+contents read and pull-request write access.
+
+```powershell
 git checkout -b short-branch-name
 git commit                           # something small and real
-gh pr create --draft --title "..." --body "Closes #14"
+$env:GH_TOKEN = & .\tools\github_app_token.ps1
+try {
+    gh pr create --draft --title "..." --body "Closes #14"
+} finally {
+    Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
+}
 ```
+
+The helper reads the app ID, installation ID and private-key path from this
+checkout's local git configuration. It prints a short-lived installation token
+but never stores one. The private key lives outside the repository on the
+development machine. Never commit it, copy it into the worktree, or persist an
+installation token in `gh` configuration. Its ACL deliberately denies the
+assistant sandbox; request a one-time host-side approval to mint a token rather
+than weakening that boundary.
 
 Mark it ready for review when it is finished.
 
@@ -61,6 +80,11 @@ prerequisites had already shipped.
 gh pr diff 15
 gh pr review 15 --comment --body-file review.md
 ```
+
+Reviews and merges use the maintainer's normal `gh` login, never the app token.
+Make sure `GH_TOKEN` is unset before reviewing. PRs opened before the app was
+introduced remain authored by `nkghxst`; GitHub cannot reassign them, so their
+cross-assistant reviews can only be recorded as comments.
 
 Say what you checked and what you could not check. A review that only lists
 findings hides how much of the change was actually looked at.
