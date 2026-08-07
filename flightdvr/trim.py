@@ -51,7 +51,13 @@ def cache_root() -> Path:
 
 
 def _key(clip: ClipInfo) -> str:
-    raw = f"{clip.path}|{clip.size}|{clip.modified.timestamp()}|{FRAME_WIDTH}"
+    """Where this clip's filmstrip lives.
+
+    Built on ClipInfo.fingerprint so there is one idea of what identifies a
+    recording, plus the frame width, because changing that has to invalidate
+    what is already cached.
+    """
+    raw = f"{clip.fingerprint}|{FRAME_WIDTH}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
 
 

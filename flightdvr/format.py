@@ -52,6 +52,41 @@ def natural_key(text: str) -> str:
     return re.sub(r"\d+", lambda m: m.group().zfill(12), text.lower())
 
 
+def canonical_path(path) -> str:
+    """One spelling of a path, so two ideas of identity cannot disagree.
+
+    `G:\\Movies` and `g:\\movies` are the same folder on Windows and different
+    strings everywhere. Sessions used `os.path.normcase` for the autosave
+    filename and the raw spelling for the clip fingerprints, so opening a card
+    through a differently-cased path found the right session and then reported
+    every clip in it as missing.
+
+    Resolved as well as case-folded: a session opened through a mapped drive,
+    a symlink or a relative path is about the same footage as one opened
+    through the real one.
+    """
+    text = Path(path)
+    try:
+        text = text.resolve()
+    except OSError:
+        text = text.absolute()
+    return os.path.normcase(str(text))
+
+
+def folder_label(source: str) -> str:
+    """The last component of a path written on any platform.
+
+    A session records the folder it was made from, and that string travels:
+    written on Windows, it may well be read on Linux, where
+    `Path(r"G:\\movies").name` is the whole string rather than "movies".
+    """
+    if not source:
+        return ""
+    text = str(source).replace("\\", "/").rstrip("/")
+    tail = text.rsplit("/", 1)[-1]
+    return tail if tail and not tail.endswith(":") else text
+
+
 def output_key(path: Path) -> str:
     """One name per file, for spotting two jobs aimed at the same place.
 

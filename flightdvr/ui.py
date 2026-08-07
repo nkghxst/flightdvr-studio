@@ -47,8 +47,8 @@ from .browser_panel import BrowserPanel
 from .external import DESKTOP_OPEN, PLAYER_PATHS, find_player, reveal
 from .export_panel import ExportPanel, FPS_STEPS, RESOLUTION_STEPS
 from .format import (
-    _clip_set_id, existing_ancestor, human_duration, human_size, natural_key,
-    output_key, work_dir,
+    _clip_set_id, canonical_path, existing_ancestor, human_duration,
+    human_size, natural_key, output_key, work_dir,
 )
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
 from .media import (
@@ -62,6 +62,10 @@ from .presets import (
 from .player import PreviewPlayer
 from .preview_panel import PreviewView
 from .queue_panel import QueuePanel
+from .session import (
+    SUFFIX as SESSION_SUFFIX, Session, apply_to, capture_from, for_source,
+    missing_from, recent_sessions, remember,
+)
 from .thumbs import THUMB_WIDTH, ThumbnailLoader
 from .trim import Filmstrip, FilmstripLoader
 from .widgets import (
@@ -127,6 +131,20 @@ class MainWindow(QMainWindow):
         # Guards handlers that fire while the window is still being assembled.
         self._ready = False
 
+        # The decisions made about the folder currently open. None until a
+        # scan has said which folder that is.
+        self.session: Session | None = None
+        # A session opened by name, waiting for the scan of its folder to
+        # finish so there are clips to put it onto.
+        self._pending_session: Session | None = None
+        # Trims arrive continuously while a filmstrip handle is dragged. The
+        # session is written after the dragging stops rather than during it,
+        # which is the difference between one write and several hundred.
+        self._session_timer = QTimer(self)
+        self._session_timer.setSingleShot(True)
+        self._session_timer.setInterval(1500)
+        self._session_timer.timeout.connect(self._write_session)
+
         self.thumbs = ThumbnailLoader(tools, self)
         self.thumbs.ready.connect(self._thumb_ready)
 
@@ -169,6 +187,7 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(EDGE, EDGE, EDGE, EDGE)
         outer.setSpacing(INNER)
 
+        self._build_menus()
         outer.addWidget(self._build_update_bar())
         outer.addLayout(self._build_source_bar())
 
@@ -580,6 +599,197 @@ class MainWindow(QMainWindow):
 
     # -- settings -------------------------------------------------------------
 
+    # -- sessions -------------------------------------------------------------
+
+    def _build_menus(self) -> None:
+        """A menu for the session, because that is where people look for it.
+
+        Everything else in this window is a button, and a session deliberately
+        is not: it autosaves, so the common case needs no action at all. What
+        the menu holds is the uncommon cases — naming one, and getting back to
+        one from another folder.
+        """
+        menu = self.menuBar().addMenu("&Session")
+
+        self.session_save_as = menu.addAction("Save session as…")
+        self.session_save_as.setShortcut("Ctrl+Shift+S")
+        self.session_save_as.triggered.connect(self._save_session_as)
+
+        open_action = menu.addAction("Open session…")
+        open_action.setShortcut("Ctrl+O")
+        open_action.triggered.connect(self._open_session)
+
+        self.recent_menu = menu.addMenu("Recent sessions")
+        self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
+
+    def _fill_recent_menu(self) -> None:
+        """Built when opened rather than kept in step.
+
+        The list changes on disk whenever any window opens a session, so a menu
+        built once at startup is wrong the moment there are two of them.
+        """
+        self.recent_menu.clear()
+        entries = [r for r in recent_sessions() if r.exists]
+        if not entries:
+            nothing = self.recent_menu.addAction("Nothing yet")
+            nothing.setEnabled(False)
+            return
+        for entry in entries:
+            action = self.recent_menu.addAction(entry.label)
+            action.setToolTip(entry.source or entry.path)
+            action.triggered.connect(
+                lambda *_, path=entry.path: self._open_session_file(Path(path))
+            )
+
+    def _adopt_session(self, found: Session) -> None:
+        """Put a session's marks onto the clips on screen, and say what it did.
+
+        Silent on a session that gave nothing back — an empty one is the normal
+        state of a folder opened for the first time, and announcing it every
+        time would train people to ignore the line that also reports losses.
+        """
+        # Everything on screen is cleared first. apply_to only touches clips
+        # the new session has something to say about, so without this a switch
+        # merged: trims from the previous session survived on screen and were
+        # then written into the file that was just opened, which had never
+        # heard of them.
+        for clip in self.clips:
+            clip.trim_in = clip.trim_out = 0.0
+
+        self.session = found
+        self._pending_session = None
+        # Only once there is a file. A folder opened for the first time has a
+        # session with a path and nothing written at it yet, and listing that
+        # under "recent" offers a door that opens onto nothing.
+        if found.path is not None and found.path.exists():
+            remember(found)
+        self._show_session_title()
+
+        restored = apply_to(found, self.clips)
+        for clip in self.clips:
+            self._mark_trim_in_table(clip)
+        if self._trim_clip is not None:
+            self._load_selected_clip()
+        self._update_estimate()
+
+        notes = []
+        if restored:
+            notes.append(f"{restored} trim{'' if restored == 1 else 's'} "
+                         "restored from your last visit")
+
+        # Named, not counted: "9 clips are missing" is a puzzle, and the whole
+        # point of keeping the name alongside the fingerprint is to answer it.
+        gone = missing_from(found, {c.fingerprint for c in self.clips})
+        if gone:
+            listed = ", ".join(m.name for m in gone[:3] if m.name)
+            more = f" and {len(gone) - 3} more" if len(gone) > 3 else ""
+            notes.append(
+                f"{len(gone)} marked clip{'' if len(gone) == 1 else 's'} "
+                f"not in this folder ({listed}{more}) — moved, or rewritten by "
+                "the goggles since you marked them")
+        if notes:
+            self.statusBar().showMessage("  ·  ".join(notes), 12000)
+
+    def _show_session_title(self) -> None:
+        if self.session is None or self.session.is_empty():
+            self.setWindowTitle(APP_NAME)
+            return
+        self.setWindowTitle(f"{self.session.title or 'Session'} — {APP_NAME}")
+
+    def _touch_session(self) -> None:
+        """Something was decided. Write it, once the deciding has stopped."""
+        if self.session is not None:
+            self._session_timer.start()
+
+    def _write_session(self) -> None:
+        if self.session is None:
+            return
+        capture_from(self.session, self.clips)
+        try:
+            self.session.save()
+        except OSError as problem:
+            # Not a dialog. Losing marks matters, but interrupting a review to
+            # say so — possibly repeatedly — would cost more than it saves.
+            self.statusBar().showMessage(
+                f"Could not save the session: {problem}", 8000)
+            return
+        # Here rather than on opening, so the recent list only ever names files
+        # that are actually there.
+        remember(self.session)
+        self._show_session_title()
+
+    def _flush_session(self) -> None:
+        """Write now rather than when the timer says so."""
+        if self._session_timer.isActive():
+            self._session_timer.stop()
+        self._write_session()
+
+    def _save_session_as(self) -> None:
+        if self.session is None:
+            QMessageBox.information(
+                self, "No session yet",
+                "Scan a folder first — a session belongs to the clips in it.")
+            return
+        self._flush_session()
+
+        suggested = (self.session.title
+                     or Path(self.session.source).name or "session")
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, "Save session as", str(Path.home() / f"{suggested}{SESSION_SUFFIX}"),
+            f"FlightDVR sessions (*{SESSION_SUFFIX})")
+        if not chosen:
+            return
+
+        target = Path(chosen)
+        self.session.title = target.name.replace(SESSION_SUFFIX, "")
+        try:
+            self.session.save(target)
+        except OSError as problem:
+            QMessageBox.warning(self, "Could not save", str(problem))
+            return
+        remember(self.session)
+        self._show_session_title()
+        self.statusBar().showMessage(f"Session saved to {target}", 8000)
+
+    def _open_session(self) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Open session", str(Path.home()),
+            f"FlightDVR sessions (*{SESSION_SUFFIX})")
+        if chosen:
+            self._open_session_file(Path(chosen))
+
+    def _open_session_file(self, path: Path) -> None:
+        """Open a session, and offer to go to the folder it was made from.
+
+        Opening one while looking at a different card would otherwise apply
+        marks to clips they were never about — the fingerprints would not match
+        and nothing would happen, which looks like the file being broken.
+        """
+        found = Session.load(path)
+        source = Path(found.source) if found.source else None
+        here = self._source_path()
+
+        if source and source.exists() and source != here:
+            answer = QMessageBox.question(
+                self, "Different folder",
+                f"That session was made from\n{source}\n\n"
+                f"Scan there now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            if answer == QMessageBox.StandardButton.Yes:
+                self._flush_session()
+                # Held rather than assigned: the scan that follows ends in
+                # _scan_done, which would otherwise load the folder's own
+                # autosave over the top of the file just opened.
+                self._pending_session = found
+                self.source_combo.insertItem(0, str(source), str(source))
+                self.source_combo.setCurrentIndex(0)
+                self._scan()
+                return
+
+        self._flush_session()
+        self._adopt_session(found)
+
     def _restore(self) -> None:
         store = self.settings_store
         self.export_panel.restore(store)
@@ -644,6 +854,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self._save()
+        # Before the threads are stopped: a trim set in the last second and a
+        # half is still sitting on the debounce timer, and closing the window
+        # is exactly when someone expects their work to have been kept.
+        self._flush_session()
         # First, because it is the one holding a decoder open on the card.
         self.player.shutdown()
         if self.worker and self.worker.isRunning():
@@ -733,6 +947,12 @@ class MainWindow(QMainWindow):
             self.scan_worker.stop()
             self.scan_worker.wait(1500)
 
+        # Before the clips go. The session is written from them, and the write
+        # is debounced by a second and a half — so a trim set and then followed
+        # straight away by Scan, Browse or Find SD card had its only copy
+        # discarded here.
+        self._flush_session()
+
         self.settings_store.setValue("source_dir", str(folder))
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
@@ -796,7 +1016,23 @@ class MainWindow(QMainWindow):
             self.warning_label.setText(message)
             self.warning_label.show()
 
+        # After the clips exist, because a session is only meaningful applied
+        # to them — and after sorting, so the rows it marks are the final ones.
+        source = self._source_path()
+        if source is not None:
+            opened, self._pending_session = self._pending_session, None
+            if opened is None and self._is_open_for(source):
+                # Scanning the same folder again keeps the session already
+                # open. Without this, pressing Scan after opening a session by
+                # name quietly swapped it for the folder's own autosave.
+                opened = self.session
+            self._adopt_session(opened or for_source(source))
+
         self.thumbs.resume()
+
+    def _is_open_for(self, source: Path) -> bool:
+        return (self.session is not None
+                and canonical_path(self.session.source) == canonical_path(source))
 
     def _add_clip(self, generation: int, clip: ClipInfo) -> None:
         # A worker from an earlier scan can still be finishing probes it had
@@ -1072,6 +1308,7 @@ class MainWindow(QMainWindow):
         self._update_trim_labels()
         self._mark_trim_in_table(clip)
         self._update_estimate()
+        self._touch_session()
 
     def _set_in(self) -> None:
         if self._trim_clip is None:
@@ -1098,6 +1335,10 @@ class MainWindow(QMainWindow):
         self._update_trim_labels()
         self._mark_trim_in_table(clip)
         self._update_estimate()
+        # Clearing a trim is a decision too. Closing the window would capture
+        # it anyway, since the session is written from the clips as they stand
+        # — what this buys is that it survives the app dying instead.
+        self._touch_session()
 
     def _update_trim_labels(self) -> None:
         clip = self._trim_clip
