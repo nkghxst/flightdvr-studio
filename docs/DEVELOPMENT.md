@@ -659,7 +659,7 @@ The cache has two bounds: the command receives `-frames:v 121`, and
 `FrameCache` independently stops accepting at 121 frames. That is 44.87 MiB of
 pixels at 480x270. A refill replaces the dictionary rather than extending it.
 Measured on real 720p60 footage (`D:\movies\hdz_047.ts`), two windows decoded in
-1.13–1.28 s and returned exactly their planned ranges, 540–660 and 600–720.
+1.16–1.29 s and returned exactly their planned ranges, 540–660 and 600–720.
 Source frame 630 was byte-identical in both at PTS 10.499989 s.
 
 One ffmpeg boundary trap needed a different shape rather than a larger fudge.
