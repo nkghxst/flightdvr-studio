@@ -16,14 +16,17 @@ own key so one can be revoked without interrupting the other.
 
 On a computer that has not used the app before:
 
-1. Run `gh auth status`. The normal `nkghxst` login is for commits, pushes,
-   reviews and merges; authenticate it with `gh auth login -h github.com` if
-   needed.
-2. In the app's [General settings](https://github.com/settings/apps/flightdvr-assistant-nkghxst),
-   generate a new private key for this computer. Do not reinstall the app. Put
-   the key in a user-only location outside every checkout, and do not copy the
-   other computer's key or grant an assistant sandbox permanent access to it.
-3. Set the non-secret IDs and that computer's key path in this clone:
+1. Run `gh auth status`. The normal `nkghxst` login is for commits, pushes and
+   merges, and for reviewing PRs opened by the app. Authenticate it with
+   `gh auth login -h github.com` if needed. This is the computer's only
+   persistent GitHub CLI login; **do not log the app into `gh`**.
+2. **Maintainer step:** in the app's [General settings](https://github.com/settings/apps/flightdvr-assistant-nkghxst),
+   generate a private key for this computer. Do not reinstall the app. Store
+   the key in a user-only location outside every checkout and give Claude only
+   the path needed for the next step. Claude must not generate, move, display,
+   or weaken the ACL on the key, and the other computer's key must not be copied.
+3. **Assistant step, after the maintainer supplies the path:** set the
+   non-secret IDs and that computer's key path in this clone:
 
    ```powershell
    git config --local flightdvr.githubAppId 4511822
@@ -32,11 +35,19 @@ On a computer that has not used the app before:
    ```
 
    Linked worktrees share these values; a separate clone needs them once.
-4. Follow `AGENTS.md` when opening a PR: push the branch normally, run
-   `tools/github_app_token.ps1` with one-time host approval if the sandbox
-   cannot read the key, use its token only around `gh pr create`, and remove
-   `GH_TOKEN` immediately afterwards. Never put the app token into
-   `gh auth login`; reviews must remain under the normal human login.
+4. Follow the identity matrix in `AGENTS.md` when opening or reviewing a PR.
+   Push normally, run `tools/github_app_token.ps1` with one-time host approval
+   if the sandbox cannot read the key, assign the short-lived result to
+   `GH_TOKEN` only around the one `gh pr create` or `gh pr review` command, and
+   remove `GH_TOKEN` immediately afterwards. Removing it automatically returns
+   `gh` to the normal human login; no logout, second login, or account switching
+   is needed.
+
+At the start of every review body, state the assistant and current model exactly
+as `Reviewer: Claude Code (<current model>)`. Codex uses the equivalent Codex
+line. If the PR was opened by `nkghxst`, review as the app; if the PR was opened
+by the app, review as `nkghxst`. Never use the same GitHub identity for both
+maker and reviewer.
 
 If setup fails, report which of `gh auth status`, the three local settings, the
 private-key path, or token generation failed. Do not weaken the key's ACL as a
