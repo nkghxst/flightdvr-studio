@@ -146,6 +146,15 @@ class MainWindow(QMainWindow):
         self._session_timer.setInterval(1500)
         self._session_timer.timeout.connect(self._write_session)
 
+        # A seek repaints from the filmstrip immediately and then asks the
+        # decoder for the real frame once the dragging stops. Short enough to
+        # feel like part of the same gesture, long enough that a drag across a
+        # whole clip does not queue a decode per pixel.
+        self._sharpen_timer = QTimer(self)
+        self._sharpen_timer.setSingleShot(True)
+        self._sharpen_timer.setInterval(250)
+        self._sharpen_timer.timeout.connect(self._sharpen)
+
         self.thumbs = ThumbnailLoader(tools, self)
         self.thumbs.ready.connect(self._thumb_ready)
 
@@ -1264,6 +1273,19 @@ class MainWindow(QMainWindow):
         self.player.seek(seconds)
         self._show_frame(seconds)
         self._update_trim_labels()
+        self._sharpen_timer.start()
+
+    def _sharpen(self) -> None:
+        """Replace the filmstrip still with the frame that is really there.
+
+        Deferred rather than immediate, because a drag emits continuously and
+        each decode is a second or so of ffmpeg. The still is painted the moment
+        the playhead moves, so nothing feels slower — this only arrives after
+        the dragging stops, and replaces a 160px thumbnail with a real frame.
+        """
+        if self.player.is_playing or self._trim_clip is None:
+            return
+        self.player.show_frame_at(self.trim_bar.playhead)
 
     # -- playing --------------------------------------------------------------
 

@@ -1003,3 +1003,62 @@ def test_the_view_is_big_enough_to_judge_a_moment_by(qt_app):
     assert view.minimumWidth() >= 320
     # The playback keys are scoped to this widget, so it has to be focusable.
     assert view.focusPolicy() != Qt.FocusPolicy.NoFocus
+
+
+# -- seeking gets a real frame, not a filmstrip thumbnail ---------------------
+
+def test_seeking_asks_for_the_frame_that_is_really_there(qt_app):
+    """A settled seek used to leave a 160px filmstrip still in a preview four
+    times that wide. It reaches the same decoder comma and period use."""
+    p = player(FakeClock())
+    p.show_frame_at(30.0)
+
+    assert len(p.frame_workers) == 1, "no window was decoded"
+    window = p.frame_workers[0].window
+    assert window.first_frame <= 30.0 * clip().fps <= window.last_frame
+
+
+def test_a_seek_inside_the_window_already_decoded_is_free(qt_app):
+    """The whole reason to share #33's cache rather than decode every seek."""
+    from flightdvr.player import CachedFrame
+
+    p = player(FakeClock())
+    p.show_frame_at(30.0)
+    window = p.frame_workers[0].window
+    p._frame_cache.replace([
+        CachedFrame(frame_number=n, seconds=n / clip().fps,
+                    pixels=b"\0" * (480 * 270 * 3))
+        for n in range(window.first_frame, window.last_frame + 1)
+    ])
+    p._frame_pending = None
+
+    before = len(p.frame_workers)
+    p.show_frame_at(window.first_frame / clip().fps + 0.2)
+    assert len(p.frame_workers) == before, "decoded a frame it already had"
+
+
+def test_seeking_while_playing_does_not_disturb_the_decoder(qt_app):
+    """Precise decode releases the playback stream, so asking for one mid-play
+    would stop the video to sharpen a frame nobody is looking at."""
+    p = player(FakeClock())
+    p.play(view_width=640)
+    assert p.is_playing
+
+    p.show_frame_at(30.0)
+    assert p.frame_workers == [], "decoded a precise frame during playback"
+    assert p.is_playing, "playback stopped"
+
+
+def test_asking_twice_for_the_same_frame_decodes_once(qt_app):
+    p = player(FakeClock())
+    p.show_frame_at(30.0)
+    p.show_frame_at(30.004)          # inside the same source frame at 60 fps
+    assert len(p.frame_workers) == 1
+
+
+def test_a_clip_with_no_known_frame_rate_is_left_alone(qt_app):
+    """Refused honestly rather than guessed at, the same as stepping."""
+    p = player(FakeClock())
+    p.load(clip(fps=0.0))
+    p.show_frame_at(30.0)
+    assert p.frame_workers == []
