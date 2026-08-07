@@ -72,7 +72,8 @@ Image-based systems already include ffmpeg, so there is
 nothing to do there. Run the app with `--check` if you want to confirm what it
 found before you go looking.
 
-Install VLC or mpv as well if you want clip preview to work.
+Playback happens in the window and needs nothing else. Install VLC or mpv as
+well if you want **Open in player…** to have somewhere to send a clip.
 
 ### macOS
 
@@ -231,6 +232,7 @@ recording takes about four seconds, and is cached afterwards, so dragging is
 instant rather than waiting on a seek.
 
 Trims survive into a joined export: each clip keeps its own in and out points.
+*Remux* is the exception and will say so — see below.
 
 **Joining clips into one file** is the *Join the ticked clips into one file*
 box, for when the DVR split a single flight across several recordings. Clips
@@ -243,9 +245,13 @@ so nothing is thrown away to suit the smallest — and a clip with no sound gets
 silence rather than removing the audio from the rest. Only *Remux* refuses a
 mismatched set, because copying without re-encoding cannot change anything.
 
-> **Remux is the exception.** It does no re-encoding, so it can only cut at a
-> keyframe and a trimmed rewrap may be a second or so out. Every other preset is
-> frame-accurate.
+> **Remux is the exception.** It does no re-encoding, so it can only cut where a
+> keyframe already is, and a trimmed rewrap may be a second or so out. Every
+> other preset is frame-accurate.
+>
+> Joining *trimmed* clips with Remux is refused rather than done badly: the
+> result plays and reports the right length while every join is torn. Reset the
+> trims to join them untouched, or pick a re-encoding preset to keep them.
 
 ## Export presets
 

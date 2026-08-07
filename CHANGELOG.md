@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.4.0
+
+**You can watch the footage now.** Until this release the app could tell you a
+clip was 3 minutes 33 and 599 MB, and nothing about what was in it. Trimming
+meant guessing at two numbers and finding out after the export. There is a
+player in the window now, and the trim points are set on the frame in front of
+you.
+
+- **A preview player, permanently in the window.** Double-click a clip and it
+  plays. Under it is a filmstrip of every keyframe in the recording, a second
+  apart — click anywhere to jump there, drag either end to set where the export
+  starts and ends. With the picture focused, Space or K plays, I and O set the
+  in and out points at the playhead, the arrow keys move a second (five with
+  Shift), Home and End jump to the trim points, Esc stops.
+
+  It is silent, and deliberately so: audio would need a second synchronised
+  pipeline to buy very little on footage most people mute anyway.
+
+  Decoding is ffmpeg's rather than Qt's, because Windows Media Foundation
+  cannot decode HEVC in an MPEG-TS container — which is exactly what the
+  goggles write. *Open in player…* is still there if you would rather use your
+  own.
+
+- **A joined remux that would come out corrupt is now refused instead of
+  written.** Joining trimmed clips without re-encoding produced a file that
+  played, reported the right length, and had torn frames at every join: a
+  stream copy can only start where a keyframe already is. The message says both
+  ways out — reset the trims to join them untouched, or pick a re-encoding
+  preset to keep them. Single-clip trimmed remuxes were never affected and are
+  unchanged.
+
+- **The window no longer freezes when you stop something.** Filmstrip
+  extraction could not be cancelled, so a slow card or a damaged recording
+  could leave the window refusing to close. Selecting the same clip twice while
+  the first extraction was still running had the two of them overwriting each
+  other's cache. Stopping the preview blocked the interface until ffmpeg
+  actually exited.
+
+- **A crash on closing the window is fixed**, where the hardware probe outlived
+  the window it reported to.
+
+- **The low-space warning no longer crashes.** Asking to export more than the
+  free space raised an error instead of the warning — so the guard against
+  filling your disk was the one thing guaranteed to break when it mattered.
+  Present since the first public release. Found by Codex while extracting the
+  panels below.
+
+- **A trimmed export could begin at the wrong second** when audio was turned
+  off and the recording's sound started fractionally before its picture. No
+  error, no corrupt frames, correct length, just the wrong moment. HDZero
+  recordings start at zero and never showed it; the fix pins the timeline so
+  the seek means one thing either way.
+
+Under the surface, `ui.py` is now five modules rather than one, which is
+groundwork for the sessions and selects work in 1.5. Where this is all going is
+written down in [docs/ROADMAP.md](docs/ROADMAP.md).
+
 ## 1.3.0
 
 - **A new Upload preset, for sites that re-encode what you send them.**
