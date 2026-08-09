@@ -43,7 +43,9 @@ from PySide6.QtWidgets import (
 )
 
 from . import scan
-from .browser_panel import BrowserPanel
+from .browser_panel import (
+    FILTER_ALL, FILTER_EXPORTED, REVIEW_KEYS, REVIEW_LABELS, BrowserPanel,
+)
 from .external import DESKTOP_OPEN, PLAYER_PATHS, find_player, reveal
 from .export_panel import ExportPanel, FPS_STEPS, RESOLUTION_STEPS
 from .format import (
@@ -63,8 +65,9 @@ from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
 from .queue_panel import QueuePanel
 from .session import (
-    SUFFIX as SESSION_SUFFIX, Session, apply_settings, apply_to, capture_from,
-    capture_settings, for_source, missing_from, recent_sessions, remember,
+    REVIEW_STATES, SUFFIX as SESSION_SUFFIX, UNREVIEWED, Session,
+    apply_settings, apply_to, capture_from, capture_settings, for_source,
+    missing_from, recent_sessions, remember,
 )
 from .thumbs import THUMB_WIDTH, ThumbnailLoader
 from .trim import Filmstrip, FilmstripLoader
@@ -78,6 +81,11 @@ APP_NAME = "FlightDVR Studio"
 APP_TAGLINE = "Browse, trim and convert HDZero goggle DVR footage"
 ORG = "FlightDVR Studio"
 COPYRIGHT_HOLDER = "Isadu Nkemi"
+
+# The name item already uses UserRole for its path, and SortItem uses the next
+# role for ordering. This one records the current-settings export marker so the
+# Exported filter reads the same answer the row displays.
+EXPORTED_ROLE = Qt.ItemDataRole.UserRole + 2
 
 # Probing is I/O bound on a card reader, so a few at once helps a lot; beyond
 # about four the reader becomes the limit and it gets slower again.
@@ -464,6 +472,8 @@ class MainWindow(QMainWindow):
         panel.item_changed.connect(self._on_item_changed)
         panel.item_activated.connect(self._play_item)
         panel.selection_changed.connect(self._on_clip_selected)
+        panel.filter_changed.connect(self._refresh_review_filter)
+        panel.review_requested.connect(self._set_review)
         return panel
 
     # Compatibility views for the established MainWindow API. They keep
@@ -696,6 +706,7 @@ class MainWindow(QMainWindow):
         for clip in self.clips:
             clip.selects = []
             clip.current = 0
+            clip.review = UNREVIEWED
 
         self.session = found
         self._pending_session = None
@@ -713,9 +724,11 @@ class MainWindow(QMainWindow):
         restored = apply_to(found, self.clips)
         for clip in self.clips:
             self._mark_trim_in_table(clip)
+            self._mark_review_in_table(clip)
         if self._trim_clip is not None:
             self._load_selected_clip()
         self._update_estimate()
+        self._refresh_review_controls()
 
         notes = []
         if restored:
@@ -1004,6 +1017,7 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(0)
         self.clips.clear()
         self.clip_by_path.clear()
+        self.browser_panel.set_review_progress(0, 0)
         self.warning_label.hide()
         self.scan_button.setEnabled(False)
         self._expected = 0
@@ -1095,6 +1109,7 @@ class MainWindow(QMainWindow):
         name_item.setFlags(name_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         name_item.setCheckState(Qt.CheckState.Unchecked)
         name_item.setData(Qt.ItemDataRole.UserRole, str(clip.path))
+        name_item.setData(EXPORTED_ROLE, False)
         tip = [str(clip.path), clip.format_detail]
         if clip.is_full_range:
             tip.append("Full-range recording: levels correction applies")
@@ -1111,9 +1126,16 @@ class MainWindow(QMainWindow):
             clip.modified.strftime("%d %b %Y  %H:%M"), clip.modified.timestamp()
         ))
         self.table.setItem(row, 4, SortItem(clip.format_label, clip.format_label))
+        self.table.setItem(
+            row, 5,
+            SortItem(REVIEW_KEYS[clip.review], REVIEW_STATES.index(clip.review)),
+        )
+        self.table.item(row, 5).setToolTip(REVIEW_LABELS[clip.review])
 
         self.table.setRowHeight(row, self.table.iconSize().height() + 6)
         self.thumbs.request(clip)
+        self._refresh_review_progress()
+        self._apply_review_filter_to_row(row, clip)
 
         if self._expected:
             self.clip_count_label.setText(
@@ -1135,6 +1157,8 @@ class MainWindow(QMainWindow):
     def _set_all(self, state: Qt.CheckState) -> None:
         self.table.blockSignals(True)
         for row in range(self.table.rowCount()):
+            if self.table.isRowHidden(row):
+                continue
             item = self.table.item(row, 0)
             if item:
                 item.setCheckState(state)
@@ -1149,6 +1173,97 @@ class MainWindow(QMainWindow):
 
     def _on_item_changed(self, _item) -> None:
         self._update_counts()
+
+    # -- reviewing ------------------------------------------------------------
+
+    def _set_review(self, state: str) -> None:
+        """Apply one of the four decisions to the highlighted row."""
+        if state not in REVIEW_STATES:
+            return
+        row = self.table.currentRow()
+        if row < 0:
+            self.statusBar().showMessage("Click a clip before marking it", 3000)
+            return
+        name = self.table.item(row, 0)
+        if name is None:
+            return
+        clip = self.clip_by_path.get(name.data(Qt.ItemDataRole.UserRole))
+        if clip is None:
+            return
+        if clip.review == state:
+            self.table.setFocus()
+            return
+
+        clip.review = state
+        self._mark_review_in_table(clip)
+        self._refresh_review_controls()
+        self._touch_session()
+        self.statusBar().showMessage(
+            f"{clip.path.name}: {REVIEW_LABELS[state]}", 2500
+        )
+        # A button click moves focus away from the list. Put it back so the
+        # next clip can be marked with one key rather than another click.
+        self.table.setFocus()
+
+    def _mark_review_in_table(self, clip: ClipInfo) -> None:
+        for row in range(self.table.rowCount()):
+            name = self.table.item(row, 0)
+            item = self.table.item(row, 5)
+            if name is None or item is None:
+                continue
+            if name.data(Qt.ItemDataRole.UserRole) != str(clip.path):
+                continue
+            previous = self.table.blockSignals(True)
+            item.setText(REVIEW_KEYS[clip.review])
+            item.setData(SortItem.SORT_ROLE, REVIEW_STATES.index(clip.review))
+            item.setToolTip(REVIEW_LABELS[clip.review])
+            self.table.blockSignals(previous)
+            break
+
+    def _refresh_review_controls(self) -> None:
+        self._refresh_review_progress()
+        self._refresh_review_filter()
+
+    def _refresh_review_progress(self) -> None:
+        reviewed = sum(1 for clip in self.clips if clip.review != UNREVIEWED)
+        self.browser_panel.set_review_progress(reviewed, len(self.clips))
+
+    def _apply_review_filter_to_row(self, row: int, clip: ClipInfo) -> None:
+        wanted = str(self.browser_panel.review_filter.currentData())
+        name = self.table.item(row, 0)
+        exported = bool(name and name.data(EXPORTED_ROLE))
+        visible = (
+            wanted == FILTER_ALL
+            or (wanted == FILTER_EXPORTED and exported)
+            or (wanted not in (FILTER_ALL, FILTER_EXPORTED)
+                and clip.review == wanted)
+        )
+        self.table.setRowHidden(row, not visible)
+
+    def _refresh_review_filter(self, *_args) -> None:
+        for row in range(self.table.rowCount()):
+            name = self.table.item(row, 0)
+            if name is None:
+                continue
+            clip = self.clip_by_path.get(name.data(Qt.ItemDataRole.UserRole))
+            if clip is not None:
+                self._apply_review_filter_to_row(row, clip)
+        self._keep_selection_visible()
+
+    def _keep_selection_visible(self) -> None:
+        """Do not leave keyboard actions aimed at a row the filter hid."""
+        current = self.table.currentRow()
+        if current < 0 or not self.table.isRowHidden(current):
+            return
+        rows = list(range(current, self.table.rowCount()))
+        rows += list(range(current - 1, -1, -1))
+        for row in rows:
+            if not self.table.isRowHidden(row):
+                self.table.setCurrentCell(row, 0)
+                self.table.selectRow(row)
+                return
+        self.table.clearSelection()
+        self.table.setCurrentItem(None)
 
     def selected_clips(self) -> list[ClipInfo]:
         """Ticked clips, in the order the table is currently showing them.
@@ -1729,10 +1844,12 @@ class MainWindow(QMainWindow):
                 continue
             target = output_path(out_dir, clip.stem, key, subfolders, stamp)
             done = target.exists() and target.stat().st_size > 0
+            item.setData(EXPORTED_ROLE, done)
             item.setText(f"{clip.path.name}    ✓ exported" if done else clip.path.name)
             if done:
                 item.setToolTip(f"{clip.path}\nAlready exported to {target}")
         self.table.blockSignals(False)
+        self._refresh_review_filter()
 
     def _retarget_pending(self) -> None:
         """Re-apply output settings to jobs that have not started yet.

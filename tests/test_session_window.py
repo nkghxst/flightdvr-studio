@@ -113,6 +113,34 @@ def test_a_trim_survives_closing_the_window(app, sessions_home, card):
     close(again)
 
 
+def test_review_state_and_progress_survive_closing_the_window(app,
+                                                              sessions_home,
+                                                              card):
+    """The state in the document matters only if the browser restores it and
+    counts it when the card is opened again."""
+    first = open_window(app, card, [a_clip("hdz_001.ts"), a_clip("hdz_002.ts")])
+    first.table.setCurrentCell(0, 0)
+    first.table.selectRow(0)
+    first._set_review(session_module.MAYBE)
+    close(first)
+
+    again = open_window(app, card, [a_clip("hdz_001.ts"), a_clip("hdz_002.ts")])
+    try:
+        assert again.clips[0].review == session_module.MAYBE
+        assert again.clips[1].review == session_module.UNREVIEWED
+        assert again.browser_panel.review_count_label.text() == "1 of 2 reviewed"
+
+        review_item = again.table.item(0, 5)
+        assert review_item.text() == "M"
+        assert review_item.toolTip() == "Maybe"
+        again.browser_panel.review_filter.setCurrentIndex(
+            again.browser_panel.review_filter.findData(session_module.MAYBE))
+        assert not again.table.isRowHidden(0)
+        assert again.table.isRowHidden(1)
+    finally:
+        close(again)
+
+
 def test_resetting_a_trim_is_remembered_as_a_decision(app, sessions_home, card):
     """The subtle one. Clearing a trim has to be stored as cleared, or the next
     visit puts back the trim that was just removed."""
@@ -374,12 +402,15 @@ def test_opening_a_session_replaces_what_is_on_screen(app, sessions_home, card,
 
     window = open_window(app, card, [a_clip("hdz_001.ts")])
     window.clips[0].trim_in, window.clips[0].trim_out = 8.0, 44.0
+    window.clips[0].review = session_module.KEEP
     window._open_session_file(foreign.path)
     close(window)
 
     assert not Session.load(foreign.path).clips, (
         "decisions from the previous session leaked into the opened one")
     assert not window.clips[0].is_trimmed, "the old trim stayed on screen"
+    assert window.clips[0].review == session_module.UNREVIEWED, (
+        "the old review state stayed on screen")
 
 
 def test_opening_a_session_clears_every_select_not_just_the_edited_one(

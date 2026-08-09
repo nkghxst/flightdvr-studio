@@ -18,13 +18,31 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QPushButton,
-    QTableWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
+    QPushButton, QTableWidget, QVBoxLayout, QWidget,
 )
 
+from .session import KEEP, MAYBE, REJECT, UNREVIEWED
 from .thumbs import THUMB_WIDTH
 from .widgets import MIN_THUMB_WIDTH, MIN_VISIBLE_CLIPS, dim
+
+
+FILTER_ALL = "all"
+FILTER_EXPORTED = "exported"
+REVIEW_LABELS = {
+    UNREVIEWED: "Unreviewed",
+    KEEP: "Keep",
+    MAYBE: "Maybe",
+    REJECT: "Reject",
+}
+REVIEW_KEYS = {
+    UNREVIEWED: "U",
+    KEEP: "K",
+    MAYBE: "M",
+    REJECT: "R",
+}
 
 
 class BrowserPanel(QWidget):
@@ -36,6 +54,8 @@ class BrowserPanel(QWidget):
     item_changed = Signal(object)
     item_activated = Signal(object)
     selection_changed = Signal()
+    filter_changed = Signal(str)
+    review_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -63,21 +83,69 @@ class BrowserPanel(QWidget):
         ):
             button = QPushButton(text)
             button.setFixedWidth(58)
+            button.setToolTip(
+                f"{'Tick' if text == 'All' else 'Untick'} every visible clip"
+            )
             button.clicked.connect(lambda *_, signal=requested: signal.emit())
             header.addWidget(button)
         layout.addLayout(header)
+
+        review = QHBoxLayout()
+        review.addWidget(QLabel("Show:"))
+        self.review_filter = QComboBox()
+        for label, value in (
+            ("All", FILTER_ALL),
+            ("Unreviewed", UNREVIEWED),
+            ("Keep", KEEP),
+            ("Maybe", MAYBE),
+            ("Reject", REJECT),
+            ("Exported", FILTER_EXPORTED),
+        ):
+            self.review_filter.addItem(label, value)
+        self.review_filter.setToolTip("Show only clips in this review state")
+        self.review_filter.currentIndexChanged.connect(
+            lambda *_: self.filter_changed.emit(
+                str(self.review_filter.currentData()))
+        )
+        review.addWidget(self.review_filter)
+
+        review.addSpacing(8)
+        review.addWidget(QLabel("Mark:"))
+        self.review_buttons: dict[str, QPushButton] = {}
+        for state, label in REVIEW_LABELS.items():
+            key = REVIEW_KEYS[state]
+            button = QPushButton(label)
+            button.setToolTip(
+                f"Mark the highlighted clip {label} ({key})"
+            )
+            button.clicked.connect(
+                lambda *_, chosen=state: self.review_requested.emit(chosen)
+            )
+            review.addWidget(button)
+            self.review_buttons[state] = button
+
+        review.addStretch(1)
+        self.review_count_label = QLabel("0 of 0 reviewed")
+        self.review_count_label.setToolTip(
+            "Keep, Maybe and Reject all count as reviewed"
+        )
+        review.addWidget(self.review_count_label)
+        layout.addLayout(review)
 
         self.warning_label = dim(QLabel())
         self.warning_label.hide()
         layout.addWidget(self.warning_label)
 
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ["Clip", "Length", "Size", "Card date", "Format"]
+            ["Clip", "Length", "Size", "Card date", "Format", "State"]
         )
         self.table.horizontalHeaderItem(3).setToolTip(
             "The timestamp on the card, not when you flew. The Box Pro has no "
             "clock battery, so these are unreliable."
+        )
+        self.table.horizontalHeaderItem(5).setToolTip(
+            "U Unreviewed · K Keep · M Maybe · R Reject"
         )
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(
@@ -90,7 +158,7 @@ class BrowserPanel(QWidget):
         # The name column takes the slack, but the thumbnail grows into it, so
         # extra width buys a bigger preview rather than empty space.
         head.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column in range(1, 5):
+        for column in range(1, 6):
             head.setSectionResizeMode(
                 column, QHeaderView.ResizeMode.ResizeToContents
             )
@@ -107,6 +175,22 @@ class BrowserPanel(QWidget):
         )
         layout.addWidget(self.table, 1)
 
+        # Scoped to the list. K remains Play while the preview has focus, and
+        # becomes Keep while the browser has focus; a window-wide shortcut
+        # would make both ambiguous and Qt would fire neither.
+        self.review_shortcuts: dict[str, QShortcut] = {}
+        for state, key in REVIEW_KEYS.items():
+            shortcut = QShortcut(
+                QKeySequence(key), self.table,
+                activated=lambda chosen=state: self.review_requested.emit(
+                    chosen),
+            )
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            self.review_shortcuts[state] = shortcut
+
+    def set_review_progress(self, reviewed: int, total: int) -> None:
+        self.review_count_label.setText(f"{reviewed} of {total} reviewed")
+
     def sync_thumbnail_size(self) -> None:
         """Fit thumbnails to the width and height the list actually has.
 
@@ -117,9 +201,11 @@ class BrowserPanel(QWidget):
         if self.table.rowCount() == 0:
             return
         available = self.table.columnWidth(0)
-        # Leave room for the tick box, cell padding and filename. The floor is
-        # low enough that a narrow window shrinks the image before the name.
-        width = max(MIN_THUMB_WIDTH, min(THUMB_WIDTH, available - 150))
+        # Leave room for the tick box, cell padding and filename. `hdz_000.ts`
+        # is 55px in the native Windows UI font; 110px leaves the same again
+        # for the tick and padding. The old 150px reserve plus the State column
+        # pinned thumbnails at their minimum even when the list grew taller.
+        width = max(MIN_THUMB_WIDTH, min(THUMB_WIDTH, available - 110))
 
         viewport = self.table.viewport().height()
         if viewport > 0:
