@@ -517,3 +517,88 @@ def test_a_settled_seek_is_not_sharpened_during_playback(window):
     window.player.is_playing = False
     window._sharpen()
     assert asked == [30.0], "paused again and it still did nothing"
+# -- what the recording looks like it is doing (#17) --------------------------
+
+def an_activity(**overrides):
+    from flightdvr.motion import Activity
+    fields = dict(duration=300.0, still=[(40.0, 90.0)],
+                  flying=[(0.0, 40.0), (90.0, 250.0)], quietest=1.0)
+    fields.update(overrides)
+    return Activity(**fields)
+
+
+def test_a_reading_offers_a_trim_but_does_not_take_it(window):
+    """The whole point: it says what it sees and waits to be asked."""
+    flight = loaded(window, clip(duration=300.0))
+    window._activity_ready(window._strip_generation, str(flight.path),
+                           an_activity())
+
+    assert not flight.is_trimmed, "trimmed the clip without being asked"
+    assert window.preview_view.activity_button.text(), "offered nothing"
+    assert "2 flights" in window.preview_view.activity_note.text()
+
+
+def test_pressing_the_button_applies_the_longest_flight(window):
+    flight = loaded(window, clip(duration=300.0))
+    window._activity_ready(window._strip_generation, str(flight.path),
+                           an_activity())
+    window.preview_view.activity_accepted.emit()
+
+    assert flight.trim_in == pytest.approx(90.0)
+    assert flight.out_point == pytest.approx(250.0)
+
+
+def test_a_clip_already_trimmed_is_not_offered_a_guess(window):
+    """Overwriting a decision somebody already made with a guess is the one
+    thing this must not do."""
+    flight = loaded(window, clip(duration=300.0))
+    flight.trim_in, flight.trim_out = 12.0, 30.0
+    window._activity_ready(window._strip_generation, str(flight.path),
+                           an_activity())
+
+    assert window.preview_view.activity_button.text() == "", (
+        "offered to overwrite a trim that was already set")
+    assert window.preview_view.activity_note.text(), (
+        "said nothing at all, when the reading is still worth showing")
+
+
+def test_a_reading_for_a_clip_no_longer_selected_is_dropped(window):
+    """Browsing the list starts one of these per clip. The path is not enough:
+    select A, then B, then A again, and the first reading of A can land after
+    the second has started."""
+    flight = loaded(window, clip(duration=300.0))
+    window._activity_ready(window._strip_generation - 1, str(flight.path),
+                           an_activity())
+    assert window.preview_view.activity_note.text() == ""
+
+    window._activity_ready(window._strip_generation, "some/other/clip.ts",
+                           an_activity())
+    assert window.preview_view.activity_note.text() == ""
+
+
+def test_an_unreadable_feed_says_so_rather_than_guessing(window):
+    flight = loaded(window, clip(duration=300.0))
+    window._activity_ready(window._strip_generation, str(flight.path),
+                           an_activity(readable=False))
+
+    assert "no reading" in window.preview_view.activity_note.text()
+    assert window.preview_view.activity_button.text() == ""
+
+
+def test_accepting_the_suggestion_moves_the_player_too(window):
+    """The picture and the label went to the suggested start while Play resumed
+    from wherever it had been — the same fault as picking a select, written
+    again in a second handler."""
+    from flightdvr.motion import Activity
+
+    flight = loaded(window, clip(duration=300.0))
+    window._activity = Activity(duration=300.0, still=[(40.0, 90.0)],
+                                flying=[(0.0, 40.0), (90.0, 250.0)],
+                                quietest=1.0)
+    window.player.seek(33.0)
+    window._accept_activity()
+
+    assert window.trim_bar.playhead == 90.0
+    assert window.player.position == 90.0, (
+        f"the filmstrip moved to 90 and the player is at "
+        f"{window.player.position}")
