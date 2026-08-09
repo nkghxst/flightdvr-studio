@@ -1985,3 +1985,49 @@ def _swapped(name, replacement):
         yield
     finally:
         setattr(media, name, original)
+
+
+def test_the_about_box_still_has_its_update_tickbox_after_a_collection(window):
+    """The only switch for the only network request this program makes.
+
+    It was created as a local with no parent and handed to setCheckBox, which
+    does not take ownership across the binding — so Python collected it as soon
+    as the function returned, the dialog showed no tickbox, and checkBox()
+    returned a pointer that faulted on touch.
+
+    The collection is the whole test. Without it this passes against the broken
+    version, because whether the object had been reaped yet depended on refcount
+    timing — which is exactly why it appeared to break on its own months after
+    it was written.
+    """
+    import gc
+
+    box = window._build_about_box()
+    gc.collect()
+
+    tick = box.checkBox()
+    assert tick is not None, "the About box has no update tickbox"
+    assert tick.text() == "Check for updates", tick.text()
+    assert tick.isVisibleTo(box), "the tickbox exists but is not in the dialog"
+
+
+def test_turning_the_tickbox_off_stops_the_request(window, monkeypatch):
+    """The README promises exactly this, so it is worth asserting rather than
+    assuming the wiring survived."""
+    from flightdvr import updates as updates_module
+
+    started = []
+    monkeypatch.setattr(updates_module, "should_check",
+                        lambda *_a, **_k: started.append(True) or True)
+
+    box = window._build_about_box()
+    box.checkBox().setChecked(False)
+    assert window.settings_store.value("check_for_updates", True,
+                                       type=bool) is False
+
+    window._start_update_check()
+    assert not started, "asked whether to check after being turned off"
+
+    box.checkBox().setChecked(True)
+    assert window.settings_store.value("check_for_updates", True,
+                                       type=bool) is True
