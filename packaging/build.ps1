@@ -107,12 +107,18 @@ Write-Host "  the full window built and stayed up"
 Stop-Process -Id $proc.Id -Force
 
 Step "Installer"
-$iscc = @(
-    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
-    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-    "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $iscc) { throw "Inno Setup 6 not found. Install it with: winget install JRSoftware.InnoSetup" }
+$iscc = Get-Command "ISCC.exe" -CommandType Application -ErrorAction SilentlyContinue |
+    Select-Object -First 1 -ExpandProperty Source
+if (-not $iscc) {
+    $iscc = @(
+        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+if (-not $iscc) {
+    throw "Inno Setup 6 not found. Install it with: winget install JRSoftware.InnoSetup, or add ISCC.exe to PATH."
+}
 
 & $iscc "packaging\installer.iss"
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed." }
