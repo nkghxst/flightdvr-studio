@@ -413,3 +413,111 @@ def MainWindow_for(card):
     made.source_combo.insertItem(0, str(card), str(card))
     made.source_combo.setCurrentIndex(0)
     return made
+
+
+# -- export settings travel with the session (#36) ----------------------------
+
+def test_each_card_remembers_its_own_preset(app, sessions_home, card, tmp_path):
+    """Two cards, deliberately.
+
+    A single card proves nothing: the preset also lives in QSettings, so it
+    comes back on its own and the test passes with the session doing nothing at
+    all. The first version of this did exactly that. Two folders with different
+    presets can only work if the setting travels with the session, because
+    QSettings holds one.
+    """
+    other = tmp_path / "second-card"
+    other.mkdir()
+
+    first = open_window(app, card, [a_clip("hdz_001.ts")])
+    first.export_panel.preset_buttons["social"].setChecked(True)
+    first.clips[0].trim_in, first.clips[0].trim_out = 10.0, 40.0
+    first._touch_session()
+    close(first)
+
+    second = open_window(app, other, [a_clip("hdz_009.ts")])
+    second.export_panel.preset_buttons["upload"].setChecked(True)
+    second.clips[0].trim_in, second.clips[0].trim_out = 5.0, 25.0
+    second._touch_session()
+    close(second)
+
+    back = open_window(app, card, [a_clip("hdz_001.ts")])
+    assert back.export_panel.preset_key() == "social", (
+        "the second card's preset followed us back to the first")
+    close(back)
+
+
+def test_the_join_order_records_only_the_clips_that_were_marked(app,
+                                                                sessions_home,
+                                                                card):
+    first = open_window(app, card,
+                        [a_clip("hdz_001.ts"), a_clip("hdz_002.ts")])
+    first.clips[1].trim_in, first.clips[1].trim_out = 5.0, 20.0
+    first._touch_session()
+    first._flush_session()
+
+    stored = session_module.for_source(card)
+    assert stored.join_order == [first.clips[1].fingerprint]
+    close(first)
+
+
+def test_a_card_with_no_stored_settings_leaves_the_panel_alone(app,
+                                                               sessions_home,
+                                                               card):
+    """Opening a fresh folder must not reset the choices already on screen."""
+    window = open_window(app, card, [a_clip("hdz_001.ts")])
+    window.export_panel.preset_buttons["upload"].setChecked(True)
+
+    window._adopt_session(session_module.for_source(card))
+    assert window.export_panel.preset_key() == "upload"
+    close(window)
+
+
+def test_the_remembered_join_order_decides_the_queue(app, sessions_home, card):
+    """The field round-tripped through JSON and nothing read it, so it was
+    inert: every joined export still came out in DVR counter order. Asserting
+    the stored list is not enough — this asserts the jobs."""
+    from PySide6.QtCore import Qt
+
+    first, second = a_clip("hdz_001.ts"), a_clip("hdz_002.ts")
+    window = open_window(app, card, [first, second])
+    window.export_panel.out_edit.setCurrentText(str(sessions_home / "out"))
+
+    # Deliberately the reverse of counter order, which is what makes this
+    # distinguishable from the default at all.
+    window.session.join_order = [second.fingerprint, first.fingerprint]
+
+    for row in range(window.table.rowCount()):
+        window.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+    window.export_panel.join_check.setChecked(True)
+    window.jobs.clear()
+    window._add_to_queue()
+
+    assert len(window.jobs) == 1, [j.out_path.name for j in window.jobs]
+    names = [c.path.name for c in window.jobs[0].clips]
+    assert names == ["hdz_002.ts", "hdz_001.ts"], names
+    close(window)
+
+
+def test_a_clip_the_order_never_heard_of_goes_after_the_ones_it_did(
+        app, sessions_home, card):
+    """A clip added since, or a session written before the field existed. It
+    sorts by counter after the remembered ones, which is what happened when
+    there was no order to remember."""
+    from PySide6.QtCore import Qt
+
+    one, two, three = (a_clip("hdz_001.ts"), a_clip("hdz_002.ts"),
+                       a_clip("hdz_003.ts"))
+    window = open_window(app, card, [one, two, three])
+    window.export_panel.out_edit.setCurrentText(str(sessions_home / "out"))
+    window.session.join_order = [three.fingerprint, two.fingerprint]
+
+    for row in range(window.table.rowCount()):
+        window.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+    window.export_panel.join_check.setChecked(True)
+    window.jobs.clear()
+    window._add_to_queue()
+
+    names = [c.path.name for c in window.jobs[0].clips]
+    assert names == ["hdz_003.ts", "hdz_002.ts", "hdz_001.ts"], names
+    close(window)

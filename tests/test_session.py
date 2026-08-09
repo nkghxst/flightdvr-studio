@@ -524,3 +524,69 @@ def test_a_failure_between_writing_and_replacing_leaves_the_old_one(tmp_path,
 
     assert json.loads(target.read_text())["title"] == "the good one", (
         "the old session was destroyed by a write that never completed")
+
+
+# -- join order and export settings (#36) --------------------------------------
+
+def test_a_version_1_document_opens_without_them_and_without_complaint(tmp_path):
+    """The reason the schema is versioned. A card reviewed before these fields
+    existed must open, not be refused and not be guessed at."""
+    old = tmp_path / "v1.flightdvr.json"
+    old.write_text(json.dumps({
+        "schema": 1,
+        "title": "before the fields existed",
+        "source": r"G:\movies",
+        "clips": {"abc": {"name": "hdz_001.ts", "review": "keep",
+                          "selects": [{"start": 10.0, "end": 40.0}]}},
+    }))
+    read = Session.load(old)
+
+    assert read.title == "before the fields existed"
+    assert read.marks("abc").review == KEEP
+    assert read.join_order == []
+    assert read.export == {}
+
+
+def test_a_version_1_document_is_brought_up_to_date_when_it_is_written(tmp_path):
+    from flightdvr.session import _migrate
+    assert _migrate({"schema": 1})["schema"] == SCHEMA
+    assert _migrate({})["schema"] == SCHEMA          # from before numbering
+
+
+def test_join_order_and_export_settings_round_trip(tmp_path):
+    session = Session(title="Hampstead Heath", source=r"G:\movies")
+    session.join_order = ["fp-second", "fp-first"]
+    session.export = {"preset": "social", "output_dir": r"D:\FPV\Exports",
+                      "social_size_mb": 45, "join": True}
+    session.marks("fp-first", "hdz_001.ts").selects = [Select(10.0, 40.0)]
+
+    read = Session.load(session.save(tmp_path / "heath.flightdvr.json"))
+    assert read.join_order == ["fp-second", "fp-first"]
+    assert read.export["preset"] == "social"
+    assert read.export["social_size_mb"] == 45
+    assert read.export["join"] is True
+
+
+def test_neither_is_written_when_nothing_was_decided(tmp_path):
+    """A session for a card nobody has joined or configured stays as small as
+    it was before these fields existed."""
+    session = Session(title="untouched")
+    session.marks("fp", "hdz_001.ts").review = KEEP
+    stored = json.loads(session.save(tmp_path / "s.flightdvr.json").read_text())
+
+    assert "join_order" not in stored
+    assert "export" not in stored
+
+
+def test_a_document_with_rubbish_in_the_new_fields_still_opens(tmp_path):
+    """Same promise as every other field: valid JSON with invalid contents
+    opens empty rather than raising."""
+    for name, payload in [
+        ("order-not-a-list", {"schema": 2, "join_order": 7}),
+        ("export-not-a-dict", {"schema": 2, "export": "nope"}),
+    ]:
+        broken = tmp_path / f"{name}.flightdvr.json"
+        broken.write_text(json.dumps(payload))
+        read = Session.load(broken)
+        assert read.path == broken, name
+        assert read.join_order == [] and read.export == {}, name

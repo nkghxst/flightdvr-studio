@@ -63,8 +63,8 @@ from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
 from .queue_panel import QueuePanel
 from .session import (
-    SUFFIX as SESSION_SUFFIX, Session, apply_to, capture_from, for_source,
-    missing_from, recent_sessions, remember,
+    SUFFIX as SESSION_SUFFIX, Session, apply_settings, apply_to, capture_from,
+    capture_settings, for_source, missing_from, recent_sessions, remember,
 )
 from .thumbs import THUMB_WIDTH, ThumbnailLoader
 from .trim import Filmstrip, FilmstripLoader
@@ -706,6 +706,10 @@ class MainWindow(QMainWindow):
             remember(found)
         self._show_session_title()
 
+        # Before the clips, so the preset the marks were made under is the one
+        # the estimate and the export markers are computed against.
+        if apply_settings(found, self.export_panel):
+            self._on_preset_changed()
         restored = apply_to(found, self.clips)
         for clip in self.clips:
             self._mark_trim_in_table(clip)
@@ -746,6 +750,7 @@ class MainWindow(QMainWindow):
         if self.session is None:
             return
         capture_from(self.session, self.clips)
+        capture_settings(self.session, self.export_panel, self.clips)
         try:
             self.session.save()
         except OSError as problem:
@@ -1813,9 +1818,7 @@ class MainWindow(QMainWindow):
             # Joined in DVR counter order: the file timestamps cannot be
             # trusted. Selects of one clip keep the order they were made in,
             # which is the order they appear along the recording.
-            ordered = sorted(pieces, key=lambda c: (c.sequence,
-                                                    natural_key(c.path.name),
-                                                    c.trim_in))
+            ordered = sorted(pieces, key=self._join_rank)
 
             # Refused rather than exported wrongly. A join built from mismatched
             # clips does not fail; it produces a file that is silent after the
@@ -1864,6 +1867,27 @@ class MainWindow(QMainWindow):
         if skipped > 0:
             note += f", {skipped} already in the queue"
         self.statusBar().showMessage(note, 5000)
+
+    def _join_rank(self, piece) -> tuple:
+        """Where a piece goes in a joined export.
+
+        The session's order first, when it has an opinion about this clip. That
+        is the whole point of storing it: DVR counter order is a sensible
+        default and not always the one somebody chose.
+
+        Anything the stored order has never heard of — a clip added since, or a
+        session written before the field existed — sorts after the remembered
+        ones by counter, which is exactly what happened before there was an
+        order to remember. Selects of one clip stay in the order they occur
+        along the recording.
+        """
+        remembered = self.session.join_order if self.session else []
+        try:
+            position = remembered.index(piece.fingerprint)
+        except ValueError:
+            position = len(remembered)
+        return (position, piece.sequence, natural_key(piece.path.name),
+                piece.trim_in)
 
     def _rebuild_queue(self) -> None:
         # The single funnel for anything that changes the queue, so this is

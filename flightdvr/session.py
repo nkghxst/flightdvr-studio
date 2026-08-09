@@ -56,7 +56,7 @@ RECENT_LIMIT = 12
 # get wrong. `_migrate` is where old versions become current ones, and there is
 # a test for every step it knows about, because this file will outlive several
 # of its own formats.
-SCHEMA = 1
+SCHEMA = 2
 
 UNREVIEWED, KEEP, MAYBE, REJECT = "", "keep", "maybe", "reject"
 REVIEW_STATES = (UNREVIEWED, KEEP, MAYBE, REJECT)
@@ -110,6 +110,18 @@ class Session:
     clips: dict[str, ClipMarks] = field(default_factory=dict)
     path: Path | None = None
 
+    # The order clips and selects go into a joined export. Fingerprints, so it
+    # survives a card being renamed, and only meaningful now that a clip can
+    # carry several ranges — until then there was one per clip and DVR counter
+    # order settled it.
+    join_order: list[str] = field(default_factory=list)
+
+    # Every export choice, exactly as ExportPanel.capture() produces it. Stored
+    # rather than re-derived so reopening a card finds the preset and the
+    # output folder it was being worked with, not whatever the panel happens to
+    # be showing.
+    export: dict = field(default_factory=dict)
+
     # -- what is in it --------------------------------------------------------
 
     def marks(self, fingerprint: str, name: str = "") -> ClipMarks:
@@ -133,12 +145,19 @@ class Session:
     def as_dict(self) -> dict:
         # Only clips something was decided about. Walking a 122-clip card
         # should not write 122 empty records.
-        return {
+        stored = {
             "schema": SCHEMA,
             "title": self.title,
             "source": self.source,
             "clips": {f: m.as_dict() for f, m in self.clips.items() if m},
         }
+        # Absent rather than empty when nothing was decided, so a session for a
+        # card nobody has joined or configured stays as small as it was.
+        if self.join_order:
+            stored["join_order"] = list(self.join_order)
+        if self.export:
+            stored["export"] = dict(self.export)
+        return stored
 
     def save(self, path: Path | None = None) -> Path:
         """Write it, atomically.
@@ -179,6 +198,8 @@ class Session:
                     for f, m in (raw.get("clips") or {}).items()
                     if isinstance(m, dict)
                 },
+                join_order=[str(f) for f in (raw.get("join_order") or [])],
+                export=dict(raw.get("export") or {}),
                 path=Path(path),
             )
         # Valid JSON is not the same as valid session data. A select whose
@@ -224,6 +245,29 @@ def apply_to(session: Session, clips) -> int:
         clip.current = 0
         restored += 1
     return restored
+
+
+def capture_settings(session: Session, panel, clips) -> None:
+    """Record the export choices and the join order that go with these marks.
+
+    Separate from `capture_from` because they answer to different things: the
+    selects come from the clips, and these come from the panel and the order
+    the clips are in.
+    """
+    session.export = panel.capture()
+    session.join_order = [c.fingerprint for c in clips if c.real_selects]
+
+
+def apply_settings(session: Session, panel) -> bool:
+    """Put the stored export choices back. False when there were none.
+
+    The join order is not applied here — it is read when a joined export is
+    built, where the clips to order actually are.
+    """
+    if not session.export:
+        return False
+    panel.apply(session.export)
+    return True
 
 
 def capture_from(session: Session, clips) -> None:
@@ -363,4 +407,11 @@ def _migrate(raw: dict) -> dict:
         # is nothing to convert — this exists so the path is written and tested
         # before it is needed rather than after.
         raw = dict(raw, schema=1)
+        version = 1
+    if version == 1:
+        # Version 1 had no join order and no export settings. Nothing to
+        # convert — both read as empty through `.get`, which is the right
+        # answer for a card reviewed before they existed. The step is written
+        # out rather than skipped so the ladder stays a ladder.
+        raw = dict(raw, schema=2)
     return raw
