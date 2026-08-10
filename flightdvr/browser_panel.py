@@ -49,7 +49,10 @@ REVIEW_KEYS = {
 def review_state_text(state: str, range_count: int) -> str:
     """The compact State-column summary for a clip."""
     key = REVIEW_KEYS[state]
-    return f"{key} ·{range_count}" if range_count else key
+    if not range_count:
+        return key
+    suffix = "range" if range_count == 1 else "ranges"
+    return f"{key}\n{range_count} {suffix}"
 
 
 def review_state_tooltip(state: str, range_count: int) -> str:
@@ -213,7 +216,7 @@ class BrowserPanel(QWidget):
         )
         self.table.horizontalHeaderItem(5).setToolTip(
             "U Unreviewed · K Keep · M Maybe · R Reject\n"
-            "·N means N saved ranges"
+            "The number of saved ranges appears below the letter"
         )
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(

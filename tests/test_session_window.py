@@ -109,7 +109,7 @@ def test_a_trim_survives_closing_the_window(app, sessions_home, card):
     again = open_window(app, card, [a_clip("hdz_001.ts"), a_clip("hdz_002.ts")])
     assert again.clips[0].trim_in == pytest.approx(12.0)
     assert again.clips[0].trim_out == pytest.approx(30.0)
-    assert again.table.item(0, 5).text() == "U ·1"
+    assert again.table.item(0, 5).text() == "U\n1 range"
     assert again.table.item(0, 5).toolTip() == (
         "Unreviewed · 1 saved range")
     assert not again.clips[1].is_trimmed, "a clip nobody marked came back marked"

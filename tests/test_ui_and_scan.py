@@ -1348,7 +1348,7 @@ def test_the_review_controls_belong_to_the_browser_panel(window):
         shortcut.context() == Qt.ShortcutContext.WidgetWithChildrenShortcut
         for shortcut in panel.review_shortcuts.values()
     ), "a window-wide K would conflict with the preview's K shortcut"
-    assert "·N" in panel.table.horizontalHeaderItem(5).toolTip()
+    assert "below the letter" in panel.table.horizontalHeaderItem(5).toolTip()
     assert "review_filter" not in window.__dict__
     assert "review_count_label" not in window.__dict__
 
@@ -1388,7 +1388,8 @@ def test_state_text_counts_ranges_that_would_reach_an_export():
         Select(56.0, 78.0),
     ]
 
-    assert review_state_text(made.review, len(made.real_selects)) == "K ·2"
+    assert review_state_text(made.review, len(made.real_selects)) == (
+        "K\n2 ranges")
     assert review_state_tooltip(made.review, len(made.real_selects)) == (
         "Keep · 2 saved ranges")
     made.selects = [Select(0.0, 0.0)]
@@ -1429,19 +1430,20 @@ def test_state_range_count_follows_add_remove_reset_and_review(window,
 
     try:
         state_item = table.item(0, 5)
-        assert state_item.text() == "K ·1"
+        assert state_item.text() == "K\n1 range"
         assert state_item.toolTip() == "Keep · 1 saved range"
 
         window.trim_bar.playhead = 30.0
         window._add_select()
-        assert state_item.text() == "K ·2"
+        assert state_item.text() == "K\n2 ranges"
 
         window._remove_select()
-        assert state_item.text() == "K ·1"
+        assert state_item.text() == "K\n1 range"
 
         made.review = REJECT
         window._mark_review_in_table(made)
-        assert state_item.text() == "R ·1", "reviewing erased the range marker"
+        assert state_item.text() == (
+            "R\n1 range"), "reviewing erased the range marker"
 
         window._reset_trim()
         assert state_item.text() == "R"
