@@ -1350,6 +1350,29 @@ def test_the_review_controls_belong_to_the_browser_panel(window):
     assert "review_count_label" not in window.__dict__
 
 
+def test_review_tints_are_blended_from_the_table_palette():
+    """A fixed final colour works in one theme. The tint has to move when the
+    table's real Base changes, while Unreviewed stays under native painting."""
+    from PySide6.QtGui import QColor, QPalette
+
+    from flightdvr.browser_panel import review_tint
+
+    dark = QPalette()
+    dark.setColor(QPalette.ColorRole.Base, QColor("#2d2d2d"))
+    dark.setColor(QPalette.ColorRole.AlternateBase, QColor("#252525"))
+    light = QPalette()
+    light.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+    light.setColor(QPalette.ColorRole.AlternateBase, QColor("#f7f7f7"))
+
+    for state in (KEEP, MAYBE, REJECT):
+        assert review_tint(dark, state) != review_tint(light, state), (
+            f"{state} is a fixed colour rather than reading Base")
+        assert review_tint(dark, state, alternate=True) != review_tint(
+            dark, state), f"{state} ignores AlternateBase"
+
+    assert review_tint(dark, UNREVIEWED) is None
+
+
 def test_each_review_filter_shows_only_the_rows_it_names(window, monkeypatch,
                                                          tmp_path):
     """The filter is the way through a 122-clip card, so every option gets a

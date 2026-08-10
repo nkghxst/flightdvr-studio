@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
     QPushButton, QTableWidget, QVBoxLayout, QWidget,
@@ -43,6 +43,35 @@ REVIEW_KEYS = {
     MAYBE: "M",
     REJECT: "R",
 }
+
+# These carry the meaning; the surface colour does not come from them alone.
+# `review_tint` blends each one toward the table's real palette so the same
+# state remains a faint wash in both the light and dark Windows themes.
+_REVIEW_HUES = {
+    KEEP: QColor(34, 139, 34),
+    MAYBE: QColor(218, 165, 32),
+    REJECT: QColor(200, 45, 45),
+}
+
+
+def review_tint(palette: QPalette, state: str, *, alternate: bool = False,
+                strength: float = 0.14) -> QColor | None:
+    """A faint state hue blended from the row's actual background.
+
+    Returning ``None`` for Unreviewed matters: it leaves the native style in
+    charge rather than painting what happens to be the current Base colour.
+    """
+    hue = _REVIEW_HUES.get(state)
+    if hue is None:
+        return None
+    role = (QPalette.ColorRole.AlternateBase if alternate
+            else QPalette.ColorRole.Base)
+    base = palette.color(role)
+    return QColor(
+        round(base.red() * (1 - strength) + hue.red() * strength),
+        round(base.green() * (1 - strength) + hue.green() * strength),
+        round(base.blue() * (1 - strength) + hue.blue() * strength),
+    )
 
 
 class BrowserPanel(QWidget):
