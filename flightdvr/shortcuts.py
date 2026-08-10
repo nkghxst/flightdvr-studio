@@ -106,16 +106,23 @@ SHORTCUT_GROUPS: tuple[ShortcutGroup, ...] = (
         "Anywhere",
         "No particular focus needed.",
         (
-            Shortcut(("F5",), "Scan the source folder"),
-            Shortcut(("Ctrl+A",), "Tick every clip"),
-            Shortcut(("Ctrl+Shift+A",), "Untick every clip"),
+            Shortcut(("F5",), "Scan the current source"),
+            # "visible" is load-bearing: _set_all skips hidden rows, so with a
+            # review filter on these tick what is on screen and nothing else.
+            # The All and None buttons have said so all along; this list said
+            # "every clip" until a review caught it.
+            Shortcut(("Ctrl+A",), "Tick every visible clip"),
+            Shortcut(("Ctrl+Shift+A",), "Untick every visible clip"),
             # Named _preview_selected in the code, but it hands the file to
             # another program. Describing it from the method name would have
             # printed "preview", which is what the built-in player does.
             Shortcut(("Ctrl+P",), "Play the highlighted clip here"),
             Shortcut(("Ctrl+Shift+P",), "Open it in your usual video player"),
+            # Every ticked clip, not every visible one: selected_clips walks
+            # the whole table, so a clip ticked before a filter was applied is
+            # still queued. The asymmetry with Ctrl+A above is real.
             Shortcut(("Ctrl+Return",), "Add the ticked clips to the queue"),
-            Shortcut(("F9",), "Start the queue"),
+            Shortcut(("F9",), "Start the export"),
             Shortcut(("Ctrl+O",), "Open a session"),
             Shortcut(("Ctrl+Shift+S",), "Save the session as…"),
             Shortcut(("F1",), "This list"),

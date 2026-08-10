@@ -231,6 +231,53 @@ def test_k_is_deliberately_two_different_keys(window):
         "neither")
 
 
+def described(keys: str) -> str:
+    for g in SHORTCUT_GROUPS:
+        for row in g.shortcuts:
+            if keys in row.keys:
+                return row.description
+    raise AssertionError(f"{keys} is not documented")
+
+
+def test_the_ticking_keys_say_visible_because_they_skip_hidden_rows(window):
+    """The defect a review caught in this dialog, kept caught.
+
+    `_set_all` skips hidden rows, so with a review filter on, Ctrl+A ticks what
+    is on screen and nothing else — there is a test elsewhere named for the day
+    that broke. This list said "every clip" anyway, because the comparison in
+    this file checks which keys exist and has nothing to say about whether the
+    sentence beside one is true.
+
+    Tying the wording to the buttons is the narrow fix available: they are the
+    same action described twice, so the two can at least not disagree.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    tips = {button.text(): button.toolTip()
+            for button in window.browser_panel.findChildren(QPushButton)}
+
+    assert tips["All"] == described("Ctrl+A"), (
+        "the All button and Ctrl+A describe one action and have drifted apart")
+    assert tips["None"] == described("Ctrl+Shift+A"), (
+        "the None button and Ctrl+Shift+A describe one action and have "
+        "drifted apart")
+    assert "visible" in described("Ctrl+A"), (
+        "_set_all skips hidden rows; a description without 'visible' is wrong "
+        "whenever a filter is on")
+
+
+def test_delete_is_described_the_same_way_the_queue_button_describes_it(window):
+    """The other place the app already says what a key does. Same reasoning as
+    above: one action, two descriptions, and no way for them to disagree."""
+    from PySide6.QtWidgets import QPushButton
+
+    tips = [b.toolTip() for b in window.queue_panel.findChildren(QPushButton)
+            if b.toolTip().startswith("Drop the selected rows")]
+    assert tips, "the queue's Remove button no longer explains itself"
+    assert tips[0].startswith(described("Delete")), (
+        "the Remove tooltip and the Delete row have drifted apart")
+
+
 def test_the_keycap_fill_follows_the_theme_instead_of_a_fixed_grey(qt_app):
     """A grey chosen against a light window is a near-white block on a dark
     one: measured, the dark theme's own text on a fixed #d0d0d0 chip comes out
