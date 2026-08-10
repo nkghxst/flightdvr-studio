@@ -38,8 +38,9 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
-    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
-    QSizePolicy, QSplitter, QTableWidget, QToolButton, QVBoxLayout, QWidget,
+    QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
+    QPushButton, QSizePolicy, QSplitter, QTableWidget, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from . import scan
@@ -69,6 +70,7 @@ from .session import (
     apply_settings, apply_to, capture_from, capture_settings, for_source,
     missing_from, recent_sessions, remember,
 )
+from .shortcuts import SHORTCUT_GROUPS
 from .thumbs import THUMB_WIDTH, ThumbnailLoader
 from .trim import Filmstrip, FilmstripLoader
 from .widgets import (
@@ -293,6 +295,50 @@ class MainWindow(QMainWindow):
             f'<a href="{page}">See what changed</a>'
         )
         self.update_bar.show()
+
+    def _show_shortcuts(self) -> None:
+        self._build_shortcuts_dialog().exec()
+
+    def _build_shortcuts_dialog(self) -> QDialog:
+        """The keys, grouped by what has to have focus for them to work.
+
+        Built here and shown by the caller for the same reason the About box is
+        — a test can then read every row without a modal dialog to dismiss.
+
+        The grouping is the point rather than the tidiness. `K` is Keep in the
+        clip list and Play on the picture, so a single flat list has to print
+        one of the two and be wrong about the other.
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Keyboard shortcuts")
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(EDGE, EDGE, EDGE, EDGE)
+        layout.setSpacing(GAP)
+
+        for group in SHORTCUT_GROUPS:
+            layout.addWidget(QLabel(f"<b>{group.title}</b>"))
+            layout.addWidget(dim(QLabel(group.note)))
+
+            grid = QGridLayout()
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(GAP)
+            grid.setVerticalSpacing(TIGHT)
+            for row, shortcut in enumerate(group.shortcuts):
+                # Each key gets its own <code> box rather than being joined by a
+                # separator: two of these rows are the "," and "." keys, and any
+                # punctuation between them reads as part of the binding.
+                keys = " ".join(f"<code>{key}</code>" for key in shortcut.keys)
+                grid.addWidget(QLabel(keys), row, 0)
+                grid.addWidget(QLabel(shortcut.description), row, 1)
+            grid.setColumnStretch(1, 1)
+            layout.addLayout(grid)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        return dialog
 
     def _show_about(self) -> None:
         self._build_about_box().exec()
@@ -667,6 +713,18 @@ class MainWindow(QMainWindow):
 
         self.recent_menu = menu.addMenu("Recent sessions")
         self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
+
+        # About was reachable only from a button beside the queue, which is a
+        # strange home for a licence notice and the last place anyone looks for
+        # one. The button stays: it is where existing users know to find it.
+        help_menu = self.menuBar().addMenu("&Help")
+
+        self.shortcuts_action = help_menu.addAction("Keyboard shortcuts")
+        self.shortcuts_action.setShortcut("F1")
+        self.shortcuts_action.triggered.connect(self._show_shortcuts)
+
+        about_action = help_menu.addAction(f"About {APP_NAME}")
+        about_action.triggered.connect(self._show_about)
 
     def _fill_recent_menu(self) -> None:
         """Built when opened rather than kept in step.
