@@ -1910,6 +1910,25 @@ def test_adding_a_job_opens_the_queue(window):
 
 # -- filmstrips finishing out of order ----------------------------------------
 
+def test_a_cached_filmstrip_can_be_checked_without_starting_a_decode(
+        tmp_path, monkeypatch):
+    """The background flight pass must exhaust existing filmstrips before it
+    is allowed to start twelve minutes of new decoding."""
+    from flightdvr import trim as trim_module
+
+    monkeypatch.setattr(trim_module, "cache_root", lambda: tmp_path)
+    made = clip("hdz_cached.ts")
+    folder = tmp_path / trim_module._key(made)
+    folder.mkdir()
+    (folder / "f_0001.jpg").write_bytes(b"jpeg")
+    (folder / "times.txt").write_text("0.000")
+
+    found = trim_module.cached_filmstrip(made)
+
+    assert found.frames == [folder / "f_0001.jpg"]
+    assert found.times == [0.0]
+
+
 def test_a_cancelled_extraction_publishes_nothing(tmp_path, monkeypatch):
     """Terminating ffmpeg makes communicate() return normally, so a cancelled
     extraction reached the publishing code with whatever frames it had got to.

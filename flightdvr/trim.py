@@ -101,6 +101,11 @@ def _read_cached(folder: Path) -> Filmstrip:
     return Filmstrip()
 
 
+def cached_filmstrip(clip: ClipInfo) -> Filmstrip:
+    """Return this clip's complete cached filmstrip without decoding it."""
+    return _read_cached(cache_root() / _key(clip))
+
+
 def extract(tools: Tools, clip: ClipInfo, register=None,
             cancelled=None) -> Filmstrip:
     """Pull every keyframe out of a clip, reusing the cache when present.
@@ -126,7 +131,7 @@ def extract(tools: Tools, clip: ClipInfo, register=None,
     """
     folder = cache_root() / _key(clip)
 
-    cached = _read_cached(folder)
+    cached = cached_filmstrip(clip)
     if cached:
         return cached
 
