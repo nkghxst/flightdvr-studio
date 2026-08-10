@@ -1,5 +1,102 @@
 # Changelog
 
+## 1.5.0
+
+**You can get through a whole card now.** 1.4 made one clip worth opening; this
+one is about the other hundred and twenty. Every decision you make is written
+down as you make it, so closing the window no longer throws the afternoon away,
+and the list tells you what you have already decided without opening anything.
+
+- **Sessions, autosaved.** Trim ranges, review states, range names, join order
+  and the export settings you chose all belong to the folder you are working
+  on, and come back when you open it again. There is nothing to press. The
+  `Session` menu has *Save session as…* when one deserves a name, *Open
+  session…*, and the last few under *Recent sessions*. A session references your
+  footage rather than containing it, so it is small enough to back up and can be
+  moved without taking the video with it.
+
+  **Clips are identified by path, size and modification time together, never by
+  name alone.** Cards get wiped and reused, and `hdz_004.ts` next month is a
+  different flight from `hdz_004.ts` today. A session that confidently attached
+  last week's trim points to this week's footage would be worse than one that
+  remembered nothing, so a clip it cannot match is reported rather than guessed
+  at.
+
+- **Review states: Unreviewed, Keep, Maybe, Reject.** A key each — `U` `K` `M`
+  `R` with the clip list focused — a filter, and a count of how far through you
+  are. *Maybe* matters more than it sounds: on a long card most of the decisions
+  are "not now", and without somewhere to put them they become Keep and the job
+  comes back later.
+
+  The row is tinted faintly to match, blended from the table's own background so
+  it works in both the light and dark Windows themes rather than one of them.
+  The colour is reinforcement and never the message — the letter in the `State`
+  column is what says the state, so nothing is lost if the greens and reds look
+  alike to you.
+
+- **Several ranges out of one recording.** A four-minute flight usually holds
+  two or three moments worth keeping. Each gets its own in and out points and an
+  optional name, and each can be exported on its own or joined with the others —
+  `hdz_048_1_Launch_upload.mp4` rather than a counter. `N` adds one with the
+  picture focused.
+
+  The button used to say *Add select*. "Select" is film-editing jargon, and it
+  already meant two other things in that window: ticking a clip for export, and
+  highlighting a row. It says **range** now, everywhere you can read it. The
+  session file still uses the old key internally, deliberately: renaming it
+  would cost a schema migration for a word nobody reading the file will see.
+
+- **Frame-by-frame trimming.** The filmstrip is one frame per second, which is
+  right for finding a moment and wrong for cutting on one. Pause and use `,` and
+  `.` to step through real source frames — ten with Shift — and the app decodes
+  a small window around the playhead rather than the whole recording.
+
+  Seeking used to paint the nearest filmstrip still, which is extracted 160
+  pixels wide because that is all a strip tile needs, and the preview box is up
+  to 780. A quarter of a second after you stop dragging, the real frame replaces
+  it.
+
+- **The app reads what the footage is doing.** From the keyframes already
+  extracted for the filmstrip it separates moving from stopped, and will offer
+  its longest useful run as a range when that would remove dead time. It offers
+  and never applies; a wrong guess that quietly trimmed your footage would cost
+  far more than no guess at all.
+
+  It also says when it cannot tell. A feed whose own noise is louder than the
+  difference between flying and crashed reports no reading rather than a
+  confident wrong answer.
+
+- **The `State` column says what is in a clip without opening it.** Under the
+  review letter it shows how many ranges you have saved, and roughly how many
+  arm-fly-land cycles the footage looks like it holds — `2 ranges`, `3 flights`.
+  A clip that was read and holds none says `no flying`; one that has not been
+  read yet, or whose feed could not be read at all, says nothing rather than
+  inventing an answer.
+
+  That reading happens on its own, after scanning and thumbnails have finished,
+  one clip at a time and at below-normal priority, reusing the filmstrips of
+  clips you have already opened before decoding anything new. Clicking a clip
+  takes the card back from it immediately, and it resumes where it left off.
+
+- **The keyboard shortcuts are in the app.** `F1`, or `Help ▸ Keyboard
+  shortcuts`, grouped by what has to have focus — because several keys depend on
+  it. `K` is Keep in the clip list and Play on the picture; `Space` ticks a clip
+  in one place and plays in the other. The README's list had been wrong for some
+  time, so the dialog is checked against the real bindings by a test rather than
+  kept by hand. `Help ▸ About` is there too, beside the button it has always had.
+
+- **Every launch was checking for updates with no way to stop it.** The About
+  box's *Check for updates* tickbox was built without an owner, so Python
+  collected it before the dialog appeared: the control was missing, and reading
+  it back was an access violation. The setting defaults to on and that was the
+  only thing that could turn it off — while the README said unticking it stopped
+  the request entirely. It is back, and it works.
+
+Under the surface, the Windows installer is built in CI alongside the AppImage
+and the macOS app, from an ffmpeg archive pinned by URL and hash so a changed
+binary fails the build instead of shipping quietly. Where this is all going is
+written down in [docs/ROADMAP.md](docs/ROADMAP.md).
+
 ## 1.4.0
 
 **You can watch the footage now.** Until this release the app could tell you a
