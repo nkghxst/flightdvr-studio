@@ -99,19 +99,25 @@ def extract(tools: Tools, clip: ClipInfo) -> Path | None:
 
 class _Signals(QObject):
     ready = Signal(str, str)  # clip path, thumbnail path
+    finished = Signal(int, str)  # loader generation, clip path
 
 
 class _ThumbTask(QRunnable):
-    def __init__(self, tools: Tools, clip: ClipInfo, signals: _Signals):
+    def __init__(self, tools: Tools, clip: ClipInfo, signals: _Signals,
+                 generation: int):
         super().__init__()
         self.tools = tools
         self.clip = clip
         self.signals = signals
+        self.generation = generation
 
     def run(self) -> None:
-        result = extract(self.tools, self.clip)
-        if result:
-            self.signals.ready.emit(str(self.clip.path), str(result))
+        try:
+            result = extract(self.tools, self.clip)
+            if result:
+                self.signals.ready.emit(str(self.clip.path), str(result))
+        finally:
+            self.signals.finished.emit(self.generation, str(self.clip.path))
 
 
 class ThumbnailLoader(QObject):
@@ -123,17 +129,21 @@ class ThumbnailLoader(QObject):
     """
 
     ready = Signal(str, str)
+    idle = Signal()
 
     def __init__(self, tools: Tools, parent=None):
         super().__init__(parent)
         self.tools = tools
         self._signals = _Signals()
         self._signals.ready.connect(self.ready)
+        self._signals.finished.connect(self._finished)
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(3)
         self._queued: set[str] = set()
+        self._pending: set[tuple[int, str]] = set()
         self._held: list[ClipInfo] = []
         self._paused = False
+        self._generation = 0
 
     def pause(self) -> None:
         self._paused = True
@@ -149,17 +159,32 @@ class ThumbnailLoader(QObject):
         if key in self._queued:
             return
         self._queued.add(key)
+        self._pending.add((self._generation, key))
         if self._paused:
             self._held.append(clip)
         else:
             self._start(clip)
 
     def _start(self, clip: ClipInfo) -> None:
-        self._pool.start(_ThumbTask(self.tools, clip, self._signals))
+        self._pool.start(_ThumbTask(
+            self.tools, clip, self._signals, self._generation))
+
+    def _finished(self, generation: int, clip_path: str) -> None:
+        self._pending.discard((generation, clip_path))
+        if self.is_idle:
+            self.idle.emit()
+
+    @property
+    def is_idle(self) -> bool:
+        """Whether no queued or running thumbnail can still touch the card."""
+        return (not self._paused and not self._held and not self._pending
+                and self._pool.activeThreadCount() == 0)
 
     def clear(self) -> None:
         self._pool.clear()
+        self._generation += 1
         self._queued.clear()
+        self._pending.clear()
         self._held.clear()
 
     def shutdown(self) -> None:

@@ -74,7 +74,7 @@ from .session import (
 )
 from .shortcuts import SHORTCUT_GROUPS
 from .thumbs import THUMB_WIDTH, ThumbnailLoader
-from .trim import Filmstrip, FilmstripLoader
+from .trim import Filmstrip, FilmstripLoader, FlightAnalysisWorker
 from .widgets import (
     EDGE, GAP, INNER, MIN_LIST_HEIGHT, MIN_THUMB_WIDTH, MIN_VISIBLE_CLIPS,
     TIGHT, DriveCombo, SortItem, _default_window_size, app_icon, dim, key_fill,
@@ -142,6 +142,12 @@ class MainWindow(QMainWindow):
         # takes its decode down with it.
         self._retired_strips: list[FilmstripLoader] = []
         self._strip_generation = 0
+        self._flight_worker: FlightAnalysisWorker | None = None
+        self._retired_flight_workers: list[FlightAnalysisWorker] = []
+        self._flight_generation = 0
+        self._flight_scan_ready = False
+        self._flight_attempted: set[str] = set()
+        self._flight_findings: dict[str, object] = {}
         # What the current clip's filmstrip says it spends its
         # time doing. Never acted on without being asked.
         self._activity = None
@@ -173,6 +179,7 @@ class MainWindow(QMainWindow):
 
         self.thumbs = ThumbnailLoader(tools, self)
         self.thumbs.ready.connect(self._thumb_ready)
+        self.thumbs.idle.connect(self._start_flight_analysis)
 
         self._select_timer = QTimer(self)
         self._select_timer.setSingleShot(True)
@@ -1014,6 +1021,8 @@ class MainWindow(QMainWindow):
         self._flush_session()
         # First, because it is the one holding a decoder open on the card.
         self.player.shutdown()
+        self._flight_scan_ready = False
+        self._stop_flight_analysis()
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
             self.worker.wait(4000)
@@ -1030,6 +1039,10 @@ class MainWindow(QMainWindow):
             if loader and loader.isRunning():
                 loader.stop()
                 loader.wait(2000)
+        for worker in [self._flight_worker, *self._retired_flight_workers]:
+            if worker and worker.isRunning():
+                worker.stop()
+                worker.wait(2000)
         self.thumbs.shutdown()
         super().closeEvent(event)
 
@@ -1100,6 +1113,10 @@ class MainWindow(QMainWindow):
         if self.scan_worker and self.scan_worker.isRunning():
             self.scan_worker.stop()
             self.scan_worker.wait(1500)
+        self._flight_scan_ready = False
+        self._stop_flight_analysis()
+        self._flight_attempted.clear()
+        self._flight_findings.clear()
 
         # Before the clips go. The session is written from them, and the write
         # is debounced by a second and a half — so a trim set and then followed
@@ -1183,7 +1200,9 @@ class MainWindow(QMainWindow):
                 opened = self.session
             self._adopt_session(opened or for_source(source))
 
+        self._flight_scan_ready = True
         self.thumbs.resume()
+        self._start_flight_analysis()
 
     def _is_open_for(self, source: Path) -> bool:
         return (self.session is not None
@@ -1222,12 +1241,13 @@ class MainWindow(QMainWindow):
         ))
         self.table.setItem(row, 4, SortItem(clip.format_label, clip.format_label))
         range_count = len(clip.real_selects)
+        flight_count = self._flight_count(clip)
         review_item = SortItem(
-            review_state_text(clip.review, range_count),
+            review_state_text(clip.review, range_count, flight_count),
             REVIEW_STATES.index(clip.review),
         )
         review_item.setToolTip(
-            review_state_tooltip(clip.review, range_count))
+            review_state_tooltip(clip.review, range_count, flight_count))
         self.table.setItem(row, 5, review_item)
         # Store this on every item rather than looking sideways from the paint
         # delegate. A review change then invalidates every cell in the row,
@@ -1322,9 +1342,12 @@ class MainWindow(QMainWindow):
             for column in range(self.table.columnCount()):
                 self.table.item(row, column).setData(REVIEW_ROLE, clip.review)
             range_count = len(clip.real_selects)
-            item.setText(review_state_text(clip.review, range_count))
+            flight_count = self._flight_count(clip)
+            item.setText(review_state_text(
+                clip.review, range_count, flight_count))
             item.setData(SortItem.SORT_ROLE, REVIEW_STATES.index(clip.review))
-            item.setToolTip(review_state_tooltip(clip.review, range_count))
+            item.setToolTip(review_state_tooltip(
+                clip.review, range_count, flight_count))
             self.table.blockSignals(previous)
             break
 
@@ -1432,6 +1455,10 @@ class MainWindow(QMainWindow):
         if self._trim_clip is not None and clip.path == self._trim_clip.path:
             return
 
+        # The person is waiting for this filmstrip. Stop the speculative sweep
+        # before starting it so the interactive decoder owns the card first.
+        self._stop_flight_analysis()
+
         self._trim_clip = clip
         self._precise_frame_number = None
         # Static for as long as this clip is the one loaded, so it is written
@@ -1469,6 +1496,10 @@ class MainWindow(QMainWindow):
                                              self._strip_generation, self)
         self._strip_loader.ready.connect(self._strip_ready)
         self._strip_loader.activity_ready.connect(self._activity_ready)
+        generation = self._strip_generation
+        self._strip_loader.finished.connect(
+            lambda generation=generation:
+            self._interactive_strip_finished(generation))
         self._strip_loader.start()
 
     def _strip_ready(self, generation: int, clip_path: str, strip) -> None:
@@ -1663,7 +1694,10 @@ class MainWindow(QMainWindow):
         if clip is None or str(clip.path) != clip_path:
             return
 
+        self._record_flight_result(clip_path, found)
         self._activity = found
+        if found is None:
+            return
         offer = ""
         span = found.suggestion
         if span is not None and not clip.is_trimmed:
@@ -1694,6 +1728,99 @@ class MainWindow(QMainWindow):
             self._activity.describe(human_duration))
         self.statusBar().showMessage(
             "Trimmed to the longest run of movement — Reset puts it back", 8000)
+
+    # -- flight counts in the browser ---------------------------------------
+
+    def _flight_count(self, clip: ClipInfo) -> int | None:
+        found = self._flight_findings.get(str(clip.path))
+        if found is None or not getattr(found, "readable", False):
+            return None
+        return int(found.flights)
+
+    def _record_flight_result(self, clip_path: str, found) -> None:
+        clip = self.clip_by_path.get(clip_path)
+        if clip is None:
+            return
+        self._flight_attempted.add(clip_path)
+        self._flight_findings[clip_path] = found
+        self._refresh_flight_in_table(clip)
+
+    def _refresh_flight_in_table(self, clip: ClipInfo) -> None:
+        for row in range(self.table.rowCount()):
+            name = self.table.item(row, 0)
+            item = self.table.item(row, 5)
+            if name is None or item is None:
+                continue
+            if name.data(Qt.ItemDataRole.UserRole) != str(clip.path):
+                continue
+            range_count = len(clip.real_selects)
+            flight_count = self._flight_count(clip)
+            previous = self.table.blockSignals(True)
+            item.setText(review_state_text(
+                clip.review, range_count, flight_count))
+            item.setToolTip(review_state_tooltip(
+                clip.review, range_count, flight_count))
+            self.table.blockSignals(previous)
+            break
+
+    def _start_flight_analysis(self) -> None:
+        """Start only after scans, thumbnails and interactive strips are idle."""
+        if not self._flight_scan_ready or not self.thumbs.is_idle:
+            return
+        if self._strip_loader and self._strip_loader.isRunning():
+            return
+        if self._flight_worker and self._flight_worker.isRunning():
+            return
+        pending = [
+            clip for clip in self.clips
+            if str(clip.path) not in self._flight_attempted
+        ]
+        if not pending:
+            return
+
+        self._retired_flight_workers = [
+            worker for worker in self._retired_flight_workers
+            if worker.isRunning()
+        ]
+        self._flight_generation += 1
+        generation = self._flight_generation
+        worker = FlightAnalysisWorker(
+            self.tools, pending, generation, self)
+        self._flight_worker = worker
+        worker.result.connect(self._flight_result)
+        worker.finished.connect(
+            lambda generation=generation:
+            self._flight_worker_finished(generation))
+        worker.start(QThread.Priority.LowestPriority)
+
+    def _flight_result(self, generation: int, clip_path: str, found) -> None:
+        if generation != self._flight_generation:
+            return
+        self._record_flight_result(clip_path, found)
+
+    def _flight_worker_finished(self, generation: int) -> None:
+        self._retired_flight_workers = [
+            worker for worker in self._retired_flight_workers
+            if worker.isRunning()
+        ]
+        if generation == self._flight_generation:
+            QTimer.singleShot(0, self._start_flight_analysis)
+
+    def _interactive_strip_finished(self, generation: int) -> None:
+        if generation == self._strip_generation:
+            QTimer.singleShot(0, self._start_flight_analysis)
+
+    def _stop_flight_analysis(self) -> None:
+        """Cancel the sweep without making the UI wait for its decoder."""
+        self._flight_generation += 1
+        worker, self._flight_worker = self._flight_worker, None
+        if worker and worker.isRunning():
+            worker.stop()
+            self._retired_flight_workers.append(worker)
+        self._retired_flight_workers = [
+            retired for retired in self._retired_flight_workers
+            if retired.isRunning()
+        ]
 
     # -- several ranges out of one clip ---------------------------------------
 
@@ -1840,12 +1967,15 @@ class MainWindow(QMainWindow):
                 item.setText(clip.duration_label)
             state_item = self.table.item(row, 5)
             range_count = len(clip.real_selects)
-            state_text = review_state_text(clip.review, range_count)
+            flight_count = self._flight_count(clip)
+            state_text = review_state_text(
+                clip.review, range_count, flight_count)
             if state_item is not None and state_item.text() != state_text:
                 previous = self.table.blockSignals(True)
                 state_item.setText(state_text)
                 state_item.setToolTip(
-                    review_state_tooltip(clip.review, range_count))
+                    review_state_tooltip(
+                        clip.review, range_count, flight_count))
                 self.table.blockSignals(previous)
             break
 

@@ -643,6 +643,22 @@ Loaders also carry a generation, for the same reason `ScanWorker` does: matching
 on the clip's path alone accepts an overtaken extraction of the clip you are
 back on.
 
+The State-column flight pass uses those same filmstrips, but it is deliberately
+last. It waits for the scan and every thumbnail, reads every complete cached
+filmstrip before decoding a new one, and handles one clip at a time at Qt's
+lowest thread priority. Selecting a clip stops the speculative decoder before
+starting the interactive one; the sweep resumes from the missing clips when
+that filmstrip finishes. Rescanning, switching folders and closing cancel it.
+An absent answer and a feed whose motion is too noisy to classify both leave the
+flight line blank. A readable zero says `no flying`, because that is a measured
+answer rather than a refusal.
+
+Measured on `hdz_166.ts` (clip `17bf3f47fb7b5daf`, 52.167 s): the Windows
+decoder ran in below-normal priority class `0x4000`; cancelling 91 ms after
+launch stopped it in 6 ms, emitted no result and left no cache. A complete cold
+pass took 1.196 s and the following cache-only pass 0.027 s, both reporting the
+same one-flight reading.
+
 ### Precise frame window
 
 Playback is deliberately 30 fps; precise trimming is deliberately not. Comma

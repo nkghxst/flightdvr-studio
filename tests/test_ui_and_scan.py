@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QPoint, QRect, QRectF, Qt
+from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QThread
 from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
 
 # Must be set before any QApplication exists, so these tests need no display.
@@ -138,6 +138,53 @@ def test_thumbnail_applies_the_same_levels_fix_as_the_export():
 def test_thumbnail_leaves_limited_range_footage_alone():
     command = build_command(TOOLS, clip(pix_fmt="yuv420p", color_range="tv"), Path("out.jpg"))
     assert "in_range=full" not in " ".join(command)
+
+
+def test_thumbnail_loader_only_reports_idle_after_every_request_finishes(
+        qt_app, monkeypatch):
+    """The flight sweep must not compete with any thumbnail still queued or
+    running against the card."""
+    from flightdvr.thumbs import ThumbnailLoader
+
+    loader = ThumbnailLoader(TOOLS)
+    tasks = []
+    monkeypatch.setattr(loader._pool, "start", lambda task: tasks.append(task))
+    idle = []
+    loader.idle.connect(lambda: idle.append(True))
+
+    first, second = clip("hdz_001.ts"), clip("hdz_002.ts")
+    loader.request(first)
+    loader.request(second)
+    assert not loader.is_idle
+
+    loader._finished(loader._generation, str(first.path))
+    assert not loader.is_idle
+    assert idle == []
+
+    loader._finished(loader._generation, str(second.path))
+    assert loader.is_idle
+    assert idle == [True]
+
+
+def test_cleared_thumbnail_results_cannot_finish_a_new_generation(
+        qt_app, monkeypatch):
+    """A thumbnail from the folder just left may finish during the next scan;
+    it cannot make the new folder look idle while its own work is pending."""
+    from flightdvr.thumbs import ThumbnailLoader
+
+    loader = ThumbnailLoader(TOOLS)
+    monkeypatch.setattr(loader._pool, "start", lambda _task: None)
+    old = clip("old.ts")
+    new = clip("new.ts")
+    loader.request(old)
+    old_generation = loader._generation
+    loader.clear()
+    loader.request(new)
+
+    loader._finished(old_generation, str(old.path))
+
+    assert not loader.is_idle
+    assert (loader._generation, str(new.path)) in loader._pending
 
 
 # -- the clock problem --------------------------------------------------------
@@ -1397,6 +1444,19 @@ def test_state_text_counts_ranges_that_would_reach_an_export():
     assert review_state_tooltip(made.review, len(made.real_selects)) == "Keep"
 
 
+def test_state_text_distinguishes_every_motion_outcome_it_can_claim():
+    """Pending and unreadable both pass no count and stay blank; a trustworthy
+    zero is a measured result, while positive counts keep established words."""
+    assert review_state_text(KEEP, 0, None) == "K"
+    assert review_state_text(KEEP, 0, 0) == "K\nno flying"
+    assert review_state_text(KEEP, 1, 1) == "K\n1 range\n1 flight"
+    assert review_state_text(MAYBE, 2, 3) == "M\n2 ranges\n3 flights"
+    assert review_state_tooltip(KEEP, 0, 0) == (
+        "Keep · Motion estimate: no flying detected")
+    assert review_state_tooltip(MAYBE, 2, 3) == (
+        "Maybe · 2 saved ranges · Motion estimate: 3 flights detected")
+
+
 def test_state_range_count_follows_add_remove_reset_and_review(window,
                                                                monkeypatch):
     """A count left behind after editing is worse than no count: the browser
@@ -1460,6 +1520,181 @@ def test_state_range_count_follows_add_remove_reset_and_review(window,
         window.clip_by_path.clear()
         table.setSortingEnabled(True)
         window._refresh_review_controls()
+
+
+def test_motion_results_update_only_the_flight_line(window, monkeypatch):
+    """Pending, failed and noisy readings stay blank; a trustworthy zero and
+    positive counts appear without disturbing the review or saved ranges."""
+    from flightdvr.motion import Activity
+
+    monkeypatch.setattr(window.thumbs, "request", lambda *_: None)
+    window.table.setSortingEnabled(False)
+    window.table.setRowCount(0)
+    window.clips.clear()
+    window.clip_by_path.clear()
+    made = clip("hdz_flights.ts")
+    made.review = KEEP
+    made.selects = [Select(10.0, 20.0)]
+    window._add_clip(window._scan_generation, made)
+    item = window.table.item(0, 5)
+
+    try:
+        assert item.text() == "K\n1 range"
+
+        window._record_flight_result(str(made.path), None)
+        assert item.text() == "K\n1 range"
+
+        unreadable = Activity(
+            duration=60.0, still=[], flying=[(0.0, 60.0)],
+            quietest=9.0, readable=False)
+        window._record_flight_result(str(made.path), unreadable)
+        assert item.text() == "K\n1 range"
+
+        none = Activity(
+            duration=60.0, still=[(0.0, 60.0)], flying=[], quietest=1.0)
+        window._record_flight_result(str(made.path), none)
+        assert item.text() == "K\n1 range\nno flying"
+
+        two = Activity(
+            duration=60.0, still=[(20.0, 30.0)],
+            flying=[(0.0, 20.0), (30.0, 60.0)], quietest=1.0)
+        window._record_flight_result(str(made.path), two)
+        assert item.text() == "K\n1 range\n2 flights"
+        assert "Motion estimate" in item.toolTip()
+    finally:
+        window.table.setRowCount(0)
+        window.clips.clear()
+        window.clip_by_path.clear()
+        window._flight_attempted.clear()
+        window._flight_findings.clear()
+        window.table.setSortingEnabled(True)
+
+
+def test_flight_pass_starts_last_and_at_the_lowest_priority(window,
+                                                            monkeypatch):
+    """Scanning can finish before three thumbnail decoders do. The slow sweep
+    must remain absent until those have all released the card."""
+    starts = []
+
+    class Signalish:
+        def connect(self, _slot):
+            pass
+
+    class FakeWorker:
+        def __init__(self, _tools, clips, generation, _parent):
+            self.clips = clips
+            self.generation = generation
+            self.result = Signalish()
+            self.finished = Signalish()
+
+        def isRunning(self):
+            return False
+
+        def start(self, priority):
+            starts.append((priority, [made.path.name for made in self.clips]))
+
+    monkeypatch.setattr("flightdvr.ui.FlightAnalysisWorker", FakeWorker)
+    old_clips = list(window.clips)
+    old_ready = window._flight_scan_ready
+    old_paused = window.thumbs._paused
+    old_worker = window._flight_worker
+    finished = clip("hdz_done.ts")
+    waiting = clip("hdz_last.ts")
+    window.clips = [finished, waiting]
+    window._flight_attempted.add(str(finished.path))
+    window._flight_scan_ready = True
+    window._flight_worker = None
+    window.thumbs._paused = True
+
+    try:
+        window._start_flight_analysis()
+        assert starts == [], "the sweep started while thumbnails were paused"
+
+        window.thumbs._paused = False
+        window._start_flight_analysis()
+        assert starts == [(
+            QThread.Priority.LowestPriority, ["hdz_last.ts"])]
+    finally:
+        window._flight_attempted.discard(str(finished.path))
+        window.clips = old_clips
+        window._flight_scan_ready = old_ready
+        window.thumbs._paused = old_paused
+        window._flight_worker = old_worker
+
+
+def test_a_flight_result_from_the_folder_just_left_is_ignored(window,
+                                                               monkeypatch):
+    """Stopping ffmpeg is asynchronous; a queued result from the previous
+    generation cannot annotate a same-named clip in the new folder."""
+    from flightdvr.motion import Activity
+
+    monkeypatch.setattr(window.thumbs, "request", lambda *_: None)
+    window.table.setSortingEnabled(False)
+    window.table.setRowCount(0)
+    window.clips.clear()
+    window.clip_by_path.clear()
+    made = clip("hdz_001.ts")
+    window._add_clip(window._scan_generation, made)
+    window._flight_generation = 12
+    found = Activity(
+        duration=60.0, still=[], flying=[(0.0, 60.0)], quietest=1.0)
+
+    try:
+        window._flight_result(11, str(made.path), found)
+        assert window.table.item(0, 5).text() == "U"
+        assert str(made.path) not in window._flight_attempted
+    finally:
+        window.table.setRowCount(0)
+        window.clips.clear()
+        window.clip_by_path.clear()
+        window._flight_attempted.clear()
+        window._flight_findings.clear()
+        window.table.setSortingEnabled(True)
+
+
+def test_an_interactive_filmstrip_stops_the_background_sweep_first(
+        window, monkeypatch):
+    """The speculative decoder yields before the decoder a person requested
+    starts, rather than leaving both to compete for the card."""
+    events = []
+
+    class Signalish:
+        def connect(self, _slot):
+            pass
+
+    class Background:
+        def isRunning(self):
+            return True
+
+        def stop(self):
+            events.append("background stopped")
+
+    class Interactive:
+        def __init__(self, *_args, **_kwargs):
+            self.ready = Signalish()
+            self.activity_ready = Signalish()
+            self.finished = Signalish()
+
+        def isRunning(self):
+            return False
+
+        def start(self):
+            events.append("interactive started")
+
+    made = clip("hdz_priority.ts")
+    window.clip_by_path[str(made.path)] = made
+    window._trim_clip = None
+    window._flight_worker = Background()
+    monkeypatch.setattr(window, "_highlighted_clip", lambda: made)
+    monkeypatch.setattr("flightdvr.ui.FilmstripLoader", Interactive)
+
+    try:
+        window._load_selected_clip()
+        assert events[:2] == ["background stopped", "interactive started"]
+    finally:
+        window._flight_worker = None
+        window._retired_flight_workers.clear()
+        window.clip_by_path.pop(str(made.path), None)
 
 
 def test_review_tint_reinforces_the_state_letter_across_the_row(window,
@@ -1929,6 +2164,117 @@ def test_a_cached_filmstrip_can_be_checked_without_starting_a_decode(
     assert found.times == [0.0]
 
 
+def test_the_flight_pass_reads_every_cache_before_starting_a_decode(
+        monkeypatch):
+    """A warm 133-clip card takes seconds; starting a cold extraction before
+    those answers are shown breaks the cache-first promise."""
+    from flightdvr import trim as trim_module
+
+    clips = [clip(f"hdz_{number:03}.ts") for number in range(3)]
+    cached = {
+        str(clips[0].path): trim_module.Filmstrip([Path("a.jpg")], [0.0]),
+        str(clips[2].path): trim_module.Filmstrip([Path("c.jpg")], [0.0]),
+    }
+    events = []
+    monkeypatch.setattr(
+        trim_module, "cached_filmstrip",
+        lambda made: cached.get(str(made.path), trim_module.Filmstrip()),
+    )
+    monkeypatch.setattr(
+        trim_module, "extract",
+        lambda _tools, made, low_priority, **_kwargs: (
+            events.append(("decode", made.path.name, low_priority))
+            or trim_module.Filmstrip([Path("new.jpg")], [0.0])
+        ),
+    )
+    monkeypatch.setattr(
+        "flightdvr.motion.activity",
+        lambda strip, _duration: events.append(
+            ("read", strip.frames[0].name)) or object(),
+    )
+
+    worker = trim_module.FlightAnalysisWorker(TOOLS, clips)
+    worker.run()
+
+    assert events == [
+        ("read", "a.jpg"),
+        ("read", "c.jpg"),
+        ("decode", "hdz_001.ts", True),
+        ("read", "new.jpg"),
+    ]
+
+
+def test_stopping_the_flight_pass_interrupts_and_publishes_no_result(
+        monkeypatch):
+    """Clicking a clip must take the decoder immediately; the background pass
+    cannot finish its old answer or leave a partial filmstrip behind."""
+    from flightdvr import trim as trim_module
+
+    made = clip("hdz_background.ts")
+    stopped = []
+    published = []
+    monkeypatch.setattr(
+        trim_module, "cached_filmstrip", lambda _clip: trim_module.Filmstrip())
+    monkeypatch.setattr(
+        trim_module, "request_stop", lambda proc: stopped.append(proc))
+
+    def interrupted(_tools, _clip, register, cancelled, low_priority):
+        assert low_priority
+        process = object()
+        register(process)
+        worker.stop()
+        assert cancelled()
+        return trim_module.Filmstrip()
+
+    monkeypatch.setattr(trim_module, "extract", interrupted)
+    monkeypatch.setattr(trim_module, "stop_process", lambda _proc: None)
+    worker = trim_module.FlightAnalysisWorker(TOOLS, [made])
+    worker.result.connect(lambda *_args: published.append(True))
+
+    worker.run()
+
+    assert stopped, "the background decoder was not asked to yield"
+    assert published == [], "a cancelled reading reached the State column"
+
+
+def test_background_filmstrip_lowers_the_decoder_process_priority(
+        tmp_path, monkeypatch):
+    """Lowering only the Python QThread does not lower the ffmpeg child that
+    performs nearly all thirteen minutes of cold-card work."""
+    from flightdvr import trim as trim_module
+
+    monkeypatch.setattr(trim_module, "cache_root", lambda: tmp_path)
+    opened = []
+    lowered = []
+
+    class Done:
+        returncode = 0
+        pid = 123
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    def fake_popen(_command, **kwargs):
+        opened.append(kwargs)
+        return Done()
+
+    monkeypatch.setattr(trim_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(trim_module, "frame_rate_mode", lambda *_args: [])
+    if trim_module.os.name != "nt":
+        monkeypatch.setattr(
+            trim_module.os, "setpriority",
+            lambda which, pid, priority: lowered.append(
+                (which, pid, priority)))
+
+    trim_module.extract(TOOLS, clip("hdz_low.ts"), low_priority=True)
+
+    if trim_module.os.name == "nt":
+        assert (opened[0]["creationflags"]
+                & trim_module.BELOW_NORMAL_PRIORITY)
+    else:
+        assert lowered == [(trim_module.os.PRIO_PROCESS, 123, 10)]
+
+
 def test_a_cancelled_extraction_publishes_nothing(tmp_path, monkeypatch):
     """Terminating ffmpeg makes communicate() return normally, so a cancelled
     extraction reached the publishing code with whatever frames it had got to.
@@ -2026,6 +2372,7 @@ def test_changing_clip_stops_the_extraction_it_leaves_behind(window,
             self.generation = 0
             self.ready = Signalish()
             self.activity_ready = Signalish()
+            self.finished = Signalish()
 
         def isRunning(self):
             return True
