@@ -195,7 +195,7 @@ That is the whole loop. Everything below is detail.
 
 ## The clip browser
 
-![The clip list, with thumbnails and export settings](docs/01-browse.png)
+![The clip list, with thumbnails, review states and export settings](docs/01-browse.png)
 
 Clips are listed with a thumbnail taken from a representative frame, plus
 length, size, card date and format. Click any column heading to sort by it. The
@@ -215,9 +215,77 @@ Clips that already have an export for the current preset are marked
 Widening the window makes the thumbnails bigger rather than leaving an empty
 filename column.
 
+## Reviewing a card
+
+A full card is a hundred-odd clips, most of which you will not keep. The
+**State** column is how you get through them without opening each one twice.
+
+Click a clip and press a key, or use the **Mark:** buttons:
+
+| | | |
+|---|---|---|
+| `U` | **Unreviewed** | the starting state |
+| `K` | **Keep** | worth exporting |
+| `M` | **Maybe** | not now |
+| `R` | **Reject** | no |
+
+*Maybe* earns its place. On a long card most decisions are "not now", and
+without somewhere to put them they end up as Keep and you sort it out later,
+which is the same job again.
+
+The row is tinted faintly to match — green, amber, red, and nothing for
+unreviewed. The colour is reinforcement, not the message: the letter in the
+column is what actually says the state, so nothing is lost if the greens and
+reds look alike to you.
+
+**Show:** filters the list to one state, which is the fastest way through a
+card: mark everything once, then show only Keep. The count beside it says how
+far through you are.
+
+Two more things appear under the letter when they are known:
+
+- **`2 ranges`** — how many parts of that clip you have marked for export. See
+  [several ranges from one clip](#preview-and-trimming).
+- **`2 flights`** — roughly how many arm-fly-land cycles the footage looks like
+  it holds, read from the filmstrip rather than from any telemetry. This is a
+  guess from motion, and the tooltip says so. A readable clip with none says
+  **`no flying`**. Until the clip has been read — or when its feed is too noisy
+  to tell flying from stopped — the line stays blank rather than inventing an
+  answer.
+
+That reading happens on its own, after scanning and thumbnails have finished,
+one clip at a time and at low priority. Clips you have already opened are free,
+because it reuses the same filmstrip. Clicking a clip stops it immediately, so
+it never makes the app feel slower — and it starts again where it left off.
+
+## Sessions
+
+The work you do on a card is saved as you go. Trim ranges, review states, range
+names and the export settings you chose all belong to the folder you are
+working on, and come back when you open it again. Outputs still present for
+those settings are recognised as already exported. There is nothing to press.
+
+The **Session** menu is for the cases that need more than that:
+
+| | |
+|---|---|
+| **Save session as…** | give this one a name and put it where you like |
+| **Open session…** | reopen one from anywhere |
+| **Recent sessions** | the last few, by name |
+
+A session references your footage rather than containing it, so it is small,
+and it can be backed up or moved without taking the video with it.
+
+**Clips are identified by path, size and modification time together — never by
+name alone.** Cards get wiped and reused, and `hdz_004.ts` next month is a
+different flight from `hdz_004.ts` today. A session that confidently attached
+last week's trim points to this week's footage would be worse than one that
+remembered nothing, so a clip it cannot match is reported rather than guessed
+at.
+
 ## Preview and trimming
 
-![The preview panel, showing the filmstrip and in and out points](docs/02-trim.png)
+![The preview panel, editing the second of three ranges in one recording](docs/02-trim.png)
 
 Select a clip and it loads into the preview under the list, with its filmstrip
 across the bottom of the window. **Play** runs it there — no other program, no
@@ -543,10 +611,10 @@ the icon, build the bundle and prove the result starts before packaging it.
 | Linux | `packaging/build-appimage.sh` | AppImage | `curl`; appimagetool is fetched and cached |
 | macOS | `packaging/build-macos.sh` | signed-ad-hoc `.app` in a `.dmg` | Xcode command line tools |
 
-Linux and macOS builds are produced by
+All three are produced by
 [GitHub Actions](.github/workflows/build.yml) on every push, so you do not need
-those machines to release for them. The Windows installer is still built by
-hand — see the note at the top of that workflow for why.
+any of those machines to release for them. The commands above are for building
+one yourself.
 
 There is more detail on the internals, the measured findings behind the colour
 handling, and the traps in this footage in
@@ -599,9 +667,10 @@ Only the Windows installer bundles ffmpeg. The AppImage and the macOS app use
 whatever your package manager installed, so they redistribute no ffmpeg binary
 and carry no obligation for its source.
 
-The bundled Windows build is `7.1.1-full_build-www.gyan.dev`, configured
-`--enable-gpl --enable-version3`. It is **not** an `--enable-nonfree` build,
-which could not be redistributed at all.
+The bundled Windows build is `n7.1.5-12-g1fdbca85aa` from
+[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), tag
+`autobuild-2026-07-31-14-10`, configured `--enable-gpl --enable-version3`. It is
+**not** an `--enable-nonfree` build, which could not be redistributed at all.
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) records the version, origin and
 licence, along with a written offer for the corresponding source as required by
 section 6 of the GPL.

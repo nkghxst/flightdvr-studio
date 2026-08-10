@@ -41,12 +41,17 @@ and a keyframe every 1.000 s, because the trim defect depended on that GOP
 length. They are 320x180 and cached per session, so the whole thing costs about
 fifteen seconds.
 
-### xfail is the known-defects list
+### xfail is the known-defects list, and it is currently empty
 
-Every `xfail(strict=True)` in the integration module describes a defect that is
-still real. `xfail_strict` is on, so a test that starts passing becomes an
-error rather than a quiet success — whoever fixes the defect is told to delete
-the marker. The list cannot silently go stale.
+There are no `xfail` markers in the suite as of 1.5. Everything that was on the
+list has been fixed, and this section is kept because the convention is how the
+next one gets recorded, not because there is anything on it today.
+
+When there is: mark it `xfail(strict=True)` and say in the docstring what the
+defect does. `xfail_strict` is on in `pytest.ini`, so a test that starts passing
+becomes an error rather than a quiet success — whoever fixes the defect is told
+to delete the marker. That is what stops the list going stale, and it is why the
+list being empty is worth writing down rather than leaving to be inferred.
 
 ### Assert your fixtures
 
@@ -383,10 +388,11 @@ Verified as a drop-in before switching: same trim and colour chain, both
 builds, **PSNR `inf`** — bit-identical output. Anything less would have made
 the measured findings above stale.
 
-**The Windows installer is not in CI yet, but nothing blocks it now.** The
-reason it was excluded — a CI job would fetch an unknown ffmpeg — is solved by
-the pin above: a workflow can download the recorded URL, check the hash, and
-fail if it drifts. What is left is installing Inno Setup on the runner.
+**The Windows installer is built in CI from that pin.** The workflow downloads
+the recorded URL, checks its hash, passes the verified folder to the same
+`packaging/build.ps1` used locally, and uploads the installer beside the Linux
+and macOS artifacts. A changed or vanished ffmpeg archive therefore fails the
+build instead of silently changing the binary being shipped.
 
 ### Releasing
 
@@ -394,13 +400,14 @@ fail if it drifts. What is left is installing Inno Setup on the runner.
    `packaging/installer.iss`. They are separate strings; both need changing.
 2. Update `CHANGELOG.md`.
 3. Push to `main` and let CI go green.
-4. Tag `vX.Y.Z` and push the tag. CI drafts a release and attaches the AppImage
-   and the DMG.
-5. Build the Windows installer locally with `pwsh packaging\build.ps1`, attach
-   it, and add its SHA-256 to the table in the README.
+4. Tag `vX.Y.Z` and push the tag. CI drafts a release and attaches the AppImage,
+   the DMG and the Windows installer.
+5. Inspect the three artifacts, write the release notes, and add their SHA-256
+   values to the table in the README.
 6. Publish.
 
-The release is drafted rather than published precisely because step 5 is manual.
+The release is drafted rather than published because inspecting the artifacts,
+writing the notes and deciding to ship remain human decisions.
 
 ---
 
@@ -724,7 +731,6 @@ release attached to them yet.
   retired and every Mac sold since late 2020 is arm64.
 - **Flatpak packaging.** Would need preview rerouted through the xdg-open
   portal rather than executing a player directly.
-- **Windows installer in CI.** See above — blocked on pinning ffmpeg properly.
 - **Splitting `ui.py`.** See above.
 
 ## Deliberately not done
