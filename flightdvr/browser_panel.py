@@ -44,6 +44,26 @@ REVIEW_KEYS = {
     MAYBE: "M",
     REJECT: "R",
 }
+
+
+def review_state_text(state: str, range_count: int) -> str:
+    """The compact State-column summary for a clip."""
+    key = REVIEW_KEYS[state]
+    if not range_count:
+        return key
+    suffix = "range" if range_count == 1 else "ranges"
+    return f"{key}\n{range_count} {suffix}"
+
+
+def review_state_tooltip(state: str, range_count: int) -> str:
+    """Spell out the compact marker without making the column wider."""
+    label = REVIEW_LABELS[state]
+    if not range_count:
+        return label
+    suffix = "range" if range_count == 1 else "ranges"
+    return f"{label} · {range_count} saved {suffix}"
+
+
 # The name item uses UserRole for its path, SortItem uses the next role, and
 # MainWindow uses the following one for its exported marker.
 REVIEW_ROLE = Qt.ItemDataRole.UserRole + 3
@@ -195,7 +215,8 @@ class BrowserPanel(QWidget):
             "clock battery, so these are unreliable."
         )
         self.table.horizontalHeaderItem(5).setToolTip(
-            "U Unreviewed · K Keep · M Maybe · R Reject"
+            "U Unreviewed · K Keep · M Maybe · R Reject\n"
+            "The number of saved ranges appears below the letter"
         )
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(
