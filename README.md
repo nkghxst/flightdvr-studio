@@ -385,6 +385,7 @@ instead, and `Space` plays rather than ticking:
 | `←` `→` | Move a second |
 | `Shift` `←` `→` | Move five seconds |
 | `Home` / `End` | Jump to the in / out point |
+| `N` | Add another range |
 | `Esc` | Stop |
 
 ---
