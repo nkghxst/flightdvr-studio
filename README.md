@@ -195,7 +195,7 @@ That is the whole loop. Everything below is detail.
 
 ## The clip browser
 
-![The clip list, with thumbnails and export settings](docs/01-browse.png)
+![The clip list, with thumbnails, review states and export settings](docs/01-browse.png)
 
 Clips are listed with a thumbnail taken from a representative frame, plus
 length, size, card date and format. Click any column heading to sort by it. The
@@ -284,7 +284,7 @@ at.
 
 ## Preview and trimming
 
-![The preview panel, showing the filmstrip and in and out points](docs/02-trim.png)
+![The preview panel, editing the second of three ranges in one recording](docs/02-trim.png)
 
 Select a clip and it loads into the preview under the list, with its filmstrip
 across the bottom of the window. **Play** runs it there — no other program, no
