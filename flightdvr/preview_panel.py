@@ -174,6 +174,9 @@ class PreviewView(QObject):
         way every version until now reviewed it should not grow a control it
         has no use for.
         """
+        # "Range" is deliberately the word people see while Select and the
+        # select_* identifiers remain internal. Renaming those would also mean
+        # migrating the persisted "selects" session key for no user benefit.
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(TIGHT)
@@ -183,10 +186,11 @@ class PreviewView(QObject):
         row.addWidget(self.select_label)
 
         self.select_name = QLineEdit()
-        self.select_name.setPlaceholderText("Name this one — launch, tree dive…")
+        self.select_name.setPlaceholderText(
+            "Name this range — launch, tree dive…")
         self.select_name.setMaximumWidth(280)
         self.select_name.setToolTip(
-            "Used in the filename when a clip has more than one select")
+            "Used in the filename when a clip has more than one range")
         self.select_name.textEdited.connect(
             lambda text: self.select_renamed.emit(text))
         row.addWidget(self.select_name)
@@ -220,7 +224,7 @@ class PreviewView(QObject):
         row.addWidget(self.activity_button)
         row.addStretch(1)
 
-        add = QPushButton("Add select")
+        add = QPushButton("Add range")
         add.setToolTip("Keep another range out of this clip  (N)")
         add.clicked.connect(lambda *_: self.select_added.emit())
         row.addWidget(add)
@@ -250,7 +254,7 @@ class PreviewView(QObject):
         for widget in self._only_when_several:
             widget.setVisible(several)
         self.select_label.setText(
-            f"Select {index + 1} of {count}" if several else "")
+            f"Range {index + 1} of {count}" if several else "")
         if self.select_name.text() != name:
             self.select_name.setText(name)
 

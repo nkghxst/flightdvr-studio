@@ -356,7 +356,34 @@ def test_the_row_stays_hidden_until_there_is_more_than_one(window):
     QApplication.processEvents()
     assert view.select_remove.isVisible()
     assert view.select_name.isVisible()
-    assert view.select_label.text() == "Select 1 of 2"
+    assert view.select_label.text() == "Range 1 of 2"
+
+
+def test_multi_range_controls_do_not_expose_internal_select_jargon(window):
+    """The model and session key are still called selects, but that editing
+    jargon must not leak into the controls a pilot reads."""
+    view = window.preview_view
+    assert view.select_add.text() == "Add range"
+    visible_strings = {
+        "add tooltip": view.select_add.toolTip(),
+        "name placeholder": view.select_name.placeholderText(),
+        "name tooltip": view.select_name.toolTip(),
+        "remove tooltip": view.select_remove.toolTip(),
+    }
+    missing_range = {name: text for name, text in visible_strings.items()
+                     if "range" not in text.lower()}
+    assert not missing_range, (
+        f"visible controls lost the range wording: {missing_range}")
+    leaked = {name: text for name, text in visible_strings.items()
+              if "select" in text.lower()}
+    assert not leaked, f"internal editing jargon leaked into: {leaked}"
+    assert "(n)" in view.select_add.toolTip().lower(), (
+        "renaming the button dropped the only visible shortcut hint")
+
+    flight = loaded(window, clip())
+    flight.selects = [Select(10, 40), Select(90, 120)]
+    window._show_selects()
+    assert view.select_label.text() == "Range 1 of 2"
 
 
 def test_the_estimate_counts_the_files_the_queue_will_make(window):
@@ -452,7 +479,7 @@ def test_a_select_covering_the_whole_clip_is_still_exported(window):
     exported = sorted((p.trim_in, p.out_point) for p in flight.for_export())
     assert drawn == exported, (
         f"the filmstrip draws {drawn} and the queue exports {exported}")
-    assert window.preview_view.select_label.text() == "Select 2 of 2"
+    assert window.preview_view.select_label.text() == "Range 2 of 2"
 
 
 def test_a_lone_trim_covering_everything_still_clears(window):

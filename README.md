@@ -230,6 +230,11 @@ you. **Set in** / **Set out** do the same from the buttons, and **Reset**
 restores the whole clip. The list then shows the range next to the length, and
 the size estimate, progress and time remaining all follow the trimmed length.
 
+**Add range** (or **N** with the picture focused) keeps another part of the same
+recording. When a clip has several ranges, the preview says which range you are
+editing and offers a name that can distinguish its exported filename. Each
+range can be exported separately or kept in order when clips are joined.
+
 For the exact cut, pause and use **,** / **.** to step through real source
 frames (hold **Shift** for ten). The preview decodes only a small window around
 the playhead, shows its exact timestamp and source frame number, and replaces
@@ -380,6 +385,7 @@ instead, and `Space` plays rather than ticking:
 | `←` `→` | Move a second |
 | `Shift` `←` `→` | Move five seconds |
 | `Home` / `End` | Jump to the in / out point |
+| `N` | Add another range |
 | `Esc` | Stop |
 
 ---
