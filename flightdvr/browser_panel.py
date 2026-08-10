@@ -46,22 +46,33 @@ REVIEW_KEYS = {
 }
 
 
-def review_state_text(state: str, range_count: int) -> str:
+def _count_label(count: int, singular: str, plural: str | None = None) -> str:
+    return f"{count} {singular if count == 1 else plural or singular + 's'}"
+
+
+def review_state_text(state: str, range_count: int,
+                      flight_count: int | None = None) -> str:
     """The compact State-column summary for a clip."""
-    key = REVIEW_KEYS[state]
-    if not range_count:
-        return key
-    suffix = "range" if range_count == 1 else "ranges"
-    return f"{key}\n{range_count} {suffix}"
+    lines = [REVIEW_KEYS[state]]
+    if range_count:
+        lines.append(_count_label(range_count, "range"))
+    if flight_count is not None:
+        lines.append("no flying" if flight_count == 0
+                     else _count_label(flight_count, "flight"))
+    return "\n".join(lines)
 
 
-def review_state_tooltip(state: str, range_count: int) -> str:
+def review_state_tooltip(state: str, range_count: int,
+                         flight_count: int | None = None) -> str:
     """Spell out the compact marker without making the column wider."""
-    label = REVIEW_LABELS[state]
-    if not range_count:
-        return label
-    suffix = "range" if range_count == 1 else "ranges"
-    return f"{label} · {range_count} saved {suffix}"
+    details = [REVIEW_LABELS[state]]
+    if range_count:
+        details.append(f"{_count_label(range_count, 'saved range')}")
+    if flight_count is not None:
+        estimate = ("no flying detected" if flight_count == 0 else
+                    f"{_count_label(flight_count, 'flight')} detected")
+        details.append(f"Motion estimate: {estimate}")
+    return " · ".join(details)
 
 
 # The name item uses UserRole for its path, SortItem uses the next role, and
@@ -216,7 +227,7 @@ class BrowserPanel(QWidget):
         )
         self.table.horizontalHeaderItem(5).setToolTip(
             "U Unreviewed · K Keep · M Maybe · R Reject\n"
-            "The number of saved ranges appears below the letter"
+            "Saved ranges and motion-estimated flights appear below the letter"
         )
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(

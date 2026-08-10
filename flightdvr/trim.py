@@ -25,6 +25,7 @@ seconds, so scrubbing afterwards is instant.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -42,6 +43,7 @@ from .media import (
 
 FRAME_WIDTH = 160
 PTS = re.compile(r"pts_time:([0-9.]+)")
+BELOW_NORMAL_PRIORITY = 0x00004000 if os.name == "nt" else 0
 
 
 def cache_root() -> Path:
@@ -101,8 +103,13 @@ def _read_cached(folder: Path) -> Filmstrip:
     return Filmstrip()
 
 
+def cached_filmstrip(clip: ClipInfo) -> Filmstrip:
+    """Return this clip's complete cached filmstrip without decoding it."""
+    return _read_cached(cache_root() / _key(clip))
+
+
 def extract(tools: Tools, clip: ClipInfo, register=None,
-            cancelled=None) -> Filmstrip:
+            cancelled=None, low_priority: bool = False) -> Filmstrip:
     """Pull every keyframe out of a clip, reusing the cache when present.
 
     Frames are written to a staging directory of this extraction's own and
@@ -126,7 +133,7 @@ def extract(tools: Tools, clip: ClipInfo, register=None,
     """
     folder = cache_root() / _key(clip)
 
-    cached = _read_cached(folder)
+    cached = cached_filmstrip(clip)
     if cached:
         return cached
 
@@ -151,7 +158,9 @@ def extract(tools: Tools, clip: ClipInfo, register=None,
     try:
         proc = subprocess.Popen(
             command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            text=True, creationflags=NO_WINDOW,
+            text=True,
+            creationflags=(NO_WINDOW | BELOW_NORMAL_PRIORITY
+                           if low_priority else NO_WINDOW),
         )
     except OSError:
         shutil.rmtree(staging, ignore_errors=True)
@@ -159,6 +168,13 @@ def extract(tools: Tools, clip: ClipInfo, register=None,
 
     if register is not None:
         register(proc)
+    if low_priority and os.name != "nt":
+        try:
+            os.setpriority(os.PRIO_PROCESS, proc.pid, 10)
+        except (AttributeError, OSError):
+            # The worker still remains one-at-a-time and interruptible on a
+            # platform that does not expose process scheduling controls.
+            pass
     try:
         _out, errors = proc.communicate(timeout=600)
     except subprocess.TimeoutExpired:
@@ -253,8 +269,83 @@ class FilmstripLoader(QThread):
             found = activity(strip, self.clip.duration)
         except Exception:  # pragma: no cover - a guess must never cost a clip
             found = None
-        if not self._cancelled and found is not None:
+        if not self._cancelled:
             self.activity_ready.emit(self.generation, str(self.clip.path), found)
+
+
+class FlightAnalysisWorker(QThread):
+    """Read every clip's motion result, cached filmstrips before new decodes.
+
+    One worker owns one ffmpeg process at a time.  ``stop`` interrupts that
+    process so an interactive filmstrip never has to wait behind the sweep.
+    """
+
+    result = Signal(int, str, object)  # generation, clip path, Activity/None
+
+    def __init__(self, tools: Tools, clips: list[ClipInfo], generation: int = 0,
+                 parent=None):
+        super().__init__(parent)
+        self.tools = tools
+        self.clips = list(clips)
+        self.generation = generation
+        self._process: subprocess.Popen | None = None
+        self._cancelled = False
+
+    def stop(self) -> None:
+        """Yield the card immediately without waiting on the UI thread."""
+        self._cancelled = True
+        request_stop(self._process)
+
+    def _register(self, proc: subprocess.Popen) -> None:
+        self._process = proc
+        if self._cancelled:
+            request_stop(proc)
+
+    def _reading(self, clip: ClipInfo, strip: Filmstrip) -> None:
+        if self._cancelled:
+            return
+        try:
+            from .motion import activity
+            found = activity(strip, clip.duration)
+        except Exception:  # pragma: no cover - a guess must never cost a clip
+            found = None
+        if not self._cancelled:
+            self.result.emit(self.generation, str(clip.path), found)
+
+    def run(self) -> None:
+        cached: list[tuple[ClipInfo, Filmstrip]] = []
+        uncached: list[ClipInfo] = []
+        for clip in self.clips:
+            strip = cached_filmstrip(clip)
+            if strip:
+                cached.append((clip, strip))
+            else:
+                uncached.append(clip)
+
+        # This ordering is the contract: a card already browsed fills in from
+        # disk before the first expensive decoder is allowed to start.
+        for clip, strip in cached:
+            self._reading(clip, strip)
+            if self._cancelled:
+                return
+
+        for clip in uncached:
+            if self._cancelled:
+                return
+            try:
+                strip = extract(
+                    self.tools, clip, register=self._register,
+                    cancelled=lambda: self._cancelled,
+                    low_priority=True,
+                )
+            except Exception:  # pragma: no cover - keep sweeping past damage
+                strip = Filmstrip()
+            finally:
+                stop_process(self._process)
+                self._process = None
+            if self._cancelled:
+                return
+            self._reading(clip, strip)
 
 
 class TrimBar(QWidget):
