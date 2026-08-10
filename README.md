@@ -360,33 +360,22 @@ time, weighted by footage length rather than job count.
 
 ## Keyboard shortcuts
 
-| Key | Does |
-|---|---|
-| `F5` | Scan the current source |
-| `Ctrl` `A` | Tick every clip |
-| `Ctrl` `Shift` `A` | Untick every clip |
-| `Ctrl` `P` | Play the highlighted clip in the preview |
-| `Ctrl` `Shift` `P` | Open it in your usual video player instead |
-| `Ctrl` `Enter` | Add ticked clips to the queue |
-| `F9` | Start the export |
-| `Delete` | Remove the selected rows from the queue |
-| `Space` | Tick or untick the highlighted clip |
-| Double-click | A clip plays it in the preview; a finished queue row opens the result |
+**`F1`, or `Help ▸ Keyboard shortcuts`.**
 
-With the preview picture focused — click it, or press `Ctrl` `P` — these apply
-instead, and `Space` plays rather than ticking:
+They are in the app rather than here because the list here was wrong. It filed
+`Delete` under the clip list when `Delete` only works in the export queue, gave
+seven of the nine keys that then worked anywhere — missing `Ctrl` `O` and
+`Ctrl` `Shift` `S` — and never mentioned `U` `K` `M` `R` for reviewing at all.
+Nothing compared it to the code, so nothing said so.
 
-| Key | Does |
-|---|---|
-| `Space` or `K` | Play or pause |
-| `I` / `O` | Set the in / out point at the playhead |
-| `,` / `.` | Previous / next source frame |
-| `Shift` `,` / `Shift` `.` | Move ten source frames |
-| `←` `→` | Move a second |
-| `Shift` `←` `→` | Move five seconds |
-| `Home` / `End` | Jump to the in / out point |
-| `N` | Add another range |
-| `Esc` | Stop |
+The dialog is compared to the code: a test walks the shortcuts the window
+actually installs and fails if the two disagree in either direction. A second
+copy of the list in this file would be free to rot again, which is how the
+first one got like that.
+
+The keys are grouped in it by what has to have focus, because several of them
+depend on it — `K` is Keep in the clip list and Play on the picture, and
+`Space` ticks a clip in one place and plays in the other.
 
 ---
 

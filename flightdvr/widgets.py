@@ -41,6 +41,28 @@ def app_icon() -> QIcon:
     return QIcon(str(path)) if path.exists() else QIcon()
 
 
+def key_fill(widget, strength: float = 0.14) -> str:
+    """A background for a keycap that is visible in either theme.
+
+    Same problem and same answer as `dim` below, from the other direction. A
+    grey picked to look right on a light window is a near-white block on a dark
+    one: measured, the dark theme's own text on a fixed #d0d0d0 chip comes out
+    at 1.54:1. Blending the real window colour toward the real text colour
+    gives #3e3e3e there and 10.7:1, and #d1d1d1 with 7.1:1 in the light theme.
+
+    Returned as a hex string because the only caller writes it into rich text,
+    where a QColor cannot go.
+    """
+    palette = widget.palette()
+    back = palette.color(QPalette.ColorRole.Window)
+    text = palette.color(QPalette.ColorRole.WindowText)
+    return QColor(
+        round(back.red() * (1 - strength) + text.red() * strength),
+        round(back.green() * (1 - strength) + text.green() * strength),
+        round(back.blue() * (1 - strength) + text.blue() * strength),
+    ).name()
+
+
 def dim(label: QLabel, strength: float = 0.34) -> QLabel:
     """Mute a label so it reads as secondary text without becoming unreadable.
 
