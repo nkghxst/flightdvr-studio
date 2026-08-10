@@ -599,9 +599,10 @@ Only the Windows installer bundles ffmpeg. The AppImage and the macOS app use
 whatever your package manager installed, so they redistribute no ffmpeg binary
 and carry no obligation for its source.
 
-The bundled Windows build is `7.1.1-full_build-www.gyan.dev`, configured
-`--enable-gpl --enable-version3`. It is **not** an `--enable-nonfree` build,
-which could not be redistributed at all.
+The bundled Windows build is `n7.1.5-12-g1fdbca85aa` from
+[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), tag
+`autobuild-2026-07-31-14-10`, configured `--enable-gpl --enable-version3`. It is
+**not** an `--enable-nonfree` build, which could not be redistributed at all.
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) records the version, origin and
 licence, along with a written offer for the corresponding source as required by
 section 6 of the GPL.
