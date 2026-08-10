@@ -363,16 +363,20 @@ def test_multi_range_controls_do_not_expose_internal_select_jargon(window):
     """The model and session key are still called selects, but that editing
     jargon must not leak into the controls a pilot reads."""
     view = window.preview_view
-    visible_strings = [
-        view.select_add.text(),
-        view.select_add.toolTip(),
-        view.select_name.placeholderText(),
-        view.select_name.toolTip(),
-        view.select_remove.toolTip(),
-    ]
-    assert all("range" in text.lower() for text in visible_strings)
-    assert all("select" not in text.lower() for text in visible_strings), (
-        "the internal editing jargon leaked into a visible control")
+    assert view.select_add.text() == "Add range"
+    visible_strings = {
+        "add tooltip": view.select_add.toolTip(),
+        "name placeholder": view.select_name.placeholderText(),
+        "name tooltip": view.select_name.toolTip(),
+        "remove tooltip": view.select_remove.toolTip(),
+    }
+    missing_range = {name: text for name, text in visible_strings.items()
+                     if "range" not in text.lower()}
+    assert not missing_range, (
+        f"visible controls lost the range wording: {missing_range}")
+    leaked = {name: text for name, text in visible_strings.items()
+              if "select" in text.lower()}
+    assert not leaked, f"internal editing jargon leaked into: {leaked}"
     assert "(n)" in view.select_add.toolTip().lower(), (
         "renaming the button dropped the only visible shortcut hint")
 
