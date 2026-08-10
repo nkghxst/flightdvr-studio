@@ -39,9 +39,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from flightdvr import scan  # noqa: E402
 from flightdvr.browser_panel import (  # noqa: E402
-    FILTER_ALL, FILTER_EXPORTED, REVIEW_KEYS, REVIEW_ROLE, review_tint,
+    FILTER_ALL, FILTER_EXPORTED, REVIEW_KEYS, REVIEW_ROLE, review_state_text,
+    review_tint,
 )
-from flightdvr.media import ClipInfo, Tools  # noqa: E402
+from flightdvr.media import ClipInfo, Select, Tools  # noqa: E402
 from flightdvr.session import KEEP, MAYBE, REJECT, UNREVIEWED  # noqa: E402
 from flightdvr.thumbs import RESYNC_SECONDS, build_command  # noqa: E402
 from flightdvr.ui import (  # noqa: E402
@@ -1373,6 +1374,22 @@ def test_review_tints_are_blended_from_the_table_palette():
             changed_alternate, state), f"{state} used degenerate AlternateBase"
 
     assert review_tint(dark, UNREVIEWED) is None
+
+
+def test_state_text_counts_ranges_that_would_reach_an_export():
+    """An empty Select can remain after Reset, but it is not a saved range and
+    must not leave a misleading marker in the browser."""
+    made = clip()
+    made.review = KEEP
+    made.selects = [
+        Select(0.0, 0.0),
+        Select(12.0, 34.0),
+        Select(56.0, 78.0),
+    ]
+
+    assert review_state_text(made.review, len(made.real_selects)) == "K ·2"
+    made.selects = [Select(0.0, 0.0)]
+    assert review_state_text(made.review, len(made.real_selects)) == "K"
 
 
 def test_review_tint_reinforces_the_state_letter_across_the_row(window,

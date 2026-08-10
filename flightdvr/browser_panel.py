@@ -44,6 +44,14 @@ REVIEW_KEYS = {
     MAYBE: "M",
     REJECT: "R",
 }
+
+
+def review_state_text(state: str, range_count: int) -> str:
+    """The compact State-column summary for a clip."""
+    key = REVIEW_KEYS[state]
+    return f"{key} ·{range_count}" if range_count else key
+
+
 # The name item uses UserRole for its path, SortItem uses the next role, and
 # MainWindow uses the following one for its exported marker.
 REVIEW_ROLE = Qt.ItemDataRole.UserRole + 3
