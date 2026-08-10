@@ -46,7 +46,8 @@ from PySide6.QtWidgets import (
 
 from . import scan
 from .browser_panel import (
-    FILTER_ALL, FILTER_EXPORTED, REVIEW_KEYS, REVIEW_LABELS, BrowserPanel,
+    FILTER_ALL, FILTER_EXPORTED, REVIEW_KEYS, REVIEW_LABELS, REVIEW_ROLE,
+    BrowserPanel,
 )
 from .external import DESKTOP_OPEN, PLAYER_PATHS, find_player, reveal
 from .export_panel import ExportPanel, FPS_STEPS, RESOLUTION_STEPS
@@ -1220,11 +1221,16 @@ class MainWindow(QMainWindow):
             clip.modified.strftime("%d %b %Y  %H:%M"), clip.modified.timestamp()
         ))
         self.table.setItem(row, 4, SortItem(clip.format_label, clip.format_label))
-        self.table.setItem(
-            row, 5,
-            SortItem(REVIEW_KEYS[clip.review], REVIEW_STATES.index(clip.review)),
+        review_item = SortItem(
+            REVIEW_KEYS[clip.review], REVIEW_STATES.index(clip.review)
         )
-        self.table.item(row, 5).setToolTip(REVIEW_LABELS[clip.review])
+        review_item.setToolTip(REVIEW_LABELS[clip.review])
+        self.table.setItem(row, 5, review_item)
+        # Store this on every item rather than looking sideways from the paint
+        # delegate. A review change then invalidates every cell in the row,
+        # including when sorting moves that row after the State key changes.
+        for column in range(self.table.columnCount()):
+            self.table.item(row, column).setData(REVIEW_ROLE, clip.review)
 
         self.table.setRowHeight(row, self.table.iconSize().height() + 6)
         self.thumbs.request(clip)
@@ -1308,6 +1314,8 @@ class MainWindow(QMainWindow):
             if name.data(Qt.ItemDataRole.UserRole) != str(clip.path):
                 continue
             previous = self.table.blockSignals(True)
+            for column in range(self.table.columnCount()):
+                self.table.item(row, column).setData(REVIEW_ROLE, clip.review)
             item.setText(REVIEW_KEYS[clip.review])
             item.setData(SortItem.SORT_ROLE, REVIEW_STATES.index(clip.review))
             item.setToolTip(REVIEW_LABELS[clip.review])
