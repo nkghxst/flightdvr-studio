@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt
+from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
 
 # Must be set before any QApplication exists, so these tests need no display.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -38,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from flightdvr import scan  # noqa: E402
 from flightdvr.browser_panel import (  # noqa: E402
-    FILTER_ALL, FILTER_EXPORTED, REVIEW_KEYS,
+    FILTER_ALL, FILTER_EXPORTED, REVIEW_KEYS, REVIEW_ROLE, review_tint,
 )
 from flightdvr.media import ClipInfo, Tools  # noqa: E402
 from flightdvr.session import KEEP, MAYBE, REJECT, UNREVIEWED  # noqa: E402
@@ -1348,6 +1349,109 @@ def test_the_review_controls_belong_to_the_browser_panel(window):
     ), "a window-wide K would conflict with the preview's K shortcut"
     assert "review_filter" not in window.__dict__
     assert "review_count_label" not in window.__dict__
+
+
+def test_review_tints_are_blended_from_the_table_palette():
+    """A fixed final colour works in one theme. The tint has to move when the
+    table's real Base changes, while Unreviewed stays under native painting."""
+    from PySide6.QtGui import QColor, QPalette
+
+    dark = QPalette()
+    dark.setColor(QPalette.ColorRole.Base, QColor("#2d2d2d"))
+    dark.setColor(QPalette.ColorRole.AlternateBase, QColor("#ffffff"))
+    light = QPalette()
+    light.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+    light.setColor(QPalette.ColorRole.AlternateBase, QColor("#000000"))
+    changed_alternate = QPalette(dark)
+    changed_alternate.setColor(
+        QPalette.ColorRole.AlternateBase, QColor("#123456"))
+
+    for state in (KEEP, MAYBE, REJECT):
+        assert review_tint(dark, state) != review_tint(light, state), (
+            f"{state} is a fixed colour rather than reading Base")
+        assert review_tint(dark, state) == review_tint(
+            changed_alternate, state), f"{state} used degenerate AlternateBase"
+
+    assert review_tint(dark, UNREVIEWED) is None
+
+
+def test_review_tint_reinforces_the_state_letter_across_the_row(window,
+                                                                 monkeypatch):
+    """Colour alone cannot carry review state, and tinting only the State cell
+    is too easy to miss in a long row."""
+    monkeypatch.setattr(window.thumbs, "request", lambda *_: None)
+    table = window.table
+    table.setSortingEnabled(False)
+    table.setRowCount(0)
+    window.clips.clear()
+    window.clip_by_path.clear()
+
+    clips = []
+    for number, state in enumerate((UNREVIEWED, KEEP, MAYBE, REJECT), 120):
+        made = clip(f"hdz_{number}.ts")
+        made.review = state
+        clips.append(made)
+        window._add_clip(window._scan_generation, made)
+
+    try:
+        delegate = table.itemDelegate()
+        for row, state in enumerate((UNREVIEWED, KEEP, MAYBE, REJECT)):
+            state_item = table.item(row, 5)
+            assert state_item.text() == REVIEW_KEYS[state]
+            for column in range(table.columnCount()):
+                assert table.item(row, column).data(REVIEW_ROLE) == state
+                option = QStyleOptionViewItem()
+                option.palette = table.palette()
+                delegate.initStyleOption(
+                    option, table.model().index(row, column))
+                if state == UNREVIEWED:
+                    assert (
+                        option.backgroundBrush.style()
+                        == Qt.BrushStyle.NoBrush
+                    )
+                else:
+                    assert option.backgroundBrush.color() == review_tint(
+                        table.palette(), state)
+
+        table.setCurrentCell(1, 0)
+        table.selectRow(1)
+        for column in range(table.columnCount()):
+            option = QStyleOptionViewItem()
+            option.palette = table.palette()
+            option.state = QStyle.StateFlag.State_Selected
+            delegate.initStyleOption(option, table.model().index(1, column))
+            assert option.backgroundBrush.style() == Qt.BrushStyle.NoBrush, (
+                "review tint would show through native selection's rounded gaps")
+
+        table.setSortingEnabled(True)
+        table.sortItems(5, Qt.SortOrder.AscendingOrder)
+        original_row = next(
+            row for row in range(table.rowCount())
+            if table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            == str(clips[0].path)
+        )
+        clips[0].review = REJECT
+        window._mark_review_in_table(clips[0])
+        updated_row = next(
+            row for row in range(table.rowCount())
+            if table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            == str(clips[0].path)
+        )
+        assert updated_row != original_row, "the test did not exercise re-sorting"
+        for column in range(table.columnCount()):
+            index = table.model().index(updated_row, column)
+            assert index.data(REVIEW_ROLE) == REJECT
+            option = QStyleOptionViewItem()
+            option.palette = table.palette()
+            delegate.initStyleOption(option, index)
+            assert option.backgroundBrush.color() == review_tint(
+                table.palette(), REJECT)
+    finally:
+        table.setRowCount(0)
+        window.clips.clear()
+        window.clip_by_path.clear()
+        table.setSortingEnabled(True)
+        window._refresh_review_controls()
 
 
 def test_each_review_filter_shows_only_the_rows_it_names(window, monkeypatch,

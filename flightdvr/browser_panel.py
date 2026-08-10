@@ -18,10 +18,11 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QBrush, QColor, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
-    QPushButton, QTableWidget, QVBoxLayout, QWidget,
+    QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+    QTableWidget, QVBoxLayout, QWidget,
 )
 
 from .session import KEEP, MAYBE, REJECT, UNREVIEWED
@@ -43,6 +44,55 @@ REVIEW_KEYS = {
     MAYBE: "M",
     REJECT: "R",
 }
+# The name item uses UserRole for its path, SortItem uses the next role, and
+# MainWindow uses the following one for its exported marker.
+REVIEW_ROLE = Qt.ItemDataRole.UserRole + 3
+
+# These carry the meaning; the surface colour does not come from them alone.
+# `review_tint` blends each one toward the table's real palette so the same
+# state remains a faint wash in both the light and dark Windows themes.
+_REVIEW_HUES = {
+    KEEP: QColor(34, 139, 34),
+    MAYBE: QColor(218, 165, 32),
+    REJECT: QColor(200, 45, 45),
+}
+
+
+def review_tint(palette: QPalette, state: str,
+                strength: float = 0.14) -> QColor | None:
+    """A faint state hue blended from the row's actual background.
+
+    Returning ``None`` for Unreviewed matters: it leaves the native style in
+    charge rather than painting what happens to be the current Base colour.
+    Native Windows reports AlternateBase as black in light mode and white in
+    dark mode, and this table does not enable alternating rows. Base is the
+    only surface the tint genuinely has to coexist with.
+    """
+    hue = _REVIEW_HUES.get(state)
+    if hue is None:
+        return None
+    base = palette.color(QPalette.ColorRole.Base)
+    return QColor(
+        round(base.red() * (1 - strength) + hue.red() * strength),
+        round(base.green() * (1 - strength) + hue.green() * strength),
+        round(base.blue() * (1 - strength) + hue.blue() * strength),
+    )
+
+
+class ReviewTintDelegate(QStyledItemDelegate):
+    """Reinforce the State letter with a faint wash across its whole row."""
+
+    def initStyleOption(self, option: QStyleOptionViewItem, index) -> None:
+        super().initStyleOption(option, index)
+        # On native Qt 6.11, Highlight is a rounded rectangle per cell. Leaving
+        # selected cells completely to the style also keeps the gaps between
+        # those rectangles on Base instead of leaking the review colour.
+        if option.state & QStyle.StateFlag.State_Selected:
+            return
+        state = index.data(REVIEW_ROLE)
+        tint = review_tint(option.palette, str(state or ""))
+        if tint is not None:
+            option.backgroundBrush = QBrush(tint)
 
 
 class BrowserPanel(QWidget):
@@ -153,6 +203,7 @@ class BrowserPanel(QWidget):
         )
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setIconSize(QSize(120, 68))
+        self.table.setItemDelegate(ReviewTintDelegate(self.table))
         self.table.setSortingEnabled(True)
         head = self.table.horizontalHeader()
         # The name column takes the slack, but the thumbnail grows into it, so
