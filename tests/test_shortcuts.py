@@ -28,16 +28,29 @@ line in the dialog, each fail here.
 
 from __future__ import annotations
 
+from html import escape
+
 import pytest
 
 from flightdvr.shortcuts import SHORTCUT_GROUPS
 
 
-# `Delete` is the one binding with nothing to introspect: it is a branch in
-# MainWindow.keyPressEvent guarded by queue_table.hasFocus(), not a QShortcut.
-# It is checked by behaviour further down instead, and named here so the
-# comparison below can say why it is exempt rather than quietly skipping it.
-NOT_AN_OBJECT = {"Delete"}
+# Keys a group documents that no QShortcut on that group's widget provides.
+# `Delete` is a branch in MainWindow.keyPressEvent guarded by
+# queue_table.hasFocus(); `Space` on the clip list is Qt's own handling of a
+# checkable row, which is precisely why the player's Space had to be scoped
+# away from it. Both are real keys a pilot presses, so omitting them would
+# repeat the gap this change exists to close.
+#
+# Per group rather than global, because Space is not exempt everywhere — it is
+# a genuine QShortcut on the picture, and writing one blanket exemption would
+# have stopped the comparison checking that.
+PROVIDED_BY_QT = {
+    "The clip list": {"Space"},
+    "The picture": set(),
+    "The export queue": {"Delete"},
+    "Anywhere": set(),
+}
 
 
 @pytest.fixture(scope="module")
@@ -97,35 +110,44 @@ def menu_keys(window) -> set[str]:
     return found
 
 
+def by_shortcut_object(title: str) -> set[str]:
+    """What a group claims, minus the keys Qt provides rather than this app."""
+    return documented(title) - PROVIDED_BY_QT[title]
+
+
 def test_the_dialog_lists_every_key_the_picture_actually_binds(window):
     """The README drifted from the bindings because nothing compared them. If
     a player key is added, renamed or dropped without touching the dialog, this
     is what says so."""
-    assert documented("The picture") == installed_on(window.frame_view)
+    assert by_shortcut_object("The picture") == installed_on(window.frame_view)
 
 
 def test_the_dialog_lists_every_key_the_clip_list_actually_binds(window):
     """U/K/M/R come from REVIEW_KEYS, so a fifth review state would bind a key
     the dialog had never heard of."""
-    assert documented("The clip list") == installed_on(window.table)
+    assert by_shortcut_object("The clip list") == installed_on(window.table)
 
 
 def test_the_dialog_lists_every_window_wide_key(window):
     """The section the README got most wrong: it named two of these and there
     are ten, seven of them QShortcuts and three menu actions."""
-    assert documented("Anywhere") == installed_on(window) | menu_keys(window)
+    assert by_shortcut_object("Anywhere") == (installed_on(window)
+                                              | menu_keys(window))
 
 
-def test_the_only_undocumented_binding_is_the_one_with_no_object(window):
-    """Delete is a keyPressEvent branch rather than a shortcut object, so it is
-    exempt from the comparisons above by name. If it ever becomes a real
-    QShortcut this fails, and the exemption should go rather than grow."""
-    every_documented = {key for g in SHORTCUT_GROUPS for row in g.shortcuts
-                        for key in row.keys}
-    every_installed = (installed_on(window) | menu_keys(window)
-                       | installed_on(window.frame_view)
-                       | installed_on(window.table))
-    assert every_documented - every_installed == NOT_AN_OBJECT
+def test_nothing_is_exempt_that_qt_does_not_actually_provide(window):
+    """The exemptions are the one place this comparison can be talked out of
+    failing, so they get checked too. Space is exempt on the clip list and must
+    not be exempt on the picture, where it is a real shortcut object."""
+    assert PROVIDED_BY_QT["The picture"] == set()
+    assert PROVIDED_BY_QT["Anywhere"] == set()
+    assert "Space" in installed_on(window.frame_view), (
+        "Space is exempt on the clip list only because the picture owns it")
+    assert "Space" not in installed_on(window.table)
+    assert "Delete" not in (installed_on(window) | installed_on(window.table)
+                            | installed_on(window.frame_view)
+                            | menu_keys(window)), (
+        "Delete became a real shortcut; the exemption should go, not stay")
 
 
 def test_delete_is_documented_under_the_queue_and_not_the_clip_list(window):
@@ -161,6 +183,41 @@ def test_delete_only_drops_queue_rows_while_the_queue_has_focus(window,
     assert dropped == [True]
 
 
+def test_space_really_does_tick_a_clip_in_the_list(window):
+    """The behavioural half of the other exemption. Nothing in this app binds
+    Space on the list — it is Qt toggling a checkable row — so the dialog's
+    claim is only as good as a real key press proving it."""
+    from datetime import datetime
+    from pathlib import Path
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication
+
+    from flightdvr.media import ClipInfo
+
+    window._add_clip(window._scan_generation, ClipInfo(
+        path=Path("hdz_047.ts"), size=599_189_652,
+        modified=datetime(2025, 10, 8, 18, 39),
+        duration=240.0, width=1280, height=720, fps=60.0,
+        video_codec="hevc", audio_codec="aac",
+        pix_fmt="yuvj420p", color_range="pc",
+    ))
+    table = window.table
+    item = table.item(0, 0)
+    assert item.flags() & Qt.ItemFlag.ItemIsUserCheckable, (
+        "the row is not checkable, so Space could not tick it whatever the "
+        "dialog says")
+
+    table.setCurrentCell(0, 0)
+    before = item.checkState()
+    QApplication.sendEvent(table, QKeyEvent(
+        QKeyEvent.Type.KeyPress, Qt.Key.Key_Space,
+        Qt.KeyboardModifier.NoModifier, " "))
+    assert item.checkState() != before, (
+        "Space did not tick the highlighted clip, which the dialog promises")
+
+
 def test_k_is_deliberately_two_different_keys(window):
     """The reason the dialog is grouped at all. A flat list would have to print
     one meaning of K and be wrong about the other, which is the specific defect
@@ -172,6 +229,37 @@ def test_k_is_deliberately_two_different_keys(window):
     assert "K" not in installed_on(window), (
         "a window-wide K would make both meanings ambiguous and Qt would fire "
         "neither")
+
+
+def test_the_keycap_fill_follows_the_theme_instead_of_a_fixed_grey(qt_app):
+    """A grey chosen against a light window is a near-white block on a dark
+    one: measured, the dark theme's own text on a fixed #d0d0d0 chip comes out
+    at 1.54:1, which is unreadable. Deriving it gives 10.7:1.
+
+    So the fill has to move toward the text colour in both directions, and this
+    fails if anyone replaces it with a literal.
+    """
+    from PySide6.QtGui import QColor, QPalette
+    from PySide6.QtWidgets import QLabel
+
+    from flightdvr.widgets import key_fill
+
+    def fill_for(window: str, text: str) -> QColor:
+        label = QLabel()
+        palette = label.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(window))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor(text))
+        label.setPalette(palette)
+        return QColor(key_fill(label))
+
+    light = fill_for("#f3f3f3", "#000000")
+    dark = fill_for("#1e1e1e", "#ffffff")
+
+    assert light.lightness() < QColor("#f3f3f3").lightness(), (
+        "on a light window the chip must be darker than the page")
+    assert dark.lightness() > QColor("#1e1e1e").lightness(), (
+        "on a dark window the chip must be lighter than the page")
+    assert light != dark, "the fill is not reading the palette at all"
 
 
 def test_every_documented_key_says_what_it_does():
@@ -195,7 +283,7 @@ def test_the_dialog_shows_every_group_and_row(window):
                 assert row.description in text, (
                     f"{row.description} is missing from the dialog")
                 for key in row.keys:
-                    assert f"<code>{key}</code>" in text, (
+                    assert f"&nbsp;{escape(key)}&nbsp;" in text, (
                         f"{key} is missing from the dialog")
     finally:
         dialog.deleteLater()

@@ -27,6 +27,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
+from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -39,8 +40,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
     QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
-    QPushButton, QSizePolicy, QSplitter, QTableWidget, QToolButton,
-    QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSizePolicy, QSplitter, QTableWidget,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import scan
@@ -75,7 +76,8 @@ from .thumbs import THUMB_WIDTH, ThumbnailLoader
 from .trim import Filmstrip, FilmstripLoader
 from .widgets import (
     EDGE, GAP, INNER, MIN_LIST_HEIGHT, MIN_THUMB_WIDTH, MIN_VISIBLE_CLIPS,
-    TIGHT, DriveCombo, SortItem, _default_window_size, app_icon, dim, resource,
+    TIGHT, DriveCombo, SortItem, _default_window_size, app_icon, dim, key_fill,
+    resource,
 )
 from .workers import CopyDialog, CopyWorker, HardwareProbe, ScanWorker
 
@@ -312,32 +314,66 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Keyboard shortcuts")
 
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(EDGE, EDGE, EDGE, EDGE)
-        layout.setSpacing(GAP)
+        body = QWidget()
+        # One grid for every group rather than one each. Separate grids size
+        # their key column independently, so "Shift+Left Shift+Right" made the
+        # picture's descriptions start further right than the queue's and the
+        # list read as four unrelated tables.
+        grid = QGridLayout(body)
+        grid.setContentsMargins(EDGE, EDGE, EDGE, EDGE)
+        grid.setHorizontalSpacing(GAP)
+        grid.setVerticalSpacing(TIGHT)
 
+        fill = key_fill(dialog)
+        row = 0
         for group in SHORTCUT_GROUPS:
-            layout.addWidget(QLabel(f"<b>{group.title}</b>"))
-            layout.addWidget(dim(QLabel(group.note)))
-
-            grid = QGridLayout()
-            grid.setContentsMargins(0, 0, 0, 0)
-            grid.setHorizontalSpacing(GAP)
-            grid.setVerticalSpacing(TIGHT)
-            for row, shortcut in enumerate(group.shortcuts):
-                # Each key gets its own <code> box rather than being joined by a
-                # separator: two of these rows are the "," and "." keys, and any
-                # punctuation between them reads as part of the binding.
-                keys = " ".join(f"<code>{key}</code>" for key in shortcut.keys)
+            if row:
+                grid.setRowMinimumHeight(row, GAP)
+                row += 1
+            grid.addWidget(QLabel(f"<b>{group.title}</b>"), row, 0, 1, 2)
+            row += 1
+            grid.addWidget(dim(QLabel(group.note)), row, 0, 1, 2)
+            row += 1
+            for shortcut in group.shortcuts:
+                # Each key gets a filled chip. A separator character cannot do
+                # this job: two of these rows are the "," and "." keys, where
+                # any punctuation between them reads as part of the binding.
+                keys = " ".join(
+                    f'<span style="background-color:{fill};">'
+                    f'&nbsp;{escape(key)}&nbsp;</span>'
+                    for key in shortcut.keys
+                )
                 grid.addWidget(QLabel(keys), row, 0)
                 grid.addWidget(QLabel(shortcut.description), row, 1)
-            grid.setColumnStretch(1, 1)
-            layout.addLayout(grid)
+                row += 1
+        grid.setColumnStretch(1, 1)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(EDGE, EDGE, EDGE, EDGE)
+        layout.setSpacing(INNER)
+        # The full list is taller than a 768-pixel laptop screen, and a dialog
+        # that runs off the bottom hides the section a beginner needs most.
+        scroll = QScrollArea()
+        scroll.setWidget(body)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        # Nothing here is wide enough to be worth scrolling sideways for, and
+        # allowing it let the notes run off the right edge instead of wrapping.
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout.addWidget(scroll)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(dialog.reject)
         buttons.accepted.connect(dialog.accept)
         layout.addWidget(buttons)
+
+        # Sized from the content rather than from the dialog: the scroll area
+        # reports a hint of its own that has nothing to do with what is in it,
+        # and using it gave a window narrower than the rows it held.
+        bars = scroll.verticalScrollBar().sizeHint().width()
+        dialog.resize(body.sizeHint().width() + 2 * EDGE + bars,
+                      min(body.sizeHint().height() + 3 * EDGE + GAP, 720))
         return dialog
 
     def _show_about(self) -> None:

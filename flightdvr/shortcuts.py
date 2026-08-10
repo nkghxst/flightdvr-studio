@@ -25,7 +25,10 @@ than the README it replaces.
 The bindings themselves live where their slots do: window-wide ones in
 `MainWindow._install_shortcuts`, the picture's in `_install_player_shortcuts`,
 the review keys in `browser_panel.REVIEW_KEYS`, and `Delete` in
-`MainWindow.keyPressEvent`. **This module does not create any of them** — it
+`MainWindow.keyPressEvent`. Two are not bindings at all: `Delete` is that
+`keyPressEvent` branch, and `Space` on the clip list is Qt's own handling of a
+checkable row, which is exactly why the player's `Space` had to be scoped away
+from it. **This module does not create any of them** — it
 only describes them, so it can drift, and the README already proved that a
 hand-kept list will. `test_shortcuts.py` closes that hole by walking the real
 `QShortcut` objects on a built window and failing if the two disagree in either
@@ -72,6 +75,7 @@ SHORTCUT_GROUPS: tuple[ShortcutGroup, ...] = (
             Shortcut(("K",), "Mark keep"),
             Shortcut(("M",), "Mark maybe"),
             Shortcut(("R",), "Mark reject"),
+            Shortcut(("Space",), "Tick or untick the highlighted clip"),
         ),
     ),
     ShortcutGroup(
@@ -105,8 +109,11 @@ SHORTCUT_GROUPS: tuple[ShortcutGroup, ...] = (
             Shortcut(("F5",), "Scan the source folder"),
             Shortcut(("Ctrl+A",), "Tick every clip"),
             Shortcut(("Ctrl+Shift+A",), "Untick every clip"),
-            Shortcut(("Ctrl+P",), "Play the highlighted clip"),
-            Shortcut(("Ctrl+Shift+P",), "Preview the highlighted clip"),
+            # Named _preview_selected in the code, but it hands the file to
+            # another program. Describing it from the method name would have
+            # printed "preview", which is what the built-in player does.
+            Shortcut(("Ctrl+P",), "Play the highlighted clip here"),
+            Shortcut(("Ctrl+Shift+P",), "Open it in your usual video player"),
             Shortcut(("Ctrl+Return",), "Add the ticked clips to the queue"),
             Shortcut(("F9",), "Start the queue"),
             Shortcut(("Ctrl+O",), "Open a session"),
