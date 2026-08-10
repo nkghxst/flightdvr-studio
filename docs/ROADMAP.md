@@ -24,7 +24,7 @@ The next releases are mostly about that.
 
 ---
 
-## 1.5 — Selects and sessions
+## 1.5 — Ranges and sessions
 
 *Getting through a card.*
 
@@ -43,7 +43,7 @@ footage would be worse than one that remembered nothing.
 a count of how far through you are. *Maybe* matters more than it sounds: on a
 long card, most of the decisions are "not now".
 
-**Several selects per clip.** A four-minute flight usually has two or three
+**Several ranges per clip.** A four-minute flight usually has two or three
 moments worth keeping. Each gets its own range and an optional name, and can be
 exported on its own or joined with the others.
 
@@ -69,12 +69,12 @@ would cost far more than no guess at all.
 - **A vertical preset** that crops to 9:16 with a position you choose. The
   platforms crop a widescreen upload anyway, and not where you would have.
 - **Slow motion**, using the frames a 60 fps recording already has.
-- **Assembly** — an ordered list of clips and selects, cuts only, exported as
+- **Assembly** — an ordered list of clips and ranges, cuts only, exported as
   one file. DVR counter order stays the default, because the goggles' clock
   cannot be trusted.
 - **Naming templates**, so exports come out named after the flight and the
   moment rather than after a counter.
-- **Delivery bundles** — one select, several presets, one action.
+- **Delivery bundles** — one range, several presets, one action.
 - **A music bed**, with a fade, for anyone who would rather not share motor
   whine. The most involved item here and the most likely to slip.
 
