@@ -18,10 +18,11 @@ verified, and the trim lands on the second it claims to.
 It can also get you *through* a card, which 1.4 could not. A real one is
 120-odd clips. Every decision is now written down as you make it: review states
 with a filter and a count, several named ranges out of one recording, and a
-session that remembers all of it — plus the export settings and what has
-already been exported — against clips identified by content rather than by a
-filename a card will reuse. The State column says which clips have ranges saved
-and roughly how many flights each one looks like it holds.
+session that remembers all of it plus the export settings. Outputs still
+present for those settings are recognised as already exported, and clips are
+matched by path, size and modification time rather than by a filename a card
+will reuse. The State column says which clips have ranges saved and roughly how
+many flights each one looks like it holds.
 
 The next releases are about what happens after that: getting the footage out,
 and getting it in.
@@ -33,10 +34,11 @@ and getting it in.
 *Getting through a card.*
 
 **Sessions.** The work you do on a card becomes a document — clip identities,
-trim ranges, review states, notes, order, and what has already been exported.
-Autosaved so a quick review needs no ceremony, with Save As when it deserves a
-name. It references your footage rather than containing it, so it can be moved,
-backed up and reopened.
+trim ranges, review states, join order and export settings. The app also
+recognises outputs still present for those settings. Autosaved so a quick
+review needs no ceremony, with Save As when it deserves a name. It references
+your footage rather than containing it, so it can be moved, backed up and
+reopened.
 
 Clips are identified by path, size and modification time together, never by
 name alone. Cards get reused and rewritten with the same filenames, and a
@@ -56,9 +58,12 @@ finding a moment and wrong for cutting on one. A small window of frames either
 side of the playhead gets decoded on demand so you can step frame by frame,
 without ever decoding a long recording in full.
 
-**A suggested start point.** Most clips open with a minute of sitting on the
-bench before arming. The keyframes already extracted for the filmstrip are
-enough to spot where that ends, so the app can offer a starting point.
+**An activity reading and an offered range.** Measurement on real cards showed
+that the DVR records from arming, so there is no dependable quiet minute before
+take-off to find. The keyframes already extracted for the filmstrip can instead
+separate moving and stopped spans, report roughly how many flights a recording
+holds, and offer its longest useful run as a range when that would remove dead
+time.
 
 It offers, and never applies. A wrong guess that quietly trimmed your footage
 would cost far more than no guess at all.
@@ -128,8 +133,8 @@ FPV Library/
 Your footage stays understandable without this program, ordinary backup tools
 work on it, and an index that gets damaged can be rebuilt from what is on disk.
 
-This is also the release for the remaining packaging work: the Windows
-installer built in CI, VAAPI encoding on Linux, and Flatpak.
+This is also the release for the remaining packaging work: VAAPI encoding on
+Linux and Flatpak.
 
 ---
 

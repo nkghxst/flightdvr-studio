@@ -248,9 +248,10 @@ Two more things appear under the letter when they are known:
   [several ranges from one clip](#preview-and-trimming).
 - **`2 flights`** — roughly how many arm-fly-land cycles the footage looks like
   it holds, read from the filmstrip rather than from any telemetry. This is a
-  guess from motion, and the tooltip says so. It appears only once a clip has
-  been read; a clip whose feed is too noisy to tell flying from stopped says
-  nothing at all rather than claiming there was no flying.
+  guess from motion, and the tooltip says so. A readable clip with none says
+  **`no flying`**. Until the clip has been read — or when its feed is too noisy
+  to tell flying from stopped — the line stays blank rather than inventing an
+  answer.
 
 That reading happens on its own, after scanning and thumbnails have finished,
 one clip at a time and at low priority. Clips you have already opened are free,
@@ -260,9 +261,9 @@ it never makes the app feel slower — and it starts again where it left off.
 ## Sessions
 
 The work you do on a card is saved as you go. Trim ranges, review states, range
-names, the export settings you chose and what you have already exported all
-belong to the folder you are working on, and come back when you open it again.
-There is nothing to press.
+names and the export settings you chose all belong to the folder you are
+working on, and come back when you open it again. Outputs still present for
+those settings are recognised as already exported. There is nothing to press.
 
 The **Session** menu is for the cases that need more than that:
 
