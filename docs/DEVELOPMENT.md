@@ -41,12 +41,17 @@ and a keyframe every 1.000 s, because the trim defect depended on that GOP
 length. They are 320x180 and cached per session, so the whole thing costs about
 fifteen seconds.
 
-### xfail is the known-defects list
+### xfail is the known-defects list, and it is currently empty
 
-Every `xfail(strict=True)` in the integration module describes a defect that is
-still real. `xfail_strict` is on, so a test that starts passing becomes an
-error rather than a quiet success — whoever fixes the defect is told to delete
-the marker. The list cannot silently go stale.
+There are no `xfail` markers in the suite as of 1.5. Everything that was on the
+list has been fixed, and this section is kept because the convention is how the
+next one gets recorded, not because there is anything on it today.
+
+When there is: mark it `xfail(strict=True)` and say in the docstring what the
+defect does. `xfail_strict` is on in `pytest.ini`, so a test that starts passing
+becomes an error rather than a quiet success — whoever fixes the defect is told
+to delete the marker. That is what stops the list going stale, and it is why the
+list being empty is worth writing down rather than leaving to be inferred.
 
 ### Assert your fixtures
 

@@ -296,10 +296,12 @@ def test_a_size_target_is_respected_for_one_clip(tools, clip, tmp_path):
     assert produced <= 2 * 1.35, f"asked for 2 MB, produced {produced:.2f} MB"
 
 
-# -- defects that are still real ----------------------------------------------
+# -- what used to be the known-defects list -----------------------------------
 #
-# These fail on purpose. Delete the marker when you fix one; strict xfail turns
-# an unexpected pass into an error so nobody has to remember.
+# These were xfail(strict=True) once. They pass now, and strict xfail is what
+# said so: fixing the defect turned the unexpected pass into an error and the
+# marker had to go. Mark the next one the same way and it will announce its own
+# fix in turn.
 
 def test_a_joined_size_target_is_respected(tools, clip, second_clip, tmp_path):
     """Two six-second clips joined, targeted at 3 MB.

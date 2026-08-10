@@ -10,21 +10,25 @@ become a smaller Resolve.
 
 ## Where it is now
 
-Through 1.4, the app can scan a card, tell you honestly what is on it, play a
+Through 1.5, the app can scan a card, tell you honestly what is on it, play a
 clip in the window, trim it on the frame in front of you, and convert it
 through five presets that each say what they are for. Exports are atomic and
 verified, and the trim lands on the second it claims to.
 
-What it cannot do is get you through a *card*. A real one is 120-odd clips.
-Today that means opening each in turn, setting one in point and one out point,
-queueing it, and repeating — and closing the window loses every decision,
-because nothing about a clip is written down anywhere.
+It can also get you *through* a card, which 1.4 could not. A real one is
+120-odd clips. Every decision is now written down as you make it: review states
+with a filter and a count, several named ranges out of one recording, and a
+session that remembers all of it — plus the export settings and what has
+already been exported — against clips identified by content rather than by a
+filename a card will reuse. The State column says which clips have ranges saved
+and roughly how many flights each one looks like it holds.
 
-The next releases are mostly about that.
+The next releases are about what happens after that: getting the footage out,
+and getting it in.
 
 ---
 
-## 1.5 — Ranges and sessions
+## 1.5 — Ranges and sessions — shipped
 
 *Getting through a card.*
 
