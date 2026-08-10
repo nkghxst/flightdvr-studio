@@ -363,13 +363,18 @@ def test_multi_range_controls_do_not_expose_internal_select_jargon(window):
     """The model and session key are still called selects, but that editing
     jargon must not leak into the controls a pilot reads."""
     view = window.preview_view
-    assert view.select_add.text() == "Add range"
-    assert "range" in view.select_add.toolTip().lower()
+    visible_strings = [
+        view.select_add.text(),
+        view.select_add.toolTip(),
+        view.select_name.placeholderText(),
+        view.select_name.toolTip(),
+        view.select_remove.toolTip(),
+    ]
+    assert all("range" in text.lower() for text in visible_strings)
+    assert all("select" not in text.lower() for text in visible_strings), (
+        "the internal editing jargon leaked into a visible control")
     assert "(n)" in view.select_add.toolTip().lower(), (
         "renaming the button dropped the only visible shortcut hint")
-    assert "range" in view.select_name.placeholderText().lower()
-    assert "range" in view.select_name.toolTip().lower()
-    assert "range" in view.select_remove.toolTip().lower()
 
     flight = loaded(window, clip())
     flight.selects = [Select(10, 40), Select(90, 120)]
