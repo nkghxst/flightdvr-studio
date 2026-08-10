@@ -104,24 +104,34 @@ you downloaded is what was built. None of these are code-signed, so this is the
 only check that means anything.
 
 ```powershell
-Get-FileHash FlightDVRStudio-1.4.0-Setup.exe -Algorithm SHA256
+Get-FileHash FlightDVRStudio-1.5.0-Setup.exe -Algorithm SHA256
 ```
 
 ```bash
-sha256sum FlightDVR_Studio-1.4.0-x86_64.AppImage    # Linux
-shasum -a 256 FlightDVR-Studio-1.4.0-arm64.dmg      # macOS
+sha256sum FlightDVR_Studio-1.5.0-x86_64.AppImage    # Linux
+shasum -a 256 FlightDVR-Studio-1.5.0-arm64.dmg      # macOS
 ```
 
-**1.4.0**
+**1.5.0**
+
+| File | SHA-256 |
+|---|---|
+| `FlightDVRStudio-1.5.0-Setup.exe` | `686f0ec87413d59e9aad2e47a3e84ff60367723b9ebd7e1a3563334445f36c6d` |
+| `FlightDVR_Studio-1.5.0-x86_64.AppImage` | `086dac7f008fee4481384d1acac64a52cd538d32a0056f26ca90401265048b7d` |
+| `FlightDVR-Studio-1.5.0-arm64.dmg` | `98526cc451c655b74be69f5462006e78f4b55f7ec90359473a9445617fe2a175` |
+
+<details>
+<summary>Earlier releases</summary>
+
+**1.4.0** — no sessions, so closing the window loses every trim and review; one
+range per clip; no review states; and every launch checks for updates with no
+way to turn it off.
 
 | File | SHA-256 |
 |---|---|
 | `FlightDVRStudio-1.4.0-Setup.exe` | `a8b67589e472fb91f22846fba6b50d43fae43c209d2dd2fb5c11233fe04d6c9e` |
 | `FlightDVR_Studio-1.4.0-x86_64.AppImage` | `5ce81819683fc70e3a5153e40c915033eb26ce9165545cdd66fbf8c62634e54c` |
 | `FlightDVR-Studio-1.4.0-arm64.dmg` | `62f4828723f1b9ad62cee152bc3fc5c4fc6a72dad124246f58c848f7956f2fef` |
-
-<details>
-<summary>Earlier releases</summary>
 
 **1.3.0** — no player in the window, so trimming means setting two numbers and
 finding out afterwards. Joining trimmed clips with Remux writes a corrupt file
