@@ -46,8 +46,8 @@ from PySide6.QtWidgets import (
 
 from . import scan
 from .browser_panel import (
-    FILTER_ALL, FILTER_EXPORTED, REVIEW_KEYS, REVIEW_LABELS, REVIEW_ROLE,
-    BrowserPanel,
+    FILTER_ALL, FILTER_EXPORTED, REVIEW_LABELS, REVIEW_ROLE,
+    BrowserPanel, review_state_text, review_state_tooltip,
 )
 from .external import DESKTOP_OPEN, PLAYER_PATHS, find_player, reveal
 from .export_panel import ExportPanel, FPS_STEPS, RESOLUTION_STEPS
@@ -1221,10 +1221,13 @@ class MainWindow(QMainWindow):
             clip.modified.strftime("%d %b %Y  %H:%M"), clip.modified.timestamp()
         ))
         self.table.setItem(row, 4, SortItem(clip.format_label, clip.format_label))
+        range_count = len(clip.real_selects)
         review_item = SortItem(
-            REVIEW_KEYS[clip.review], REVIEW_STATES.index(clip.review)
+            review_state_text(clip.review, range_count),
+            REVIEW_STATES.index(clip.review),
         )
-        review_item.setToolTip(REVIEW_LABELS[clip.review])
+        review_item.setToolTip(
+            review_state_tooltip(clip.review, range_count))
         self.table.setItem(row, 5, review_item)
         # Store this on every item rather than looking sideways from the paint
         # delegate. A review change then invalidates every cell in the row,
@@ -1318,9 +1321,10 @@ class MainWindow(QMainWindow):
             previous = self.table.blockSignals(True)
             for column in range(self.table.columnCount()):
                 self.table.item(row, column).setData(REVIEW_ROLE, clip.review)
-            item.setText(REVIEW_KEYS[clip.review])
+            range_count = len(clip.real_selects)
+            item.setText(review_state_text(clip.review, range_count))
             item.setData(SortItem.SORT_ROLE, REVIEW_STATES.index(clip.review))
-            item.setToolTip(REVIEW_LABELS[clip.review])
+            item.setToolTip(review_state_tooltip(clip.review, range_count))
             self.table.blockSignals(previous)
             break
 
@@ -1834,6 +1838,15 @@ class MainWindow(QMainWindow):
                 item.setText(f"{clip.duration_label}  ✂ {clip.trim_label}")
             else:
                 item.setText(clip.duration_label)
+            state_item = self.table.item(row, 5)
+            range_count = len(clip.real_selects)
+            state_text = review_state_text(clip.review, range_count)
+            if state_item is not None and state_item.text() != state_text:
+                previous = self.table.blockSignals(True)
+                state_item.setText(state_text)
+                state_item.setToolTip(
+                    review_state_tooltip(clip.review, range_count))
+                self.table.blockSignals(previous)
             break
 
     # -- preview --------------------------------------------------------------

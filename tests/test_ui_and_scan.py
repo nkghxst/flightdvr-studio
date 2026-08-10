@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from flightdvr import scan  # noqa: E402
 from flightdvr.browser_panel import (  # noqa: E402
     FILTER_ALL, FILTER_EXPORTED, REVIEW_KEYS, REVIEW_ROLE, review_state_text,
-    review_tint,
+    review_state_tooltip, review_tint,
 )
 from flightdvr.media import ClipInfo, Select, Tools  # noqa: E402
 from flightdvr.session import KEEP, MAYBE, REJECT, UNREVIEWED  # noqa: E402
@@ -1348,6 +1348,7 @@ def test_the_review_controls_belong_to_the_browser_panel(window):
         shortcut.context() == Qt.ShortcutContext.WidgetWithChildrenShortcut
         for shortcut in panel.review_shortcuts.values()
     ), "a window-wide K would conflict with the preview's K shortcut"
+    assert "·N" in panel.table.horizontalHeaderItem(5).toolTip()
     assert "review_filter" not in window.__dict__
     assert "review_count_label" not in window.__dict__
 
@@ -1388,8 +1389,75 @@ def test_state_text_counts_ranges_that_would_reach_an_export():
     ]
 
     assert review_state_text(made.review, len(made.real_selects)) == "K ·2"
+    assert review_state_tooltip(made.review, len(made.real_selects)) == (
+        "Keep · 2 saved ranges")
     made.selects = [Select(0.0, 0.0)]
     assert review_state_text(made.review, len(made.real_selects)) == "K"
+    assert review_state_tooltip(made.review, len(made.real_selects)) == "Keep"
+
+
+def test_state_range_count_follows_add_remove_reset_and_review(window,
+                                                               monkeypatch):
+    """A count left behind after editing is worse than no count: the browser
+    has to follow every way ranges are added or removed without reopening."""
+    monkeypatch.setattr(window.thumbs, "request", lambda *_: None)
+    monkeypatch.setattr(window.player, "seek", lambda *_: None)
+    monkeypatch.setattr(window, "_show_frame", lambda *_: None)
+    monkeypatch.setattr(window, "_update_estimate", lambda *_: None)
+    monkeypatch.setattr(window, "_touch_session", lambda *_: None)
+    table = window.table
+    old_clip = window._trim_clip
+    old_bar = (
+        window.trim_bar.duration,
+        window.trim_bar.in_point,
+        window.trim_bar.out_point,
+        window.trim_bar.playhead,
+        list(window.trim_bar.ranges),
+        window.trim_bar.selected,
+    )
+    table.setSortingEnabled(False)
+    table.setRowCount(0)
+    window.clips.clear()
+    window.clip_by_path.clear()
+
+    made = clip("hdz_ranges.ts")
+    made.review = KEEP
+    made.selects = [Select(10.0, 20.0)]
+    window._add_clip(window._scan_generation, made)
+    window._trim_clip = made
+    window.trim_bar.set_clip(made.duration, made.trim_in, made.out_point)
+
+    try:
+        state_item = table.item(0, 5)
+        assert state_item.text() == "K ·1"
+        assert state_item.toolTip() == "Keep · 1 saved range"
+
+        window.trim_bar.playhead = 30.0
+        window._add_select()
+        assert state_item.text() == "K ·2"
+
+        window._remove_select()
+        assert state_item.text() == "K ·1"
+
+        made.review = REJECT
+        window._mark_review_in_table(made)
+        assert state_item.text() == "R ·1", "reviewing erased the range marker"
+
+        window._reset_trim()
+        assert state_item.text() == "R"
+        assert state_item.toolTip() == "Reject"
+    finally:
+        window._trim_clip = old_clip
+        duration, in_point, out_point, playhead, ranges, selected = old_bar
+        window.trim_bar.set_clip(
+            duration, in_point, out_point, ranges, selected)
+        window.trim_bar.set_playhead(playhead)
+        window._show_selects()
+        table.setRowCount(0)
+        window.clips.clear()
+        window.clip_by_path.clear()
+        table.setSortingEnabled(True)
+        window._refresh_review_controls()
 
 
 def test_review_tint_reinforces_the_state_letter_across_the_row(window,
