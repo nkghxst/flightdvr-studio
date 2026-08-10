@@ -1423,9 +1423,29 @@ def test_review_tint_reinforces_the_state_letter_across_the_row(window,
             assert option.backgroundBrush.style() == Qt.BrushStyle.NoBrush, (
                 "review tint would show through native selection's rounded gaps")
 
-        clips[0].review = KEEP
+        table.setSortingEnabled(True)
+        table.sortItems(5, Qt.SortOrder.AscendingOrder)
+        original_row = next(
+            row for row in range(table.rowCount())
+            if table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            == str(clips[0].path)
+        )
+        clips[0].review = REJECT
         window._mark_review_in_table(clips[0])
-        assert table.item(0, 5).data(REVIEW_ROLE) == KEEP
+        updated_row = next(
+            row for row in range(table.rowCount())
+            if table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            == str(clips[0].path)
+        )
+        assert updated_row != original_row, "the test did not exercise re-sorting"
+        for column in range(table.columnCount()):
+            index = table.model().index(updated_row, column)
+            assert index.data(REVIEW_ROLE) == REJECT
+            option = QStyleOptionViewItem()
+            option.palette = table.palette()
+            delegate.initStyleOption(option, index)
+            assert option.backgroundBrush.color() == review_tint(
+                table.palette(), REJECT)
     finally:
         table.setRowCount(0)
         window.clips.clear()

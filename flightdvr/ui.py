@@ -1229,8 +1229,10 @@ class MainWindow(QMainWindow):
         # Store this on every item rather than looking sideways from the paint
         # delegate. A review change then invalidates every cell in the row,
         # including when sorting moves that row after the State key changes.
+        previous = self.table.blockSignals(True)
         for column in range(self.table.columnCount()):
             self.table.item(row, column).setData(REVIEW_ROLE, clip.review)
+        self.table.blockSignals(previous)
 
         self.table.setRowHeight(row, self.table.iconSize().height() + 6)
         self.thumbs.request(clip)
