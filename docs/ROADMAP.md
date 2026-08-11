@@ -84,8 +84,13 @@ would cost far more than no guess at all.
 - **Naming templates**, so exports come out named after the flight and the
   moment rather than after a counter.
 - **Delivery bundles** — one range, several presets, one action.
-- **A music bed**, with a fade, for anyone who would rather not share motor
-  whine. The most involved item here and the most likely to slip.
+
+**A music bed** was in this release and is now 1.6.1, on its own. It is not one
+feature: a second input to probe, a policy for looping or trimming it to length,
+replacing the original audio or mixing with it, fade rules, keeping audio and
+video the same length across an assembly, and cancelling a graph that is half
+audio. Gated behind the two largest items above, it is the one most likely to
+slip, and moving it out means it cannot take the release with it.
 
 ---
 
