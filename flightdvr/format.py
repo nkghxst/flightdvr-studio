@@ -115,6 +115,13 @@ _FIELD = _ANY_BRACE
 # relative path and escaped the folder the person chose.
 _SEPARATORS = re.compile(r"[\\/]")
 
+# The rest of what Windows refuses in a name. Field *values* go through
+# `safe_name`, but the literal text between them did not, so `{clip}:bad`
+# expanded happily and queued a job aiming at a file the platform cannot
+# create — a failure deferred all the way to export. Slashes are checked above
+# so they can say something more useful about the Output box.
+_INVALID = re.compile(r'[<>:"|?*\x00-\x1f]')
+
 # Windows refuses these whatever the extension, and a template is free text.
 _RESERVED = {
     "con", "prn", "aux", "nul",
@@ -168,6 +175,15 @@ def check_template(template: str) -> None:
             "There is a { or } without its pair. Fields look like {clip}."
         )
 
+    # Only the literal text, because a field's value is sanitised as it is
+    # filled in. A colon typed between two fields is not.
+    illegal = _INVALID.search(without_fields)
+    if illegal:
+        raise BadTemplate(
+            f"A filename cannot contain {illegal.group()!r}. "
+            'Windows refuses < > : " | ? *'
+        )
+
     unknown = set(template_fields(template)) - set(TEMPLATE_FIELDS)
     if unknown:
         raise UnknownTemplateField(unknown)
@@ -183,6 +199,19 @@ def check_stem(stem: str) -> None:
     if not stem:
         raise BadTemplate(
             "That template produces an empty name for this clip."
+        )
+    # The last gate before a target is built, so it judges the whole finished
+    # name rather than trusting that everything upstream sanitised its own
+    # part. A stem carrying one of these reaches ffmpeg as a path that cannot
+    # be opened, which is a failure at export rather than at the queue.
+    illegal = _SEPARATORS.search(stem) or _INVALID.search(stem)
+    if illegal:
+        raise BadTemplate(
+            f"{stem} cannot be a filename: {illegal.group()!r} is not allowed."
+        )
+    if stem != stem.rstrip(". "):
+        raise BadTemplate(
+            f"{stem} ends in a dot or a space, which Windows drops silently."
         )
     if stem.split(".")[0].lower() in _RESERVED:
         raise BadTemplate(

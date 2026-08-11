@@ -61,6 +61,35 @@ def pytest_configure(config):
     )
 
 
+@pytest.fixture(autouse=True)
+def isolated_settings(tmp_path, monkeypatch):
+    """Give every test its own settings, and never touch the real ones.
+
+    `MainWindow` restores its export panel from `QSettings(ORG, APP_NAME)` —
+    the settings of whoever is running the tests. That was harmless while
+    stored values only chose a preset. The name template ended it: a stored
+    `review-{clip}` renders every range of a clip to one filename, so the queue
+    refuses the whole action through a modal warning that no one is there to
+    close, and the suite stops dead partway through with no failure and no
+    output. It survives the process that wrote it, so the run that hangs is
+    rarely the run that caused it — and any run of the app, or any probe of the
+    queue by hand, is enough to write one.
+
+    Done by replacing the class the window builds its store from. The
+    documented route — `setDefaultFormat` plus `setPath` — does not work here:
+    `QSettings(organization, application)` stays on `NativeFormat` in Qt 6.11
+    whatever the default is set to, so on Windows it reads the registry and the
+    redirection is silently ignored.
+    """
+    from PySide6.QtCore import QSettings
+
+    store = str(tmp_path / "settings.ini")
+    monkeypatch.setattr(
+        "flightdvr.ui.QSettings",
+        lambda *_args, **_kw: QSettings(store, QSettings.Format.IniFormat),
+    )
+
+
 @dataclass(frozen=True)
 class Clip:
     """A synthetic recording, described well enough to reason about."""

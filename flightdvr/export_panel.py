@@ -28,7 +28,8 @@ from PySide6.QtWidgets import (
 )
 
 from .format import (
-    DEFAULT_TEMPLATE, TEMPLATE_FIELDS, UnknownTemplateField, expand_template,
+    DEFAULT_TEMPLATE, TEMPLATE_FIELDS, BadTemplate, UnknownTemplateField,
+    expand_template,
 )
 from .media import ClipInfo
 from .presets import (
@@ -580,7 +581,7 @@ class ExportPanel(QWidget):
                 "range_number": "2",
                 "preset": PRESETS[self.preset_key()].suffix.lstrip("_"),
             })
-        except UnknownTemplateField as exc:
+        except (UnknownTemplateField, BadTemplate) as exc:
             self.template_example.setText(str(exc))
             return
         extension = PRESETS[self.preset_key()].extension

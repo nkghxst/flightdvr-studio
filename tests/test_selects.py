@@ -249,12 +249,11 @@ def test_a_joined_export_keeps_the_name_it_always_had(window):
     """Joins went through output_path directly, so a template changed every
     ordinary export and left joined ones alone.
 
-    Asserted with the default template rather than a custom one, deliberately:
-    the template is a saved export setting, and a test that types into the box
-    writes to this machine's real QSettings and arrives in every later run. The
-    default distinguishes old from new on its own — the marker goes into the
-    clip field, so this name is unchanged, while the old code reached it by a
-    route that ignored the template entirely.
+    This half pins the compatibility requirement: the marker goes into the clip
+    field, so the default template still produces the name every version before
+    this one produced. It passes on the old code too, and deliberately so — a
+    join that ignored the template arrived at this same name by another route.
+    The test below is the one that fails without the fix.
     """
     window.export_panel.preset_buttons["master"].setChecked(True)
     try:
@@ -264,6 +263,49 @@ def test_a_joined_export_keeps_the_name_it_always_had(window):
         assert jobs[0].out_path.name == "hdz_047_joined_master.mp4",             jobs[0].out_path.name
     finally:
         window.export_panel.join_check.setChecked(False)
+
+
+def test_a_joined_export_is_named_by_the_template_too(window, monkeypatch):
+    """The other half, and the half that fails without the fix.
+
+    The default name above is one the old join branch produced by ignoring the
+    template altogether, so it passed either way. This one proves a custom
+    template reaches a join: with `review-{clip}` the old code still queued
+    hdz_047_joined_master.mp4.
+
+    The template is patched at the source the queue reads it from, so the test
+    says what it depends on and nothing about how the control stores it. The
+    stored settings are a fresh file either way — see `isolated_settings`, which
+    exists because a template left in the real ones hangs the suite.
+    """
+    monkeypatch.setattr(window.export_panel, "template",
+                        lambda: "review-{clip}_{preset}")
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    try:
+        jobs = queue_up(window, [clip("hdz_047.ts"), clip("hdz_048.ts")],
+                        join=True)
+        assert len(jobs) == 1
+        assert jobs[0].out_path.name == "review-hdz_047_joined_master.mp4", (
+            jobs[0].out_path.name)
+    finally:
+        window.export_panel.join_check.setChecked(False)
+
+
+def test_a_template_windows_cannot_write_queues_nothing(window, monkeypatch):
+    """`{clip}:bad` was accepted, queued, and shown in the queue under a name
+    the platform cannot create — the export failed hours later, with the clip
+    ticked off as done. Refused at the queue instead, and nothing appended."""
+    from PySide6.QtWidgets import QMessageBox
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda *args, **kw: warned.append(args[2]))
+    monkeypatch.setattr(window.export_panel, "template", lambda: "{clip}:bad")
+
+    jobs = queue_up(window, [clip("hdz_047.ts")])
+
+    assert jobs == [], "a name Windows refuses was queued anyway"
+    assert warned, "nothing was said about the unusable template"
 
 
 def test_two_clips_that_would_write_one_file_queue_nothing(window, monkeypatch):

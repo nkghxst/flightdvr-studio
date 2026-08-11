@@ -280,8 +280,8 @@ def test_a_template_cannot_send_an_export_out_of_the_output_folder():
     box."""
     from flightdvr.format import BadTemplate
 
-    for escaping in ("../{clip}", "..\{clip}", "{clip}/{range}",
-                     "sub\{clip}"):
+    for escaping in ("../{clip}", r"..\{clip}", "{clip}/{range}",
+                     r"sub\{clip}"):
         with pytest.raises(BadTemplate):
             check_template(escaping)
 
@@ -309,3 +309,45 @@ def test_a_name_a_filesystem_refuses_is_caught_before_queueing():
     for reserved in ("con", "NUL", "com1", "LPT9"):
         with pytest.raises(BadTemplate):
             check_stem(reserved)
+
+
+@pytest.mark.parametrize("typed", [
+    "{clip}:bad", "{clip}?bad", "bad|{clip}", "{clip}<x>", '{clip}"x"',
+    "{clip}*", "{clip}\x01",
+])
+def test_a_character_windows_refuses_is_rejected_in_the_literal_text(typed):
+    """Field *values* go through safe_name; the text typed between them did not.
+
+    So `{clip}:bad` expanded to hdz_047:bad and queued a job aiming at a file
+    Windows cannot create — the template was accepted, the name looked fine in
+    the queue, and the failure waited until export.
+    """
+    from flightdvr.format import BadTemplate
+
+    with pytest.raises(BadTemplate):
+        check_template(typed)
+
+
+def test_the_finished_name_is_judged_as_a_whole_not_only_its_parts():
+    """check_stem is the last gate before a target is built, so it does not
+    assume every upstream part sanitised itself."""
+    from flightdvr.format import BadTemplate, check_stem
+
+    for unusable in ("hdz_048:master", "hdz_048|1", "hdz/048", "hdz_048."):
+        with pytest.raises(BadTemplate):
+            check_stem(unusable)
+
+
+def test_a_template_that_is_not_a_filename_at_all_says_so_in_the_example(
+        qt_app):
+    """The example catches UnknownTemplateField and BadTemplate alike. Catching
+    only the first meant a slash or a stray brace raised out of the control
+    while the person was still typing, instead of being shown to them."""
+    from flightdvr.export_panel import ExportPanel
+
+    panel = ExportPanel()
+    for typed in ("../{clip}", "{clip", "{clip}:bad"):
+        panel.template_edit.setText(typed)
+        panel._show_example()                       # must not raise
+        shown = panel.template_example.text()
+        assert shown and not shown.startswith("e.g."), typed
