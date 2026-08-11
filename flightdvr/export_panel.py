@@ -425,6 +425,21 @@ class ExportPanel(QWidget):
         )
         form.addRow("Horizontal position:", self.vertical_position)
 
+        self.vertical_quality = QComboBox()
+        for crf, name, _ in QUALITY_LEVELS:
+            self.vertical_quality.addItem(name, crf)
+        self.vertical_quality.setCurrentIndex(1)
+        self.vertical_quality.currentIndexChanged.connect(self._on_quality_changed)
+        form.addRow("Quality:", self.vertical_quality)
+
+        self.vertical_quality_help = dim(QLabel())
+        form.addRow(self.vertical_quality_help)
+
+        self.vertical_speed = QComboBox()
+        self.vertical_speed.addItems(SPEEDS)
+        self.vertical_speed.setCurrentText("slow")
+        form.addRow("Encoder effort:", self.vertical_speed)
+
         self.vertical_position_label = dim(QLabel("Centre"))
         form.addRow(self.vertical_position_label)
         form.addRow(dim(QLabel(
@@ -443,6 +458,10 @@ class ExportPanel(QWidget):
             label = "Centre"
         self.vertical_position_label.setText(label)
         self.settings_changed.emit()
+
+    def set_vertical_position(self, value: int) -> None:
+        """Accept a position chosen by dragging the preview crop."""
+        self.vertical_position.setValue(max(0, min(100, int(value))))
 
     def _build_slowmo_options(self) -> QWidget:
         box = QWidget()
@@ -483,6 +502,7 @@ class ExportPanel(QWidget):
             ("edit_codec", self.edit_codec_combo),
             ("master_quality", self.master_quality),
             ("slow_quality", self.slow_quality),
+            ("vertical_quality", self.vertical_quality),
             ("social_mode", self.social_mode),
             ("social_quality", self.social_quality),
             ("social_height", self.social_height),
@@ -494,7 +514,8 @@ class ExportPanel(QWidget):
     def _text_combo_settings(self) -> list[tuple[str, QComboBox]]:
         """Combos built from plain strings, which carry no item data at all."""
         return [("master_speed", self.master_speed),
-                ("upload_speed", self.upload_speed)]
+                ("upload_speed", self.upload_speed),
+                ("vertical_speed", self.vertical_speed)]
 
     def _check_settings(self) -> list[tuple[str, QCheckBox]]:
         return [
@@ -618,6 +639,8 @@ class ExportPanel(QWidget):
             master_crf=self.master_quality.currentData(),
             master_speed=self.master_speed.currentText(),
             slow_crf=self.slow_quality.currentData(),
+            vertical_crf=self.vertical_quality.currentData(),
+            vertical_speed=self.vertical_speed.currentText(),
             vertical_position=self.vertical_position.value(),
             social_mode=self.social_mode.currentData(),
             social_size_mb=self.social_size.value(),
@@ -860,6 +883,11 @@ class ExportPanel(QWidget):
         for value, _, description in QUALITY_LEVELS:
             if value == crf:
                 self.slow_quality_help.setText(f"{description}  (CRF {value})")
+                break
+        crf = self.vertical_quality.currentData()
+        for value, _, description in QUALITY_LEVELS:
+            if value == crf:
+                self.vertical_quality_help.setText(f"{description}  (CRF {value})")
                 break
         self.settings_changed.emit()
 

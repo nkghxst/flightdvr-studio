@@ -690,6 +690,9 @@ class MainWindow(QMainWindow):
         panel = self.export_panel = ExportPanel(self)
         panel.preset_changed.connect(self._on_preset_changed)
         panel.settings_changed.connect(self._on_export_settings_changed)
+        self.frame_view.vertical_position_changed.connect(
+            panel.set_vertical_position
+        )
         panel.output_changed.connect(self._on_output_changed)
         panel.date_changed.connect(self._on_date_changed)
         panel.add_requested.connect(self._add_to_queue)

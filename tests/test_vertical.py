@@ -126,6 +126,25 @@ def test_vertical_command_crops_then_scales_with_square_sar_and_keeps_audio():
     assert "cfr" in command
 
 
+def test_vertical_quality_is_independent_from_master_quality_and_speed():
+    settings = ExportSettings(
+        master_crf=14,
+        master_speed="slower",
+        vertical_crf=26,
+        vertical_speed="fast",
+    )
+    command = build_commands(
+        TOOLS, clip(), "vertical", settings,
+        Path("out.mp4"), Path("work"),
+    )[0]
+
+    assert command[command.index("-crf") + 1] == "26"
+    assert command[command.index("-preset") + 1] == "fast"
+    assert estimate_output_size(clip(), "vertical", settings) < estimate_output_size(
+        clip(), "vertical", ExportSettings(vertical_crf=14)
+    )
+
+
 def test_a_joined_vertical_command_crops_each_source_before_shared_delivery_scale():
     first = clip(width=1280, height=720)
     second = clip(width=1920, height=1080)
@@ -170,6 +189,54 @@ def test_the_overlay_maps_the_same_source_crop_after_a_resize(qt_app):
     assert small.height() / 360 == pytest.approx(large.height() / 562)
 
 
+def test_dragging_the_overlay_emits_the_same_position_the_slider_uses(qt_app):
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QImage, QMouseEvent
+    from flightdvr.player import FrameView
+
+    model = vertical_crop(clip(), position=50)
+    view = FrameView()
+    view.resize(640, 360)
+    view.set_image(QImage(1280, 720, QImage.Format.Format_RGB32))
+    view.set_vertical_crop(model)
+    positions = []
+    clicks = []
+    view.vertical_position_changed.connect(positions.append)
+    view.vertical_position_changed.connect(
+        lambda value: view.set_vertical_crop(vertical_crop(clip(), value))
+    )
+    view.clicked.connect(lambda: clicks.append(True))
+
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress, QPointF(320, 180),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    move = QMouseEvent(
+        QEvent.Type.MouseMove, QPointF(400, 180),
+        Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    move_again = QMouseEvent(
+        QEvent.Type.MouseMove, QPointF(500, 180),
+        Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    release = QMouseEvent(
+        QEvent.Type.MouseButtonRelease, QPointF(500, 180),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    view.mousePressEvent(press)
+    view.mouseMoveEvent(move)
+    view.mouseMoveEvent(move_again)
+    view.mouseReleaseEvent(release)
+
+    assert positions and positions[-1] > positions[0] > 50
+    assert clicks == []
+    assert view._vertical_drag_offset is None
+
+
 def test_vertical_position_is_a_persisted_panel_choice_and_keeps_audio(qt_app):
     from flightdvr.export_panel import ExportPanel
     from flightdvr.presets import PRESET_ORDER
@@ -177,17 +244,23 @@ def test_vertical_position_is_a_persisted_panel_choice_and_keeps_audio(qt_app):
     panel = ExportPanel()
     panel.preset_buttons["vertical"].setChecked(True)
     panel.vertical_position.setValue(75)
+    panel.vertical_quality.setCurrentIndex(3)
+    panel.vertical_speed.setCurrentText("fast")
 
     assert panel.preset_key() == "vertical"
     assert panel.options_stack.currentIndex() == PRESET_ORDER.index("vertical")
     assert panel.audio_check.isEnabled()
     saved = panel.capture()
     assert saved["vertical_position"] == 75
+    assert saved["vertical_quality"] == 24
+    assert saved["vertical_speed"] == "fast"
 
     panel.vertical_position.setValue(0)
     panel.apply(saved)
     assert panel.vertical_position.value() == 75
     assert panel.settings("").vertical_position == 75
+    assert panel.settings("").vertical_crf == 24
+    assert panel.settings("").vertical_speed == "fast"
 
 
 def test_the_worker_refuses_a_narrow_source_before_creating_any_file(tmp_path):

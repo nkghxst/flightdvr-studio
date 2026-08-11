@@ -179,6 +179,12 @@ class ExportSettings:
     # slow export nobody was looking at.
     slow_crf: int = 18
 
+    # Vertical has its own quality and encoder effort for the same reason:
+    # changing Master's settings must not change a queued or future phone
+    # export nobody was looking at.
+    vertical_crf: int = 18
+    vertical_speed: str = "slow"
+
     # Horizontal position of the vertical crop, as a percentage from left to
     # right. The crop model turns this into an even source-space coordinate so
     # the preview and ffmpeg cannot round the same choice differently.
@@ -273,7 +279,13 @@ def _vertical_multiplier(side: int) -> int:
 
 
 def _vertical_output_size(width: int, height: int) -> tuple[int, int]:
-    """Return the largest exact 9:16 canvas supported by dimensions."""
+    """Return the delivery canvas, keeping the named 720x1280 floor.
+
+    The floor is deliberate: Vertical is a phone/social delivery preset, so a
+    small source is upscaled to the smallest named delivery tier rather than
+    published as a tiny portrait file. Larger sources select their 1080x1920
+    tier from the largest source side.
+    """
     anchor = max(width or 0, height or 0, 1280)
     k = _vertical_multiplier(anchor)
     return 9 * k, 16 * k
@@ -1059,11 +1071,11 @@ def build_commands(
     if preset_key == "vertical":
         filters, mapped = picture("yuv420p", vertical=True)
         if settings.hardware:
-            video = hardware_video_args(settings.hardware, settings.master_crf)
+            video = hardware_video_args(settings.hardware, settings.vertical_crf)
         else:
             video = [
-                "-c:v", "libx264", "-preset", settings.master_speed,
-                "-crf", str(settings.master_crf), "-profile:v", "high",
+                "-c:v", "libx264", "-preset", settings.vertical_speed,
+                "-crf", str(settings.vertical_crf), "-profile:v", "high",
             ]
         return [
             head + filters + video + timing() + sound("192k", mapped)
@@ -1215,7 +1227,7 @@ def estimate_output_size(clip: ClipInfo, preset_key: str, settings: ExportSettin
         ) / REFERENCE_PIXEL_RATE
         mbps = (
             MASTER_REFERENCE_MBPS * vertical_scale
-            * (2 ** ((18 - settings.master_crf) / 6.0))
+            * (2 ** ((18 - settings.vertical_crf) / 6.0))
         )
         return int(mbps * 1_000_000 / 8 * runtime)
 
