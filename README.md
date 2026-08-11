@@ -301,12 +301,17 @@ Select a clip and it loads into the preview under the list, with its filmstrip
 across the bottom of the window. **Play** runs it there — no other program, no
 handing the file to something that cannot decode it.
 
-Trimming sets where a clip starts and ends, mostly for cutting the minute or two
-spent sitting on the bench before arming. Drag either handle on the filmstrip,
-or press **I** and **O** while the clip plays to cut at the picture in front of
-you. **Set in** / **Set out** do the same from the buttons, and **Reset**
-restores the whole clip. The list then shows the range next to the length, and
-the size estimate, progress and time remaining all follow the trimmed length.
+Trimming chooses the useful part of a recording. HDZero DVR starts at arming,
+so there is not normally a long quiet section before take-off. Drag either
+handle on the filmstrip, or press **I** and **O** while the clip plays to cut at
+the picture in front of you. **Set in** / **Set out** do the same from the
+buttons, and **Reset** restores the whole clip. The list then shows the range
+next to the length, and the size estimate, progress and time remaining all
+follow the trimmed length.
+
+The reading below the filmstrip says roughly how much movement it found. When
+one run looks useful, **Trim to the flying** offers it as a starting point; the
+app never applies that guess unless you press the button.
 
 **Add range** (or **N** with the picture focused) keeps another part of the same
 recording. When a clip has several ranges, the preview says which range you are
