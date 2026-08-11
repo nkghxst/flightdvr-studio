@@ -97,6 +97,72 @@ def safe_name(text: str) -> str:
     return cleaned.strip(". ")[:48]
 
 
+TEMPLATE_FIELDS = ("date", "session", "clip", "range", "range_number", "preset")
+
+# What the app has always produced, written as a template. Every field except
+# `clip` can be empty, and an empty one takes its separator with it — which is
+# what makes this one string cover a single untitled range (`hdz_048_upload`), a
+# named one out of several (`hdz_048_2_Tree-dive!_upload`), and a Remux export
+# whose preset suffix is deliberately blank (`hdz_048`).
+DEFAULT_TEMPLATE = "{date}_{clip}_{range_number}_{range}_{preset}"
+
+_FIELD = re.compile(r"\{([a-z_]+)\}")
+
+
+class UnknownTemplateField(ValueError):
+    """A template names something that cannot be filled in.
+
+    Raised rather than expanded to an empty string, and raised while the
+    template is being read rather than while a queue is being built: a typo in
+    `{clipp}` should say so, not quietly export every file under one name.
+    """
+
+    def __init__(self, unknown):
+        self.unknown = tuple(sorted(unknown))
+        known = ", ".join(f"{{{name}}}" for name in TEMPLATE_FIELDS)
+        listed = ", ".join(f"{{{name}}}" for name in self.unknown)
+        super().__init__(f"{listed} is not a field. Available: {known}")
+
+
+def template_fields(template: str) -> tuple[str, ...]:
+    """The fields a template asks for, in the order they appear."""
+    return tuple(match.group(1) for match in _FIELD.finditer(template))
+
+
+def check_template(template: str) -> None:
+    """Raise if a template names a field that does not exist."""
+    unknown = set(template_fields(template)) - set(TEMPLATE_FIELDS)
+    if unknown:
+        raise UnknownTemplateField(unknown)
+
+
+def expand_template(template: str, values: dict) -> str:
+    """One export's filename stem, from a template and this clip's facts.
+
+    Each value is sanitised on its own rather than the finished string, because
+    `safe_name` strips separators the template itself supplies: cleaning the
+    whole thing afterwards would let a name containing an underscore look like
+    a field boundary.
+
+    An empty value takes one adjacent separator with it. Without that, an
+    untitled range in a dated export reads `2026-07-04_hdz_048_3__upload`, and
+    a Remux export — whose preset suffix is empty on purpose — ends in a stray
+    underscore.
+    """
+    check_template(template)
+
+    def fill(match):
+        return safe_name(str(values.get(match.group(1), "") or ""))
+
+    rendered = _FIELD.sub(fill, template)
+    # Collapse the gaps the empty fields left, then trim the ends. Done once at
+    # the end rather than per field so a template with two empty fields in a
+    # row behaves the same as one with a single empty field.
+    rendered = re.sub(r"_{2,}", "_", rendered)
+    rendered = re.sub(r"-{2,}", "-", rendered)
+    return rendered.strip("_-. ")[:120]
+
+
 def select_stem(clip, index: int, total: int) -> str:
     """What to call the file for one select of a clip.
 
