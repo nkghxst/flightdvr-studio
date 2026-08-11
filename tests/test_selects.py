@@ -231,6 +231,45 @@ def test_three_selects_of_one_clip_become_three_jobs(window):
         "two jobs aimed at the same file, so one would overwrite the other")
 
 
+def test_two_clips_that_would_write_one_file_queue_nothing(window, monkeypatch):
+    """Two recordings with the same name in different folders — which
+    "Include subfolders" makes reachable on a card copied twice — render to one
+    output filename. Queueing both would leave whichever ran last, and the
+    other would look exported.
+
+    Refused rather than skipped, and refused for the whole action: skipping is
+    right for a clip already in the queue, because re-ticking is ordinary, but
+    here it would hide that a name cannot tell two exports apart.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda *args, **kw: warned.append(args[2]))
+
+    first = clip("hdz_047.ts")
+    second = clip("hdz_047.ts")
+    second.path = Path("other") / "hdz_047.ts"
+
+    jobs = queue_up(window, [first, second])
+
+    assert jobs == [], "a colliding pair queued anyway"
+    assert warned, "nothing was said about the collision"
+    assert "hdz_047" in warned[0]
+
+
+def test_re_ticking_a_queued_clip_still_skips_rather_than_refusing(window):
+    """The other half of the rule. A target already in the queue is not a
+    collision to complain about — it is somebody ticking a clip they queued
+    earlier — so it is skipped and counted, as it always was."""
+    flight = clip("hdz_051.ts")
+    jobs = queue_up(window, [flight])
+    assert len(jobs) == 1
+
+    window._add_to_queue()          # the same clip, still ticked
+    assert len(window.jobs) == 1, "a duplicate was queued instead of skipped"
+
+
 def test_a_clip_with_one_select_queues_exactly_as_it_always_did(window):
     """The common case must not change: one job, and the filename it had
     before selects existed."""

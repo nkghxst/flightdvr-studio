@@ -2209,17 +2209,52 @@ class MainWindow(QMainWindow):
                 self.jobs.append(Job(ordered, key, settings, target, concat_file=concat,
                                      out_dir=out_dir, stem=stem, subfolders=subfolders))
         else:
+            # Every target is rendered before a single job is appended. Two
+            # pieces of this one action landing on the same filename is not the
+            # same thing as one that is already queued: the second is ordinary —
+            # re-ticking clips you queued earlier — and is skipped below with a
+            # count. The first means a name cannot tell two exports apart, so
+            # only one of them would ever exist on disk, and skipping it would
+            # hide that. It is refused, and nothing is queued.
+            planned = []
             for clip in clips:
                 parts = clip.for_export()
                 for index, piece in enumerate(parts):
                     stem = select_stem(piece, index, len(parts))
                     target = output_path(out_dir, stem, key, subfolders, stamp)
-                    if output_key(target) in already:
-                        continue
-                    already.add(output_key(target))
-                    self.jobs.append(Job([piece], key, settings, target,
-                                         out_dir=out_dir, stem=stem,
-                                         subfolders=subfolders))
+                    planned.append((piece, stem, target))
+
+            seen: dict[str, Path] = {}
+            clashing: dict[str, list[Path]] = {}
+            for piece, _stem, target in planned:
+                identity = output_key(target)
+                if identity in seen:
+                    clashing.setdefault(
+                        identity, [seen[identity]]).append(piece.path)
+                else:
+                    seen[identity] = piece.path
+            if clashing:
+                lines = []
+                for identity, sources in clashing.items():
+                    named = ", ".join(sorted(p.name for p in sources))
+                    lines.append(f"{Path(identity).name}\n    from {named}")
+                QMessageBox.warning(
+                    self, "Two exports would have the same name",
+                    "Nothing has been queued. These would write to the same "
+                    "file, so only the last one would survive:\n\n"
+                    + "\n".join(lines)
+                    + "\n\nGive the ranges different names, or change the "
+                      "output template so it tells them apart.",
+                )
+                return
+
+            for piece, stem, target in planned:
+                if output_key(target) in already:
+                    continue
+                already.add(output_key(target))
+                self.jobs.append(Job([piece], key, settings, target,
+                                     out_dir=out_dir, stem=stem,
+                                     subfolders=subfolders))
 
         added = len(self.jobs) - before
         skipped = (
