@@ -33,9 +33,9 @@ request is made at all.
 
 ### Windows
 
-Run **`FlightDVRStudio-Setup.exe`**. It installs per-user, so there is no
-administrator prompt, and it puts ffmpeg inside the install folder — the machine
-needs nothing else installed.
+Run the downloaded **`FlightDVRStudio-<version>-Setup.exe`**. It installs
+per-user, so there is no administrator prompt, and it puts ffmpeg inside the
+install folder — the machine needs nothing else installed.
 
 About 95 MB to download, 340 MB installed. Uninstalls from Add/Remove Programs.
 
@@ -54,23 +54,25 @@ chmod +x FlightDVR_Studio-*.AppImage
 ./FlightDVR_Studio-*.AppImage
 ```
 
-About 63 MB. One file, nothing installed, delete it to uninstall. Built on
-Ubuntu 22.04, so it runs on anything with glibc 2.35 or newer — which is every
-current distribution, Bazzite and the other Fedora-based immutable ones
-included.
+About 63 MB. One file, nothing installed, delete it to uninstall. It is built on
+Ubuntu 22.04 and needs glibc 2.35 or newer. Some supported enterprise
+distributions still carry an older glibc; `ldd --version` reports yours.
 
 Unlike the Windows build it does **not** carry its own ffmpeg, because your
 distribution already ships a maintained one:
 
 ```bash
 sudo apt install ffmpeg      # Debian, Ubuntu, Mint, Pop!_OS
-sudo dnf install ffmpeg      # Fedora, Nobara
+sudo dnf install ffmpeg      # Nobara; Fedora after enabling RPM Fusion
 sudo pacman -S ffmpeg        # Arch, Manjaro
 ```
 
-Image-based systems already include ffmpeg, so there is
-nothing to do there. Run the app with `--check` if you want to confirm what it
-found before you go looking.
+Fedora's own `ffmpeg-free` package has limited codec support and does not cover
+every FlightDVR export. Enable [RPM Fusion](https://rpmfusion.org/Configuration)
+and install its full `ffmpeg` package first.
+
+Some image-based systems already include a suitable ffmpeg. Run the app with
+`--check` before installing anything to see exactly what it found.
 
 Playback happens in the window and needs nothing else. Install VLC or mpv as
 well if you want **Open in player…** to have somewhere to send a clip.
@@ -402,7 +404,8 @@ motor noise and wind, and dropping it buys bitrate on a size-targeted export.
 
 If your machine has a usable hardware encoder, a checkbox offers it and names
 which one — NVIDIA NVENC, Intel Quick Sync, AMD AMF or Apple VideoToolbox. It is
-roughly three times faster and slightly larger for the same quality.
+usually faster than software encoding, but the speed, quality and file-size
+trade-offs depend on the encoder, GPU and driver.
 
 Availability is decided by *running* a test encode at startup, not by asking
 ffmpeg what it supports. A build can advertise three encoders on a machine that
@@ -410,10 +413,11 @@ has none of the hardware.
 
 ## Copying originals off the card
 
-**Copy originals to library** copies the untouched `.ts` files into folders named
-after the flight date, verifying each copy and skipping anything already there.
-Nothing is converted, and nothing is deleted from the card — clearing it is left
-to you deliberately.
+**Copy originals to library** copies the supported source files unchanged into
+folders named after the flight date. Each one is written through a temporary
+`.part` file, checked to be the same size as the source and then moved into
+place; an existing same-size file is skipped. Nothing is converted, and nothing
+is deleted from the card — clearing it is left to you deliberately.
 
 ## The queue
 
@@ -436,9 +440,10 @@ time, weighted by footage length rather than job count.
   which ones and offers to skip them, overwrite, or stop.
 - **Fill the disk.** Exports are estimated and checked against free space first.
   A full card at Edit quality runs to several hundred gigabytes.
-- **Leave a broken file behind.** A cancelled encode produces an unplayable MP4
-  named exactly like a finished one. That file is deleted. Files that were
-  already there before the job started are never touched.
+- **Leave a broken file behind.** An encode is written to a temporary
+  `.flightdvr-part` file and checked for video before it is moved into place.
+  Cancelling removes the temporary file; an output that was already there is
+  never touched.
 - **Queue the same output twice**, or re-encode work that has already finished.
 
 ## Keyboard shortcuts
@@ -464,10 +469,10 @@ depend on it — `K` is Keep in the clip list and Play on the picture, and
 
 ## Which goggles it works with
 
-All HDZero goggles write the same MPEG-TS format to `movies/` on the card, so
-anything producing `hdz_NNN.ts` should work. They do not all record at the same
-*size* — the Box Pro does 720p60, other modes do 720p90 and 1080p30, and the
-Goggle 2 goes to 1080p.
+HDZero goggles can record MPEG-TS (the recommended container) or MP4 to
+`movies/` on the card. FlightDVR scans those recordings and also accepts `.mov`
+and `.mkv` files. They do not all record at the same *size* — the Box Pro does
+720p60, other modes do 720p90 and 1080p30, and the Goggle 2 goes to 1080p.
 
 Nothing in the app assumes a resolution or frame rate. Downscale and frame rate
 options are built from the clips you have selected, and size estimates scale
@@ -614,7 +619,8 @@ Running from source needs ffmpeg and ffprobe on PATH, or unpacked into
 `C:\ffmpeg\bin`.
 
 ```bash
-python -m pytest tests/ -q          # no ffmpeg required
+python -m pytest -m "not integration"  # unit tests; no ffmpeg required
+python -m pytest                       # full suite; integration needs ffmpeg
 ```
 
 Each platform has its own packaging script. All three run the tests, regenerate
@@ -627,9 +633,10 @@ the icon, build the bundle and prove the result starts before packaging it.
 | macOS | `packaging/build-macos.sh` | signed-ad-hoc `.app` in a `.dmg` | Xcode command line tools |
 
 All three are produced by
-[GitHub Actions](.github/workflows/build.yml) on every push, so you do not need
-any of those machines to release for them. The commands above are for building
-one yourself.
+[GitHub Actions](.github/workflows/build.yml) on relevant code and packaging
+pushes and on version tags; documentation-only pushes are skipped. You do not
+need any of those machines to release for them. The commands above are for
+building one yourself.
 
 There is more detail on the internals, the measured findings behind the colour
 handling, and the traps in this footage in
@@ -640,15 +647,15 @@ Where this is going next — and what it deliberately will not do — is in
 
 ### How it is put together
 
-| File | Contains |
-|---|---|
-| `media.py` | ffmpeg discovery, clip probing, hardware detection |
-| `presets.py` | colour modes, presets, ffmpeg command construction |
-| `jobs.py` | the export queue and progress parsing |
-| `scan.py` | drive detection, clip scanning, copying off the card |
-| `thumbs.py` | cached thumbnail extraction |
-| `trim.py` | filmstrip extraction and the scrubbing bar |
-| `ui.py` | the window |
+| Area | Files | Contains |
+|---|---|---|
+| Media and export | `media.py`, `presets.py`, `jobs.py` | ffmpeg discovery, probing, export commands and the worker queue |
+| Browsing and analysis | `scan.py`, `thumbs.py`, `trim.py`, `motion.py` | clip discovery, cached frames, trimming and flight readings |
+| Playback and decisions | `player.py`, `session.py` | bounded in-window playback and saved review decisions |
+| Interface | `browser_panel.py`, `preview_panel.py`, `export_panel.py`, `queue_panel.py`, `ui.py` | panel-local behaviour and cross-panel workflows |
+
+The module-by-module layout is maintained in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#layout).
 
 A few decisions that are not obvious from the code:
 
