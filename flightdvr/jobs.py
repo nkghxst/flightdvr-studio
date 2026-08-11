@@ -254,8 +254,15 @@ class ExportWorker(QThread):
         if len(job.clips) > 1:
             # Stream copy cannot normalise anything, so a joined remux is held
             # to the stricter standard.
-            problems = join_problems(job.clips,
-                                     re_encoding=job.preset_key != "remux")
+            problems = join_problems(
+                job.clips,
+                re_encoding=job.preset_key != "remux",
+                # And the same for the one-frame-once promise: without this, a
+                # mixed-rate slow job arriving by any route other than the
+                # window's own guard was normalised and run, inventing frames
+                # in the one export that claims it never does.
+                slowing=job.preset_key == "slowmo",
+            )
             if problems:
                 return False, "Cannot join these clips: " + "; ".join(problems)
 

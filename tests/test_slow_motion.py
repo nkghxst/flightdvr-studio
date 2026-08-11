@@ -380,6 +380,68 @@ def test_every_other_preset_still_reports_one_runtime(window):
     assert "20 sec of footage" in shown and "from" not in shown, shown
 
 
+def test_the_audio_tickbox_is_off_for_a_preset_that_always_drops_it(app):
+    """The command sends -an whatever the tickbox says, so leaving the tickbox
+    ticked and usable is the interface promising something the export does not
+    keep: the file arrives silent while the box said the audio was kept.
+
+    Disabled rather than unticked, because unticking it would change the value a
+    session stores and silence a later Master export of the same card.
+    """
+    from flightdvr.export_panel import ExportPanel
+
+    panel = ExportPanel()
+    panel.preset_buttons["slowmo"].setChecked(True)
+    assert not panel.audio_check.isEnabled()
+
+    panel.preset_buttons["master"].setChecked(True)
+    assert panel.audio_check.isEnabled(), "it must come back for other presets"
+    assert panel.settings("").keep_audio, "the stored choice was altered"
+
+
+def test_the_worker_refuses_a_mixed_rate_slow_job_on_its_own(tmp_path):
+    """The window's guard is not the only route to the worker: a session, a
+    retargeted job or a future queue editor all reach _run_job directly. The
+    defensive check there has to know it is slowing, or the promise holds only
+    for jobs that came through the button."""
+    from flightdvr.jobs import ExportWorker, Job
+
+    mixed = [boxpro_clip(path=Path("hdz_030.ts"), fps=60.0),
+             boxpro_clip(path=Path("hdz_031.ts"), fps=30.0)]
+    target = tmp_path / "mixed_slow.mp4"
+    job = Job(clips=mixed, preset_key="slowmo", settings=ExportSettings(),
+              out_path=target)
+
+    ok, message = ExportWorker(Tools(Path("ffmpeg"), Path("ffprobe")), [job],
+                              tmp_path)._run_job(0, job)
+    assert not ok
+    assert "different frame rates" in message, message
+    assert not target.exists(), "a refused job still wrote a file"
+
+
+def test_the_worker_still_joins_mixed_rates_for_other_presets(tmp_path,
+                                                             monkeypatch):
+    """The refusal must be specific to slowing. Master has normalised mixed
+    rates for releases, and breaking that would be a regression in a feature
+    nobody asked me to touch."""
+    from flightdvr.jobs import ExportWorker, Job
+
+    mixed = [boxpro_clip(path=Path("hdz_030.ts"), fps=60.0),
+             boxpro_clip(path=Path("hdz_031.ts"), fps=30.0)]
+    job = Job(clips=mixed, preset_key="master", settings=ExportSettings(),
+              out_path=tmp_path / "mixed_master.mp4")
+    worker = ExportWorker(Tools(Path("ffmpeg"), Path("ffprobe")), [job], tmp_path)
+
+    # Stop before ffmpeg: the point is which jobs get past the join check, not
+    # whether a fake ffmpeg path can encode.
+    refusals = []
+    monkeypatch.setattr(worker, "_run_one",
+                        lambda *a, **k: (False, "stopped before ffmpeg"))
+    ok, message = worker._run_job(0, job)
+    refusals.append(message)
+    assert "different frame rates" not in message, refusals
+
+
 def test_the_filename_says_slow_without_a_second_naming_rule():
     """Naming templates put the preset suffix in the name, so this preset needs
     no naming code of its own — `{preset}` resolves to it."""

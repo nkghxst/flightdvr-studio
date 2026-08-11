@@ -762,7 +762,11 @@ class ExportPanel(QWidget):
         self.preset_help.setText(PRESETS[key].blurb)
         self.options_stack.setCurrentIndex(PRESET_ORDER.index(key))
         self.colour_combo.setEnabled(key != "remux")
-        self.audio_check.setEnabled(key != "remux")
+        # Off for Remux, which copies the streams and cannot be told otherwise,
+        # and off for Slow motion, which always drops the sound. A ticked box
+        # that changes nothing is a promise the export does not keep — the file
+        # arrives silent while the interface said the audio was being kept.
+        self.audio_check.setEnabled(key not in ("remux", "slowmo"))
         self._on_colour_changed()
         self._on_quality_changed()
         # The example carries the preset's own suffix and container, so it goes
