@@ -79,8 +79,19 @@ revisit it or the maintainer assigns one explicitly. The reason is arithmetic
 rather than distrust: if the cheap pass owns the only reciprocal verdict, then
 nothing independent has checked it, which is the opposite of what delegating to
 it was for. Every blocking finding on PR #70 lived in exactly those
-output-correctness paths, and every one of them needed a measurement rather than
-a reading.
+output-correctness paths, and no two of them were caught the same way:
+
+- a missing `slowing=` argument on the worker's defensive join check was found by
+  **reading the call site**, and settled by reverting it and watching the new
+  regression fail;
+- an audio tickbox that promised sound the export always dropped was found by
+  **running the panel** and inspecting the state it was actually in;
+- a third of a recording silently disappearing was found only by **counting the
+  frames** in the finished file — 360 in, 241 out, reported as a success.
+
+Reading, execution and measurement each caught exactly one, so the rule is not
+"measure everything": it is that a claim is settled by whichever of the three can
+actually settle it, and that the cheap pass is not the one deciding which.
 
 The saving survives that restriction, because the expensive pass then starts
 from evidence and a narrow delta instead of from nothing.
