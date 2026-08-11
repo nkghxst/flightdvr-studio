@@ -126,6 +126,7 @@ class ExportPanel(QWidget):
             "social": self._build_social_options,
             "upload": self._build_upload_options,
             "remux": self._build_remux_options,
+            "slowmo": self._build_slowmo_options,
         }
         for key in PRESET_ORDER:
             self.options_stack.addWidget(builders[key]())
@@ -406,12 +407,45 @@ class ExportPanel(QWidget):
         layout.addStretch(1)
         return box
 
+    def _build_slowmo_options(self) -> QWidget:
+        box = QWidget()
+        form = QFormLayout(box)
+
+        self.slow_quality = QComboBox()
+        for crf, name, _ in QUALITY_LEVELS:
+            self.slow_quality.addItem(name, crf)
+        self.slow_quality.setCurrentIndex(1)
+        self.slow_quality.currentIndexChanged.connect(self._on_quality_changed)
+        form.addRow("Quality:", self.slow_quality)
+
+        self.slow_quality_help = dim(QLabel())
+        form.addRow(self.slow_quality_help)
+
+        # Says the rates rather than only the ratio. "Half speed" leaves a pilot
+        # working out what their own footage becomes, and the output rate is the
+        # thing that decides whether an editor will take it.
+        form.addRow(dim(QLabel(
+            "Every frame you recorded is kept and shown for twice as long, so "
+            "nothing is invented between them. A 60 fps recording becomes 30 "
+            "fps and runs twice as long; 90 becomes 45."
+        )))
+
+        # The one preset that overrides Keep audio, so it says so where the
+        # decision is made rather than leaving the tickbox looking effective.
+        form.addRow(dim(QLabel(
+            "Sound is left out. Slowed motor noise drops an octave and is not "
+            "worth having, and keeping it at normal speed over video that now "
+            "runs twice as long would drift apart by the length of the clip."
+        )))
+        return box
+
     def _combo_settings(self) -> list[tuple[str, QComboBox]]:
         """Combos whose choice is carried in the item data."""
         return [
             ("colour", self.colour_combo),
             ("edit_codec", self.edit_codec_combo),
             ("master_quality", self.master_quality),
+            ("slow_quality", self.slow_quality),
             ("social_mode", self.social_mode),
             ("social_quality", self.social_quality),
             ("social_height", self.social_height),
@@ -538,6 +572,7 @@ class ExportPanel(QWidget):
             edit_codec=self.edit_codec_combo.currentData(),
             master_crf=self.master_quality.currentData(),
             master_speed=self.master_speed.currentText(),
+            slow_crf=self.slow_quality.currentData(),
             social_mode=self.social_mode.currentData(),
             social_size_mb=self.social_size.value(),
             social_crf=self.social_quality.currentData(),
@@ -770,6 +805,11 @@ class ExportPanel(QWidget):
         for value, _, description in QUALITY_LEVELS:
             if value == crf:
                 self.upload_quality_help.setText(f"{description}  (CRF {value})")
+                break
+        crf = self.slow_quality.currentData()
+        for value, _, description in QUALITY_LEVELS:
+            if value == crf:
+                self.slow_quality_help.setText(f"{description}  (CRF {value})")
                 break
         self.settings_changed.emit()
 

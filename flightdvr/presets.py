@@ -173,6 +173,12 @@ class ExportSettings:
     master_crf: int = 18
     master_speed: str = "slow"
 
+    # Its own quality rather than Master's. The two produce different files from
+    # the same footage — half the frame rate over twice the runtime — and a
+    # shared setting would mean changing Master's quality silently changed a
+    # slow export nobody was looking at.
+    slow_crf: int = 18
+
     social_mode: str = "size"          # "size" targets a file size, "quality" uses CRF
     social_size_mb: int = 45
     social_crf: int = 23
@@ -284,11 +290,10 @@ PRESETS: dict[str, Preset] = {
     ),
 }
 
-# Deliberately not in PRESET_ORDER yet, which is what the export panel builds
-# its buttons from: the command exists and is tested, the control and the
-# estimate are not built. A preset that can be picked before its estimate is
-# right would report the source runtime for a file twice that long.
-PRESET_ORDER = ["edit", "master", "social", "upload", "remux"]
+# Also the order of the buttons and of the option pages behind them. Slow
+# motion goes last: it is the one preset that answers a different question from
+# "what should this look like when it is finished".
+PRESET_ORDER = ["edit", "master", "social", "upload", "remux", "slowmo"]
 
 
 # --- command construction ----------------------------------------------------
@@ -882,11 +887,11 @@ def build_commands(
         rate = slow_output_rate(clips)
         filters, mapped = picture("yuv420p", [f"setpts={SLOW_FACTOR}*PTS"])
         if settings.hardware:
-            video = hardware_video_args(settings.hardware, settings.master_crf)
+            video = hardware_video_args(settings.hardware, settings.slow_crf)
         else:
             video = [
                 "-c:v", "libx264", "-preset", settings.master_speed,
-                "-crf", str(settings.master_crf), "-profile:v", "high",
+                "-crf", str(settings.slow_crf), "-profile:v", "high",
             ]
         return [
             head + filters + video
@@ -999,7 +1004,7 @@ def estimate_output_size(clip: ClipInfo, preset_key: str, settings: ExportSettin
         # nothing, or by doubling the runtime while leaving the rate alone.
         out_scale = pixel_rate(clip, fps=slow_output_rate([clip]))
         mbps = (MASTER_REFERENCE_MBPS * (out_scale / REFERENCE_PIXEL_RATE)
-                * (2 ** ((18 - settings.master_crf) / 6.0)))
+                * (2 ** ((18 - settings.slow_crf) / 6.0)))
         return int(mbps * 1_000_000 / 8 * output_runtime(preset_key, runtime))
 
     if preset_key == "upload":

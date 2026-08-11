@@ -259,6 +259,118 @@ def test_the_estimate_is_about_the_file_not_the_footage():
     assert 0.8 * master <= slow <= 1.2 * master, (slow, master)
 
 
+# -- the control, and what the window does with it ----------------------------
+
+@pytest.fixture(scope="module")
+def app():
+    from PySide6.QtWidgets import QApplication
+    yield QApplication.instance() or QApplication([])
+
+
+@pytest.fixture
+def window(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+    (tmp_path / "home").mkdir(exist_ok=True)
+
+    from flightdvr.media import find_tools
+    from flightdvr.ui import MainWindow
+
+    made = MainWindow(find_tools())
+    made.export_panel.out_edit.setCurrentText(str(tmp_path / "out"))
+    yield made
+    made.close()
+
+
+def queued_clip(name: str = "hdz_047.ts", **overrides) -> ClipInfo:
+    return boxpro_clip(path=Path(name), **overrides)
+
+
+def test_the_preset_has_its_own_quality_not_masters(app):
+    """Sharing Master's setting would mean changing Master's quality silently
+    changed a slow export nobody was looking at."""
+    from flightdvr.export_panel import ExportPanel
+
+    panel = ExportPanel()
+    panel.master_quality.setCurrentIndex(0)          # Archive
+    panel.slow_quality.setCurrentIndex(3)            # Compact
+    settings = panel.settings("")
+    assert settings.master_crf == 14
+    assert settings.slow_crf == 24
+
+
+def test_the_quality_choice_survives_capture_and_apply(app):
+    """A session stores what capture() returns. A setting that did not survive
+    it would revert on reopening a card and re-encode at a different quality."""
+    from flightdvr.export_panel import ExportPanel
+
+    panel = ExportPanel()
+    panel.preset_buttons["slowmo"].setChecked(True)
+    panel.slow_quality.setCurrentIndex(0)
+    stored = panel.capture()
+
+    other = ExportPanel()
+    other.apply(stored)
+    assert other.slow_quality.currentData() == 14
+    assert other.preset_key() == "slowmo"
+
+
+def test_choosing_it_shows_its_own_page(app):
+    """The options stack is indexed by PRESET_ORDER, so a preset added to one
+    and not the other shows another preset's controls."""
+    from flightdvr.export_panel import ExportPanel
+    from flightdvr.presets import PRESET_ORDER
+
+    panel = ExportPanel()
+    panel.preset_buttons["slowmo"].setChecked(True)
+    assert panel.options_stack.currentIndex() == PRESET_ORDER.index("slowmo")
+
+
+def test_the_queue_takes_a_slow_export_end_to_end(window):
+    """Through the window rather than the command builder: the preset is picked,
+    the clip is ticked, and what lands in the queue is checked."""
+    from PySide6.QtCore import Qt
+
+    window.export_panel.preset_buttons["slowmo"].setChecked(True)
+    window._add_clip(window._scan_generation, queued_clip(duration=10.0))
+    window.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    window.jobs.clear()
+    window._add_to_queue()
+
+    assert len(window.jobs) == 1
+    job = window.jobs[0]
+    assert job.out_path.name == "hdz_047_slow.mp4"
+    # The progress bar reads ffmpeg's out_time against this.
+    assert job.total_duration == 20.0
+
+
+def test_the_estimate_says_what_comes_out_and_what_went_in(window):
+    """"20s of footage" is true and useless for a file that runs for 40. Both
+    numbers, because the second is what makes the first make sense."""
+    from PySide6.QtCore import Qt
+
+    window.export_panel.preset_buttons["slowmo"].setChecked(True)
+    window._add_clip(window._scan_generation, queued_clip(duration=20.0))
+    window.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    window._update_estimate()
+
+    shown = window.export_panel.estimate_label.text()
+    assert "40 sec from 20 sec of footage" in shown, shown
+
+
+def test_every_other_preset_still_reports_one_runtime(window):
+    """The estimate must not start explaining itself for presets that write a
+    file exactly as long as the footage."""
+    from PySide6.QtCore import Qt
+
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    window._add_clip(window._scan_generation, queued_clip(duration=20.0))
+    window.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    window._update_estimate()
+
+    shown = window.export_panel.estimate_label.text()
+    assert "20 sec of footage" in shown and "from" not in shown, shown
+
+
 def test_the_filename_says_slow_without_a_second_naming_rule():
     """Naming templates put the preset suffix in the name, so this preset needs
     no naming code of its own — `{preset}` resolves to it."""
