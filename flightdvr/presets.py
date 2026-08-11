@@ -275,8 +275,19 @@ PRESETS: dict[str, Preset] = {
         "but keeps HEVC, which the free DaVinci Resolve cannot read.",
         "", ".mp4",
     ),
+    "slowmo": Preset(
+        "slowmo", "Slow motion",
+        "Half speed from the frames already recorded, so nothing is invented: "
+        "every frame you shot is shown for twice as long. A 60 fps recording "
+        "becomes 30 fps and runs twice as long.",
+        "_slow", ".mp4",
+    ),
 }
 
+# Deliberately not in PRESET_ORDER yet, which is what the export panel builds
+# its buttons from: the command exists and is tested, the control and the
+# estimate are not built. A preset that can be picked before its estimate is
+# right would report the source runtime for a file twice that long.
 PRESET_ORDER = ["edit", "master", "social", "upload", "remux"]
 
 
@@ -367,6 +378,33 @@ def _fps_args(tools: Tools, clip: ClipInfo, override: int = 0) -> list[str]:
     if fps <= 0:
         return mode
     return mode + ["-r", f"{fps:g}"]
+
+
+# How much slower Slow motion runs. One value, named, because the output rate,
+# the runtime, the estimate and every test have to derive from the same number
+# rather than each carrying its own 2.
+SLOW_FACTOR = 2
+
+
+def slow_output_rate(clips: list[ClipInfo]) -> float:
+    """The frame rate a slow export writes: what was recorded, halved.
+
+    Taken from the source rather than from a list of rates the interface
+    offers, because the promise is about the frames in this recording. 60 gives
+    30 and 90 gives 45 — and 45 is not one of the rates the Social frame-rate
+    box offers, so rounding a slow export onto that list would drop or repeat
+    frames to reach a number nobody asked for.
+
+    A join is already brought to one rate by `join_target_format`, so the same
+    halving applies to the normalised rate. Whether every clip in it can keep
+    the one-frame-once promise is a separate question, answered before anything
+    is queued.
+    """
+    if len(clips) > 1:
+        _, _, fps = join_target_format(clips)
+    else:
+        fps = clips[0].fps
+    return (fps or 60.0) / SLOW_FACTOR
 
 
 def _scale_filter(clip: ClipInfo, target_height: int) -> list[str]:
@@ -791,6 +829,43 @@ def build_commands(
             ]
         return [
             head + filters + video + timing() + sound("192k", mapped)
+            + ["-movflags", "+faststart", str(out_path)]
+        ]
+
+    if preset_key == "slowmo":
+        # Half speed out of the frames that were recorded, never out of frames
+        # invented to fill the gap. Two arguments have to agree for that, and
+        # the whole correctness of the preset is in their relationship:
+        #
+        #   setpts=2*PTS   doubles every presentation time. No frame is added
+        #                  and none is dropped; the same pictures are simply
+        #                  spread over twice as long.
+        #   -r fps/2       states the rate that stream already has. 60 frames
+        #                  spread over two seconds ARE 30 fps.
+        #
+        # Leaving the output rate at the source's is the mistake this comment
+        # exists to prevent: -fps_mode cfr would then duplicate every frame to
+        # fill 60 fps across the doubled runtime, and the result — twice the
+        # frames, each shown twice — looks correct in a player and is not what
+        # was recorded. Frame count is asserted rather than assumed, in
+        # test_slow_motion.py, against real media.
+        rate = slow_output_rate(clips)
+        filters, mapped = picture("yuv420p", [f"setpts={SLOW_FACTOR}*PTS"])
+        if settings.hardware:
+            video = hardware_video_args(settings.hardware, settings.master_crf)
+        else:
+            video = [
+                "-c:v", "libx264", "-preset", settings.master_speed,
+                "-crf", str(settings.master_crf), "-profile:v", "high",
+            ]
+        return [
+            head + filters + video
+            + frame_rate_mode(tools, "cfr") + ["-r", f"{rate:g}"]
+            # Never the source audio. Sound at half pitch is not slow motion,
+            # and keeping it at speed over doubled video would drift apart by
+            # the length of the clip. Refused here rather than left to the
+            # Keep audio tickbox, so no combination of settings can produce it.
+            + ["-an"]
             + ["-movflags", "+faststart", str(out_path)]
         ]
 
