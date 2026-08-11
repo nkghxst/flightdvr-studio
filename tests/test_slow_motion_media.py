@@ -35,7 +35,7 @@ import pytest
 
 from conftest import CLEAN_PSNR, GOP_SECONDS, frame_psnr, probe_output
 from flightdvr.jobs import ExportWorker, Job
-from flightdvr.media import probe
+from flightdvr.media import frame_rate_mode, probe
 from flightdvr.presets import (
     SLOW_FACTOR, ExportSettings, templated_output_path,
 )
@@ -193,14 +193,17 @@ def test_both_ffmpeg_spellings_preserve_the_frame_count(tools, clip, tmp_path,
     arguments: the two spellings could plausibly differ in behaviour, and a
     distribution shipping the older one would be the last to find out.
 
-    The legacy half is skipped where the legacy option no longer exists. That
-    is not a gap being papered over — forcing `-vsync` onto a build that has
-    removed it tests nothing about this app, which asks which spelling the
-    installed ffmpeg takes and would never send that combination. The
+    Each half is skipped where that spelling does not exist, and both
+    directions are real: a current Windows build has REMOVED `-vsync`, while
+    the 22.04 image the AppImage is built on predates `-fps_mode`. Forcing
+    either onto a binary that lacks it tests nothing about this app, which asks
+    which spelling the installed ffmpeg takes and would never send it. The
     argument-level pairing is pinned without ffmpeg in test_slow_motion.py.
     """
     from flightdvr import media
 
+    if fps_mode_supported and not media._fps_mode_supported(str(tools.ffmpeg)):
+        pytest.skip("this ffmpeg predates -fps_mode, so it cannot be measured")
     if not fps_mode_supported and not legacy_vsync_accepted(tools):
         pytest.skip("this ffmpeg has removed -vsync, so it cannot be measured")
 
@@ -269,8 +272,13 @@ def lossless_reference(tools, info, out_path: Path) -> Path:
     chain = colour_filters(ExportSettings().colour, info, "yuv420p")
     command = ([str(tools.ffmpeg), "-hide_banner", "-nostdin", "-y"]
                + [str(a) for a in _input_args([info.path], None, info)]
-               + ["-vf", ",".join(chain), "-fps_mode", "passthrough",
-                  "-c:v", "ffv1", "-an", str(out_path)])
+               + ["-vf", ",".join(chain)]
+               # Asked, not written out. Hardcoding `-fps_mode` here failed the
+               # AppImage build, which runs on 22.04 with ffmpeg 4.4 and has
+               # only `-vsync` — the exact version split this helper exists to
+               # be neutral about, and the app's own answer to it.
+               + [str(a) for a in frame_rate_mode(tools, "passthrough")]
+               + ["-c:v", "ffv1", "-an", str(out_path)])
     done = subprocess.run(command, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr[-400:]
     return out_path
