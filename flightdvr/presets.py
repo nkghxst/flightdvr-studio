@@ -314,7 +314,8 @@ SEEK_LEAD_IN = 2.0
 
 
 def _input_args(
-    sources: list[Path], concat_file: Path | None, clip: ClipInfo | None = None
+    sources: list[Path], concat_file: Path | None, clip: ClipInfo | None = None,
+    time_scale: float = 1.0,
 ) -> list[str]:
     """Input side, hardened for the loose timestamps DVR transport streams have.
 
@@ -352,9 +353,21 @@ def _input_args(
     # what makes the first output frame correct. Measured from the start of the
     # file, which is what -start_at_zero above guarantees.
     if seeking:
-        args += ["-ss", f"{clip.trim_in:.3f}"]
+        # Scaled for the same reason as `-t` below: this seek is measured in the
+        # timestamps the filters hand the muxer, not the ones the source
+        # carried. Measured on a mid-GOP range with slowing on, an unscaled
+        # 2.5 s here started the export 1.25 s early — every frame present,
+        # correctly slowed, and a second and a quarter of the wrong footage.
+        args += ["-ss", f"{clip.trim_in * time_scale:.3f}"]
     if concat_file is None and clip is not None and clip.is_trimmed:
-        args += ["-t", f"{clip.trimmed_duration:.3f}"]
+        # `-t` is an output-side limit, measured in the timestamps the filters
+        # produce rather than the ones the source carried. Every preset until
+        # Slow motion left those the same, so the range length and the output
+        # length were one number. Slowing doubles the timestamps, and this
+        # limit has to be doubled with them: measured, a two-second range
+        # exported to a file holding one second of footage, correctly slowed
+        # and quietly half missing.
+        args += ["-t", f"{clip.trimmed_duration * time_scale:.3f}"]
     return args
 
 
@@ -885,6 +898,11 @@ def build_commands(
         # was recorded. Frame count is asserted rather than assumed, in
         # test_slow_motion.py, against real media.
         rate = slow_output_rate(clips)
+        if not joined:
+            # Rebuilt rather than reusing `head`: the trim length above is an
+            # output-side limit and has to be stated in the slowed timeline.
+            head = ([ff, "-hide_banner", "-nostdin", "-y"]
+                    + _input_args(sources, None, clip, time_scale=SLOW_FACTOR))
         filters, mapped = picture("yuv420p", [f"setpts={SLOW_FACTOR}*PTS"])
         if settings.hardware:
             video = hardware_video_args(settings.hardware, settings.slow_crf)
