@@ -38,6 +38,7 @@ class PreviewView(QObject):
 
     frame_clicked = Signal()
     play_requested = Signal()
+    grab_still_requested = Signal()
     set_in_requested = Signal()
     set_out_requested = Signal()
     reset_requested = Signal()
@@ -115,6 +116,16 @@ class PreviewView(QObject):
         self.play_button.clicked.connect(lambda *_: self.play_requested.emit())
         column.addWidget(self.play_button)
 
+        self.still_button = QPushButton("Grab still…")
+        self.still_button.setEnabled(False)
+        self.still_button.setToolTip(
+            "Save the exact paused source frame as a full-resolution PNG.\n"
+            "Pause or step to a real decoded frame first."
+        )
+        self.still_button.clicked.connect(
+            lambda *_: self.grab_still_requested.emit())
+        column.addWidget(self.still_button)
+
         trim_row = QHBoxLayout()
         trim_row.setContentsMargins(0, 0, 0, 0)
         trim_row.setSpacing(TIGHT)
@@ -152,6 +163,19 @@ class PreviewView(QObject):
         column.addWidget(self.trim_note)
 
         return side
+
+    def set_still_state(self, available: bool, running: bool = False,
+                        cancelling: bool = False) -> None:
+        """Make the button describe the one action it can take right now."""
+        if cancelling:
+            self.still_button.setText("Cancelling…")
+            self.still_button.setEnabled(False)
+        elif running:
+            self.still_button.setText("Cancel still")
+            self.still_button.setEnabled(True)
+        else:
+            self.still_button.setText("Grab still…")
+            self.still_button.setEnabled(available)
 
     def show_activity(self, text: str, offer: str = "") -> None:
         """Say what the clip looks like, and offer a trim only if there is one.

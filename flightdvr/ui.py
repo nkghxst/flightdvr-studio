@@ -75,6 +75,7 @@ from .session import (
     missing_from, recent_sessions, remember,
 )
 from .shortcuts import SHORTCUT_GROUPS
+from .stills import StillRequest, StillWorker
 from .thumbs import THUMB_WIDTH, ThumbnailLoader
 from .trim import Filmstrip, FilmstripLoader, FlightAnalysisWorker
 from .widgets import (
@@ -138,6 +139,10 @@ class MainWindow(QMainWindow):
         self.splitter: QSplitter | None = None
         self._trim_clip: ClipInfo | None = None
         self._precise_frame_number: int | None = None
+        self._precise_frame_seconds: float | None = None
+        self._still_worker: StillWorker | None = None
+        self._retired_still_workers: list[StillWorker] = []
+        self._still_generation = 0
         self._strip: Filmstrip = Filmstrip()
         self._strip_loader: FilmstripLoader | None = None
         # Same reason as _retired_scans: a running QThread that gets collected
@@ -610,6 +615,7 @@ class MainWindow(QMainWindow):
         view = self.preview_view = PreviewView(self)
         view.frame_clicked.connect(self._focus_player)
         view.play_requested.connect(self._toggle_play)
+        view.grab_still_requested.connect(self._grab_still)
         view.set_in_requested.connect(self._set_in)
         view.set_out_requested.connect(self._set_out)
         view.reset_requested.connect(self._reset_trim)
@@ -635,6 +641,10 @@ class MainWindow(QMainWindow):
     @property
     def preview_sidebar(self) -> QWidget:
         return self.preview_view.sidebar
+
+    @property
+    def still_button(self) -> QPushButton:
+        return self.preview_view.still_button
 
     @property
     def trim_title(self) -> QLabel:
@@ -1021,6 +1031,7 @@ class MainWindow(QMainWindow):
         # half is still sitting on the debounce timer, and closing the window
         # is exactly when someone expects their work to have been kept.
         self._flush_session()
+        self._retire_still_capture()
         # First, because it is the one holding a decoder open on the card.
         self.player.shutdown()
         self._flight_scan_ready = False
@@ -1045,6 +1056,10 @@ class MainWindow(QMainWindow):
             if worker and worker.isRunning():
                 worker.stop()
                 worker.wait(2000)
+        for worker in self._retired_still_workers:
+            if worker.isRunning():
+                worker.stop()
+                worker.wait(4000)
         self.thumbs.shutdown()
         super().closeEvent(event)
 
@@ -1112,6 +1127,7 @@ class MainWindow(QMainWindow):
         if folder is None:
             QMessageBox.warning(self, "Nothing to scan", "Pick a folder or drive first.")
             return
+        self._retire_still_capture()
         if self.scan_worker and self.scan_worker.isRunning():
             self.scan_worker.stop()
             self.scan_worker.wait(1500)
@@ -1460,9 +1476,10 @@ class MainWindow(QMainWindow):
         # The person is waiting for this filmstrip. Stop the speculative sweep
         # before starting it so the interactive decoder owns the card first.
         self._stop_flight_analysis()
+        self._retire_still_capture()
 
         self._trim_clip = clip
-        self._precise_frame_number = None
+        self._clear_precise_frame()
         # Static for as long as this clip is the one loaded, so it is written
         # here rather than alongside the playhead.
         self.clip_format.setText(f"{clip.format_label} · {clip.size_label}")
@@ -1547,7 +1564,7 @@ class MainWindow(QMainWindow):
 
     def _on_playhead(self, seconds: float) -> None:
         """The filmstrip was clicked or dragged."""
-        self._precise_frame_number = None
+        self._clear_precise_frame()
         self.player.seek(seconds)
         self._show_frame(seconds)
         self._update_trim_labels()
@@ -1612,7 +1629,7 @@ class MainWindow(QMainWindow):
         clip = self._trim_clip
         if clip is None:
             return
-        self._precise_frame_number = None
+        self._clear_precise_frame()
         seconds = max(0.0, min(seconds, clip.duration))
         self.player.seek(seconds)
         self.trim_bar.set_playhead(seconds)
@@ -1620,7 +1637,7 @@ class MainWindow(QMainWindow):
         self._update_trim_labels()
 
     def _preview_frame_ready(self, image, seconds: float) -> None:
-        self._precise_frame_number = None
+        self._clear_precise_frame()
         self.frame_view.set_image(image)
         # From the frame that was painted, not from the clock, so that pressing
         # I always means the picture on screen.
@@ -1631,27 +1648,174 @@ class MainWindow(QMainWindow):
                              frame_number: int) -> None:
         """Paint the exact source frame and make it the trim authority."""
         self._precise_frame_number = frame_number
+        self._precise_frame_seconds = seconds
         self.frame_view.set_image(image)
         self.trim_bar.set_playhead(seconds)
         self._update_trim_labels()
+        self._update_still_button()
+
+    def _clear_precise_frame(self) -> None:
+        """Retire the source identity when the painted picture changes."""
+        self._precise_frame_number = None
+        self._precise_frame_seconds = None
+        if hasattr(self, "preview_view"):
+            self._update_still_button()
+
+    def _update_still_button(self, cancelling: bool = False) -> None:
+        """A still is valid only while an exact decoded picture is current."""
+        available = (
+            self._trim_clip is not None
+            and self._precise_frame_number is not None
+            and self._precise_frame_seconds is not None
+            and not self.player.is_playing
+        )
+        self.preview_view.set_still_state(
+            available,
+            running=self._still_worker is not None,
+            cancelling=cancelling,
+        )
+
+    def _still_suggestion(self) -> Path:
+        """Use the same visible naming template and output box as exports."""
+        clip = self._trim_clip
+        if clip is None:
+            raise BadTemplate("Select a clip first.")
+        fields = export_fields(
+            clip, 0, 1, "still", flight_date=self.flight_date(),
+            session_name=self.session.title if self.session else "",
+        )
+        stem = expand_template(self.export_panel.template(), fields)
+        check_stem(stem)
+        typed = self.export_panel.output_text().strip()
+        folder = Path(typed) if typed else clip.path.parent
+        return folder / f"{stem}.png"
+
+    def _grab_still(self) -> None:
+        """Choose a PNG target, or make a second click cancel the first."""
+        if self._still_worker is not None:
+            self._still_worker.stop()
+            self._update_still_button(cancelling=True)
+            self.statusBar().showMessage("Cancelling still capture…", 4000)
+            return
+
+        clip = self._trim_clip
+        frame_number = self._precise_frame_number
+        seconds = self._precise_frame_seconds
+        if clip is None or frame_number is None or seconds is None:
+            self.statusBar().showMessage(
+                "Pause or step to an exact source frame first", 5000)
+            return
+
+        try:
+            suggested = self._still_suggestion()
+        except (BadTemplate, UnknownTemplateField) as problem:
+            QMessageBox.warning(self, "Cannot name the still", str(problem))
+            return
+
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, "Grab full-resolution still", str(suggested),
+            "PNG images (*.png)",
+        )
+        if not chosen:
+            return
+        target = Path(chosen)
+        if target.suffix.lower() != ".png":
+            target = target.with_suffix(".png")
+
+        if target.exists():
+            answer = QMessageBox.question(
+                self, "Replace existing still?",
+                f"{target.name} already exists. Replace it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        request = StillRequest(
+            clip=clip,
+            frame_number=frame_number,
+            seconds=seconds,
+            colour=self.export_panel.settings(self.hw_encoder).colour,
+            target=target,
+        )
+        self._still_generation += 1
+        generation = self._still_generation
+        worker = StillWorker(self.tools, request, generation, self)
+        self._still_worker = worker
+        worker.saved.connect(self._still_saved)
+        worker.failed.connect(self._still_failed)
+        worker.cancelled.connect(self._still_cancelled)
+        worker.finished.connect(
+            lambda worker=worker, generation=generation:
+            self._still_finished(worker, generation)
+        )
+        self._update_still_button()
+        self.statusBar().showMessage(
+            f"Saving source frame {frame_number + 1:,}…")
+        worker.start()
+
+    def _still_saved(self, generation: int, path: str) -> None:
+        if generation != self._still_generation:
+            return
+        self.statusBar().showMessage(f"Saved full-resolution still to {path}", 8000)
+
+    def _still_failed(self, generation: int, message: str) -> None:
+        if generation != self._still_generation:
+            return
+        QMessageBox.warning(self, "Could not save still", message)
+
+    def _still_cancelled(self, generation: int) -> None:
+        if generation != self._still_generation:
+            return
+        self.statusBar().showMessage("Still capture cancelled", 4000)
+
+    def _still_finished(self, worker: StillWorker, generation: int) -> None:
+        self._retired_still_workers = [
+            old for old in self._retired_still_workers if old.isRunning()
+        ]
+        if generation == self._still_generation and self._still_worker is worker:
+            self._still_worker = None
+            self._update_still_button()
+
+    def _retire_still_capture(self) -> None:
+        """Cancel work tied to a clip/folder that is no longer current."""
+        worker = self._still_worker
+        if worker is None:
+            return
+        self._still_generation += 1
+        worker.stop()
+        if worker.isRunning():
+            self._retired_still_workers.append(worker)
+        self._still_worker = None
+        self._retired_still_workers = [
+            old for old in self._retired_still_workers if old.isRunning()
+        ]
+        self._update_still_button()
 
     def _precise_loading(self, loading: bool) -> None:
         if loading:
             self.trim_position.setText("reading exact frames…")
 
     def _precise_failed(self, message: str) -> None:
-        self._precise_frame_number = None
+        self._clear_precise_frame()
         self.statusBar().showMessage(f"Precise frames: {message}", 8000)
         self._show_frame(self.trim_bar.playhead)
         self._update_trim_labels()
 
     def _preview_state_changed(self, playing: bool) -> None:
         if playing:
-            self._precise_frame_number = None
+            self._clear_precise_frame()
+        elif self._trim_clip is not None:
+            # A playback frame is real, but the 30 fps stream cannot say which
+            # 60/90 fps source frame it represents. Settle the pause through
+            # the native-rate decoder so Grab still receives the same trusted
+            # frame number and PTS as comma/period stepping.
+            self._sharpen_timer.start()
         self.play_button.setText("Pause" if playing else "Play")
 
     def _preview_failed(self, message: str) -> None:
-        self._precise_frame_number = None
+        self._clear_precise_frame()
         self.frame_view.set_message("could not play this clip")
         self.statusBar().showMessage(f"Preview: {message}", 8000)
         self._show_frame(self.trim_bar.playhead)

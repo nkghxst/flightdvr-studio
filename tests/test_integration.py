@@ -31,6 +31,7 @@ delete the marker — so this file cannot quietly fall out of date.
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 import time
@@ -41,9 +42,10 @@ import pytest
 
 from conftest import FPS, CLEAN_PSNR, frame_psnr, probe_output
 from flightdvr.jobs import ExportWorker, Job
-from flightdvr.media import probe
+from flightdvr.media import ClipInfo, probe
 from flightdvr.player import PreviewSize
-from flightdvr.presets import ExportSettings, output_path
+from flightdvr.presets import LEVELS, ExportSettings, colour_filters, output_path
+from flightdvr.stills import StillRequest, StillWorker
 
 pytestmark = pytest.mark.integration
 
@@ -571,6 +573,129 @@ def test_precise_window_returns_the_frames_it_planned(tools, clip, qt_app):
     assert frames[0].frame_number == window.first_frame
     assert frames[-1].frame_number == window.last_frame
     assert len(frames) == window.frame_count
+
+
+def _still_source(tools, path: Path, width: int, height: int,
+                  fps: int, frames: int = 12):
+    """A short full-range MPEG-TS whose neighbouring pictures really differ."""
+    command = [
+        str(tools.ffmpeg), "-hide_banner", "-nostdin", "-y",
+        "-f", "lavfi", "-i",
+        f"testsrc2=size={width}x{height}:rate={fps}",
+        "-frames:v", str(frames),
+        "-c:v", "libx265", "-preset", "ultrafast",
+        "-x265-params",
+        f"keyint={fps}:min-keyint={fps}:scenecut=0:log-level=none",
+        "-vf", "scale=in_range=limited:out_range=full",
+        "-pix_fmt", "yuv420p", "-color_range", "pc",
+        "-an", "-f", "mpegts", str(path),
+    ]
+    made = subprocess.run(command, capture_output=True, text=True)
+    assert made.returncode == 0, made.stderr[-800:]
+    info = probe(tools, path)
+    # A dimension/rate fixture that did not retain the awkward property would
+    # prove nothing; assert what ffmpeg really made before using it.
+    assert (info.width, info.height) == (width, height)
+    assert info.fps == pytest.approx(fps, rel=0.001)
+    return info
+
+
+def _source_rgb(tools, info, frame_number: int) -> bytes:
+    filters = [f"select='eq(n,{frame_number})'",
+               *colour_filters(LEVELS, info, "rgb24")]
+    result = subprocess.run(
+        [str(tools.ffmpeg), "-hide_banner", "-nostdin", "-v", "error",
+         "-i", str(info.path), "-an", "-vf", ",".join(filters),
+         "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")[-800:]
+    assert len(result.stdout) == info.width * info.height * 3
+    return result.stdout
+
+
+def _png_rgb(tools, path: Path, width: int, height: int) -> bytes:
+    result = subprocess.run(
+        [str(tools.ffmpeg), "-hide_banner", "-nostdin", "-v", "error",
+         "-i", str(path), "-frames:v", "1", "-f", "rawvideo",
+         "-pix_fmt", "rgb24", "pipe:1"],
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")[-800:]
+    assert len(result.stdout) == width * height * 3
+    return result.stdout
+
+
+@pytest.mark.parametrize("width,height,fps", [
+    (1280, 720, 60),
+    (1920, 1080, 30),
+])
+def test_grab_still_keeps_source_size_and_the_exact_stepped_frame(
+        tools, tmp_path, qt_app, width, height, fps):
+    source = tmp_path / f"still-{width}x{height}.ts"
+    info = _still_source(tools, source, width, height, fps)
+    frame_number = 6
+
+    precise, problems, _window = decode_frame_window(
+        tools, info, frame_number / fps)
+    assert not problems, problems
+    trusted = next(
+        frame for frame in precise if frame.frame_number == frame_number)
+
+    target_path = tmp_path / f"still-{width}x{height}.png"
+    request = StillRequest(
+        info, trusted.frame_number, trusted.seconds, LEVELS, target_path)
+    ok, message = StillWorker(tools, request, 1)._capture()
+    assert ok, message
+
+    wanted = _source_rgb(tools, info, frame_number)
+    adjacent = _source_rgb(tools, info, frame_number + 1)
+    produced = _png_rgb(tools, target_path, width, height)
+    assert wanted != adjacent, "the fixture's adjacent frames are identical"
+
+    deltas = [abs(left - right) for left, right in zip(produced, wanted)]
+    maximum_delta = max(deltas)
+    mean_square = sum(value * value for value in deltas) / len(deltas)
+    psnr = 99.0 if mean_square == 0 else 10 * math.log10(255 ** 2 / mean_square)
+    assert psnr == 99.0 and maximum_delta == 0, (
+        f"saved RGB differs: PSNR {psnr:.2f} dB, max delta {maximum_delta}")
+
+
+def test_a_failed_real_still_capture_preserves_the_target_and_no_part(
+        tools, tmp_path, qt_app):
+    broken = tmp_path / "broken.ts"
+    broken.write_bytes(b"not an MPEG transport stream" * 2000)
+    info = ClipInfo(
+        path=broken, size=broken.stat().st_size,
+        modified=datetime.fromtimestamp(broken.stat().st_mtime),
+        duration=1.0, width=1280, height=720, fps=60.0,
+        video_codec="hevc", audio_codec="", color_range="pc",
+    )
+    target_path = tmp_path / "precious.png"
+    target_path.write_bytes(b"an earlier still")
+    before = target_path.read_bytes()
+
+    request = StillRequest(info, 6, 0.1, LEVELS, target_path)
+    ok, _message = StillWorker(tools, request, 1)._capture()
+
+    assert not ok
+    assert target_path.read_bytes() == before
+    assert not list(tmp_path.glob("*.flightdvr-part*"))
+
+
+def test_a_cancelled_real_still_capture_publishes_no_target_or_part(
+        tools, clip, tmp_path, qt_app):
+    info = probed(tools, clip)
+    target_path = tmp_path / "cancelled.png"
+    request = StillRequest(info, 150, 2.5, LEVELS, target_path)
+    worker = StillWorker(tools, request, 1)
+    worker.stop()
+
+    ok, message = worker._capture()
+
+    assert not ok and message == "Cancelled"
+    assert not target_path.exists()
+    assert not list(tmp_path.glob("*.flightdvr-part*"))
 
 
 def test_the_preview_agrees_with_the_export_about_colour(tools, clip, tmp_path,
