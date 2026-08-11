@@ -1210,12 +1210,12 @@ class FrameView(QWidget):
     @staticmethod
     def _vertical_position_for_x(
         target: QRect, crop: VerticalCrop, pointer_x: float, grab_offset: float
-    ) -> int:
+    ) -> int | None:
         """Convert a dragged crop edge back to the model's 0..100 position."""
         source_width = max(1, crop.source_width)
         max_source_x = max(0, source_width - crop.width)
         if max_source_x == 0 or target.width() <= 0:
-            return 0
+            return None
 
         display_width = target.width() * crop.width / source_width
         left = pointer_x - grab_offset
@@ -1254,7 +1254,8 @@ class FrameView(QWidget):
                     self._display_target(), self._vertical_crop,
                     event.position().x(), offset,
                 )
-                self.vertical_position_changed.emit(position)
+                if position is not None:
+                    self.vertical_position_changed.emit(position)
                 event.accept()
                 return
         super().mouseMoveEvent(event)

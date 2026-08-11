@@ -237,6 +237,36 @@ def test_dragging_the_overlay_emits_the_same_position_the_slider_uses(qt_app):
     assert view._vertical_drag_offset is None
 
 
+def test_dragging_a_full_frame_portrait_overlay_does_not_rewrite_position(qt_app):
+    """A portrait crop has no horizontal room, so a drag must emit nothing."""
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QImage, QMouseEvent
+    from flightdvr.player import FrameView
+
+    source = clip(width=720, height=1280)
+    view = FrameView()
+    view.resize(360, 640)
+    view.set_image(QImage(720, 1280, QImage.Format.Format_RGB32))
+    view.set_vertical_crop(vertical_crop(source, position=50))
+    positions = []
+    view.vertical_position_changed.connect(positions.append)
+
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress, QPointF(180, 320),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    move = QMouseEvent(
+        QEvent.Type.MouseMove, QPointF(220, 320),
+        Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    view.mousePressEvent(press)
+    view.mouseMoveEvent(move)
+
+    assert positions == []
+
+
 def test_vertical_position_is_a_persisted_panel_choice_and_keeps_audio(qt_app):
     from flightdvr.export_panel import ExportPanel
     from flightdvr.presets import PRESET_ORDER
