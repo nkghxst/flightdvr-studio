@@ -85,12 +85,24 @@ would cost far more than no guess at all.
   moment rather than after a counter.
 - **Delivery bundles** — one range, several presets, one action.
 
-**A music bed** was in this release and is now 1.6.1, on its own. It is not one
-feature: a second input to probe, a policy for looping or trimming it to length,
-replacing the original audio or mixing with it, fade rules, keeping audio and
-video the same length across an assembly, and cancelling a graph that is half
-audio. Gated behind the two largest items above, it is the one most likely to
-slip, and moving it out means it cannot take the release with it.
+---
+
+## 1.6.1 — Music bed
+
+*Something other than motor whine.*
+
+A fade-in, a fade-out, and your own track over a finished export, for anyone who
+would rather not share four minutes of propellers.
+
+It was in 1.6 and is now on its own, because it is not one feature. There is a
+second input to probe, a policy for looping or trimming it to length, a choice
+between replacing the original audio and mixing with it, fade rules, keeping
+audio and video the same length across an assembly, and cancelling a graph that
+is half audio. It also depends on assembly and delivery bundles, the two largest
+items in 1.6.
+
+Gated behind those and larger than any of them, it was the item most likely to
+slip. Out here it can take as long as it takes without holding a release.
 
 ---
 
