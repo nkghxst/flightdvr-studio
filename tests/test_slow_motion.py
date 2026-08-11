@@ -36,8 +36,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from flightdvr import media  # noqa: E402
 from flightdvr.media import ClipInfo, Tools  # noqa: E402
 from flightdvr.presets import (  # noqa: E402
-    PRESETS, SLOW_FACTOR, ExportSettings, build_commands, slow_output_rate,
-    templated_output_path,
+    PRESETS, SLOW_FACTOR, ExportSettings, build_commands,
+    describe_join_problems, estimate_output_size, join_problems,
+    output_runtime, slow_output_rate, templated_output_path,
 )
 
 TOOLS = Tools(Path("ffmpeg"), Path("ffprobe"))
@@ -177,6 +178,85 @@ def test_every_preset_has_a_command_builder():
             Path(f"out/hdz_022{PRESETS[key].extension}"), Path("work"),
         )
         assert command and command[0][0] == "ffmpeg", key
+
+
+# -- a mixed-rate assembly is refused, not quietly coerced -------------------
+
+def test_clips_recorded_at_one_rate_join_normally():
+    """The rule is about mixed rates, not about joining at all."""
+    same = [boxpro_clip(path=Path("hdz_030.ts"), fps=60.0),
+            boxpro_clip(path=Path("hdz_031.ts"), fps=60.0)]
+    assert join_problems(same, slowing=True) == []
+
+
+def test_a_mixed_rate_assembly_is_refused_rather_than_put_on_one_rate():
+    """Neither direction can keep the promise, which is why this is a refusal
+    and not a normalisation.
+
+    The join graph brings every clip to the highest rate present, so a 30 fps
+    clip beside a 60 fps one has frames duplicated before anything is slowed —
+    invented frames in an export whose whole claim is that it invents none.
+    Going the other way throws away frames the faster clip really recorded.
+    """
+    mixed = [boxpro_clip(path=Path("hdz_030.ts"), fps=60.0),
+             boxpro_clip(path=Path("hdz_031.ts"), fps=30.0)]
+    problems = join_problems(mixed, slowing=True)
+    assert problems, "a mixed-rate slow join was allowed"
+    assert "30 and 60 fps" in problems[0]
+    # and the refusal says what to do about it, not what went wrong internally
+    spoken = describe_join_problems(mixed, problems)
+    assert "Exporting them separately works" in spoken
+
+
+def test_the_same_mixed_rates_still_join_for_every_other_preset():
+    """Normalising rates is right for Master or Upload and has been for
+    releases. Slow motion is the only preset that cannot accept it."""
+    mixed = [boxpro_clip(path=Path("hdz_030.ts"), fps=60.0),
+             boxpro_clip(path=Path("hdz_031.ts"), fps=30.0)]
+    assert join_problems(mixed) == []
+
+
+def test_an_unreadable_rate_is_refused_for_a_slow_join():
+    """fps of 0 means ffprobe could not say. Slowing that is a guess about how
+    many frames the clip holds."""
+    unknown = [boxpro_clip(path=Path("hdz_030.ts"), fps=60.0),
+               boxpro_clip(path=Path("hdz_031.ts"), fps=0.0)]
+    problems = join_problems(unknown, slowing=True)
+    assert any("could not be read" in problem for problem in problems)
+
+
+# -- the three places a runtime is read ---------------------------------------
+
+def test_the_finished_file_is_twice_the_footage_that_went_in():
+    """One function behind all three readers, because the app had been treating
+    "how long is the footage" and "how long is the file" as one number."""
+    assert output_runtime("slowmo", 30.0) == 60.0
+    assert output_runtime("master", 30.0) == 30.0
+    assert output_runtime("remux", 30.0) == 30.0
+
+
+def test_the_progress_bar_measures_against_the_doubled_runtime():
+    """ffmpeg reports out_time against the file it is writing. Measured against
+    the source length, a slow export would show 100% at the halfway point and
+    then sit there for as long again."""
+    from flightdvr.jobs import Job
+
+    clip = boxpro_clip(duration=10.0)
+    slow = Job([clip], "slowmo", ExportSettings(), Path("out/a_slow.mp4"))
+    fast = Job([clip], "master", ExportSettings(), Path("out/a_master.mp4"))
+    assert slow.total_duration == 20.0
+    assert fast.total_duration == 10.0
+
+
+def test_the_estimate_is_about_the_file_not_the_footage():
+    """Half the frame rate over twice the runtime is the same pictures, so a
+    slow export lands close to a Master of the same clip — and nowhere near
+    half or double it, which is what the two obvious mistakes produce."""
+    clip = boxpro_clip(duration=20.0)
+    settings = ExportSettings()
+    slow = estimate_output_size(clip, "slowmo", settings)
+    master = estimate_output_size(clip, "master", settings)
+    assert 0.8 * master <= slow <= 1.2 * master, (slow, master)
 
 
 def test_the_filename_says_slow_without_a_second_naming_rule():

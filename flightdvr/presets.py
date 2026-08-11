@@ -585,7 +585,8 @@ def join_filtergraph(
     return ";".join(chains), video_label, "[ja]" if want_audio else ""
 
 
-def join_problems(clips: list[ClipInfo], re_encoding: bool = True) -> list[str]:
+def join_problems(clips: list[ClipInfo], re_encoding: bool = True,
+                  slowing: bool = False) -> list[str]:
     """Why these clips cannot be joined into one file, in words a pilot can act on.
 
     Clips of different sizes, frame rates, codecs and colour ranges join
@@ -593,6 +594,11 @@ def join_problems(clips: list[ClipInfo], re_encoding: bool = True) -> list[str]:
     it — join_filtergraph() brings each one to a common format first. What is
     left here is what no amount of normalising can rescue: a clip whose
     properties could not be read, and a clip with nothing in it.
+
+    `slowing` adds the one thing normalising cannot rescue for Slow motion. The
+    graph brings every clip to the highest rate present, which means a 30 fps
+    clip beside a 60 fps one has frames duplicated before anything is slowed —
+    so the export would show invented frames while promising it never does.
 
     Messages are written to be read by someone deciding what to do next, not
     to describe the internals.
@@ -626,6 +632,30 @@ def join_problems(clips: list[ClipInfo], re_encoding: bool = True) -> list[str]:
     if empty:
         listed = ", ".join(c.path.name for c in empty[:3])
         problems.append(f"{len(empty)} of them are empty or trimmed to nothing ({listed})")
+
+    if slowing:
+        # Refused rather than normalised, which is the choice #59 leaves open.
+        # Normalising to the lowest rate would throw away frames the faster
+        # clips recorded; normalising to the highest invents frames for the
+        # slower ones. Either breaks the one promise the preset makes, and a
+        # documented common rate cannot be honest about both clips at once.
+        unreadable_rate = [c for c in clips if not c.fps]
+        if unreadable_rate:
+            listed = ", ".join(c.path.name for c in unreadable_rate[:3])
+            problems.append(
+                f"the frame rate of {len(unreadable_rate)} of them could not "
+                f"be read ({listed}), so there is no way to slow them without "
+                "guessing how many frames they hold"
+            )
+        rates = sorted({c.fps for c in clips if c.fps})
+        if len(rates) > 1:
+            spoken = " and ".join(f"{rate:g}" for rate in rates)
+            problems.append(
+                f"they were recorded at different frame rates ({spoken} fps), "
+                "and slow motion shows every recorded frame once — putting "
+                "them on one rate would have to invent frames for the slower "
+                "clips or throw away frames from the faster ones"
+            )
 
     if re_encoding:
         return problems
@@ -925,6 +955,20 @@ def build_commands(
     return [pass1, pass2]
 
 
+def output_runtime(preset_key: str, seconds: float) -> float:
+    """How long the finished file is, which is not always how long the source is.
+
+    Every other preset writes a file the length of the footage that went in, so
+    the app read the two as the same number in three places: the estimate, the
+    progress bar, and the runtime reported for a queued job. Slow motion is the
+    first preset for which they differ, and each of those three is wrong by half
+    without asking here.
+    """
+    if preset_key == "slowmo":
+        return seconds * SLOW_FACTOR
+    return seconds
+
+
 def estimate_output_size(clip: ClipInfo, preset_key: str, settings: ExportSettings) -> int:
     """Rough output size in bytes, for showing before anyone commits to a queue.
 
@@ -946,6 +990,17 @@ def estimate_output_size(clip: ClipInfo, preset_key: str, settings: ExportSettin
         # Each 6 points of CRF roughly halves or doubles the size.
         mbps = MASTER_REFERENCE_MBPS * scale * (2 ** ((18 - settings.master_crf) / 6.0))
         return int(mbps * 1_000_000 / 8 * runtime)
+
+    if preset_key == "slowmo":
+        # Half the frame rate over twice the runtime is the same pictures at
+        # the same quality, so this lands close to a Master export of the same
+        # footage — which is the honest answer, and not the one you get by
+        # estimating the source runtime at the source rate and doubling
+        # nothing, or by doubling the runtime while leaving the rate alone.
+        out_scale = pixel_rate(clip, fps=slow_output_rate([clip]))
+        mbps = (MASTER_REFERENCE_MBPS * (out_scale / REFERENCE_PIXEL_RATE)
+                * (2 ** ((18 - settings.master_crf) / 6.0)))
+        return int(mbps * 1_000_000 / 8 * output_runtime(preset_key, runtime))
 
     if preset_key == "upload":
         # allow_upscale, or this reports the size of a 720p file for a 1080p

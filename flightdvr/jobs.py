@@ -35,7 +35,9 @@ from PySide6.QtCore import QThread, Signal
 from .media import (
     NO_WINDOW, TERMINATE_SECONDS, ClipInfo, Tools, request_stop, stop_process,
 )
-from .presets import PRESETS, ExportSettings, build_commands, join_problems
+from .presets import (
+    PRESETS, ExportSettings, build_commands, join_problems, output_runtime,
+)
 
 # Pass 1 of a two-pass encode analyses without writing video, so it is quicker.
 PASS_WEIGHTS = (0.35, 0.65)
@@ -151,8 +153,16 @@ class Job:
 
     @property
     def total_duration(self) -> float:
-        """Footage this job will actually encode, after any trimming."""
-        return sum(c.trimmed_duration or c.duration for c in self.clips)
+        """How long the file this job writes will be, after any trimming.
+
+        The length of the footage going in for every preset but Slow motion,
+        which writes twice that. This drives the progress bar, which reads
+        ffmpeg's `out_time` against it: measured against the source length, a
+        slow export would show 100% at the halfway mark and then sit there for
+        as long again.
+        """
+        footage = sum(c.trimmed_duration or c.duration for c in self.clips)
+        return output_runtime(self.preset_key, footage)
 
 
 def _parse_progress(line: str) -> tuple[str, str] | None:
