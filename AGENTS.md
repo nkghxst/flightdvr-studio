@@ -1,10 +1,11 @@
 # Working on FlightDVR Studio
 
-Read this before touching anything. It is written for the two assistants that
-work on this repository — Claude Code and Codex — and for anyone else who turns
-up. Neither assistant remembers the last session, and they cannot see each
-other. **The repository is the only channel between them.** Anything not
-written down here, in an issue, or in a commit message did not happen.
+Read this before touching anything. It is written for the three assistants that
+work on this repository — **Sol**, **Claude** and **Luna** — and for anyone else
+who turns up. None of them remembers the last session, and they cannot see each
+other's machines. **The repository is the only durable channel between them.**
+Anything not written down here, in an issue, or in a commit message did not
+happen: a chat message is how work is coordinated, not how it is recorded.
 
 The maintainer is Isadu Nkemi (`nkghxst`). Only he merges.
 
@@ -23,7 +24,86 @@ covers where it is going and what it deliberately will not do.
 
 ---
 
-## How the two of us work together
+## How the three of us work together
+
+Three assistants, one repository, and only two GitHub identities between them.
+Most of the rules below exist because of that arithmetic.
+
+| Agent | Chat sender | Suited to |
+|---|---|---|
+| **Sol** | `sol` | Building features, and the debugging nobody else can finish |
+| **Claude** | `claude` | Architecture, specification, adversarial review |
+| **Luna** | `luna` | Triage, repository investigation, tests, documentation, CI evidence, first-pass review |
+
+The roles say who is *best* placed for a piece of work, not who is permitted to
+do it. Any of the three may take any issue; what does not change is that the
+author never reviews their own work.
+
+### Luna is a cost decision
+
+Sol and Claude are expensive per token. Luna is cheap and tireless, and she is
+here so that the expensive attention is spent on the work that actually needs
+it. **Route bounded, checkable work to her first**: reproducing and narrowing a
+reported bug, locating the relevant code and writing an implementation brief,
+extending tests after somebody implements, gathering CI evidence, updating
+release notes and documentation, checking an ffmpeg command or a signal flow,
+preparing issue and PR summaries for the others.
+
+**The saving is end to end or it is not a saving.** A brief that takes longer to
+write than the work would take to do has cost more than it saved, and so has a
+result nobody can check without redoing it. Before delegating, make sure the
+task has: a scope stated in files or directories, an explicit *not* list, the
+exact head to work from, a definition of done, somewhere to report, and
+something objective the result can be checked against — a test, a measurement,
+a diff. Guidance is not overhead on delegation; it is the delegation.
+
+**Her output is scoped input, not assurance.** That is not a comment on the
+quality of it — it follows from her being the cheap pass. Anything that becomes
+a *claim* — a verdict, a measurement, a merge-blocking finding, "there are no
+others" — gets checked by Sol or Claude before it is relied on.
+
+**A negative finding must state the net it used.** "None found" is the easiest
+claim to get wrong and the hardest to notice. Luna's first pass on PR #72
+searched Markdown outside two files, said exactly that, and was right about what
+it covered; a wider search then found four more mentions in code and tests. The
+bounding is what made the second pass cheap — it is the model to copy, not a
+failure to avoid.
+
+**Verdict ownership.** The largest saving is Luna as the maker, not the judge:
+she may own a bounded implementation or documentation branch that Sol or Claude
+then reviews. As a reviewer she performs advisory first passes. She is **never**
+the sole verdict owner on anything touching output correctness — ffmpeg
+arguments, timing, colour, cancellation, queue mutation — and for now not on
+docs or mechanical changes either, until there are enough calibrated examples to
+revisit it or the maintainer assigns one explicitly. The reason is arithmetic
+rather than distrust: if the cheap pass owns the only reciprocal verdict, then
+nothing independent has checked it, which is the opposite of what delegating to
+it was for. Every blocking finding on PR #70 lived in exactly those
+output-correctness paths, and no two of them were caught the same way:
+
+- a missing `slowing=` argument on the worker's defensive join check was found by
+  **reading the call site**, and settled by reverting it and watching the new
+  regression fail;
+- an audio tickbox that promised sound the export always dropped was found by
+  **running the panel** and inspecting the state it was actually in;
+- a third of a recording silently disappearing was found only by **counting the
+  frames** in the finished file — 360 in, 241 out, reported as a success.
+
+Reading, execution and measurement each caught exactly one, so the rule is not
+"measure everything": it is that a claim is settled by whichever of the three can
+actually settle it, and that the cheap pass is not the one deciding which.
+
+The saving survives that restriction, because the expensive pass then starts
+from evidence and a narrow delta instead of from nothing.
+
+**One agent owns a branch at a time.** This is the rule most likely to be broken
+by good intentions — "Luna adds the tests while Sol implements" is genuinely
+valuable and is exactly how two agents end up pushing to one branch. Tests or
+fixes from a non-owner arrive as a review comment, a patch pasted in chat, or a
+follow-up PR. If the branch really should change hands, the owner says so in
+chat and stops pushing. Two agents on one branch is worse than the file
+collisions the 1.6 milestone was sequenced around, because git will merge it
+quietly and neither agent will know whose assumption survived.
 
 ### Before starting anything
 
@@ -35,6 +115,12 @@ gh pr list --state open              # what is already claimed
 If an open PR touches the file you were about to change, pick something else or
 say so on the issue. This matters more than it sounds: `ui.py` is still large
 enough that two features in it will conflict.
+
+**An error from `gh` is not an empty list.** A fresh machine or a fresh agent may
+have no GitHub login at all, and `gh` then answers with `HTTP 401` rather than
+nothing — which reads exactly like "no open PRs" to anyone skimming. Run
+`gh auth status` first; if it fails, say so in chat and ask, rather than
+concluding that nothing is claimed and starting work on top of somebody.
 
 ### Claiming work
 
@@ -77,27 +163,60 @@ Mark it ready for review when it is finished.
 ### Reviewing
 
 **Whoever did not write it reviews it.** Then the maintainer merges. This has
-already earned its keep in both directions: a Codex review of PR #9 found three
-real defects, and a review of Codex's roadmap found four of its six stated
-prerequisites had already shipped.
+already earned its keep in every direction it has been tried: a review of PR #9
+found three real defects, a review of a roadmap found four of its six stated
+prerequisites had already shipped, and the review of PR #70 found a preset that
+silently dropped a third of the frames in a recording. (Sol was called Codex
+before the team grew; older reviews and issues still say so.)
+
+### One verdict, named at handoff
+
+With three agents it is no longer obvious who "the reviewer" is, and two
+half-reviews add up to nobody having checked. So:
+
+- The author names the reviewer when they hand the PR over. That agent submits
+  the GitHub review, and it is the only review that counts as the reciprocal
+  check the maintainer waits for.
+- A **first-pass review** — missing tests, stale documentation, obvious
+  regressions, CI evidence — is advisory, posted in chat, and does not approve
+  or request changes on GitHub. It is genuinely useful before the real review,
+  and it is not a substitute for one.
+- Two agents may both look. Only one owns the verdict, and the PR says which.
+
+A handoff that leaves any of these unstated will cost somebody an hour:
+
+| | |
+|---|---|
+| **Branch owner** | who may push to it — exactly one agent |
+| **Verdict owner** | who submits the GitHub review |
+| **Exact head** | the full SHA reviewed, because it moves under you |
+| **Done criteria** | what the reviewer should check, and what "finished" means |
+| **Findings destination** | the PR for the verdict, the channel for advisory notes |
+
+The exact head matters more than it looks. On PR #70 a review began on a head
+that had already been superseded twice, and each time the reviewer had to stop
+and re-verify. Say the SHA, and confirm it has not moved immediately before
+submitting.
 
 ```bash
 gh pr diff 15
 gh pr view 15 --json author --jq .author.login
 ```
 
-**Every review starts by naming its actual reviewer**, because Claude and Codex
-share the same app identity. Use the first line of the review body:
+**Every review starts by naming its actual reviewer.** There are three agents
+and two GitHub identities, so the login on a review does not identify who wrote
+it — two of the three are always sharing one. That first line is the audit
+trail, not a courtesy:
 
 ```
-Reviewer: Codex (<current model>)
-```
-
-or:
-
-```
+Reviewer: Sol (<current model>)
 Reviewer: Claude Code (<current model>)
+Reviewer: Luna (<current model>)
 ```
+
+State the model you are actually running as, not the one the role table implies.
+The same goes for a commit trailer or a chat handoff: "reviewed" without a name
+is unverifiable the moment more than two of us are working.
 
 The review must be submitted by the identity that did **not** open the PR:
 
@@ -130,6 +249,28 @@ findings hides how much of the change was actually looked at.
 
 Confirm a finding against the code before reporting it, and say whether you
 did. "This looks wrong" and "I ran it and it is wrong" are different claims.
+
+**A cancelled run is not a passing run, and "nothing is pending" is not "the run
+finished".** Both mistakes were made on PR #70 within an hour. Pushing a new
+commit cancels the run for the previous head, and for a few seconds afterwards
+no job is pending because the next run has not registered yet — so a check for
+"any pending jobs" answers "no" and a status check answers `CLEAN`, both about a
+head that was never tested. Map runs to commits before reporting anything:
+
+```bash
+gh run list --branch <branch> --limit 5 \
+  --json databaseId,headSha,status,conclusion
+```
+
+Report the head SHA next to the result, wait for every job rather than the test
+jobs alone, and treat a `cancelled` conclusion as no evidence at all.
+
+**Ubuntu-latest passing is not evidence about the oldest ffmpeg we support.** The
+test runners carry a current build; the 22.04 image behind the AppImage job is
+the only place ffmpeg 4.4 is exercised, and it is where `-fps_mode` does not
+exist. A current Windows build has meanwhile *removed* `-vsync`. Anything
+touching ffmpeg arguments waits for the packaging jobs too, and asks
+`frame_rate_mode()` rather than naming an option — including in tests.
 
 A queued, absent or cancelled GitHub Actions job is not evidence that the code
 failed. GitHub itself has outages and capacity problems. Check the current run
@@ -208,6 +349,21 @@ Synthetic data is fine, and often the only way to test an awkward shape. But
 **take the shapes from the world**: run the thing over a real card, look at what
 comes back, and build the fixtures from those numbers. If the tests and the
 footage disagree, the footage is right.
+
+**A test that agrees with the implementation proves nothing, and this is the
+trap that comes with dividing the work up.** Two examples from one afternoon.
+An equivalence matrix for naming templates appended the file extension by hand
+instead of building the real path, so it passed while every non-Remux export was
+renamed. A still-capture test built its reference with the same colour chain the
+code under test used, so a perfect score proved the frame and said nothing about
+the colour. Both were written by the author of the code.
+
+Independent tests are stronger — the person who wrote the code cannot help
+knowing what it does — but only if the assertion comes from the issue and from
+measurement, never from reading the implementation and describing it back. If a
+test claims to catch something, show that it does: **revert the fix and watch it
+fail**, or measure the output and put the number in the commit message. "It
+passes" is not evidence that it would have caught the defect.
 
 ### Write down the trap, next to the code
 

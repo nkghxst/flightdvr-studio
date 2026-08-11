@@ -1,11 +1,15 @@
 # CLAUDE.md
 
 The working agreement for this repository is in [AGENTS.md](AGENTS.md) — one
-file for every assistant that works here, so the two of us cannot drift apart
-by reading different rules.
+file for every assistant that works here (Sol, Claude and Luna), so the three of
+us cannot drift apart by reading different rules.
 
 **Read it before starting.** In particular: check `gh pr list` before picking
-anything up, claim work with a draft PR, and review what the other one wrote.
+anything up, claim work with a draft PR, and review what somebody else wrote.
+One agent owns a branch at a time, and one named agent owns each review verdict.
+Luna is the cheap pass and exists to save expensive tokens — brief her properly,
+check anything of hers that becomes a claim, and keep the verdict on
+output-correctness work with Sol or Claude.
 
 ## GitHub identity on each computer
 
@@ -44,9 +48,12 @@ On a computer that has not used the app before:
    is needed.
 
 At the start of every review body, state the assistant and current model exactly
-as `Reviewer: Claude Code (<current model>)`. Codex uses the equivalent Codex
-line. If the PR was opened by `nkghxst`, review as the app; if the PR was opened
-by the app, review as `nkghxst`. Never use the same GitHub identity for both
+as `Reviewer: Claude Code (<current model>)`. Sol and Luna use the equivalent
+line for themselves — with three agents sharing two GitHub logins, that line is
+the only thing that says who actually reviewed.
+
+If the PR was opened by `nkghxst`, review as the app; if the PR was opened by the
+app, review as `nkghxst`. Never use the same GitHub identity for both
 maker and reviewer.
 
 If setup fails, report which of `gh auth status`, the three local settings, the
