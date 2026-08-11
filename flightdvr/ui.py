@@ -52,7 +52,9 @@ from .browser_panel import (
 from .external import DESKTOP_OPEN, PLAYER_PATHS, find_player, reveal
 from .export_panel import ExportPanel, FPS_STEPS, RESOLUTION_STEPS
 from .format import (
-    _clip_set_id, canonical_path, existing_ancestor, human_duration,
+    BadTemplate, UnknownTemplateField, _clip_set_id, canonical_path,
+    check_stem, check_template,
+    existing_ancestor, expand_template, export_fields, human_duration,
     human_size, natural_key, output_key, select_stem, work_dir,
 )
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
@@ -61,8 +63,8 @@ from .media import (
     stop_process,
 )
 from .presets import (
-    ExportSettings, describe_join_problems, estimate_output_size, join_problems,
-    output_path,
+    PRESETS, ExportSettings, describe_join_problems, estimate_output_size,
+    join_problems, output_path, templated_output_path,
 )
 from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
@@ -2196,8 +2198,33 @@ class MainWindow(QMainWindow):
                                     describe_join_problems(ordered, problems))
                 return
 
-            stem = f"{ordered[0].stem}_joined"
-            target = output_path(out_dir, stem, key, subfolders, stamp)
+            # The template names a join too. It went through output_path
+            # before, so a joined export ignored the template entirely and
+            # still carried the old date and suffix handling.
+            joined_template = self.export_panel.template()
+            try:
+                check_template(joined_template)
+                fields = export_fields(
+                    ordered[0], 0, 1, PRESETS[key].suffix,
+                    flight_date=stamp,
+                    session_name=self.session.title if self.session else "",
+                )
+                # One file out of several clips, so {clip} alone would name it
+                # after whichever sorted first. The marker goes *into* the clip
+                # field rather than onto the end of the rendered name: that is
+                # where it has always been, so the default template still
+                # produces hdz_047_joined_master.mp4 exactly as before, and a
+                # template ending in {preset} still reads correctly.
+                fields["clip"] = f"{fields['clip']}_joined"
+                stem = expand_template(joined_template, fields)
+                check_stem(stem)
+            except (UnknownTemplateField, BadTemplate) as exc:
+                QMessageBox.warning(
+                    self, "That name template cannot be used",
+                    f"Nothing has been queued.\n\n{exc}",
+                )
+                return
+            target = templated_output_path(out_dir, stem, key, subfolders)
             if output_key(target) not in already:
                 # The list is written only once the target is accepted, and its
                 # name covers every clip in it. Writing it first, under a name
@@ -2209,17 +2236,83 @@ class MainWindow(QMainWindow):
                 self.jobs.append(Job(ordered, key, settings, target, concat_file=concat,
                                      out_dir=out_dir, stem=stem, subfolders=subfolders))
         else:
-            for clip in clips:
-                parts = clip.for_export()
-                for index, piece in enumerate(parts):
-                    stem = select_stem(piece, index, len(parts))
-                    target = output_path(out_dir, stem, key, subfolders, stamp)
-                    if output_key(target) in already:
-                        continue
-                    already.add(output_key(target))
-                    self.jobs.append(Job([piece], key, settings, target,
-                                         out_dir=out_dir, stem=stem,
-                                         subfolders=subfolders))
+            # Every target is rendered before a single job is appended. Two
+            # pieces of this one action landing on the same filename is not the
+            # same thing as one that is already queued: the second is ordinary —
+            # re-ticking clips you queued earlier — and is skipped below with a
+            # count. The first means a name cannot tell two exports apart, so
+            # only one of them would ever exist on disk, and skipping it would
+            # hide that. It is refused, and nothing is queued.
+            template = self.export_panel.template()
+            try:
+                check_template(template)
+            except (UnknownTemplateField, BadTemplate) as exc:
+                QMessageBox.warning(
+                    self, "That name template cannot be used",
+                    f"Nothing has been queued.\n\n{exc}",
+                )
+                return
+
+            session_name = self.session.title if self.session else ""
+            planned = []
+            try:
+                for clip in clips:
+                    parts = clip.for_export()
+                    for index, piece in enumerate(parts):
+                        stem = expand_template(template, export_fields(
+                            piece, index, len(parts), PRESETS[key].suffix,
+                            flight_date=stamp, session_name=session_name,
+                        ))
+                        # A template can be valid and still expand to something
+                        # unusable — every field empty, or a clip whose own stem
+                        # is a Windows device name. Checked per clip, and one
+                        # bad name refuses the action rather than queueing the
+                        # rest and leaving a gap nobody notices.
+                        check_stem(stem)
+                        # Not output_path: that appends the preset suffix and
+                        # prefixes the date, and the template has already placed
+                        # both. Using it produced hdz_047_master_master.mp4.
+                        target = templated_output_path(out_dir, stem, key,
+                                                       subfolders)
+                        planned.append((piece, stem, target))
+            except BadTemplate as exc:
+                QMessageBox.warning(
+                    self, "That name cannot be used",
+                    f"Nothing has been queued.\n\n{exc}",
+                )
+                return
+
+            seen: dict[str, Path] = {}
+            clashing: dict[str, list[Path]] = {}
+            for piece, _stem, target in planned:
+                identity = output_key(target)
+                if identity in seen:
+                    clashing.setdefault(
+                        identity, [seen[identity]]).append(piece.path)
+                else:
+                    seen[identity] = piece.path
+            if clashing:
+                lines = []
+                for identity, sources in clashing.items():
+                    named = ", ".join(sorted(p.name for p in sources))
+                    lines.append(f"{Path(identity).name}\n    from {named}")
+                QMessageBox.warning(
+                    self, "Two exports would have the same name",
+                    "Nothing has been queued. These would write to the same "
+                    "file, so only the last one would survive:\n\n"
+                    + "\n".join(lines)
+                    + "\n\nGive the ranges different names, or change the "
+                      "output template so it tells them apart.",
+                )
+                return
+
+            for piece, stem, target in planned:
+                if output_key(target) in already:
+                    continue
+                already.add(output_key(target))
+                self.jobs.append(Job([piece], key, settings, target,
+                                     out_dir=out_dir, stem=stem,
+                                     subfolders=subfolders))
 
         added = len(self.jobs) - before
         skipped = (

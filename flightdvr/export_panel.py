@@ -23,10 +23,14 @@ from pathlib import Path
 from PySide6.QtCore import QDate, QSettings, Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout,
-    QFrame, QGroupBox, QHBoxLayout, QLabel, QPushButton, QRadioButton,
-    QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QRadioButton, QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
+from .format import (
+    DEFAULT_TEMPLATE, TEMPLATE_FIELDS, BadTemplate, UnknownTemplateField,
+    expand_template,
+)
 from .media import ClipInfo
 from .presets import (
     COLOUR_MODES, EDIT_CODECS, PRESET_ORDER, PRESETS, QUALITY_LEVELS,
@@ -150,6 +154,24 @@ class ExportPanel(QWidget):
         pick.clicked.connect(self._browse_output)
         row.addWidget(pick)
         out_layout.addLayout(row)
+
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Name:"))
+        self.template_edit = QLineEdit(DEFAULT_TEMPLATE)
+        self.template_edit.setToolTip(
+            "Fields: " + "  ".join(f"{{{f}}}" for f in TEMPLATE_FIELDS)
+            + "\nAn empty field takes its separator with it, so one template "
+              "covers a lone range and a named one out of several."
+        )
+        self.template_edit.textEdited.connect(lambda *_: self._show_example())
+        name_row.addWidget(self.template_edit, 1)
+        out_layout.addLayout(name_row)
+
+        # The rendered example is the whole point of the control. A template
+        # language nobody can see the output of is a way to discover at export
+        # time that every file is called the same thing.
+        self.template_example = dim(QLabel(""))
+        out_layout.addWidget(self.template_example)
 
         self.subfolder_check = QCheckBox("Put each preset in its own subfolder")
         self.subfolder_check.setChecked(True)
@@ -420,6 +442,7 @@ class ExportPanel(QWidget):
         """Every export choice, as plain values."""
         values = {
             "output_dir": self.out_edit.currentText(),
+            "template": self.template(),
             "preset": self.preset_key(),
             "social_size_mb": self.social_size.value(),
         }
@@ -443,6 +466,10 @@ class ExportPanel(QWidget):
             if self.out_edit.findText(str(out)) < 0:
                 self.out_edit.addItem(str(out))
             self.out_edit.setCurrentText(str(out))
+
+        template = values.get("template")
+        if template:
+            self.template_edit.setText(str(template))
 
         preset = values.get("preset")
         if preset in self.preset_buttons:
@@ -526,6 +553,39 @@ class ExportPanel(QWidget):
 
     def output_text(self) -> str:
         return self.out_edit.currentText()
+
+    def template(self) -> str:
+        """The name template, falling back rather than exporting under one name.
+
+        An empty box means the default, not "call every file nothing". The
+        queue refuses a template it cannot expand, but the value read here is
+        the one stored in a session, and a session should never carry a state
+        that cannot produce a filename.
+        """
+        typed = self.template_edit.text().strip()
+        return typed or DEFAULT_TEMPLATE
+
+    def _show_example(self) -> None:
+        """Render the template against a clip nobody has to own.
+
+        Shown as it is typed, because a template language whose output you
+        cannot see until export time is how every file ends up called the same
+        thing. An unusable template says so here rather than at the queue.
+        """
+        try:
+            rendered = expand_template(self.template(), {
+                "date": "2026-07-04",
+                "session": "Hampstead Heath",
+                "clip": "hdz_048",
+                "range": "Launch",
+                "range_number": "2",
+                "preset": PRESETS[self.preset_key()].suffix.lstrip("_"),
+            })
+        except (UnknownTemplateField, BadTemplate) as exc:
+            self.template_example.setText(str(exc))
+            return
+        extension = PRESETS[self.preset_key()].extension
+        self.template_example.setText(f"e.g. {rendered}{extension}")
 
     def subfolders_enabled(self) -> bool:
         return self.subfolder_check.isChecked()
@@ -670,6 +730,9 @@ class ExportPanel(QWidget):
         self.audio_check.setEnabled(key != "remux")
         self._on_colour_changed()
         self._on_quality_changed()
+        # The example carries the preset's own suffix and container, so it goes
+        # stale the moment the preset changes rather than when the template does.
+        self._show_example()
         self.preset_changed.emit(key)
 
     def _on_colour_changed(self) -> None:

@@ -97,6 +97,191 @@ def safe_name(text: str) -> str:
     return cleaned.strip(". ")[:48]
 
 
+TEMPLATE_FIELDS = ("date", "session", "clip", "range", "range_number", "preset")
+
+# What the app has always produced, written as a template. Every field except
+# `clip` can be empty, and an empty one takes its separator with it — which is
+# what makes this one string cover a single untitled range (`hdz_048_upload`), a
+# named one out of several (`hdz_048_2_Tree-dive!_upload`), and a Remux export
+# whose preset suffix is deliberately blank (`hdz_048`).
+DEFAULT_TEMPLATE = "{date}_{clip}_{range_number}_{range}_{preset}"
+
+# Every braced run, not only the well-formed ones. Matching `[a-z_]+` alone
+# accepted `{clip2}` as ordinary text and wrote the braces into the filename.
+_ANY_BRACE = re.compile(r"\{([^{}]*)\}")
+_FIELD = _ANY_BRACE
+
+# A template is a filename, never a path. `../{clip}` reached output_path as a
+# relative path and escaped the folder the person chose.
+_SEPARATORS = re.compile(r"[\\/]")
+
+# The rest of what Windows refuses in a name. Field *values* go through
+# `safe_name`, but the literal text between them did not, so `{clip}:bad`
+# expanded happily and queued a job aiming at a file the platform cannot
+# create — a failure deferred all the way to export. Slashes are checked above
+# so they can say something more useful about the Output box.
+_INVALID = re.compile(r'[<>:"|?*\x00-\x1f]')
+
+# Windows refuses these whatever the extension, and a template is free text.
+_RESERVED = {
+    "con", "prn", "aux", "nul",
+    *(f"com{n}" for n in range(1, 10)),
+    *(f"lpt{n}" for n in range(1, 10)),
+}
+
+
+class UnknownTemplateField(ValueError):
+    """A template names something that cannot be filled in.
+
+    Raised rather than expanded to an empty string, and raised while the
+    template is being read rather than while a queue is being built: a typo in
+    `{clipp}` should say so, not quietly export every file under one name.
+    """
+
+    def __init__(self, unknown):
+        self.unknown = tuple(sorted(unknown))
+        known = ", ".join(f"{{{name}}}" for name in TEMPLATE_FIELDS)
+        listed = ", ".join(f"{{{name}}}" for name in self.unknown)
+        super().__init__(f"{listed} is not a field. Available: {known}")
+
+
+def template_fields(template: str) -> tuple[str, ...]:
+    """The fields a template asks for, in the order they appear."""
+    return tuple(match.group(1) for match in _FIELD.finditer(template))
+
+
+class BadTemplate(ValueError):
+    """A template that is not usable as a filename at all."""
+
+
+def check_template(template: str) -> None:
+    """Raise unless this template can only ever produce a filename.
+
+    Checked before anything is queued, because every failure here is silent
+    otherwise: a stray brace becomes part of the name, and a separator sends
+    the export somewhere the person did not choose.
+    """
+    if _SEPARATORS.search(template):
+        raise BadTemplate(
+            "A name template cannot contain a slash. It names the file; the "
+            "folder is the Output box above."
+        )
+    if ".." in template:
+        raise BadTemplate("A name template cannot contain '..'.")
+
+    without_fields = _ANY_BRACE.sub("", template)
+    if "{" in without_fields or "}" in without_fields:
+        raise BadTemplate(
+            "There is a { or } without its pair. Fields look like {clip}."
+        )
+
+    # Only the literal text, because a field's value is sanitised as it is
+    # filled in. A colon typed between two fields is not.
+    illegal = _INVALID.search(without_fields)
+    if illegal:
+        raise BadTemplate(
+            f"A filename cannot contain {illegal.group()!r}. "
+            'Windows refuses < > : " | ? *'
+        )
+
+    unknown = set(template_fields(template)) - set(TEMPLATE_FIELDS)
+    if unknown:
+        raise UnknownTemplateField(unknown)
+
+
+def check_stem(stem: str) -> None:
+    """Raise if an expanded name is one a filesystem will not take.
+
+    Separate from `check_template` because a template can be perfectly valid
+    and still expand to something refused — every field empty, or a clip whose
+    own stem is a reserved device name.
+    """
+    if not stem:
+        raise BadTemplate(
+            "That template produces an empty name for this clip."
+        )
+    # The last gate before a target is built, so it judges the whole finished
+    # name rather than trusting that everything upstream sanitised its own
+    # part. A stem carrying one of these reaches ffmpeg as a path that cannot
+    # be opened, which is a failure at export rather than at the queue.
+    illegal = _SEPARATORS.search(stem) or _INVALID.search(stem)
+    if illegal:
+        raise BadTemplate(
+            f"{stem} cannot be a filename: {illegal.group()!r} is not allowed."
+        )
+    if stem != stem.rstrip(". "):
+        raise BadTemplate(
+            f"{stem} ends in a dot or a space, which Windows drops silently."
+        )
+    if stem.split(".")[0].lower() in _RESERVED:
+        raise BadTemplate(
+            f"{stem} is a reserved device name on Windows and cannot be a file."
+        )
+
+
+def expand_template(template: str, values: dict) -> str:
+    """One export's filename stem, from a template and this clip's facts.
+
+    Each value is sanitised on its own rather than the finished string, because
+    `safe_name` strips separators the template itself supplies: cleaning the
+    whole thing afterwards would let a name containing an underscore look like
+    a field boundary.
+
+    An empty value takes one adjacent separator with it. Without that, an
+    untitled range in a dated export reads `2026-07-04_hdz_048_3__upload`, and
+    a Remux export — whose preset suffix is empty on purpose — ends in a stray
+    underscore.
+    """
+    check_template(template)
+
+    def fill(match):
+        return safe_name(str(values.get(match.group(1), "") or ""))
+
+    rendered = _FIELD.sub(fill, template)
+    # Collapse the gaps the empty fields left, then trim the ends. Done once at
+    # the end rather than per field so a template with two empty fields in a
+    # row behaves the same as one with a single empty field.
+    rendered = re.sub(r"_{2,}", "_", rendered)
+    rendered = re.sub(r"-{2,}", "-", rendered)
+    return rendered.strip("_-. ")[:120]
+
+
+def export_fields(piece, index: int, total: int, preset_suffix: str,
+                  flight_date=None, session_name: str = "") -> dict:
+    """What one export's template has to fill in.
+
+    Kept here, next to the expansion, so the app and the test that proves the
+    default reproduces today's filenames are reading the same rules. Written in
+    the test instead, it would have proved only that the test agreed with
+    itself.
+
+    Two rules are not obvious and both come from `select_stem`:
+
+    A lone range contributes neither its number nor its **name**. A clip
+    trimmed the way every version before ranges trimmed it exports to the
+    filename it always did, so typing a name on a single range does not rename
+    its export.
+
+    The date is dropped when the clip's own stem already starts with that same
+    date, because files copied to the library are already dated and
+    `2026-07-04_2026-07-04_hdz_048` helps nobody. A *different* date is never
+    dropped, and a template that puts `{date}` somewhere other than the front
+    still gets it — the guard is about repetition, not position.
+    """
+    stamp = flight_date.strftime("%Y-%m-%d") if flight_date else ""
+    if stamp and piece.path.stem.startswith(stamp):
+        stamp = ""
+    several = total > 1
+    return {
+        "date": stamp,
+        "session": session_name,
+        "clip": piece.path.stem,
+        "range": (piece.selects[0].name if several and piece.selects else ""),
+        "range_number": str(index + 1) if several else "",
+        "preset": preset_suffix.lstrip("_"),
+    }
+
+
 def select_stem(clip, index: int, total: int) -> str:
     """What to call the file for one select of a clip.
 

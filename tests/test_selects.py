@@ -231,6 +231,154 @@ def test_three_selects_of_one_clip_become_three_jobs(window):
         "two jobs aimed at the same file, so one would overwrite the other")
 
 
+def test_the_queue_writes_one_preset_suffix_not_two(window):
+    """The regression that mattered most, at the boundary that produces it.
+
+    The template places {preset} and output_path used to append the suffix
+    again, so every non-remux export queued as hdz_047_master_master.mp4. Remux
+    hid it because its suffix is empty, and the naming matrix missed it because
+    it appended the extension by hand instead of building the real path.
+    """
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    jobs = queue_up(window, [clip("hdz_047.ts")])
+    assert len(jobs) == 1
+    assert jobs[0].out_path.name == "hdz_047_master.mp4", jobs[0].out_path.name
+
+
+def test_a_joined_export_keeps_the_name_it_always_had(window):
+    """Joins went through output_path directly, so a template changed every
+    ordinary export and left joined ones alone.
+
+    This half pins the compatibility requirement: the marker goes into the clip
+    field, so the default template still produces the name every version before
+    this one produced. It passes on the old code too, and deliberately so — a
+    join that ignored the template arrived at this same name by another route.
+    The test below is the one that fails without the fix.
+    """
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    try:
+        jobs = queue_up(window, [clip("hdz_047.ts"), clip("hdz_048.ts")],
+                        join=True)
+        assert len(jobs) == 1
+        assert jobs[0].out_path.name == "hdz_047_joined_master.mp4",             jobs[0].out_path.name
+    finally:
+        window.export_panel.join_check.setChecked(False)
+
+
+def test_a_joined_export_is_named_by_the_template_too(window, monkeypatch):
+    """The other half, and the half that fails without the fix.
+
+    The default name above is one the old join branch produced by ignoring the
+    template altogether, so it passed either way. This one proves a custom
+    template reaches a join: with `review-{clip}` the old code still queued
+    hdz_047_joined_master.mp4.
+
+    The template is patched at the source the queue reads it from, so the test
+    says what it depends on and nothing about how the control stores it. The
+    stored settings are a fresh file either way — see `isolated_settings`, which
+    exists because a template left in the real ones hangs the suite.
+    """
+    monkeypatch.setattr(window.export_panel, "template",
+                        lambda: "review-{clip}_{preset}")
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    try:
+        jobs = queue_up(window, [clip("hdz_047.ts"), clip("hdz_048.ts")],
+                        join=True)
+        assert len(jobs) == 1
+        assert jobs[0].out_path.name == "review-hdz_047_joined_master.mp4", (
+            jobs[0].out_path.name)
+    finally:
+        window.export_panel.join_check.setChecked(False)
+
+
+def test_a_template_windows_cannot_write_queues_nothing(window, monkeypatch):
+    """`{clip}:bad` was accepted, queued, and shown in the queue under a name
+    the platform cannot create — the export failed hours later, with the clip
+    ticked off as done. Refused at the queue instead, and nothing appended."""
+    from PySide6.QtWidgets import QMessageBox
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda *args, **kw: warned.append(args[2]))
+    monkeypatch.setattr(window.export_panel, "template", lambda: "{clip}:bad")
+
+    jobs = queue_up(window, [clip("hdz_047.ts")])
+
+    assert jobs == [], "a name Windows refuses was queued anyway"
+    assert warned, "nothing was said about the unusable template"
+
+
+def test_two_clips_that_would_write_one_file_queue_nothing(window, monkeypatch):
+    """Two recordings with the same name in different folders — which
+    "Include subfolders" makes reachable on a card copied twice — render to one
+    output filename. Queueing both would leave whichever ran last, and the
+    other would look exported.
+
+    Refused rather than skipped, and refused for the whole action: skipping is
+    right for a clip already in the queue, because re-ticking is ordinary, but
+    here it would hide that a name cannot tell two exports apart.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda *args, **kw: warned.append(args[2]))
+
+    first = clip("hdz_047.ts")
+    second = clip("hdz_047.ts")
+    second.path = Path("other") / "hdz_047.ts"
+
+    jobs = queue_up(window, [first, second])
+
+    assert jobs == [], "a colliding pair queued anyway"
+    assert warned, "nothing was said about the collision"
+    assert "hdz_047" in warned[0]
+
+
+def test_an_already_queued_target_does_not_hide_a_fresh_collision(window,
+                                                                  monkeypatch):
+    """The two rules must not cancel each other out.
+
+    If the name a pair collides on happens to be in the queue already, the
+    skip-and-count rule would quietly drop both and report them as duplicates —
+    and the genuine ambiguity, that one name cannot describe two exports, would
+    never be shown. Detection therefore runs over the targets this action would
+    create, before the queue is consulted at all.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda *args, **kw: warned.append(args[2]))
+
+    first = clip("hdz_052.ts")
+    queue_up(window, [first])                    # hdz_052 is now queued
+    assert len(window.jobs) == 1
+
+    twin = clip("hdz_052.ts")
+    twin.path = Path("other") / "hdz_052.ts"     # renders to the same name
+    window._add_clip(window._scan_generation, twin)
+    for row in range(window.table.rowCount()):
+        window.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+    window._add_to_queue()
+
+    assert warned, "the collision was hidden by the already-queued target"
+    assert len(window.jobs) == 1, "something was queued despite the refusal"
+
+
+def test_re_ticking_a_queued_clip_still_skips_rather_than_refusing(window):
+    """The other half of the rule. A target already in the queue is not a
+    collision to complain about — it is somebody ticking a clip they queued
+    earlier — so it is skipped and counted, as it always was."""
+    flight = clip("hdz_051.ts")
+    jobs = queue_up(window, [flight])
+    assert len(jobs) == 1
+
+    window._add_to_queue()          # the same clip, still ticked
+    assert len(window.jobs) == 1, "a duplicate was queued instead of skipped"
+
+
 def test_a_clip_with_one_select_queues_exactly_as_it_always_did(window):
     """The common case must not change: one job, and the filename it had
     before selects existed."""

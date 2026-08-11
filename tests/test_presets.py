@@ -787,3 +787,55 @@ def test_dated_exports_still_go_into_preset_subfolders():
 ])
 def test_containers_match_the_codec(preset, extension):
     assert output_path(Path("/out"), "x", preset, False).suffix == extension
+
+
+# The pieces above are each covered on their own. What nothing covered until
+# now is the two of them composed — select_stem feeding output_path — which is
+# the whole of what a user sees and precisely what a naming template replaces.
+# Pinned before that refactor rather than after it, so "byte for byte" is a
+# claim something can fail.
+
+def test_the_names_several_ranges_of_one_clip_actually_export_to():
+    """Every part a template has to reproduce, in one filename each: the clip
+    stem, the 1-based position, the typed range name, the preset suffix, the
+    container, and a flight date that is added exactly once."""
+    from dataclasses import replace
+
+    from flightdvr.format import select_stem
+    from flightdvr.media import Select
+
+    clip = boxpro_clip(path=Path("hdz_048.ts"))
+    ranges = [Select(12.0, 48.0, "Launch"), Select(96.0, 141.0, "Tree dive!"),
+              Select(150.0, 190.0, "")]
+    pieces = [replace(clip, selects=[one], current=0) for one in ranges]
+
+    names = [
+        output_path(Path("/out"), select_stem(piece, index, len(pieces)),
+                    "upload", subfolders=False,
+                    flight_date=date(2026, 7, 4)).name
+        for index, piece in enumerate(pieces)
+    ]
+
+    assert names == [
+        "2026-07-04_hdz_048_1_Launch_upload.mp4",
+        # "!" survives: safe_name strips what Windows refuses, and "!" is
+        # legal. Predicting this wrong is exactly why it is pinned.
+        "2026-07-04_hdz_048_2_Tree-dive!_upload.mp4",
+        "2026-07-04_hdz_048_3_upload.mp4",
+    ]
+
+
+def test_one_range_exports_to_the_name_it_always_did():
+    """The compatibility that matters most: a clip trimmed the way every
+    version before ranges trimmed it must not gain a position number."""
+    from dataclasses import replace
+
+    from flightdvr.format import select_stem
+    from flightdvr.media import Select
+
+    clip = boxpro_clip(path=Path("hdz_048.ts"))
+    piece = replace(clip, selects=[Select(12.0, 48.0, "Launch")], current=0)
+
+    name = output_path(Path("/out"), select_stem(piece, 0, 1), "upload",
+                       subfolders=False, flight_date=None).name
+    assert name == "hdz_048_upload.mp4"
