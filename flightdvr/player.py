@@ -55,13 +55,14 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Iterator
 
-from PySide6.QtCore import QObject, QRect, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPalette
+from PySide6.QtCore import QObject, QRect, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from .media import (
     NO_WINDOW, ClipInfo, Tools, frame_rate_mode, request_stop, stop_process,
 )
+from .presets import VerticalCrop
 
 # Frame sizes offered to the view. Every width gives a row of bytes divisible
 # by four, which keeps QImage's scanline alignment happy without padding.
@@ -1079,6 +1080,7 @@ class FrameView(QWidget):
     """
 
     clicked = Signal()
+    vertical_position_changed = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1093,6 +1095,8 @@ class FrameView(QWidget):
         self._image = QImage()
         self._message = "Select a clip"
         self._aspect = 16 / 9
+        self._vertical_crop: VerticalCrop | None = None
+        self._vertical_drag_offset: float | None = None
 
     @property
     def aspect(self) -> float:
@@ -1106,6 +1110,22 @@ class FrameView(QWidget):
 
     def set_aspect(self, ratio: float) -> None:
         self._aspect = ratio if ratio > 0.1 else 16 / 9
+
+    @property
+    def vertical_crop(self) -> VerticalCrop | None:
+        return self._vertical_crop
+
+    def set_vertical_crop(self, crop: VerticalCrop | None) -> None:
+        """Show the source-space crop that the selected export will use."""
+        dragging = self._vertical_drag_offset is not None
+        self._vertical_crop = crop
+        if crop is None or not dragging:
+            self._vertical_drag_offset = None
+        self.setCursor(
+            Qt.CursorShape.OpenHandCursor if crop is not None
+            else Qt.CursorShape.PointingHandCursor
+        )
+        self.update()
 
     def set_image(self, image: QImage) -> None:
         self._image = image
@@ -1126,12 +1146,11 @@ class FrameView(QWidget):
         painter.fillRect(rect, QColor(16, 16, 16))
 
         if not self._image.isNull():
-            scaled = self._image.size().scaled(
-                rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
-            target = QRect(0, 0, scaled.width(), scaled.height())
-            target.moveCenter(rect.center())
+            target = self._display_target()
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             painter.drawImage(target, self._image)
+            if self._vertical_crop is not None:
+                self._paint_vertical_overlay(painter, target, self._vertical_crop)
         elif self._message:
             painter.setPen(self.palette().color(QPalette.ColorRole.Mid))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._message)
@@ -1144,6 +1163,67 @@ class FrameView(QWidget):
             painter.drawRect(rect.adjusted(0, 0, -1, -1))
         painter.end()
 
+    def _display_target(self) -> QRect:
+        """The image rectangle used by both painting and direct manipulation."""
+        scaled = self._image.size().scaled(
+            self.rect().size(), Qt.AspectRatioMode.KeepAspectRatio)
+        target = QRect(0, 0, scaled.width(), scaled.height())
+        target.moveCenter(self.rect().center())
+        return target
+
+    @staticmethod
+    def _paint_vertical_overlay(
+        painter: QPainter, target: QRect, crop: VerticalCrop
+    ) -> None:
+        """Shade outside the crop without using widget geometry as input."""
+        selected = FrameView._crop_display_rect(target, crop)
+        whole = QRectF(target)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 145))
+        painter.drawRect(QRectF(whole.left(), whole.top(),
+                                whole.width(), max(0.0, selected.top() - whole.top())))
+        painter.drawRect(QRectF(whole.left(), selected.bottom(),
+                                whole.width(), max(0.0, whole.bottom() - selected.bottom())))
+        painter.drawRect(QRectF(whole.left(), selected.top(),
+                                max(0.0, selected.left() - whole.left()), selected.height()))
+        painter.drawRect(QRectF(selected.right(), selected.top(),
+                                max(0.0, whole.right() - selected.right()), selected.height()))
+
+        # The dashed frame remains legible in both themes even if a user does
+        # not distinguish the dimmed pixels from the source picture.
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 235), 2, Qt.PenStyle.DashLine))
+        painter.drawRect(selected)
+
+    @staticmethod
+    def _crop_display_rect(target: QRect, crop: VerticalCrop) -> QRectF:
+        """Map source pixels to the displayed image without re-solving them."""
+        source_w = max(1, crop.source_width)
+        source_h = max(1, crop.source_height)
+        left = target.left() + target.width() * crop.x / source_w
+        top = target.top() + target.height() * crop.y / source_h
+        right = target.left() + target.width() * (crop.x + crop.width) / source_w
+        bottom = target.top() + target.height() * (crop.y + crop.height) / source_h
+        return QRectF(left, top, right - left, bottom - top)
+
+    @staticmethod
+    def _vertical_position_for_x(
+        target: QRect, crop: VerticalCrop, pointer_x: float, grab_offset: float
+    ) -> int | None:
+        """Convert a dragged crop edge back to the model's 0..100 position."""
+        source_width = max(1, crop.source_width)
+        max_source_x = max(0, source_width - crop.width)
+        if max_source_x == 0 or target.width() <= 0:
+            return None
+
+        display_width = target.width() * crop.width / source_width
+        left = pointer_x - grab_offset
+        left = max(target.left(), left)
+        left = min(target.left() + target.width() - display_width, left)
+        source_x = (left - target.left()) * source_width / target.width()
+        return max(0, min(100, int(round(source_x / max_source_x * 100))))
+
     def focusInEvent(self, event) -> None:  # noqa: N802
         super().focusInEvent(event)
         self.update()
@@ -1154,4 +1234,37 @@ class FrameView(QWidget):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         self.setFocus(Qt.FocusReason.MouseFocusReason)
+        crop = self._vertical_crop
+        if crop is not None and event.button() == Qt.MouseButton.LeftButton:
+            target = self._display_target()
+            selected = self._crop_display_rect(target, crop)
+            point = event.position()
+            if selected.contains(point):
+                self._vertical_drag_offset = point.x() - selected.left()
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return
         self.clicked.emit()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._vertical_crop is not None:
+            offset = self._vertical_drag_offset
+            if offset is not None:
+                position = self._vertical_position_for_x(
+                    self._display_target(), self._vertical_crop,
+                    event.position().x(), offset,
+                )
+                if position is not None:
+                    self.vertical_position_changed.emit(position)
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._vertical_drag_offset is not None):
+            self._vertical_drag_offset = None
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)

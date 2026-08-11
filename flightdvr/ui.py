@@ -64,8 +64,8 @@ from .media import (
 )
 from .presets import (
     PRESETS, ExportSettings, describe_join_problems, estimate_output_size,
-    join_problems, output_path, output_runtime, slow_problems,
-    templated_output_path,
+    join_problems, output_path, output_runtime, slow_problems, vertical_crop,
+    vertical_problems, templated_output_path,
 )
 from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
@@ -689,7 +689,10 @@ class MainWindow(QMainWindow):
     def _build_export_panel(self) -> QWidget:
         panel = self.export_panel = ExportPanel(self)
         panel.preset_changed.connect(self._on_preset_changed)
-        panel.settings_changed.connect(self._update_estimate)
+        panel.settings_changed.connect(self._on_export_settings_changed)
+        self.frame_view.vertical_position_changed.connect(
+            panel.set_vertical_position
+        )
         panel.output_changed.connect(self._on_output_changed)
         panel.date_changed.connect(self._on_date_changed)
         panel.add_requested.connect(self._add_to_queue)
@@ -1493,6 +1496,7 @@ class MainWindow(QMainWindow):
             self.frame_view.set_aspect(clip.width / clip.height)
             # A 4:3 clip wants a different height from a 16:9 one.
             self.preview_box.updateGeometry()
+        self._refresh_vertical_overlay()
         self.trim_bar.set_clip(clip.duration, clip.trim_in, clip.out_point)
         self._show_selects()
         self.trim_bar.set_strip(Filmstrip())
@@ -2224,8 +2228,28 @@ class MainWindow(QMainWindow):
             return
         key = key or self._preset_key()
         self.trim_note.setVisible(key == "remux")
+        self._refresh_vertical_overlay()
         self._refresh_export_markers()
         self._update_estimate()
+
+    def _on_export_settings_changed(self) -> None:
+        """Refresh both the estimate and any source-space preview guidance."""
+        self._refresh_vertical_overlay()
+        self._update_estimate()
+
+    def _refresh_vertical_overlay(self) -> None:
+        """Give the preview the same source-space crop the export will use."""
+        clip = self._trim_clip
+        if not self._ready or clip is None or self._preset_key() != "vertical":
+            self.frame_view.set_vertical_crop(None)
+            return
+        problems = vertical_problems([clip])
+        if problems:
+            self.frame_view.set_vertical_crop(None)
+            return
+        self.frame_view.set_vertical_crop(
+            vertical_crop(clip, self.current_settings().vertical_position)
+        )
 
     def _on_date_changed(self) -> None:
         self._retarget_pending()
@@ -2352,6 +2376,20 @@ class MainWindow(QMainWindow):
         # takes a list of clips each carrying its own trim, so three selects of
         # one flight join exactly as three separate clips would.
         pieces = [piece for clip in clips for piece in clip.for_export()]
+
+        # Refuse before rendering names or creating concat files. The worker
+        # repeats this named check because jobs can reach it by another route,
+        # but a pilot choosing Vertical should hear about a narrow source now,
+        # not after it has waited for the queue to reach the front.
+        if key == "vertical":
+            problems = vertical_problems(pieces)
+            if problems:
+                QMessageBox.warning(
+                    self, "These clips cannot be made vertical",
+                    "Nothing has been queued, because "
+                    + "; ".join(problems) + ".",
+                )
+                return
 
         if self.export_panel.join_enabled() and len(pieces) > 1:
             # Joined in DVR counter order: the file timestamps cannot be

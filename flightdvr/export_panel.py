@@ -24,7 +24,8 @@ from PySide6.QtCore import QDate, QSettings, Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout,
     QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QRadioButton, QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QRadioButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QVBoxLayout,
+    QWidget,
 )
 
 from .format import (
@@ -125,6 +126,7 @@ class ExportPanel(QWidget):
             "master": self._build_master_options,
             "social": self._build_social_options,
             "upload": self._build_upload_options,
+            "vertical": self._build_vertical_options,
             "remux": self._build_remux_options,
             "slowmo": self._build_slowmo_options,
         }
@@ -407,6 +409,60 @@ class ExportPanel(QWidget):
         layout.addStretch(1)
         return box
 
+    def _build_vertical_options(self) -> QWidget:
+        box = QWidget()
+        form = QFormLayout(box)
+
+        self.vertical_position = QSlider(Qt.Orientation.Horizontal)
+        self.vertical_position.setRange(0, 100)
+        self.vertical_position.setSingleStep(1)
+        self.vertical_position.setPageStep(10)
+        self.vertical_position.setTickInterval(25)
+        self.vertical_position.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.vertical_position.setValue(50)
+        self.vertical_position.valueChanged.connect(
+            lambda value: self._on_vertical_position_changed(value)
+        )
+        form.addRow("Horizontal position:", self.vertical_position)
+
+        self.vertical_quality = QComboBox()
+        for crf, name, _ in QUALITY_LEVELS:
+            self.vertical_quality.addItem(name, crf)
+        self.vertical_quality.setCurrentIndex(1)
+        self.vertical_quality.currentIndexChanged.connect(self._on_quality_changed)
+        form.addRow("Quality:", self.vertical_quality)
+
+        self.vertical_quality_help = dim(QLabel())
+        form.addRow(self.vertical_quality_help)
+
+        self.vertical_speed = QComboBox()
+        self.vertical_speed.addItems(SPEEDS)
+        self.vertical_speed.setCurrentText("slow")
+        form.addRow("Encoder effort:", self.vertical_speed)
+
+        self.vertical_position_label = dim(QLabel("Centre"))
+        form.addRow(self.vertical_position_label)
+        form.addRow(dim(QLabel(
+            "The frame is cropped to a true 9:16 picture and scaled to the "
+            "source's delivery size. A source that is too narrow is refused "
+            "instead of being padded with black bars."
+        )))
+        return box
+
+    def _on_vertical_position_changed(self, value: int) -> None:
+        if value < 34:
+            label = "Left"
+        elif value > 66:
+            label = "Right"
+        else:
+            label = "Centre"
+        self.vertical_position_label.setText(label)
+        self.settings_changed.emit()
+
+    def set_vertical_position(self, value: int) -> None:
+        """Accept a position chosen by dragging the preview crop."""
+        self.vertical_position.setValue(max(0, min(100, int(value))))
+
     def _build_slowmo_options(self) -> QWidget:
         box = QWidget()
         form = QFormLayout(box)
@@ -446,6 +502,7 @@ class ExportPanel(QWidget):
             ("edit_codec", self.edit_codec_combo),
             ("master_quality", self.master_quality),
             ("slow_quality", self.slow_quality),
+            ("vertical_quality", self.vertical_quality),
             ("social_mode", self.social_mode),
             ("social_quality", self.social_quality),
             ("social_height", self.social_height),
@@ -457,7 +514,8 @@ class ExportPanel(QWidget):
     def _text_combo_settings(self) -> list[tuple[str, QComboBox]]:
         """Combos built from plain strings, which carry no item data at all."""
         return [("master_speed", self.master_speed),
-                ("upload_speed", self.upload_speed)]
+                ("upload_speed", self.upload_speed),
+                ("vertical_speed", self.vertical_speed)]
 
     def _check_settings(self) -> list[tuple[str, QCheckBox]]:
         return [
@@ -479,6 +537,7 @@ class ExportPanel(QWidget):
             "template": self.template(),
             "preset": self.preset_key(),
             "social_size_mb": self.social_size.value(),
+            "vertical_position": self.vertical_position.value(),
         }
         for key, combo in self._combo_settings():
             values[key] = combo.currentData()
@@ -542,6 +601,13 @@ class ExportPanel(QWidget):
             except (TypeError, ValueError):
                 pass
 
+        position = values.get("vertical_position")
+        if position is not None:
+            try:
+                self.vertical_position.setValue(int(position))
+            except (TypeError, ValueError):
+                pass
+
         self._on_preset_changed()
         self._on_colour_changed()
         self._on_quality_changed()
@@ -573,6 +639,9 @@ class ExportPanel(QWidget):
             master_crf=self.master_quality.currentData(),
             master_speed=self.master_speed.currentText(),
             slow_crf=self.slow_quality.currentData(),
+            vertical_crf=self.vertical_quality.currentData(),
+            vertical_speed=self.vertical_speed.currentText(),
+            vertical_position=self.vertical_position.value(),
             social_mode=self.social_mode.currentData(),
             social_size_mb=self.social_size.value(),
             social_crf=self.social_quality.currentData(),
@@ -814,6 +883,11 @@ class ExportPanel(QWidget):
         for value, _, description in QUALITY_LEVELS:
             if value == crf:
                 self.slow_quality_help.setText(f"{description}  (CRF {value})")
+                break
+        crf = self.vertical_quality.currentData()
+        for value, _, description in QUALITY_LEVELS:
+            if value == crf:
+                self.vertical_quality_help.setText(f"{description}  (CRF {value})")
                 break
         self.settings_changed.emit()
 

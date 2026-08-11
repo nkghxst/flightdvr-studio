@@ -550,12 +550,13 @@ def test_an_unknown_preset_is_refused_rather_than_built_as_social():
     """Social used to be the unguarded fallthrough in both the command builder
     and the estimator, so a preset added to PRESETS without its own branch was
     silently built as Social — plausible output, wrong preset."""
-    assert "vertical" not in PRESET_ORDER, "pick a key that is not a real preset"
+    unknown = "not-a-preset"
+    assert unknown not in PRESET_ORDER, "pick a key that is not a real preset"
     with pytest.raises(KeyError):
-        build_commands(TOOLS, boxpro_clip(), "vertical", ExportSettings(),
+        build_commands(TOOLS, boxpro_clip(), unknown, ExportSettings(),
                        Path("out.mp4"), Path("work"))
     with pytest.raises(KeyError):
-        estimate_output_size(boxpro_clip(), "vertical", ExportSettings())
+        estimate_output_size(boxpro_clip(), unknown, ExportSettings())
 
 
 # -- the Upload preset, which is the only one allowed to enlarge --------------
