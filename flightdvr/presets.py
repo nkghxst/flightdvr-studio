@@ -173,6 +173,12 @@ class ExportSettings:
     master_crf: int = 18
     master_speed: str = "slow"
 
+    # Its own quality rather than Master's. The two produce different files from
+    # the same footage — half the frame rate over twice the runtime — and a
+    # shared setting would mean changing Master's quality silently changed a
+    # slow export nobody was looking at.
+    slow_crf: int = 18
+
     social_mode: str = "size"          # "size" targets a file size, "quality" uses CRF
     social_size_mb: int = 45
     social_crf: int = 23
@@ -275,9 +281,19 @@ PRESETS: dict[str, Preset] = {
         "but keeps HEVC, which the free DaVinci Resolve cannot read.",
         "", ".mp4",
     ),
+    "slowmo": Preset(
+        "slowmo", "Slow motion",
+        "Half speed from the frames already recorded, so nothing is invented: "
+        "every frame you shot is shown for twice as long. A 60 fps recording "
+        "becomes 30 fps and runs twice as long.",
+        "_slow", ".mp4",
+    ),
 }
 
-PRESET_ORDER = ["edit", "master", "social", "upload", "remux"]
+# Also the order of the buttons and of the option pages behind them. Slow
+# motion goes last: it is the one preset that answers a different question from
+# "what should this look like when it is finished".
+PRESET_ORDER = ["edit", "master", "social", "upload", "remux", "slowmo"]
 
 
 # --- command construction ----------------------------------------------------
@@ -298,7 +314,8 @@ SEEK_LEAD_IN = 2.0
 
 
 def _input_args(
-    sources: list[Path], concat_file: Path | None, clip: ClipInfo | None = None
+    sources: list[Path], concat_file: Path | None, clip: ClipInfo | None = None,
+    time_scale: float = 1.0,
 ) -> list[str]:
     """Input side, hardened for the loose timestamps DVR transport streams have.
 
@@ -336,9 +353,21 @@ def _input_args(
     # what makes the first output frame correct. Measured from the start of the
     # file, which is what -start_at_zero above guarantees.
     if seeking:
-        args += ["-ss", f"{clip.trim_in:.3f}"]
+        # Scaled for the same reason as `-t` below: this seek is measured in the
+        # timestamps the filters hand the muxer, not the ones the source
+        # carried. Measured on a mid-GOP range with slowing on, an unscaled
+        # 2.5 s here started the export 1.25 s early — every frame present,
+        # correctly slowed, and a second and a quarter of the wrong footage.
+        args += ["-ss", f"{clip.trim_in * time_scale:.3f}"]
     if concat_file is None and clip is not None and clip.is_trimmed:
-        args += ["-t", f"{clip.trimmed_duration:.3f}"]
+        # `-t` is an output-side limit, measured in the timestamps the filters
+        # produce rather than the ones the source carried. Every preset until
+        # Slow motion left those the same, so the range length and the output
+        # length were one number. Slowing doubles the timestamps, and this
+        # limit has to be doubled with them: measured, a two-second range
+        # exported to a file holding one second of footage, correctly slowed
+        # and quietly half missing.
+        args += ["-t", f"{clip.trimmed_duration * time_scale:.3f}"]
     return args
 
 
@@ -367,6 +396,37 @@ def _fps_args(tools: Tools, clip: ClipInfo, override: int = 0) -> list[str]:
     if fps <= 0:
         return mode
     return mode + ["-r", f"{fps:g}"]
+
+
+# How much slower Slow motion runs. One value, named, because the output rate,
+# the runtime, the estimate and every test have to derive from the same number
+# rather than each carrying its own 2.
+SLOW_FACTOR = 2
+
+# How much heavier a slow export is than a Master of the same footage. Measured,
+# not derived — see estimate_output_size for the three ranges behind it.
+SLOW_SIZE_FACTOR = 1.5
+
+
+def slow_output_rate(clips: list[ClipInfo]) -> float:
+    """The frame rate a slow export writes: what was recorded, halved.
+
+    Taken from the source rather than from a list of rates the interface
+    offers, because the promise is about the frames in this recording. 60 gives
+    30 and 90 gives 45 — and 45 is not one of the rates the Social frame-rate
+    box offers, so rounding a slow export onto that list would drop or repeat
+    frames to reach a number nobody asked for.
+
+    A join is already brought to one rate by `join_target_format`, so the same
+    halving applies to the normalised rate. Whether every clip in it can keep
+    the one-frame-once promise is a separate question, answered before anything
+    is queued.
+    """
+    if len(clips) > 1:
+        _, _, fps = join_target_format(clips)
+    else:
+        fps = clips[0].fps
+    return (fps or 60.0) / SLOW_FACTOR
 
 
 def _scale_filter(clip: ClipInfo, target_height: int) -> list[str]:
@@ -547,7 +607,44 @@ def join_filtergraph(
     return ";".join(chains), video_label, "[ja]" if want_audio else ""
 
 
-def join_problems(clips: list[ClipInfo], re_encoding: bool = True) -> list[str]:
+def slow_problems(clips: list[ClipInfo]) -> list[str]:
+    """Why this footage cannot keep the one-frame-once promise, in words a
+    pilot can act on.
+
+    A rate nobody could read is not a small gap: `slow_output_rate` falls back
+    to 60 so that nothing divides by zero, and on a 90 fps recording that guess
+    silently throws away a third of the frames. Measured — 360 frames in, 241
+    out over 8.033 s, reported as a successful export.
+
+    Refusing is the same answer this gives a mixed-rate assembly, and for the
+    same reason: every other preset may reasonably guess, because none of them
+    promises to keep every frame.
+    """
+    problems: list[str] = []
+
+    unreadable = [c for c in clips if not c.fps]
+    if unreadable:
+        listed = ", ".join(c.path.name for c in unreadable[:3])
+        problems.append(
+            f"the frame rate of {len(unreadable)} of them could not be read "
+            f"({listed}), so there is no way to slow them without guessing "
+            "how many frames they hold"
+        )
+
+    rates = sorted({c.fps for c in clips if c.fps})
+    if len(rates) > 1:
+        spoken = " and ".join(f"{rate:g}" for rate in rates)
+        problems.append(
+            f"they were recorded at different frame rates ({spoken} fps), "
+            "and slow motion shows every recorded frame once — putting them "
+            "on one rate would have to invent frames for the slower clips or "
+            "throw away frames from the faster ones"
+        )
+    return problems
+
+
+def join_problems(clips: list[ClipInfo], re_encoding: bool = True,
+                  slowing: bool = False) -> list[str]:
     """Why these clips cannot be joined into one file, in words a pilot can act on.
 
     Clips of different sizes, frame rates, codecs and colour ranges join
@@ -555,6 +652,11 @@ def join_problems(clips: list[ClipInfo], re_encoding: bool = True) -> list[str]:
     it — join_filtergraph() brings each one to a common format first. What is
     left here is what no amount of normalising can rescue: a clip whose
     properties could not be read, and a clip with nothing in it.
+
+    `slowing` adds the one thing normalising cannot rescue for Slow motion. The
+    graph brings every clip to the highest rate present, which means a 30 fps
+    clip beside a 60 fps one has frames duplicated before anything is slowed —
+    so the export would show invented frames while promising it never does.
 
     Messages are written to be read by someone deciding what to do next, not
     to describe the internals.
@@ -588,6 +690,14 @@ def join_problems(clips: list[ClipInfo], re_encoding: bool = True) -> list[str]:
     if empty:
         listed = ", ".join(c.path.name for c in empty[:3])
         problems.append(f"{len(empty)} of them are empty or trimmed to nothing ({listed})")
+
+    if slowing:
+        # One definition, used here for an assembly and directly for a single
+        # clip. Refused rather than normalised, which is the choice #59 leaves
+        # open: normalising to the lowest rate throws away frames the faster
+        # clips recorded, and normalising to the highest invents frames for the
+        # slower ones, so no documented common rate is honest about both.
+        problems += slow_problems(clips)
 
     if re_encoding:
         return problems
@@ -794,6 +904,48 @@ def build_commands(
             + ["-movflags", "+faststart", str(out_path)]
         ]
 
+    if preset_key == "slowmo":
+        # Half speed out of the frames that were recorded, never out of frames
+        # invented to fill the gap. Two arguments have to agree for that, and
+        # the whole correctness of the preset is in their relationship:
+        #
+        #   setpts=2*PTS   doubles every presentation time. No frame is added
+        #                  and none is dropped; the same pictures are simply
+        #                  spread over twice as long.
+        #   -r fps/2       states the rate that stream already has. 60 frames
+        #                  spread over two seconds ARE 30 fps.
+        #
+        # Leaving the output rate at the source's is the mistake this comment
+        # exists to prevent: -fps_mode cfr would then duplicate every frame to
+        # fill 60 fps across the doubled runtime, and the result — twice the
+        # frames, each shown twice — looks correct in a player and is not what
+        # was recorded. Frame count is asserted rather than assumed, in
+        # test_slow_motion.py, against real media.
+        rate = slow_output_rate(clips)
+        if not joined:
+            # Rebuilt rather than reusing `head`: the trim length above is an
+            # output-side limit and has to be stated in the slowed timeline.
+            head = ([ff, "-hide_banner", "-nostdin", "-y"]
+                    + _input_args(sources, None, clip, time_scale=SLOW_FACTOR))
+        filters, mapped = picture("yuv420p", [f"setpts={SLOW_FACTOR}*PTS"])
+        if settings.hardware:
+            video = hardware_video_args(settings.hardware, settings.slow_crf)
+        else:
+            video = [
+                "-c:v", "libx264", "-preset", settings.master_speed,
+                "-crf", str(settings.slow_crf), "-profile:v", "high",
+            ]
+        return [
+            head + filters + video
+            + frame_rate_mode(tools, "cfr") + ["-r", f"{rate:g}"]
+            # Never the source audio. Sound at half pitch is not slow motion,
+            # and keeping it at speed over doubled video would drift apart by
+            # the length of the clip. Refused here rather than left to the
+            # Keep audio tickbox, so no combination of settings can produce it.
+            + ["-an"]
+            + ["-movflags", "+faststart", str(out_path)]
+        ]
+
     # Guarded rather than left as the fallthrough it used to be. A preset added
     # to PRESETS without a branch here would otherwise have been built as
     # Social, silently and plausibly, which is the worst way for a mistake to
@@ -850,6 +1002,20 @@ def build_commands(
     return [pass1, pass2]
 
 
+def output_runtime(preset_key: str, seconds: float) -> float:
+    """How long the finished file is, which is not always how long the source is.
+
+    Every other preset writes a file the length of the footage that went in, so
+    the app read the two as the same number in three places: the estimate, the
+    progress bar, and the runtime reported for a queued job. Slow motion is the
+    first preset for which they differ, and each of those three is wrong by half
+    without asking here.
+    """
+    if preset_key == "slowmo":
+        return seconds * SLOW_FACTOR
+    return seconds
+
+
 def estimate_output_size(clip: ClipInfo, preset_key: str, settings: ExportSettings) -> int:
     """Rough output size in bytes, for showing before anyone commits to a queue.
 
@@ -871,6 +1037,30 @@ def estimate_output_size(clip: ClipInfo, preset_key: str, settings: ExportSettin
         # Each 6 points of CRF roughly halves or doubles the size.
         mbps = MASTER_REFERENCE_MBPS * scale * (2 ** ((18 - settings.master_crf) / 6.0))
         return int(mbps * 1_000_000 / 8 * runtime)
+
+    if preset_key == "slowmo":
+        # Half the frame rate over twice the runtime is the same pictures at the
+        # same quality, so the arithmetic says a slow export weighs what a
+        # Master of the same footage weighs. Measured on real Box Pro footage,
+        # it does not: x264 at a fixed CRF spends more bits on each frame when
+        # the declared rate is lower.
+        #
+        #   clip (range)          Master     Slow    ratio
+        #   hdz_047 12.5-22.5s    7.9 MB   14.6 MB   1.85
+        #   hdz_048 30-40s       17.3 MB   24.9 MB   1.44
+        #   hdz_053 5-13s        23.1 MB   32.8 MB   1.42
+        #
+        # Three ranges on one goggle, so SLOW_SIZE_FACTOR is a correction with
+        # a known sample size rather than a constant to trust: it centres the
+        # estimate on what was measured instead of on what the arithmetic
+        # predicted. Every estimate here carries scene-complexity error of the
+        # same order — Master's own reference over-predicted hdz_048 by 1.9x —
+        # and erring high is the safe direction, because this number also
+        # decides whether the app warns about disk space.
+        out_scale = pixel_rate(clip, fps=slow_output_rate([clip]))
+        mbps = (MASTER_REFERENCE_MBPS * (out_scale / REFERENCE_PIXEL_RATE)
+                * (2 ** ((18 - settings.slow_crf) / 6.0)) * SLOW_SIZE_FACTOR)
+        return int(mbps * 1_000_000 / 8 * output_runtime(preset_key, runtime))
 
     if preset_key == "upload":
         # allow_upscale, or this reports the size of a 720p file for a 1080p

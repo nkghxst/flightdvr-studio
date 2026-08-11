@@ -64,7 +64,8 @@ from .media import (
 )
 from .presets import (
     PRESETS, ExportSettings, describe_join_problems, estimate_output_size,
-    join_problems, output_path, templated_output_path,
+    join_problems, output_path, output_runtime, slow_problems,
+    templated_output_path,
 )
 from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
@@ -2309,9 +2310,17 @@ class MainWindow(QMainWindow):
         else:
             summary = f"{len(pieces)} files, about {human_size(total)} in total"
 
-        runtime = human_duration(sum(c.trimmed_duration or c.duration
-                                     for c in pieces))
-        self.export_panel.set_estimate(f"{summary}  ·  {runtime} of footage")
+        footage = sum(c.trimmed_duration or c.duration for c in pieces)
+        # What comes out, not what goes in. The two are the same number for
+        # every preset except Slow motion, which writes twice the runtime — and
+        # the estimate is the number people plan a card around.
+        written = output_runtime(key, footage)
+        if written != footage:
+            runtime = (f"{human_duration(written)} from "
+                       f"{human_duration(footage)} of footage")
+        else:
+            runtime = f"{human_duration(footage)} of footage"
+        self.export_panel.set_estimate(f"{summary}  ·  {runtime}")
 
     # -- queue ----------------------------------------------------------------
 
@@ -2356,7 +2365,8 @@ class MainWindow(QMainWindow):
             # Remux is stricter, and has to be: it copies the streams rather
             # than rebuilding them, so it cannot reconcile anything that
             # differs and cannot cut inside a clip at all.
-            problems = join_problems(ordered, re_encoding=key != "remux")
+            problems = join_problems(ordered, re_encoding=key != "remux",
+                                     slowing=key == "slowmo")
             if problems:
                 QMessageBox.warning(self, "These clips cannot be joined",
                                     describe_join_problems(ordered, problems))
@@ -2416,6 +2426,22 @@ class MainWindow(QMainWindow):
                     f"Nothing has been queued.\n\n{exc}",
                 )
                 return
+
+            # Refused before a single target is rendered, and for the whole
+            # action: a clip whose rate could not be read cannot be slowed
+            # without guessing how many frames it holds, and the guess is not
+            # small — on a 90 fps recording it dropped 119 frames of 360 and
+            # reported success. The joined branch asks the same question
+            # through join_problems.
+            if key == "slowmo":
+                unslowable = slow_problems(clips)
+                if unslowable:
+                    QMessageBox.warning(
+                        self, "These clips cannot be slowed",
+                        "Nothing has been queued, because "
+                        + "; ".join(unslowable) + ".",
+                    )
+                    return
 
             session_name = self.session.title if self.session else ""
             planned = []
