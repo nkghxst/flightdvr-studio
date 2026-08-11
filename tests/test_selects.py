@@ -231,6 +231,41 @@ def test_three_selects_of_one_clip_become_three_jobs(window):
         "two jobs aimed at the same file, so one would overwrite the other")
 
 
+def test_the_queue_writes_one_preset_suffix_not_two(window):
+    """The regression that mattered most, at the boundary that produces it.
+
+    The template places {preset} and output_path used to append the suffix
+    again, so every non-remux export queued as hdz_047_master_master.mp4. Remux
+    hid it because its suffix is empty, and the naming matrix missed it because
+    it appended the extension by hand instead of building the real path.
+    """
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    jobs = queue_up(window, [clip("hdz_047.ts")])
+    assert len(jobs) == 1
+    assert jobs[0].out_path.name == "hdz_047_master.mp4", jobs[0].out_path.name
+
+
+def test_a_joined_export_keeps_the_name_it_always_had(window):
+    """Joins went through output_path directly, so a template changed every
+    ordinary export and left joined ones alone.
+
+    Asserted with the default template rather than a custom one, deliberately:
+    the template is a saved export setting, and a test that types into the box
+    writes to this machine's real QSettings and arrives in every later run. The
+    default distinguishes old from new on its own — the marker goes into the
+    clip field, so this name is unchanged, while the old code reached it by a
+    route that ignored the template entirely.
+    """
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    try:
+        jobs = queue_up(window, [clip("hdz_047.ts"), clip("hdz_048.ts")],
+                        join=True)
+        assert len(jobs) == 1
+        assert jobs[0].out_path.name == "hdz_047_joined_master.mp4",             jobs[0].out_path.name
+    finally:
+        window.export_panel.join_check.setChecked(False)
+
+
 def test_two_clips_that_would_write_one_file_queue_nothing(window, monkeypatch):
     """Two recordings with the same name in different folders — which
     "Include subfolders" makes reachable on a card copied twice — render to one

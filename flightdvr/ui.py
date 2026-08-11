@@ -52,7 +52,8 @@ from .browser_panel import (
 from .external import DESKTOP_OPEN, PLAYER_PATHS, find_player, reveal
 from .export_panel import ExportPanel, FPS_STEPS, RESOLUTION_STEPS
 from .format import (
-    UnknownTemplateField, _clip_set_id, canonical_path, check_template,
+    BadTemplate, UnknownTemplateField, _clip_set_id, canonical_path,
+    check_stem, check_template,
     existing_ancestor, expand_template, export_fields, human_duration,
     human_size, natural_key, output_key, select_stem, work_dir,
 )
@@ -63,7 +64,7 @@ from .media import (
 )
 from .presets import (
     PRESETS, ExportSettings, describe_join_problems, estimate_output_size,
-    join_problems, output_path,
+    join_problems, output_path, templated_output_path,
 )
 from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
@@ -2197,8 +2198,33 @@ class MainWindow(QMainWindow):
                                     describe_join_problems(ordered, problems))
                 return
 
-            stem = f"{ordered[0].stem}_joined"
-            target = output_path(out_dir, stem, key, subfolders, stamp)
+            # The template names a join too. It went through output_path
+            # before, so a joined export ignored the template entirely and
+            # still carried the old date and suffix handling.
+            joined_template = self.export_panel.template()
+            try:
+                check_template(joined_template)
+                fields = export_fields(
+                    ordered[0], 0, 1, PRESETS[key].suffix,
+                    flight_date=stamp,
+                    session_name=self.session.title if self.session else "",
+                )
+                # One file out of several clips, so {clip} alone would name it
+                # after whichever sorted first. The marker goes *into* the clip
+                # field rather than onto the end of the rendered name: that is
+                # where it has always been, so the default template still
+                # produces hdz_047_joined_master.mp4 exactly as before, and a
+                # template ending in {preset} still reads correctly.
+                fields["clip"] = f"{fields['clip']}_joined"
+                stem = expand_template(joined_template, fields)
+                check_stem(stem)
+            except (UnknownTemplateField, BadTemplate) as exc:
+                QMessageBox.warning(
+                    self, "That name template cannot be used",
+                    f"Nothing has been queued.\n\n{exc}",
+                )
+                return
+            target = templated_output_path(out_dir, stem, key, subfolders)
             if output_key(target) not in already:
                 # The list is written only once the target is accepted, and its
                 # name covers every clip in it. Writing it first, under a name
@@ -2220,7 +2246,7 @@ class MainWindow(QMainWindow):
             template = self.export_panel.template()
             try:
                 check_template(template)
-            except UnknownTemplateField as exc:
+            except (UnknownTemplateField, BadTemplate) as exc:
                 QMessageBox.warning(
                     self, "That name template cannot be used",
                     f"Nothing has been queued.\n\n{exc}",
@@ -2229,20 +2255,32 @@ class MainWindow(QMainWindow):
 
             session_name = self.session.title if self.session else ""
             planned = []
-            for clip in clips:
-                parts = clip.for_export()
-                for index, piece in enumerate(parts):
-                    stem = expand_template(template, export_fields(
-                        piece, index, len(parts), PRESETS[key].suffix,
-                        flight_date=stamp, session_name=session_name,
-                    ))
-                    # output_path adds the preset suffix and the date itself,
-                    # and the template has already placed both. Passing the
-                    # rendered stem with no date leaves it alone; the suffix is
-                    # appended by the preset, which is why {preset} renders it
-                    # without one.
-                    target = output_path(out_dir, stem, key, subfolders, None)
-                    planned.append((piece, stem, target))
+            try:
+                for clip in clips:
+                    parts = clip.for_export()
+                    for index, piece in enumerate(parts):
+                        stem = expand_template(template, export_fields(
+                            piece, index, len(parts), PRESETS[key].suffix,
+                            flight_date=stamp, session_name=session_name,
+                        ))
+                        # A template can be valid and still expand to something
+                        # unusable — every field empty, or a clip whose own stem
+                        # is a Windows device name. Checked per clip, and one
+                        # bad name refuses the action rather than queueing the
+                        # rest and leaving a gap nobody notices.
+                        check_stem(stem)
+                        # Not output_path: that appends the preset suffix and
+                        # prefixes the date, and the template has already placed
+                        # both. Using it produced hdz_047_master_master.mp4.
+                        target = templated_output_path(out_dir, stem, key,
+                                                       subfolders)
+                        planned.append((piece, stem, target))
+            except BadTemplate as exc:
+                QMessageBox.warning(
+                    self, "That name cannot be used",
+                    f"Nothing has been queued.\n\n{exc}",
+                )
+                return
 
             seen: dict[str, Path] = {}
             clashing: dict[str, list[Path]] = {}

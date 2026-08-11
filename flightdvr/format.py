@@ -106,7 +106,21 @@ TEMPLATE_FIELDS = ("date", "session", "clip", "range", "range_number", "preset")
 # whose preset suffix is deliberately blank (`hdz_048`).
 DEFAULT_TEMPLATE = "{date}_{clip}_{range_number}_{range}_{preset}"
 
-_FIELD = re.compile(r"\{([a-z_]+)\}")
+# Every braced run, not only the well-formed ones. Matching `[a-z_]+` alone
+# accepted `{clip2}` as ordinary text and wrote the braces into the filename.
+_ANY_BRACE = re.compile(r"\{([^{}]*)\}")
+_FIELD = _ANY_BRACE
+
+# A template is a filename, never a path. `../{clip}` reached output_path as a
+# relative path and escaped the folder the person chose.
+_SEPARATORS = re.compile(r"[\\/]")
+
+# Windows refuses these whatever the extension, and a template is free text.
+_RESERVED = {
+    "con", "prn", "aux", "nul",
+    *(f"com{n}" for n in range(1, 10)),
+    *(f"lpt{n}" for n in range(1, 10)),
+}
 
 
 class UnknownTemplateField(ValueError):
@@ -129,11 +143,51 @@ def template_fields(template: str) -> tuple[str, ...]:
     return tuple(match.group(1) for match in _FIELD.finditer(template))
 
 
+class BadTemplate(ValueError):
+    """A template that is not usable as a filename at all."""
+
+
 def check_template(template: str) -> None:
-    """Raise if a template names a field that does not exist."""
+    """Raise unless this template can only ever produce a filename.
+
+    Checked before anything is queued, because every failure here is silent
+    otherwise: a stray brace becomes part of the name, and a separator sends
+    the export somewhere the person did not choose.
+    """
+    if _SEPARATORS.search(template):
+        raise BadTemplate(
+            "A name template cannot contain a slash. It names the file; the "
+            "folder is the Output box above."
+        )
+    if ".." in template:
+        raise BadTemplate("A name template cannot contain '..'.")
+
+    without_fields = _ANY_BRACE.sub("", template)
+    if "{" in without_fields or "}" in without_fields:
+        raise BadTemplate(
+            "There is a { or } without its pair. Fields look like {clip}."
+        )
+
     unknown = set(template_fields(template)) - set(TEMPLATE_FIELDS)
     if unknown:
         raise UnknownTemplateField(unknown)
+
+
+def check_stem(stem: str) -> None:
+    """Raise if an expanded name is one a filesystem will not take.
+
+    Separate from `check_template` because a template can be perfectly valid
+    and still expand to something refused — every field empty, or a clip whose
+    own stem is a reserved device name.
+    """
+    if not stem:
+        raise BadTemplate(
+            "That template produces an empty name for this clip."
+        )
+    if stem.split(".")[0].lower() in _RESERVED:
+        raise BadTemplate(
+            f"{stem} is a reserved device name on Windows and cannot be a file."
+        )
 
 
 def expand_template(template: str, values: dict) -> str:

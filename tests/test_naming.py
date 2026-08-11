@@ -245,3 +245,67 @@ def test_a_mistyped_field_says_so_in_the_example(qt_app):
     panel._show_example()
     shown = panel.template_example.text()
     assert "clipp" in shown and "{clip}" in shown
+
+
+# -- what the queue actually writes, not what the template renders -------------
+#
+# The matrix above compared template output against select_stem and appended the
+# extension by hand. That is not the path the app takes, and the gap hid a
+# regression that renamed every non-remux export: the template placed {preset}
+# and output_path appended the suffix again, giving hdz_047_master_master.mp4.
+# Remux hid it, because its suffix is empty. These go through the real
+# construction instead.
+
+@pytest.mark.parametrize("preset_key", sorted(PRESETS))
+def test_the_queued_filename_carries_one_preset_suffix(preset_key):
+    from flightdvr.presets import templated_output_path
+
+    piece = clip()
+    stem = expand_template(DEFAULT_TEMPLATE, export_fields(
+        piece, 0, 1, PRESETS[preset_key].suffix))
+    produced = templated_output_path(Path("/out"), stem, preset_key,
+                                     subfolders=False).name
+    expected = output_path(Path("/out"), "hdz_048", preset_key,
+                           subfolders=False, flight_date=None).name
+    assert produced == expected
+
+    suffix = PRESETS[preset_key].suffix
+    if suffix:
+        assert produced.count(suffix) == 1, produced
+
+
+def test_a_template_cannot_send_an_export_out_of_the_output_folder():
+    """`../{clip}` reached output_path as a relative path and escaped the
+    folder the person chose. A template names a file; the folder is the Output
+    box."""
+    from flightdvr.format import BadTemplate
+
+    for escaping in ("../{clip}", "..\{clip}", "{clip}/{range}",
+                     "sub\{clip}"):
+        with pytest.raises(BadTemplate):
+            check_template(escaping)
+
+
+def test_a_malformed_field_is_refused_rather_than_written_literally():
+    """{clip2} did not match the field pattern, so it was left alone and the
+    braces went into the filename."""
+    from flightdvr.format import BadTemplate
+
+    with pytest.raises(UnknownTemplateField):
+        check_template("{clip2}")
+    with pytest.raises(BadTemplate):
+        check_template("{clip")
+    with pytest.raises(BadTemplate):
+        check_template("clip}")
+
+
+def test_a_name_a_filesystem_refuses_is_caught_before_queueing():
+    """A valid template can still expand to something unusable."""
+    from flightdvr.format import BadTemplate, check_stem
+
+    check_stem("hdz_048_master")
+    with pytest.raises(BadTemplate):
+        check_stem("")
+    for reserved in ("con", "NUL", "com1", "LPT9"):
+        with pytest.raises(BadTemplate):
+            check_stem(reserved)

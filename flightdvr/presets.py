@@ -894,6 +894,23 @@ def estimate_output_size(clip: ClipInfo, preset_key: str, settings: ExportSettin
     return int(mbps * 1_000_000 / 8 * runtime)
 
 
+def templated_output_path(out_dir: Path, stem: str, preset_key: str,
+                          subfolders: bool) -> Path:
+    """Where an export lands when its whole name came from a template.
+
+    Deliberately not `output_path`. That one appends the preset suffix and
+    prefixes the flight date itself, which is right when the caller passed a
+    bare clip stem and wrong once a template has already placed both: the
+    default template rendered `hdz_047_master` and `output_path` turned it into
+    `hdz_047_master_master.mp4`.
+
+    Remux hid it, because its suffix is empty.
+    """
+    preset = PRESETS[preset_key]
+    folder = out_dir / preset.label if subfolders else out_dir
+    return folder / f"{stem}{preset.extension}"
+
+
 def output_path(
     out_dir: Path,
     clip_stem: str,
