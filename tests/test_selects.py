@@ -258,6 +258,38 @@ def test_two_clips_that_would_write_one_file_queue_nothing(window, monkeypatch):
     assert "hdz_047" in warned[0]
 
 
+def test_an_already_queued_target_does_not_hide_a_fresh_collision(window,
+                                                                  monkeypatch):
+    """The two rules must not cancel each other out.
+
+    If the name a pair collides on happens to be in the queue already, the
+    skip-and-count rule would quietly drop both and report them as duplicates —
+    and the genuine ambiguity, that one name cannot describe two exports, would
+    never be shown. Detection therefore runs over the targets this action would
+    create, before the queue is consulted at all.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda *args, **kw: warned.append(args[2]))
+
+    first = clip("hdz_052.ts")
+    queue_up(window, [first])                    # hdz_052 is now queued
+    assert len(window.jobs) == 1
+
+    twin = clip("hdz_052.ts")
+    twin.path = Path("other") / "hdz_052.ts"     # renders to the same name
+    window._add_clip(window._scan_generation, twin)
+    for row in range(window.table.rowCount()):
+        window.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+    window._add_to_queue()
+
+    assert warned, "the collision was hidden by the already-queued target"
+    assert len(window.jobs) == 1, "something was queued despite the refusal"
+
+
 def test_re_ticking_a_queued_clip_still_skips_rather_than_refusing(window):
     """The other half of the rule. A target already in the queue is not a
     collision to complain about — it is somebody ticking a clip they queued
