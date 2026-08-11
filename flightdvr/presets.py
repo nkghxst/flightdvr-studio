@@ -179,6 +179,11 @@ class ExportSettings:
     # slow export nobody was looking at.
     slow_crf: int = 18
 
+    # Horizontal position of the vertical crop, as a percentage from left to
+    # right. The crop model turns this into an even source-space coordinate so
+    # the preview and ffmpeg cannot round the same choice differently.
+    vertical_position: int = 50
+
     social_mode: str = "size"          # "size" targets a file size, "quality" uses CRF
     social_size_mb: int = 45
     social_crf: int = 23
@@ -248,6 +253,67 @@ class Preset:
     extension: str
 
 
+@dataclass(frozen=True)
+class VerticalCrop:
+    """One source-space crop and its exact square-SAR output canvas."""
+
+    source_width: int
+    source_height: int
+    x: int
+    y: int
+    width: int
+    height: int
+    output_width: int
+    output_height: int
+
+
+def _vertical_multiplier(side: int) -> int:
+    """Largest even ``k`` for a ``9k x 16k`` rectangle within ``side``."""
+    return max(0, (side // 16) & ~1)
+
+
+def _vertical_output_size(width: int, height: int) -> tuple[int, int]:
+    """Return the largest exact 9:16 canvas supported by dimensions."""
+    anchor = max(width or 0, height or 0, 1280)
+    k = _vertical_multiplier(anchor)
+    return 9 * k, 16 * k
+
+
+def vertical_output_size(clip: ClipInfo) -> tuple[int, int]:
+    """Return the largest exact 9:16 canvas supported by the source."""
+    return _vertical_output_size(clip.width, clip.height)
+
+
+def vertical_crop(clip: ClipInfo, position: int = 50) -> VerticalCrop:
+    """Build the crop used by both the preview overlay and ffmpeg.
+
+    The source crop is the largest exact 9:16 rectangle whose dimensions are
+    even. Position is deliberately resolved here, in source pixels; painting
+    widget geometry back into the export command would make a resize change
+    the recording rather than only the preview.
+    """
+    if not clip.width or not clip.height:
+        raise ValueError("vertical crop needs the source dimensions")
+
+    k = _vertical_multiplier(clip.height)
+    crop_width, crop_height = 9 * k, 16 * k
+    if not k or crop_width > clip.width:
+        raise ValueError("source is too narrow for an exact vertical crop")
+
+    max_x = max(0, (clip.width - crop_width) & ~1)
+    bounded = max(0, min(100, int(position)))
+    # Always round toward the left even coordinate. In particular, a
+    # mathematical midpoint of 663 becomes 662 everywhere, including after a
+    # widget resize, rather than being rounded independently by two callers.
+    x = int(max_x * bounded / 100) & ~1
+    y = max(0, (clip.height - crop_height) // 2) & ~1
+    output_width, output_height = vertical_output_size(clip)
+    return VerticalCrop(
+        clip.width, clip.height, x, y, crop_width, crop_height,
+        output_width, output_height,
+    )
+
+
 PRESETS: dict[str, Preset] = {
     "edit": Preset(
         "edit", "Edit",
@@ -275,6 +341,13 @@ PRESETS: dict[str, Preset] = {
         "better — it does not add detail that was never recorded.",
         "_upload", ".mp4",
     ),
+    "vertical": Preset(
+        "vertical", "Vertical",
+        "A 9:16 crop for phones and vertical feeds. Choose which part of the "
+        "frame stays visible; narrow sources are refused rather than padded "
+        "with bars.",
+        "_vertical", ".mp4",
+    ),
     "remux": Preset(
         "remux", "Remux",
         "Rewraps .ts into .mp4 with no re-encoding at all. Instant and lossless, "
@@ -293,7 +366,7 @@ PRESETS: dict[str, Preset] = {
 # Also the order of the buttons and of the option pages behind them. Slow
 # motion goes last: it is the one preset that answers a different question from
 # "what should this look like when it is finished".
-PRESET_ORDER = ["edit", "master", "social", "upload", "remux", "slowmo"]
+PRESET_ORDER = ["edit", "master", "social", "upload", "vertical", "remux", "slowmo"]
 
 
 # --- command construction ----------------------------------------------------
@@ -525,6 +598,7 @@ def join_filtergraph(
     settings: ExportSettings,
     pix_fmt: str,
     tail: list[str] | None = None,
+    vertical: bool = False,
 ) -> tuple[str, str, str]:
     """A filter_complex that normalises every clip and then joins them.
 
@@ -541,7 +615,14 @@ def join_filtergraph(
     Colour is handled per clip rather than once for all of them, because
     whether a recording is full range is a property of that recording.
     """
-    width, height, fps = join_target_format(clips)
+    if vertical:
+        width, height = _vertical_output_size(
+            max((c.width for c in clips), default=0),
+            max((c.height for c in clips), default=0),
+        )
+        fps = max((c.fps for c in clips if c.fps), default=60.0)
+    else:
+        width, height, fps = join_target_format(clips)
     want_audio = settings.keep_audio and any(c.has_audio for c in clips)
 
     chains: list[str] = []
@@ -561,18 +642,31 @@ def join_filtergraph(
         # demuxer produced at every trimmed seam.
         video = [f"trim=start={start:.3f}:duration={duration:.3f}",
                  "setpts=PTS-STARTPTS"]
-        # Range conversion folded into the scale that resizes the clip, so the
-        # picture is only resampled once.
-        scale = f"scale={width}:{height}:force_original_aspect_ratio=decrease"
-        if settings.colour == LEVELS and clip.is_full_range:
-            scale += ":in_range=full:out_range=limited"
-        video += [
-            scale,
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
-            "setsar=1",
-            f"fps={fps:g}",
-            f"format={pix_fmt}",
-        ]
+        if vertical:
+            crop = vertical_crop(clip, settings.vertical_position)
+            scale = f"scale={width}:{height}:flags=lanczos"
+            if settings.colour == LEVELS and clip.is_full_range:
+                scale += ":in_range=full:out_range=limited"
+            video += [
+                f"crop={crop.width}:{crop.height}:{crop.x}:{crop.y}",
+                scale,
+                f"fps={fps:g}",
+                f"format={pix_fmt}",
+                "setsar=1",
+            ]
+        else:
+            # Range conversion folded into the scale that resizes the clip,
+            # so the picture is only resampled once.
+            scale = f"scale={width}:{height}:force_original_aspect_ratio=decrease"
+            if settings.colour == LEVELS and clip.is_full_range:
+                scale += ":in_range=full:out_range=limited"
+            video += [
+                scale,
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+                "setsar=1",
+                f"fps={fps:g}",
+                f"format={pix_fmt}",
+            ]
         chains.append(f"[{index}:v]{','.join(video)}[v{index}]")
         labels.append(f"[v{index}]")
 
@@ -639,6 +733,50 @@ def slow_problems(clips: list[ClipInfo]) -> list[str]:
             "and slow motion shows every recorded frame once — putting them "
             "on one rate would have to invent frames for the slower clips or "
             "throw away frames from the faster ones"
+        )
+    return problems
+
+
+def vertical_problems(clips: list[ClipInfo]) -> list[str]:
+    """Why these sources cannot produce an honest 9:16 crop."""
+    problems: list[str] = []
+
+    unreadable = [c for c in clips if not c.width or not c.height]
+    if unreadable:
+        listed = ", ".join(c.path.name for c in unreadable[:3])
+        problems.append(
+            f"the dimensions of {len(unreadable)} of them could not be read "
+            f"({listed}), so there is no way to crop them to 9:16"
+        )
+
+    too_narrow = []
+    too_short = []
+    for clip in clips:
+        if not clip.width or not clip.height:
+            continue
+        k = _vertical_multiplier(clip.height)
+        if not k:
+            too_short.append(clip)
+        elif 9 * k > clip.width:
+            too_narrow.append((clip, 9 * k, 16 * k))
+
+    if too_short:
+        listed = ", ".join(
+            f"{c.path.name} ({c.width}×{c.height})" for c in too_short[:3]
+        )
+        problems.append(
+            f"{len(too_short)} of them are too short for an even 9:16 crop "
+            f"({listed})"
+        )
+
+    if too_narrow:
+        listed = ", ".join(
+            f"{c.path.name} is {c.width}×{c.height} and needs at least "
+            f"{width}×{height} source pixels"
+            for c, width, height in too_narrow[:3]
+        )
+        problems.append(
+            "they are too narrow for an exact 9:16 crop: " + listed
         )
     return problems
 
@@ -827,7 +965,11 @@ def build_commands(
         head = ([ff, "-hide_banner", "-nostdin", "-y"]
                 + _input_args(sources, None, clip))
 
-    def picture(pix_fmt: str, tail: list[str] | None = None):
+    def picture(
+        pix_fmt: str,
+        tail: list[str] | None = None,
+        vertical: bool = False,
+    ):
         """Filter arguments, and whether the result carries audio.
 
         A join routes through filter_complex so every clip can be brought to a
@@ -835,12 +977,22 @@ def build_commands(
         """
         if joined:
             graph, video_label, audio_label = join_filtergraph(
-                clips, settings, pix_fmt, tail
+                clips, settings, pix_fmt, tail, vertical=vertical
             )
             args = ["-filter_complex", graph, "-map", video_label]
             if audio_label:
                 args += ["-map", audio_label]
             return args, bool(audio_label)
+        if vertical:
+            crop = vertical_crop(clip, settings.vertical_position)
+            chain = [
+                f"crop={crop.width}:{crop.height}:{crop.x}:{crop.y}",
+                f"scale={crop.output_width}:{crop.output_height}:flags=lanczos",
+            ]
+            chain += tail or []
+            chain += colour_filters(settings.colour, clip, pix_fmt)
+            chain += ["setsar=1"]
+            return ["-vf", ",".join(chain)], None
         chain = (_even_size_filter(clip) + (tail or [])
                  + colour_filters(settings.colour, clip, pix_fmt))
         return ["-vf", ",".join(chain)], None
@@ -898,6 +1050,20 @@ def build_commands(
             video = [
                 "-c:v", "libx264", "-preset", settings.upload_speed,
                 "-crf", str(settings.upload_crf), "-profile:v", "high",
+            ]
+        return [
+            head + filters + video + timing() + sound("192k", mapped)
+            + ["-movflags", "+faststart", str(out_path)]
+        ]
+
+    if preset_key == "vertical":
+        filters, mapped = picture("yuv420p", vertical=True)
+        if settings.hardware:
+            video = hardware_video_args(settings.hardware, settings.master_crf)
+        else:
+            video = [
+                "-c:v", "libx264", "-preset", settings.master_speed,
+                "-crf", str(settings.master_crf), "-profile:v", "high",
             ]
         return [
             head + filters + video + timing() + sound("192k", mapped)
@@ -1036,6 +1202,21 @@ def estimate_output_size(clip: ClipInfo, preset_key: str, settings: ExportSettin
     if preset_key == "master":
         # Each 6 points of CRF roughly halves or doubles the size.
         mbps = MASTER_REFERENCE_MBPS * scale * (2 ** ((18 - settings.master_crf) / 6.0))
+        return int(mbps * 1_000_000 / 8 * runtime)
+
+    if preset_key == "vertical":
+        # pixel_rate() follows the source aspect ratio and would therefore
+        # estimate a landscape frame. The delivery canvas is an explicit
+        # square-SAR 9:16 size, so use its pixels directly.
+        output_width, output_height = vertical_output_size(clip)
+        output_fps = clip.fps or 60.0
+        vertical_scale = (
+            output_width * output_height * output_fps
+        ) / REFERENCE_PIXEL_RATE
+        mbps = (
+            MASTER_REFERENCE_MBPS * vertical_scale
+            * (2 ** ((18 - settings.master_crf) / 6.0))
+        )
         return int(mbps * 1_000_000 / 8 * runtime)
 
     if preset_key == "slowmo":
