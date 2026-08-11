@@ -403,6 +403,10 @@ def _fps_args(tools: Tools, clip: ClipInfo, override: int = 0) -> list[str]:
 # rather than each carrying its own 2.
 SLOW_FACTOR = 2
 
+# How much heavier a slow export is than a Master of the same footage. Measured,
+# not derived — see estimate_output_size for the three ranges behind it.
+SLOW_SIZE_FACTOR = 1.5
+
 
 def slow_output_rate(clips: list[ClipInfo]) -> float:
     """The frame rate a slow export writes: what was recorded, halved.
@@ -1015,14 +1019,27 @@ def estimate_output_size(clip: ClipInfo, preset_key: str, settings: ExportSettin
         return int(mbps * 1_000_000 / 8 * runtime)
 
     if preset_key == "slowmo":
-        # Half the frame rate over twice the runtime is the same pictures at
-        # the same quality, so this lands close to a Master export of the same
-        # footage — which is the honest answer, and not the one you get by
-        # estimating the source runtime at the source rate and doubling
-        # nothing, or by doubling the runtime while leaving the rate alone.
+        # Half the frame rate over twice the runtime is the same pictures at the
+        # same quality, so the arithmetic says a slow export weighs what a
+        # Master of the same footage weighs. Measured on real Box Pro footage,
+        # it does not: x264 at a fixed CRF spends more bits on each frame when
+        # the declared rate is lower.
+        #
+        #   clip (range)          Master     Slow    ratio
+        #   hdz_047 12.5-22.5s    7.9 MB   14.6 MB   1.85
+        #   hdz_048 30-40s       17.3 MB   24.9 MB   1.44
+        #   hdz_053 5-13s        23.1 MB   32.8 MB   1.42
+        #
+        # Three ranges on one goggle, so SLOW_SIZE_FACTOR is a correction with
+        # a known sample size rather than a constant to trust: it centres the
+        # estimate on what was measured instead of on what the arithmetic
+        # predicted. Every estimate here carries scene-complexity error of the
+        # same order — Master's own reference over-predicted hdz_048 by 1.9x —
+        # and erring high is the safe direction, because this number also
+        # decides whether the app warns about disk space.
         out_scale = pixel_rate(clip, fps=slow_output_rate([clip]))
         mbps = (MASTER_REFERENCE_MBPS * (out_scale / REFERENCE_PIXEL_RATE)
-                * (2 ** ((18 - settings.slow_crf) / 6.0)))
+                * (2 ** ((18 - settings.slow_crf) / 6.0)) * SLOW_SIZE_FACTOR)
         return int(mbps * 1_000_000 / 8 * output_runtime(preset_key, runtime))
 
     if preset_key == "upload":

@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from flightdvr import media  # noqa: E402
 from flightdvr.media import ClipInfo, Tools  # noqa: E402
 from flightdvr.presets import (  # noqa: E402
-    PRESETS, SLOW_FACTOR, ExportSettings, build_commands,
+    PRESETS, SLOW_FACTOR, SLOW_SIZE_FACTOR, ExportSettings, build_commands,
     describe_join_problems, estimate_output_size, join_problems,
     output_runtime, slow_output_rate, templated_output_path,
 )
@@ -249,14 +249,23 @@ def test_the_progress_bar_measures_against_the_doubled_runtime():
 
 
 def test_the_estimate_is_about_the_file_not_the_footage():
-    """Half the frame rate over twice the runtime is the same pictures, so a
-    slow export lands close to a Master of the same clip — and nowhere near
-    half or double it, which is what the two obvious mistakes produce."""
+    """The arithmetic says a slow export weighs what a Master weighs — same
+    pictures, half the rate, twice the runtime. Measured on real footage it is
+    about half again as heavy, because x264 spends more bits per frame at a
+    lower declared rate, so the estimate carries that measured correction.
+
+    Pinned against Master rather than as an absolute number: what matters is
+    that it stays anchored to a preset whose estimate is already calibrated, and
+    that it is neither half nor double the file, which is what the two obvious
+    mistakes produce.
+    """
     clip = boxpro_clip(duration=20.0)
     settings = ExportSettings()
     slow = estimate_output_size(clip, "slowmo", settings)
     master = estimate_output_size(clip, "master", settings)
-    assert 0.8 * master <= slow <= 1.2 * master, (slow, master)
+    assert slow == pytest.approx(master * SLOW_SIZE_FACTOR, rel=0.01), (slow, master)
+    # and still the same order as the footage it came from
+    assert master < slow < 2 * master
 
 
 # -- the control, and what the window does with it ----------------------------
