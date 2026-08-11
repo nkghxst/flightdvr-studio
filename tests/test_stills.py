@@ -18,10 +18,13 @@
 from datetime import datetime
 from pathlib import Path
 
+from PySide6.QtGui import QImage
+
 from flightdvr.media import ClipInfo, Tools
 from flightdvr.presets import LEVELS, REC709
 from flightdvr.stills import (
-    StillRequest, build_still_command, still_temp_path, timestamp_matches,
+    StillRequest, StillWorker, build_still_command, still_temp_path,
+    timestamp_matches,
 )
 
 
@@ -95,3 +98,113 @@ def test_the_temporary_png_is_beside_the_target():
 
     assert still_temp_path(target) == Path(
         "D:/exports/hdz_047.flightdvr-part.png")
+
+
+def test_retired_and_new_requests_cannot_clean_up_each_others_png(tmp_path):
+    target = tmp_path / "still.png"
+    first = StillWorker(TOOLS, tiny_request(target), 1)
+    second = StillWorker(TOOLS, tiny_request(target), 2)
+
+    assert first._temporary != second._temporary
+    assert first._temporary.parent == second._temporary.parent == target.parent
+
+
+class FakeCapture:
+    """One already-finished ffmpeg result, including a readable PNG."""
+
+    def __init__(self, command, *, seconds=10.499989, size=(8, 8), code=0):
+        self.returncode = code
+        self._stderr = (
+            f"[Parsed_showinfo_2 @ 000] n:0 pts:0 pts_time:{seconds}\n"
+        ).encode()
+        if code == 0:
+            image = QImage(*size, QImage.Format.Format_RGB888)
+            image.fill(0x336699)
+            assert image.save(command[-1], "PNG")
+
+    def communicate(self):
+        return b"", self._stderr
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = -15
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+
+
+def tiny_request(target: Path) -> StillRequest:
+    return request(clip=clip(width=8, height=8), target=target)
+
+
+def test_a_complete_validated_png_atomically_replaces_the_old_one(
+        monkeypatch, tmp_path):
+    target = tmp_path / "still.png"
+    target.write_bytes(b"old still")
+    monkeypatch.setattr(
+        "flightdvr.stills.subprocess.Popen",
+        lambda command, **_kwargs: FakeCapture(command),
+    )
+
+    ok, message = StillWorker(TOOLS, tiny_request(target), 1)._capture()
+
+    assert ok, message
+    assert QImage(str(target)).size().toTuple() == (8, 8)
+    assert not list(tmp_path.glob("*.flightdvr-part*"))
+
+
+def test_a_wrong_source_frame_preserves_the_old_target(monkeypatch, tmp_path):
+    target = tmp_path / "still.png"
+    target.write_bytes(b"old still")
+    before = target.read_bytes()
+    monkeypatch.setattr(
+        "flightdvr.stills.subprocess.Popen",
+        lambda command, **_kwargs: FakeCapture(command, seconds=10.499989 + 1 / 60),
+    )
+
+    ok, message = StillWorker(TOOLS, tiny_request(target), 1)._capture()
+
+    assert not ok
+    assert "instead of" in message
+    assert target.read_bytes() == before
+    assert not list(tmp_path.glob("*.flightdvr-part*"))
+
+
+def test_a_wrong_sized_png_preserves_the_old_target(monkeypatch, tmp_path):
+    target = tmp_path / "still.png"
+    target.write_bytes(b"old still")
+    before = target.read_bytes()
+    monkeypatch.setattr(
+        "flightdvr.stills.subprocess.Popen",
+        lambda command, **_kwargs: FakeCapture(command, size=(7, 8)),
+    )
+
+    ok, message = StillWorker(TOOLS, tiny_request(target), 1)._capture()
+
+    assert not ok
+    assert "not the source" in message
+    assert target.read_bytes() == before
+    assert not list(tmp_path.glob("*.flightdvr-part*"))
+
+
+def test_cancelling_before_ffmpeg_starts_publishes_nothing(monkeypatch, tmp_path):
+    target = tmp_path / "still.png"
+    target.write_bytes(b"old still")
+    before = target.read_bytes()
+    monkeypatch.setattr(
+        "flightdvr.stills.subprocess.Popen",
+        lambda command, **_kwargs: FakeCapture(command),
+    )
+    worker = StillWorker(TOOLS, tiny_request(target), 1)
+    worker.stop()
+
+    ok, message = worker._capture()
+
+    assert not ok and message == "Cancelled"
+    assert target.read_bytes() == before
+    assert not list(tmp_path.glob("*.flightdvr-part*"))

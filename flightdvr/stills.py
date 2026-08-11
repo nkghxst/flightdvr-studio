@@ -17,11 +17,19 @@
 
 from __future__ import annotations
 
+import subprocess
+import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from .media import ClipInfo, Tools, frame_rate_mode
-from .player import SEEK_LEAD_IN
+from PySide6.QtCore import QThread, Signal
+from PySide6.QtGui import QImage
+
+from .media import (
+    NO_WINDOW, ClipInfo, Tools, frame_rate_mode, request_stop, stop_process,
+)
+from .player import SEEK_LEAD_IN, SHOWINFO_TIME
 from .presets import colour_filters
 
 
@@ -36,9 +44,10 @@ class StillRequest:
     target: Path
 
 
-def still_temp_path(target: Path) -> Path:
+def still_temp_path(target: Path, request_id: str = "") -> Path:
     """The beside-target path used until a complete PNG is ready."""
-    return target.with_name(f"{target.stem}.flightdvr-part{target.suffix}")
+    marker = f".flightdvr-part-{request_id}" if request_id else ".flightdvr-part"
+    return target.with_name(f"{target.stem}{marker}{target.suffix}")
 
 
 def build_still_command(tools: Tools, request: StillRequest,
@@ -89,3 +98,157 @@ def timestamp_matches(request: StillRequest, decoded_seconds: float) -> bool:
     """
     rate = request.clip.fps if request.clip.fps > 0 else 30.0
     return abs(decoded_seconds - request.seconds) <= 0.25 / rate
+
+
+class StillWorker(QThread):
+    """Run one atomic still capture without holding the interface still."""
+
+    saved = Signal(int, str)             # generation, final path
+    failed = Signal(int, str)
+    cancelled = Signal(int)
+
+    def __init__(self, tools: Tools, request: StillRequest, generation: int,
+                 parent=None):
+        super().__init__(parent)
+        self.tools = tools
+        self.request = request
+        self.generation = generation
+        self._cancel = False
+        self._published = False
+        self._state_lock = threading.Lock()
+        self._process: subprocess.Popen | None = None
+        # A clip change retires rather than waits for its old worker, so two
+        # requests may briefly overlap. Distinct beside-target paths stop the
+        # old worker's cleanup from deleting the new worker's PNG.
+        self._temporary = still_temp_path(request.target, uuid.uuid4().hex)
+
+    def stop(self) -> None:
+        """Ask from the UI thread; the bounded wait stays on this worker."""
+        with self._state_lock:
+            if self._published:
+                return
+            self._cancel = True
+            proc = self._process
+        request_stop(proc)
+
+    def run(self) -> None:  # noqa: D102 (QThread entry point)
+        ok, message = self._capture()
+        if self._was_cancelled():
+            self.cancelled.emit(self.generation)
+        elif ok:
+            self.saved.emit(self.generation, str(self.request.target))
+        else:
+            self.failed.emit(self.generation, message)
+
+    def _was_cancelled(self) -> bool:
+        with self._state_lock:
+            return self._cancel and not self._published
+
+    def _capture(self) -> tuple[bool, str]:
+        """Run, validate and publish; separated so integration can inspect it."""
+        target = self.request.target
+        temporary = self._temporary
+        self._remove(temporary)
+
+        try:
+            command = build_still_command(self.tools, self.request, temporary)
+        except (TypeError, ValueError) as problem:
+            return False, str(problem)
+
+        try:
+            proc = subprocess.Popen(
+                command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                creationflags=NO_WINDOW,
+            )
+        except OSError as problem:
+            return False, f"Could not start ffmpeg: {problem}"
+
+        with self._state_lock:
+            self._process = proc
+            cancelled_before_start = self._cancel
+        if cancelled_before_start:
+            stop_process(proc)
+
+        communication_problem = None
+        stderr = b""
+        code = None
+        try:
+            _, stderr = proc.communicate()
+            code = proc.returncode
+        except (OSError, subprocess.SubprocessError) as problem:
+            communication_problem = problem
+            code = proc.poll()
+        finally:
+            # communicate() normally reaps it. Cancellation can interrupt that
+            # normal path, so the worker still owns the bounded escalation.
+            stop_process(proc)
+            with self._state_lock:
+                self._process = None
+
+        try:
+            if self._was_cancelled():
+                return False, "Cancelled"
+            if communication_problem is not None:
+                return False, f"Could not read ffmpeg output: {communication_problem}"
+            log = (stderr or b"").decode("utf-8", "replace").splitlines()
+            if code != 0:
+                from .jobs import _describe_failure
+                return False, _describe_failure(log, code)
+
+            timestamps = []
+            for line in log:
+                match = SHOWINFO_TIME.search(line)
+                if match:
+                    try:
+                        timestamps.append(float(match.group(1)))
+                    except ValueError:
+                        continue
+            if not timestamps:
+                return False, "ffmpeg did not identify the extracted frame"
+            if not timestamp_matches(self.request, timestamps[0]):
+                return False, (
+                    "ffmpeg returned source time "
+                    f"{timestamps[0]:.6f}s instead of the requested "
+                    f"{self.request.seconds:.6f}s"
+                )
+
+            try:
+                if not temporary.exists() or temporary.stat().st_size == 0:
+                    return False, "ffmpeg finished but produced no PNG"
+            except OSError as problem:
+                return False, f"Could not read the finished PNG: {problem}"
+
+            image = QImage(str(temporary))
+            if image.isNull():
+                return False, "ffmpeg produced a PNG that could not be read"
+            expected = (self.request.clip.width, self.request.clip.height)
+            actual = (image.width(), image.height())
+            if all(expected) and actual != expected:
+                return False, (
+                    f"ffmpeg produced {actual[0]}x{actual[1]}, not the "
+                    f"source {expected[0]}x{expected[1]}"
+                )
+
+            # stop() and publication are serialised. If cancellation wins the
+            # lock, nothing is published; if replace wins, the request already
+            # completed atomically and a late stop cannot relabel it cancelled.
+            with self._state_lock:
+                if self._cancel:
+                    return False, "Cancelled"
+                try:
+                    temporary.replace(target)
+                except OSError as problem:
+                    return False, f"Could not put the PNG in place: {problem}"
+                self._published = True
+            return True, f"{actual[0]}x{actual[1]} PNG"
+        finally:
+            # Anything left here failed or was cancelled. The target, including
+            # an earlier still approved for overwrite, remains untouched.
+            self._remove(temporary)
+
+    @staticmethod
+    def _remove(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass

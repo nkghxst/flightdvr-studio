@@ -1980,6 +1980,7 @@ def test_exact_frame_readout_names_the_timestamp_and_source_frame(window):
 
     old_clip = window._trim_clip
     old_number = window._precise_frame_number
+    old_seconds = window._precise_frame_seconds
     try:
         window._trim_clip = clip("hdz_exact.ts")
         window._precise_frame_ready(QImage(8, 8, QImage.Format.Format_RGB32),
@@ -1989,6 +1990,143 @@ def test_exact_frame_readout_names_the_timestamp_and_source_frame(window):
     finally:
         window._trim_clip = old_clip
         window._precise_frame_number = old_number
+        window._precise_frame_seconds = old_seconds
+        window._update_still_button()
+
+
+def test_grab_still_is_enabled_only_for_a_real_precise_picture(window):
+    from PySide6.QtGui import QImage
+
+    old_clip = window._trim_clip
+    old_number = window._precise_frame_number
+    old_seconds = window._precise_frame_seconds
+    try:
+        window._trim_clip = clip("hdz_exact.ts")
+        window._clear_precise_frame()
+        assert not window.still_button.isEnabled()
+
+        image = QImage(8, 8, QImage.Format.Format_RGB32)
+        window._precise_frame_ready(image, 10 + 1 / 60, 601)
+        assert window.still_button.isEnabled()
+
+        window._preview_frame_ready(image, 10 + 2 / 60)
+        assert not window.still_button.isEnabled()
+    finally:
+        window._trim_clip = old_clip
+        window._precise_frame_number = old_number
+        window._precise_frame_seconds = old_seconds
+        window._update_still_button()
+
+
+def test_pausing_requests_the_native_rate_frame_needed_by_grab_still(
+        window, monkeypatch):
+    old_clip = window._trim_clip
+    sharpened = []
+    try:
+        window._trim_clip = clip("hdz_exact.ts")
+        monkeypatch.setattr(window._sharpen_timer, "start",
+                            lambda: sharpened.append(True))
+
+        window._preview_state_changed(False)
+
+        assert sharpened == [True]
+    finally:
+        window._trim_clip = old_clip
+
+
+def test_the_still_save_dialog_uses_the_visible_naming_template(
+        window, monkeypatch, tmp_path):
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QFileDialog
+    from flightdvr.format import DEFAULT_TEMPLATE
+
+    old_clip = window._trim_clip
+    old_number = window._precise_frame_number
+    old_seconds = window._precise_frame_seconds
+    old_output = window.export_panel.output_text()
+    old_template = window.export_panel.template_edit.text()
+    old_session = window.session
+    suggested = []
+    try:
+        window._trim_clip = clip("hdz_047.ts")
+        window.session = None
+        window.export_panel.out_edit.setEditText(str(tmp_path))
+        window.export_panel.template_edit.setText(DEFAULT_TEMPLATE)
+        window._precise_frame_ready(
+            QImage(8, 8, QImage.Format.Format_RGB32), 10.5, 630)
+        monkeypatch.setattr(
+            QFileDialog, "getSaveFileName",
+            lambda *_args: (suggested.append(_args[2]) or "", ""),
+        )
+
+        window._grab_still()
+
+        assert Path(suggested[0]) == tmp_path / "hdz_047_still.png"
+    finally:
+        window._trim_clip = old_clip
+        window._precise_frame_number = old_number
+        window._precise_frame_seconds = old_seconds
+        window.export_panel.out_edit.setEditText(old_output)
+        window.export_panel.template_edit.setText(old_template)
+        window.session = old_session
+        window._update_still_button()
+
+
+def test_declining_still_overwrite_leaves_the_file_untouched(
+        window, monkeypatch, tmp_path):
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    old_clip = window._trim_clip
+    old_number = window._precise_frame_number
+    old_seconds = window._precise_frame_seconds
+    target = tmp_path / "precious.png"
+    target.write_bytes(b"the still already there")
+    before = target.read_bytes()
+    started = []
+    try:
+        window._trim_clip = clip("hdz_047.ts")
+        window._precise_frame_ready(
+            QImage(8, 8, QImage.Format.Format_RGB32), 10.5, 630)
+        monkeypatch.setattr(
+            QFileDialog, "getSaveFileName", lambda *_args: (str(target), ""))
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            lambda *_args: QMessageBox.StandardButton.No)
+        monkeypatch.setattr(
+            "flightdvr.ui.StillWorker",
+            lambda *_args, **_kwargs: started.append(True))
+
+        window._grab_still()
+
+        assert not started
+        assert target.read_bytes() == before
+    finally:
+        window._trim_clip = old_clip
+        window._precise_frame_number = old_number
+        window._precise_frame_seconds = old_seconds
+        window._update_still_button()
+
+
+def test_a_second_still_click_requests_stop_without_waiting(window):
+    class RunningStill:
+        def __init__(self):
+            self.stops = 0
+
+        def stop(self):
+            self.stops += 1
+
+    worker = RunningStill()
+    old_worker = window._still_worker
+    try:
+        window._still_worker = worker
+        window._grab_still()
+        assert worker.stops == 1
+        assert window.still_button.text() == "Cancelling…"
+        assert not window.still_button.isEnabled()
+    finally:
+        window._still_worker = old_worker
+        window._update_still_button()
 
 
 def test_comma_and_period_delegate_real_frame_counts(window, monkeypatch):
