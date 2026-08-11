@@ -7,6 +7,9 @@ us cannot drift apart by reading different rules.
 **Read it before starting.** In particular: check `gh pr list` before picking
 anything up, claim work with a draft PR, and review what somebody else wrote.
 One agent owns a branch at a time, and one named agent owns each review verdict.
+Luna is the cheap pass and exists to save expensive tokens — brief her properly,
+check anything of hers that becomes a claim, and keep the verdict on
+output-correctness work with Sol or Claude.
 
 ## GitHub identity on each computer
 

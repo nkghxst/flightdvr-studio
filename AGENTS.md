@@ -39,6 +39,52 @@ The roles say who is *best* placed for a piece of work, not who is permitted to
 do it. Any of the three may take any issue; what does not change is that the
 author never reviews their own work.
 
+### Luna is a cost decision
+
+Sol and Claude are expensive per token. Luna is cheap and tireless, and she is
+here so that the expensive attention is spent on the work that actually needs
+it. **Route bounded, checkable work to her first**: reproducing and narrowing a
+reported bug, locating the relevant code and writing an implementation brief,
+extending tests after somebody implements, gathering CI evidence, updating
+release notes and documentation, checking an ffmpeg command or a signal flow,
+preparing issue and PR summaries for the others.
+
+**The saving is end to end or it is not a saving.** A brief that takes longer to
+write than the work would take to do has cost more than it saved, and so has a
+result nobody can check without redoing it. Before delegating, make sure the
+task has: a scope stated in files or directories, an explicit *not* list, the
+exact head to work from, a definition of done, somewhere to report, and
+something objective the result can be checked against — a test, a measurement,
+a diff. Guidance is not overhead on delegation; it is the delegation.
+
+**Her output is scoped input, not assurance.** That is not a comment on the
+quality of it — it follows from her being the cheap pass. Anything that becomes
+a *claim* — a verdict, a measurement, a merge-blocking finding, "there are no
+others" — gets checked by Sol or Claude before it is relied on.
+
+**A negative finding must state the net it used.** "None found" is the easiest
+claim to get wrong and the hardest to notice. Luna's first pass on PR #72
+searched Markdown outside two files, said exactly that, and was right about what
+it covered; a wider search then found four more mentions in code and tests. The
+bounding is what made the second pass cheap — it is the model to copy, not a
+failure to avoid.
+
+**Verdict ownership.** The largest saving is Luna as the maker, not the judge:
+she may own a bounded implementation or documentation branch that Sol or Claude
+then reviews. As a reviewer she performs advisory first passes. She is **never**
+the sole verdict owner on anything touching output correctness — ffmpeg
+arguments, timing, colour, cancellation, queue mutation — and for now not on
+docs or mechanical changes either, until there are enough calibrated examples to
+revisit it or the maintainer assigns one explicitly. The reason is arithmetic
+rather than distrust: if the cheap pass owns the only reciprocal verdict, then
+nothing independent has checked it, which is the opposite of what delegating to
+it was for. Every blocking finding on PR #70 lived in exactly those
+output-correctness paths, and every one of them needed a measurement rather than
+a reading.
+
+The saving survives that restriction, because the expensive pass then starts
+from evidence and a narrow delta instead of from nothing.
+
 **One agent owns a branch at a time.** This is the rule most likely to be broken
 by good intentions — "Luna adds the tests while Sol implements" is genuinely
 valuable and is exactly how two agents end up pushing to one branch. Tests or
