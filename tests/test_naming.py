@@ -39,10 +39,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from flightdvr.format import (  # noqa: E402
     DEFAULT_TEMPLATE, TEMPLATE_FIELDS, UnknownTemplateField, check_template,
-    expand_template, select_stem,
+    expand_template, export_fields, select_stem,
 )
 from flightdvr.media import ClipInfo, Select  # noqa: E402
 from flightdvr.presets import PRESETS, output_path  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def qt_app():
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    yield QApplication.instance() or QApplication([])
 
 
 def clip(name="hdz_048.ts") -> ClipInfo:
@@ -67,26 +75,16 @@ def todays_stem(piece: ClipInfo, index: int, total: int) -> str:
 
 def template_stem(piece: ClipInfo, index: int, total: int, preset_key: str,
                   flight_date=None, session="") -> str:
-    """The same filename, built from the default template instead."""
-    stamp = flight_date.strftime("%Y-%m-%d") if flight_date else ""
-    # The clip may already be dated — files copied to the library are. The
-    # guard lives in the field rather than after expansion, so a template that
-    # puts {date} somewhere else still cannot double it.
-    if stamp and piece.path.stem.startswith(stamp):
-        stamp = ""
-    # Both range fields are empty for a lone range, and the name is dropped as
-    # well as the number. That is deliberate in select_stem: "a clip trimmed
-    # the way every version until now trimmed it exports to the filename it
-    # always did". Typing a name on a single range does not rename its export.
-    several = total > 1
-    return expand_template(DEFAULT_TEMPLATE, {
-        "date": stamp,
-        "session": session,
-        "clip": piece.path.stem,
-        "range": (piece.selects[0].name if several and piece.selects else ""),
-        "range_number": str(index + 1) if several else "",
-        "preset": PRESETS[preset_key].suffix.lstrip("_"),
-    })
+    """The same filename, built from the default template instead.
+
+    Deliberately calls the app's own `export_fields` rather than restating the
+    rules. A copy here would prove the test agrees with itself while the app
+    did something else.
+    """
+    return expand_template(DEFAULT_TEMPLATE, export_fields(
+        piece, index, total, PRESETS[preset_key].suffix,
+        flight_date=flight_date, session_name=session,
+    ))
 
 
 # -- the requirement that outranks the feature --------------------------------
@@ -185,3 +183,65 @@ def test_a_template_that_is_all_empty_fields_does_not_produce_a_dotfile():
     matters: `.upload` is hidden on Unix and refused on Windows."""
     stem = expand_template("{date}_{session}_{range}", {})
     assert stem == ""
+
+
+# -- the control, and the round trip a session depends on ----------------------
+
+def test_the_template_survives_capture_and_apply(qt_app):
+    """A session stores what capture() returns and hands it back to apply().
+    A template that did not survive that would silently revert to the default
+    on reopening a card, renaming everything queued afterwards."""
+    from flightdvr.export_panel import ExportPanel
+
+    panel = ExportPanel()
+    panel.template_edit.setText("{session}_{clip}_{range}")
+    stored = panel.capture()
+    assert stored["template"] == "{session}_{clip}_{range}"
+
+    other = ExportPanel()
+    other.apply(stored)
+    assert other.template() == "{session}_{clip}_{range}"
+
+
+def test_an_empty_box_means_the_default_not_a_nameless_file(qt_app):
+    """Clearing the field is how somebody asks for "however it used to be",
+    not for every export to be called the same nothing."""
+    from flightdvr.export_panel import ExportPanel
+
+    panel = ExportPanel()
+    panel.template_edit.setText("   ")
+    assert panel.template() == DEFAULT_TEMPLATE
+    assert panel.capture()["template"] == DEFAULT_TEMPLATE
+
+
+def test_an_older_session_without_a_template_keeps_the_default(qt_app):
+    """Every session written before this existed has no template key. Reading
+    one must not blank the control."""
+    from flightdvr.export_panel import ExportPanel
+
+    panel = ExportPanel()
+    panel.apply({"preset": "master"})          # a 1.5-era settings dict
+    assert panel.template() == DEFAULT_TEMPLATE
+
+
+def test_the_example_shows_what_the_template_will_produce(qt_app):
+    """The control is only useful if the result is visible while typing."""
+    from flightdvr.export_panel import ExportPanel
+
+    panel = ExportPanel()
+    panel.preset_buttons["upload"].setChecked(True)
+    panel.template_edit.setText("{clip}_{range}")
+    panel._show_example()
+    assert panel.template_example.text() == "e.g. hdz_048_Launch.mp4"
+
+
+def test_a_mistyped_field_says_so_in_the_example(qt_app):
+    """Before the queue, and before anything is written. The example is where
+    a typo should surface."""
+    from flightdvr.export_panel import ExportPanel
+
+    panel = ExportPanel()
+    panel.template_edit.setText("{clipp}")
+    panel._show_example()
+    shown = panel.template_example.text()
+    assert "clipp" in shown and "{clip}" in shown

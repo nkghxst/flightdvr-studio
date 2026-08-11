@@ -163,6 +163,42 @@ def expand_template(template: str, values: dict) -> str:
     return rendered.strip("_-. ")[:120]
 
 
+def export_fields(piece, index: int, total: int, preset_suffix: str,
+                  flight_date=None, session_name: str = "") -> dict:
+    """What one export's template has to fill in.
+
+    Kept here, next to the expansion, so the app and the test that proves the
+    default reproduces today's filenames are reading the same rules. Written in
+    the test instead, it would have proved only that the test agreed with
+    itself.
+
+    Two rules are not obvious and both come from `select_stem`:
+
+    A lone range contributes neither its number nor its **name**. A clip
+    trimmed the way every version before ranges trimmed it exports to the
+    filename it always did, so typing a name on a single range does not rename
+    its export.
+
+    The date is dropped when the clip's own stem already starts with that same
+    date, because files copied to the library are already dated and
+    `2026-07-04_2026-07-04_hdz_048` helps nobody. A *different* date is never
+    dropped, and a template that puts `{date}` somewhere other than the front
+    still gets it — the guard is about repetition, not position.
+    """
+    stamp = flight_date.strftime("%Y-%m-%d") if flight_date else ""
+    if stamp and piece.path.stem.startswith(stamp):
+        stamp = ""
+    several = total > 1
+    return {
+        "date": stamp,
+        "session": session_name,
+        "clip": piece.path.stem,
+        "range": (piece.selects[0].name if several and piece.selects else ""),
+        "range_number": str(index + 1) if several else "",
+        "preset": preset_suffix.lstrip("_"),
+    }
+
+
 def select_stem(clip, index: int, total: int) -> str:
     """What to call the file for one select of a clip.
 

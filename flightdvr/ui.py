@@ -52,7 +52,8 @@ from .browser_panel import (
 from .external import DESKTOP_OPEN, PLAYER_PATHS, find_player, reveal
 from .export_panel import ExportPanel, FPS_STEPS, RESOLUTION_STEPS
 from .format import (
-    _clip_set_id, canonical_path, existing_ancestor, human_duration,
+    UnknownTemplateField, _clip_set_id, canonical_path, check_template,
+    existing_ancestor, expand_template, export_fields, human_duration,
     human_size, natural_key, output_key, select_stem, work_dir,
 )
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
@@ -61,8 +62,8 @@ from .media import (
     stop_process,
 )
 from .presets import (
-    ExportSettings, describe_join_problems, estimate_output_size, join_problems,
-    output_path,
+    PRESETS, ExportSettings, describe_join_problems, estimate_output_size,
+    join_problems, output_path,
 )
 from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
@@ -2216,12 +2217,31 @@ class MainWindow(QMainWindow):
             # count. The first means a name cannot tell two exports apart, so
             # only one of them would ever exist on disk, and skipping it would
             # hide that. It is refused, and nothing is queued.
+            template = self.export_panel.template()
+            try:
+                check_template(template)
+            except UnknownTemplateField as exc:
+                QMessageBox.warning(
+                    self, "That name template cannot be used",
+                    f"Nothing has been queued.\n\n{exc}",
+                )
+                return
+
+            session_name = self.session.title if self.session else ""
             planned = []
             for clip in clips:
                 parts = clip.for_export()
                 for index, piece in enumerate(parts):
-                    stem = select_stem(piece, index, len(parts))
-                    target = output_path(out_dir, stem, key, subfolders, stamp)
+                    stem = expand_template(template, export_fields(
+                        piece, index, len(parts), PRESETS[key].suffix,
+                        flight_date=stamp, session_name=session_name,
+                    ))
+                    # output_path adds the preset suffix and the date itself,
+                    # and the template has already placed both. Passing the
+                    # rendered stem with no date leaves it alone; the suffix is
+                    # appended by the preset, which is why {preset} renders it
+                    # without one.
+                    target = output_path(out_dir, stem, key, subfolders, None)
                     planned.append((piece, stem, target))
 
             seen: dict[str, Path] = {}
