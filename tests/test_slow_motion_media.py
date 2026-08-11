@@ -287,10 +287,10 @@ def lossless_reference(tools, info, out_path: Path) -> Path:
 def test_the_frames_are_the_recorded_ones_not_new_ones(tools, clip, tmp_path):
     """Slowing must not filter, blend or interpolate the picture.
 
-    Compared against a Master export of the same clip, picture by picture, with
-    no extra encode on either side: both are one generation from the same
-    source through the same colour chain, so anything that invented or blended
-    a frame shows as a low score on that frame. Per-frame rather than averaged,
+    Compared picture by picture against a lossless FFV1 reference that keeps
+    the source's own frame timing, so the only difference between the two files
+    is the slowing. A Master export was the first reference and the wrong one —
+    see `lossless_reference` for what that cost. Per-frame rather than averaged,
     because the mid-GOP defect this suite was built around averaged out to
     something that merely looked mediocre.
     """
@@ -379,3 +379,47 @@ def test_cancelling_leaves_no_partial_file(tools, clip, tmp_path):
     assert not out.exists(), "a cancelled export left a file under its own name"
     leftovers = list(tmp_path.glob("*.flightdvr-part"))
     assert not leftovers, leftovers
+
+
+# -- why the refusal exists, kept measurable ----------------------------------
+
+def test_a_guessed_rate_really_does_lose_frames(tools, tmp_path, clip_at_90):
+    """The measurement behind refusing an unreadable rate, kept checkable.
+
+    `slow_problems` now stops this before encoding, so the defect can no longer
+    be reproduced through the app — which is exactly how a restriction turns
+    into folklore. This builds the command the guard prevents, the same way
+    `test_a_trimmed_joined_remux_would_be_corrupt` does for a trimmed joined
+    remux, and asserts the result really is wrong.
+
+    If a future ffmpeg, or a future implementation, preserves the frames here,
+    this test fails and the refusal should be reconsidered rather than kept out
+    of habit.
+    """
+    from flightdvr.media import probe as probe_clip
+    from flightdvr.presets import build_commands, slow_problems
+
+    source, source_frames, _duration = clip_at_90
+    info = probe_clip(tools, source)
+    assert info.fps == pytest.approx(90.0, rel=0.01), "the fixture is not 90 fps"
+    assert source_frames >= 120, "too few frames for a loss to be unambiguous"
+
+    blind = probe_clip(tools, source)
+    blind.fps = 0.0                      # the state ffprobe leaves on a bad read
+    assert slow_problems([blind]), "the app no longer refuses this"
+
+    # Around the guard on purpose: what is being checked is that the guessed
+    # command is genuinely destructive, not that the guard runs.
+    out = tmp_path / "guessed.mp4"
+    command = build_commands(tools, blind, "slowmo", ExportSettings(), out,
+                             tmp_path)[0]
+    done = subprocess.run([str(a) for a in command], capture_output=True,
+                          text=True)
+    assert done.returncode == 0, done.stderr[-400:]
+    assert out.exists(), "ffmpeg produced nothing to examine"
+
+    frames, _duration, _rate = measured(tools, out)
+    assert frames < source_frames, (
+        f"the guessed 60 fps rate kept all {source_frames} frames of a 90 fps "
+        "recording — the refusal in slow_problems should be reconsidered"
+    )
