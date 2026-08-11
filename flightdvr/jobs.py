@@ -37,6 +37,7 @@ from .media import (
 )
 from .presets import (
     PRESETS, ExportSettings, build_commands, join_problems, output_runtime,
+    slow_problems,
 )
 
 # Pass 1 of a two-pass encode analyses without writing video, so it is quicker.
@@ -251,18 +252,19 @@ class ExportWorker(QThread):
     def _run_job(self, index: int, job: Job) -> tuple[bool, str]:
         # Refused here as well as in the window, so a job that reaches the
         # worker by any route cannot produce a file that is quietly wrong.
+        # Whatever the clip count: a lone recording whose rate could not be
+        # read is as unslowable as an assembly of two different rates, and the
+        # window's guard is not the only route into this method.
+        if job.preset_key == "slowmo":
+            problems = slow_problems(job.clips)
+            if problems:
+                return False, "Cannot slow these clips: " + "; ".join(problems)
+
         if len(job.clips) > 1:
             # Stream copy cannot normalise anything, so a joined remux is held
             # to the stricter standard.
-            problems = join_problems(
-                job.clips,
-                re_encoding=job.preset_key != "remux",
-                # And the same for the one-frame-once promise: without this, a
-                # mixed-rate slow job arriving by any route other than the
-                # window's own guard was normalised and run, inventing frames
-                # in the one export that claims it never does.
-                slowing=job.preset_key == "slowmo",
-            )
+            problems = join_problems(job.clips,
+                                     re_encoding=job.preset_key != "remux")
             if problems:
                 return False, "Cannot join these clips: " + "; ".join(problems)
 

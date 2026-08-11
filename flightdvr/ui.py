@@ -64,7 +64,8 @@ from .media import (
 )
 from .presets import (
     PRESETS, ExportSettings, describe_join_problems, estimate_output_size,
-    join_problems, output_path, output_runtime, templated_output_path,
+    join_problems, output_path, output_runtime, slow_problems,
+    templated_output_path,
 )
 from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
@@ -2261,6 +2262,22 @@ class MainWindow(QMainWindow):
                     f"Nothing has been queued.\n\n{exc}",
                 )
                 return
+
+            # Refused before a single target is rendered, and for the whole
+            # action: a clip whose rate could not be read cannot be slowed
+            # without guessing how many frames it holds, and the guess is not
+            # small — on a 90 fps recording it dropped 119 frames of 360 and
+            # reported success. The joined branch asks the same question
+            # through join_problems.
+            if key == "slowmo":
+                unslowable = slow_problems(clips)
+                if unslowable:
+                    QMessageBox.warning(
+                        self, "These clips cannot be slowed",
+                        "Nothing has been queued, because "
+                        + "; ".join(unslowable) + ".",
+                    )
+                    return
 
             session_name = self.session.title if self.session else ""
             planned = []

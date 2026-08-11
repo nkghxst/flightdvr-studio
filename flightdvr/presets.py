@@ -607,6 +607,42 @@ def join_filtergraph(
     return ";".join(chains), video_label, "[ja]" if want_audio else ""
 
 
+def slow_problems(clips: list[ClipInfo]) -> list[str]:
+    """Why this footage cannot keep the one-frame-once promise, in words a
+    pilot can act on.
+
+    A rate nobody could read is not a small gap: `slow_output_rate` falls back
+    to 60 so that nothing divides by zero, and on a 90 fps recording that guess
+    silently throws away a third of the frames. Measured — 360 frames in, 241
+    out over 8.033 s, reported as a successful export.
+
+    Refusing is the same answer this gives a mixed-rate assembly, and for the
+    same reason: every other preset may reasonably guess, because none of them
+    promises to keep every frame.
+    """
+    problems: list[str] = []
+
+    unreadable = [c for c in clips if not c.fps]
+    if unreadable:
+        listed = ", ".join(c.path.name for c in unreadable[:3])
+        problems.append(
+            f"the frame rate of {len(unreadable)} of them could not be read "
+            f"({listed}), so there is no way to slow them without guessing "
+            "how many frames they hold"
+        )
+
+    rates = sorted({c.fps for c in clips if c.fps})
+    if len(rates) > 1:
+        spoken = " and ".join(f"{rate:g}" for rate in rates)
+        problems.append(
+            f"they were recorded at different frame rates ({spoken} fps), "
+            "and slow motion shows every recorded frame once — putting them "
+            "on one rate would have to invent frames for the slower clips or "
+            "throw away frames from the faster ones"
+        )
+    return problems
+
+
 def join_problems(clips: list[ClipInfo], re_encoding: bool = True,
                   slowing: bool = False) -> list[str]:
     """Why these clips cannot be joined into one file, in words a pilot can act on.
@@ -656,28 +692,12 @@ def join_problems(clips: list[ClipInfo], re_encoding: bool = True,
         problems.append(f"{len(empty)} of them are empty or trimmed to nothing ({listed})")
 
     if slowing:
-        # Refused rather than normalised, which is the choice #59 leaves open.
-        # Normalising to the lowest rate would throw away frames the faster
-        # clips recorded; normalising to the highest invents frames for the
-        # slower ones. Either breaks the one promise the preset makes, and a
-        # documented common rate cannot be honest about both clips at once.
-        unreadable_rate = [c for c in clips if not c.fps]
-        if unreadable_rate:
-            listed = ", ".join(c.path.name for c in unreadable_rate[:3])
-            problems.append(
-                f"the frame rate of {len(unreadable_rate)} of them could not "
-                f"be read ({listed}), so there is no way to slow them without "
-                "guessing how many frames they hold"
-            )
-        rates = sorted({c.fps for c in clips if c.fps})
-        if len(rates) > 1:
-            spoken = " and ".join(f"{rate:g}" for rate in rates)
-            problems.append(
-                f"they were recorded at different frame rates ({spoken} fps), "
-                "and slow motion shows every recorded frame once — putting "
-                "them on one rate would have to invent frames for the slower "
-                "clips or throw away frames from the faster ones"
-            )
+        # One definition, used here for an assembly and directly for a single
+        # clip. Refused rather than normalised, which is the choice #59 leaves
+        # open: normalising to the lowest rate throws away frames the faster
+        # clips recorded, and normalising to the highest invents frames for the
+        # slower ones, so no documented common rate is honest about both.
+        problems += slow_problems(clips)
 
     if re_encoding:
         return problems

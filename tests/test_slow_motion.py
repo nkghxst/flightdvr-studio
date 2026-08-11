@@ -38,7 +38,7 @@ from flightdvr.media import ClipInfo, Tools  # noqa: E402
 from flightdvr.presets import (  # noqa: E402
     PRESETS, SLOW_FACTOR, SLOW_SIZE_FACTOR, ExportSettings, build_commands,
     describe_join_problems, estimate_output_size, join_problems,
-    output_runtime, slow_output_rate, templated_output_path,
+    output_runtime, slow_output_rate, slow_problems, templated_output_path,
 )
 
 TOOLS = Tools(Path("ffmpeg"), Path("ffprobe"))
@@ -123,8 +123,59 @@ def test_the_source_rate_is_never_used_as_the_output_rate():
 
 def test_a_clip_with_no_readable_rate_still_produces_a_usable_command():
     """fps is 0 when ffprobe could not tell us, and a nameless division is how
-    that becomes a crash mid-queue rather than a sensible default."""
+    that becomes a crash mid-queue rather than a sensible default.
+
+    The fallback keeps the arithmetic total; it is not permission to export.
+    Nothing reaches this without passing `slow_problems` first, because the
+    guess is wrong by a third on a 90 fps recording.
+    """
     assert slow_output_rate([boxpro_clip(fps=0.0)]) == 60.0 / SLOW_FACTOR
+
+
+def test_a_rate_nobody_could_read_is_refused_rather_than_guessed():
+    """Measured before it was refused: a 90 fps recording whose rate came back
+    unreadable exported 241 frames of 360 over 8.033 s, and reported success.
+    The 60 fps fallback is a guess, and this preset does not get to guess."""
+    problems = slow_problems([boxpro_clip(fps=0.0)])
+    assert problems, "a rate nobody could read was slowed anyway"
+    assert "could not be read" in problems[0]
+    # and a clip that was read is left alone
+    assert slow_problems([boxpro_clip(fps=90.0)]) == []
+
+
+def test_the_worker_refuses_a_single_unreadable_clip_too(tmp_path):
+    """One clip, so the join check never runs — this is the route the earlier
+    guard missed entirely."""
+    from flightdvr.jobs import ExportWorker, Job
+
+    target = tmp_path / "blind_slow.mp4"
+    job = Job(clips=[boxpro_clip(fps=0.0)], preset_key="slowmo",
+              settings=ExportSettings(), out_path=target)
+    ok, message = ExportWorker(Tools(Path("ffmpeg"), Path("ffprobe")), [job],
+                              tmp_path)._run_job(0, job)
+    assert not ok
+    assert "could not be read" in message, message
+    assert not target.exists()
+
+
+def test_the_queue_refuses_an_unreadable_rate_before_rendering_a_target(
+        window, monkeypatch):
+    """Through the window, and for the whole action rather than clip by clip."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda *args, **kw: warned.append(args[2]))
+
+    window.export_panel.preset_buttons["slowmo"].setChecked(True)
+    window._add_clip(window._scan_generation, queued_clip(fps=0.0))
+    window.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    window.jobs.clear()
+    window._add_to_queue()
+
+    assert window.jobs == [], "an unslowable clip was queued"
+    assert warned and "could not be read" in warned[0], warned
 
 
 # -- sound, which is not slowed ----------------------------------------------
