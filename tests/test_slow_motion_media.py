@@ -164,6 +164,24 @@ def test_ninety_frames_a_second_becomes_forty_five(tools, tmp_path, clip_at_90):
     assert rate == pytest.approx(45.0, abs=1.5), f"{rate:.2f} fps"
 
 
+def legacy_vsync_accepted(tools) -> bool:
+    """Whether this ffmpeg still takes the pre-5.1 spelling at all.
+
+    Asked rather than assumed, because the answer changed twice: `-fps_mode`
+    arrived in 5.1, and `-vsync` has since been *removed* — a current Windows
+    build rejects it outright with "Unrecognized option 'vsync'". So the legacy
+    half of this test can only run where the legacy option exists, and the app
+    is right to ask `frame_rate_mode()` rather than pick one.
+    """
+    done = subprocess.run(
+        [str(tools.ffmpeg), "-hide_banner", "-nostdin", "-f", "lavfi",
+         "-i", "testsrc2=size=64x64:rate=30:duration=0.1",
+         "-vsync", "cfr", "-frames:v", "1", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    return "Unrecognized option" not in done.stderr
+
+
 @pytest.mark.parametrize("fps_mode_supported", [True, False])
 def test_both_ffmpeg_spellings_preserve_the_frame_count(tools, clip, tmp_path,
                                                         source_facts,
@@ -174,8 +192,17 @@ def test_both_ffmpeg_spellings_preserve_the_frame_count(tools, clip, tmp_path,
     Asserted by running both against real media rather than by inspecting the
     arguments: the two spellings could plausibly differ in behaviour, and a
     distribution shipping the older one would be the last to find out.
+
+    The legacy half is skipped where the legacy option no longer exists. That
+    is not a gap being papered over — forcing `-vsync` onto a build that has
+    removed it tests nothing about this app, which asks which spelling the
+    installed ffmpeg takes and would never send that combination. The
+    argument-level pairing is pinned without ffmpeg in test_slow_motion.py.
     """
     from flightdvr import media
+
+    if not fps_mode_supported and not legacy_vsync_accepted(tools):
+        pytest.skip("this ffmpeg has removed -vsync, so it cannot be measured")
 
     monkeypatch.setattr(media, "_fps_mode_supported",
                         lambda _, v=fps_mode_supported: v)
