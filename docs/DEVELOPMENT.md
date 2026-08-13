@@ -82,6 +82,16 @@ Windows.
 | `flightdvr/scan.py` | Drive detection, clip discovery, copying off the card |
 | `flightdvr/thumbs.py` | Thumbnail extraction and caching |
 | `flightdvr/trim.py` | Filmstrip extraction and the scrubbing bar widget |
+| `flightdvr/motion.py` | Which parts of a recording are flying, from frames decoded anyway |
+| `flightdvr/player.py` | In-window playback through ffmpeg, and the picture trims are set on |
+| `flightdvr/stills.py` | The paused preview frame, extracted at full resolution |
+| `flightdvr/session.py` | Review states, trims and settings, written down per card |
+| `flightdvr/format.py` | Values into strings and paths. Pure functions, no Qt |
+| `flightdvr/external.py` | Handing a clip to a player that can decode it |
+| `flightdvr/updates.py` | The only network call: whether a newer release exists |
+| `flightdvr/shortcuts.py` | What the keyboard does, grouped by what must have focus |
+| `flightdvr/workers.py` | The threads that keep the window responsive, and the copy dialog |
+| `flightdvr/widgets.py` | Small reusable widgets and the measurements that shape the window |
 | `flightdvr/browser_panel.py` | Clip table construction and thumbnail sizing |
 | `flightdvr/preview_panel.py` | Preview, transport controls and filmstrip view |
 | `flightdvr/export_panel.py` | Export controls, settings and source-derived choices |

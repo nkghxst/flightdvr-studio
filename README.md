@@ -367,9 +367,12 @@ mismatched set, because copying without re-encoding cannot change anything.
 | **Master** | H.264 `.mp4`, quality-based | 11 GB/hour | archiving, sending to editors online |
 | **Social** | H.264 `.mp4`, size-targeted | you choose | WhatsApp, Instagram, Discord |
 | **Upload** | H.264 `.mp4` at 1080p or above | 20 GB/hour | YouTube, Instagram, Reddit |
+| **Vertical** | H.264 `.mp4`, 9:16 crop | 11 GB/hour | Reels, Shorts, TikTok, sending to a phone |
 | **Remux** | `.ts` → `.mp4`, no re-encode | same as source | instant lossless rewrap |
+| **Slow motion** | H.264 `.mp4` at half speed | 18 GB/hour | showing the moment something went wrong |
 
-Sizes are for 720p60; other resolutions are scaled accordingly.
+Sizes are for 720p60; other resolutions are scaled accordingly. Slow motion is
+per hour of *recording* — the file it writes runs for two.
 
 **Edit** exists because the free version of DaVinci Resolve on Windows cannot
 decode H.265, so the original files cannot go on a timeline at all. Mezzanine
@@ -396,6 +399,29 @@ not offered.
 **Social** hits an exact file size using a two-pass encode, landing within about
 one percent of the number you ask for. It can also downscale and halve the frame
 rate. Only sizes smaller than the source are offered, so it never upscales.
+
+**Vertical** crops a 9:16 slice out of the recording for phone feeds. It crops
+rather than padding, so the picture fills the screen instead of sitting in a
+letterbox — and because a 16:9 recording is much wider than 9:16 is, *which*
+slice you keep is a real decision. A slider chooses it from left to right, or
+drag the crop on the preview itself; the shaded area is what will be thrown
+away.
+
+The frame it takes is the largest exact 9:16 rectangle in the source. A 720p60
+recording gives a 396×704 crop, delivered at 720×1280; a 1080p one gives
+594×1056 at 1080×1920. That costs eight lines top and bottom at 720p, which is
+the price of an exactly square pixel: the alternative that keeps the full height
+is 0.25% out, and ffmpeg hides that difference in a sample-aspect flag rather
+than in the picture, so it looks correct until a platform ignores the flag.
+Taking the eight lines is the version that is true everywhere.
+
+A source too narrow to hold a 9:16 crop is refused with both numbers rather than
+padded with bars.
+
+Worth knowing before you use it: **the goggle OSD lives at the edges of the
+frame**, so a vertical crop cuts off the timer, battery and warnings at the
+sides. That is unavoidable in a 9:16 slice of a 16:9 recording, and the preview
+shows exactly what goes.
 
 **Keep the audio track** can be turned off on any preset. DVR audio is mostly
 motor noise and wind, and dropping it buys bitrate on a size-targeted export.
@@ -651,7 +677,7 @@ Where this is going next — and what it deliberately will not do — is in
 |---|---|---|
 | Media and export | `media.py`, `presets.py`, `jobs.py` | ffmpeg discovery, probing, export commands and the worker queue |
 | Browsing and analysis | `scan.py`, `thumbs.py`, `trim.py`, `motion.py` | clip discovery, cached frames, trimming and flight readings |
-| Playback and decisions | `player.py`, `session.py` | bounded in-window playback and saved review decisions |
+| Playback and decisions | `player.py`, `stills.py`, `session.py` | bounded in-window playback, full-resolution stills and saved review decisions |
 | Interface | `browser_panel.py`, `preview_panel.py`, `export_panel.py`, `queue_panel.py`, `ui.py` | panel-local behaviour and cross-panel workflows |
 
 The module-by-module layout is maintained in
