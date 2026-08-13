@@ -36,6 +36,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass, field
+from uuid import uuid4
 from datetime import datetime
 from pathlib import Path
 
@@ -56,7 +57,7 @@ RECENT_LIMIT = 12
 # get wrong. `_migrate` is where old versions become current ones, and there is
 # a test for every step it knows about, because this file will outlive several
 # of its own formats.
-SCHEMA = 2
+SCHEMA = 3
 
 UNREVIEWED, KEEP, MAYBE, REJECT = "", "keep", "maybe", "reject"
 REVIEW_STATES = (UNREVIEWED, KEEP, MAYBE, REJECT)
@@ -243,7 +244,10 @@ def apply_to(session: Session, clips) -> int:
         # hold the same Select objects, and editing a trim would rewrite the
         # stored one before anything decided to save it — which is fine until
         # something wants to know what changed.
-        clip.selects = [Select(max(0.0, s.start), s.end, s.name)
+        # The id comes across with the range. Copying start, end and name
+        # alone would mint a new identity on every reopen, which is the one
+        # thing a stable id must not do.
+        clip.selects = [Select(max(0.0, s.start), s.end, s.name, sid=s.sid)
                         for s in marks.selects]
         clip.current = 0
         restored += 1
@@ -285,7 +289,8 @@ def capture_from(session: Session, clips) -> None:
         review = (clip.review if clip.review in REVIEW_STATES else UNREVIEWED)
         if ranges or review:
             marks = session.marks(clip.fingerprint, clip.path.name)
-            marks.selects = [Select(s.start, s.end, s.name) for s in ranges]
+            marks.selects = [Select(s.start, s.end, s.name, sid=s.sid)
+                             for s in ranges]
             marks.review = review
         else:
             marks = session.clips.get(clip.fingerprint)
@@ -420,4 +425,23 @@ def _migrate(raw: dict) -> dict:
         # answer for a card reviewed before they existed. The step is written
         # out rather than skipped so the ladder stays a ladder.
         raw = dict(raw, schema=2)
+        version = 2
+    if version == 2:
+        # Ranges gain identity. This is the step that earns the schema bump:
+        # an ordered assembly refers to ranges, and until now the only way to
+        # name one was its position in a list that editing reorders.
+        #
+        # Position *is* the only information a version 2 document holds, so it
+        # is what identity is assigned from — but only once, here, and never
+        # consulted again. Order is deliberately untouched: a card reviewed
+        # last week must come back joined exactly as it was left.
+        raw = dict(raw, schema=3, clips={
+            fingerprint: dict(marks, selects=[
+                dict(select, id=str(select.get("id") or uuid4().hex[:12]))
+                for select in (marks.get("selects") or [])
+                if isinstance(select, dict)
+            ])
+            for fingerprint, marks in (raw.get("clips") or {}).items()
+            if isinstance(marks, dict)
+        })
     return raw
