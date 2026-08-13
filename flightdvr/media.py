@@ -33,6 +33,7 @@ import sys
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from fractions import Fraction
+from uuid import uuid4
 from pathlib import Path
 
 # One rule for what counts as the same path, shared with the session so
@@ -281,6 +282,14 @@ class Select:
     end: float
     name: str = ""
 
+    # Identity, so an ordered assembly can name *this* range and still mean it
+    # after the range is renamed, retrimmed, or has an earlier sibling deleted.
+    # Position cannot do that job: removing range 1 would quietly retarget an
+    # assembly item pointing at range 2, and the export would be wrong in a way
+    # that only shows up on watching it. A fresh value per range rather than a
+    # counter, because a counter has to remember which numbers it has retired.
+    sid: str = field(default_factory=lambda: uuid4().hex[:12])
+
     @property
     def duration(self) -> float:
         return max(0.0, self.end - self.start)
@@ -288,13 +297,19 @@ class Select:
     def as_dict(self) -> dict:
         return {"start": round(self.start, 3),
                 "end": round(self.end, 3),
-                "name": self.name}
+                "name": self.name,
+                "id": self.sid}
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Select":
+        # A missing id means a document older than schema 3 that reached here
+        # without the migration, so generate rather than refuse: the range is
+        # real and losing it would be worse than giving it a new identity.
+        stored = str(raw.get("id", "")).strip()
         return cls(start=float(raw.get("start", 0.0)),
                    end=float(raw.get("end", 0.0)),
-                   name=str(raw.get("name", "")))
+                   name=str(raw.get("name", "")),
+                   **({"sid": stored} if stored else {}))
 
 
 @dataclass
@@ -402,7 +417,9 @@ class ClipInfo:
         # The Select is copied, not just the list holding it. A queued job
         # keeps its clip until it runs, and sharing the range meant adjusting a
         # select afterwards silently changed an export already in the queue.
-        return [replace(self, selects=[Select(one.start, one.end, one.name)],
+        return [replace(self,
+                        selects=[Select(one.start, one.end, one.name,
+                                        sid=one.sid)],
                         current=0)
                 for one in ranges]
 

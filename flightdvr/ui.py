@@ -70,6 +70,7 @@ from .presets import (
 from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
 from .queue_panel import QueuePanel
+from .assembly import absent, default_items, export_piece, present, resolve
 from .session import (
     REVIEW_STATES, SUFFIX as SESSION_SUFFIX, UNREVIEWED, Session,
     apply_settings, apply_to, capture_from, capture_settings, for_source,
@@ -690,6 +691,9 @@ class MainWindow(QMainWindow):
         panel = self.export_panel = ExportPanel(self)
         panel.preset_changed.connect(self._on_preset_changed)
         panel.settings_changed.connect(self._on_export_settings_changed)
+        panel.assembly_panel.fill_requested.connect(self._fill_assembly)
+        panel.assembly_panel.order_changed.connect(self._capture_assembly)
+        panel.assembly_panel.export_requested.connect(self._add_to_queue)
         self.frame_view.vertical_position_changed.connect(
             panel.set_vertical_position
         )
@@ -847,6 +851,9 @@ class MainWindow(QMainWindow):
             self._load_selected_clip()
         self._update_estimate()
         self._refresh_review_controls()
+        # After the trims, because the assembly names ranges and the ranges
+        # only exist once apply_to has put them back on the clips.
+        self._refresh_assembly()
 
         notes = []
         if restored:
@@ -2313,21 +2320,41 @@ class MainWindow(QMainWindow):
     def _update_estimate(self) -> None:
         if not self._ready:
             return
+        # An estimate for something other than what will be exported is worse
+        # than none: it reads as a promise about the job you are about to
+        # queue. When there is an assembly, it is the job, so it is what gets
+        # measured — ticks included nothing and excluded nothing.
+        if self.export_panel.join_enabled():
+            pieces, gaps = self._assembly_export_pieces()
+            if gaps or len(pieces) < 2:
+                self.export_panel.set_estimate(
+                    "The assembly cannot be exported yet."
+                    if gaps else
+                    "Add another range to the assembly to join it."
+                )
+                return
+            self._show_estimate(pieces, joined=True)
+            return
+
         clips = self.selected_clips()
         if not clips:
             self.export_panel.set_estimate(
                 "Tick some clips to see an estimated output size."
             )
             return
-        settings = self.current_settings()
-        key = self._preset_key()
         # Estimated over the same pieces the queue will actually make, so a
         # clip with three selects reads as three files rather than one, and
         # the size is the three ranges rather than the whole recording.
-        pieces = [piece for clip in clips for piece in clip.for_export()]
+        self._show_estimate(
+            [piece for clip in clips for piece in clip.for_export()],
+            joined=False)
+
+    def _show_estimate(self, pieces, joined: bool) -> None:
+        settings = self.current_settings()
+        key = self._preset_key()
         total = sum(estimate_output_size(c, key, settings) for c in pieces)
 
-        if self.export_panel.join_enabled() and len(pieces) > 1:
+        if joined and len(pieces) > 1:
             if key == "social" and settings.social_mode == "size":
                 total = settings.social_size_mb * 1024 * 1024
             summary = f"1 joined file, about {human_size(total)}"
@@ -2349,10 +2376,41 @@ class MainWindow(QMainWindow):
     # -- queue ----------------------------------------------------------------
 
     def _add_to_queue(self) -> None:
-        clips = self.selected_clips()
-        if not clips:
-            QMessageBox.warning(self, "Nothing ticked", "Tick at least one clip first.")
-            return
+        # A filled assembly names its own material, so it is resolved once,
+        # here, and the same pieces then answer every question below —
+        # validation, estimate, runtime and the queue itself. Deriving any of
+        # those from the ticked rows instead let an unrelated clip on the card
+        # refuse an assembly that was perfectly valid.
+        assembling = self.export_panel.join_enabled()
+        if assembling:
+            pieces, gaps = self._assembly_export_pieces()
+            if gaps:
+                QMessageBox.warning(
+                    self, "The assembly refers to material that is not here",
+                    "Nothing has been queued.\n\n"
+                    + "\n".join(f"• {a}" for a in gaps)
+                    + "\n\nRemove those rows, or rescan the card if the "
+                      "footage should still be there.",
+                )
+                return
+            if len(pieces) < 2:
+                QMessageBox.warning(
+                    self, "Not enough in the assembly",
+                    "An assembly needs at least two ranges to be worth "
+                    "joining. Use Add to queue for a single range.",
+                )
+                return
+        else:
+            clips = self.selected_clips()
+            if not clips:
+                QMessageBox.warning(
+                    self, "Nothing ticked", "Tick at least one clip first.")
+                return
+            # One clip with three selects becomes three ordinary clips here,
+            # and everything below carries on believing a recording has one in
+            # point and one out point.
+            pieces = [piece for clip in clips for piece in clip.for_export()]
+
         out_dir = Path(self.export_panel.output_text().strip())
         if not str(out_dir).strip():
             QMessageBox.warning(self, "No output folder", "Choose where the exports should go.")
@@ -2371,12 +2429,6 @@ class MainWindow(QMainWindow):
         before = len(self.jobs)
 
         # One clip with three selects becomes three ordinary clips here, and
-        # everything below this line carries on believing a recording has one
-        # in point and one out point. Joining comes free: join_inputs already
-        # takes a list of clips each carrying its own trim, so three selects of
-        # one flight join exactly as three separate clips would.
-        pieces = [piece for clip in clips for piece in clip.for_export()]
-
         # Refuse before rendering names or creating concat files. The worker
         # repeats this named check because jobs can reach it by another route,
         # but a pilot choosing Vertical should hear about a narrow source now,
@@ -2391,11 +2443,10 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-        if self.export_panel.join_enabled() and len(pieces) > 1:
-            # Joined in DVR counter order: the file timestamps cannot be
-            # trusted. Selects of one clip keep the order they were made in,
-            # which is the order they appear along the recording.
-            ordered = sorted(pieces, key=self._join_rank)
+        if assembling:
+            # Already resolved, in the order the list shows. The pieces that
+            # were validated above are the pieces that get joined.
+            ordered = pieces
 
             # Refused rather than exported wrongly. A join built from mismatched
             # clips does not fail; it produces a file that is silent after the
@@ -2553,26 +2604,68 @@ class MainWindow(QMainWindow):
             note += f", {skipped} already in the queue"
         self.statusBar().showMessage(note, 5000)
 
-    def _join_rank(self, piece) -> tuple:
-        """Where a piece goes in a joined export.
+    def _assembly_rows(self):
+        """The assembly resolved against every clip on the card.
 
-        The session's order first, when it has an opinion about this clip. That
-        is the whole point of storing it: DVR counter order is a sensible
-        default and not always the one somebody chose.
-
-        Anything the stored order has never heard of — a clip added since, or a
-        session written before the field existed — sorts after the remembered
-        ones by counter, which is exactly what happened before there was an
-        order to remember. Selects of one clip stay in the order they occur
-        along the recording.
+        Deliberately not `selected_clips()`. Once the list has something in it
+        the assembly is both the order *and* the content, so a browser tick is
+        not an input to this decision — unticking a source used to downgrade a
+        two-item join into one ordinary single-clip job with no warning at all.
         """
-        remembered = self.session.join_order if self.session else []
-        try:
-            position = remembered.index(piece.fingerprint)
-        except ValueError:
-            position = len(remembered)
-        return (position, piece.sequence, natural_key(piece.path.name),
-                piece.trim_in)
+        # From the panel, not the session. What the list shows is what gets
+        # encoded, and a folder opened before any session exists still has a
+        # list — reading the session instead made the export silently find
+        # nothing to do and stop with "not enough in the assembly".
+        names = ({f: m.name for f, m in self.session.clips.items()}
+                 if self.session else {})
+        return resolve(self.export_panel.assembly_panel.items(),
+                       self.clips, names)
+
+    def _assembly_export_pieces(self) -> tuple[list, list[str]]:
+        """What the assembly contributes to the queue, in the order shown.
+
+        Built from what each row *means* rather than from `for_export()`. That
+        expansion turns a clip into its selects, so a row naming the whole
+        recording disappeared the moment that recording gained a range, and
+        the export reported its own material missing.
+        """
+        rows = self._assembly_rows()
+        gaps = [r.remembered or "a range that is no longer on this card"
+                for r in absent(rows)]
+        if gaps:
+            return [], gaps
+        return [export_piece(r) for r in present(rows)], []
+
+    def _fill_assembly(self) -> None:
+        """Put the ticked ranges into the list, in the default order."""
+        self._store_assembly(default_items(self.selected_clips()))
+
+    def _store_assembly(self, items) -> None:
+        """Set the list and schedule the write.
+
+        Filling and resetting change the stored assembly exactly as reordering
+        does, and only reordering used to say so. A close happened to flush it,
+        which is not the same as being saved.
+        """
+        if self.session is not None:
+            self.session.assembly = list(items)
+        self._refresh_assembly(items)
+        self._touch_session()
+
+    def _capture_assembly(self) -> None:
+        """Take the order back from the list after somebody rearranged it."""
+        if self.session is not None:
+            self.session.assembly = self.export_panel.assembly_panel.items()
+        self._touch_session()
+
+    def _refresh_assembly(self, items=None) -> None:
+        """Resolve the stored list against the clips currently in front of us."""
+        stored = (list(items) if items is not None
+                  else (self.session.assembly if self.session else []))
+        names = ({f: m.name for f, m in self.session.clips.items()}
+                 if self.session else {})
+        self.export_panel.assembly_panel.show_rows(
+            resolve(stored, self.clips, names))
 
     def _rebuild_queue(self) -> None:
         # The single funnel for anything that changes the queue, so this is

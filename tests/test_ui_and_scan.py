@@ -1360,7 +1360,7 @@ def test_export_widgets_do_not_leak_onto_the_main_window(window):
     to MainWindow, so changing an option page changed the window's API."""
     assert hasattr(window, "export_panel")
     for name in ("master_quality", "social_mode", "upload_height",
-                 "edit_codec_combo", "colour_combo", "join_check"):
+                 "edit_codec_combo", "colour_combo", "assembly_panel"):
         assert not hasattr(window, name), name
 
 

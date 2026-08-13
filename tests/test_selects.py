@@ -212,7 +212,10 @@ def queue_up(window, clips, join=False):
         window._add_clip(window._scan_generation, clip)
     for row in range(window.table.rowCount()):
         window.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
-    window.export_panel.join_check.setChecked(join)
+    # Joining is now the assembly: fill it from the ticked ranges, which
+    # is exactly what the panel's own button does.
+    if join:
+        window._fill_assembly()
     window.jobs.clear()
     window._add_to_queue()
     return window.jobs
@@ -262,7 +265,7 @@ def test_a_joined_export_keeps_the_name_it_always_had(window):
         assert len(jobs) == 1
         assert jobs[0].out_path.name == "hdz_047_joined_master.mp4",             jobs[0].out_path.name
     finally:
-        window.export_panel.join_check.setChecked(False)
+        window.export_panel.assembly_panel.list.clear()
 
 
 def test_a_joined_export_is_named_by_the_template_too(window, monkeypatch):
@@ -288,7 +291,7 @@ def test_a_joined_export_is_named_by_the_template_too(window, monkeypatch):
         assert jobs[0].out_path.name == "review-hdz_047_joined_master.mp4", (
             jobs[0].out_path.name)
     finally:
-        window.export_panel.join_check.setChecked(False)
+        window.export_panel.assembly_panel.list.clear()
 
 
 def test_a_template_windows_cannot_write_queues_nothing(window, monkeypatch):
