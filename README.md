@@ -450,8 +450,8 @@ audio over slowed video drifts apart within seconds.
 It refuses a clip whose frame rate cannot be read, and a joined set recorded at
 different rates. Every other preset may reasonably guess at a rate; this is the
 only one that promises to keep every frame exactly once, and neither case can
-keep that promise without inventing or discarding frames. An unreadable rate is
-not a small gap — the fallback of 60 silently threw away a third of the frames
+keep that promise without inventing or discarding frames. That refusal is worth
+having: before it existed, falling back to 60 threw away a third of the frames
 of a 90 fps recording and reported a successful export.
 
 **Keep the audio track** can be turned off on any preset. DVR audio is mostly
@@ -517,9 +517,10 @@ cover every case without leaving gaps: an untitled single range is
 blank, is just `hdz_048`.
 
 A template names a file, never a folder — the Output box still decides where it
-is written. Slashes, unknown fields, unpaired braces and names the operating
-system will not accept are refused when you type them rather than at the point
-of export.
+is written. Slashes, unknown fields, unpaired braces and characters the
+operating system will not accept are reported as you type; the finished name is
+checked again before anything is queued, which is what catches a reserved name
+that only appears once the fields are filled in.
 
 ### What it will not do quietly
 
