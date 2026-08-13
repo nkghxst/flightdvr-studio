@@ -667,3 +667,54 @@ def test_filling_the_assembly_schedules_the_save(app, sessions_home, card):
     window.export_panel.assembly_panel.fill_requested.emit()
     assert window._session_timer.isActive(), "Default order did not schedule a save"
     close(window)
+
+
+def test_an_unrelated_narrow_clip_cannot_refuse_a_valid_assembly(
+        app, sessions_home, card, monkeypatch):
+    """Sol's re-review finding: validation and the estimate came from the ticks.
+
+    A 300-pixel-wide recording sitting on the same card has nothing to do with
+    an assembly of two wide ones, but the Vertical check ran over whatever the
+    browser had — so it refused the assembly and named a clip that was not in
+    it. The estimate had the same fault from the other side: with nothing
+    ticked it said to tick something, while a perfectly exportable assembly sat
+    on screen.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    said = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: said.append(a[2]))
+
+    one, two = a_clip("hdz_001.ts"), a_clip("hdz_002.ts")
+    narrow = a_clip("hdz_003.ts")
+    narrow.width, narrow.height = 300, 720
+    window = open_window(app, card, [one, two, narrow])
+    window.export_panel.out_edit.setCurrentText(str(sessions_home / "out"))
+
+    # An assembly of the two wide recordings only.
+    for row in range(window.table.rowCount()):
+        item = window.table.item(row, 0)
+        name = window.clip_by_path.get(item.data(Qt.ItemDataRole.UserRole))
+        if name is not None and name.path.name != "hdz_003.ts":
+            item.setCheckState(Qt.CheckState.Checked)
+    window._fill_assembly()
+    assert len(window.export_panel.assembly_panel.items()) == 2
+
+    # Nothing ticked at all, and Vertical selected.
+    for row in range(window.table.rowCount()):
+        window.table.item(row, 0).setCheckState(Qt.CheckState.Unchecked)
+    window.export_panel.preset_buttons["vertical"].setChecked(True)
+    window._on_preset_changed()
+
+    estimate = window.export_panel.estimate_label.text()
+    assert "Tick some clips" not in estimate, estimate
+
+    window.jobs.clear()
+    window._add_to_queue()
+
+    assert said == [], f"refused a valid assembly: {said}"
+    assert len(window.jobs) == 1, [j.out_path.name for j in window.jobs]
+    assert [c.path.name for c in window.jobs[0].clips] == [
+        "hdz_001.ts", "hdz_002.ts"]
+    close(window)

@@ -2320,21 +2320,41 @@ class MainWindow(QMainWindow):
     def _update_estimate(self) -> None:
         if not self._ready:
             return
+        # An estimate for something other than what will be exported is worse
+        # than none: it reads as a promise about the job you are about to
+        # queue. When there is an assembly, it is the job, so it is what gets
+        # measured — ticks included nothing and excluded nothing.
+        if self.export_panel.join_enabled():
+            pieces, gaps = self._assembly_export_pieces()
+            if gaps or len(pieces) < 2:
+                self.export_panel.set_estimate(
+                    "The assembly cannot be exported yet."
+                    if gaps else
+                    "Add another range to the assembly to join it."
+                )
+                return
+            self._show_estimate(pieces, joined=True)
+            return
+
         clips = self.selected_clips()
         if not clips:
             self.export_panel.set_estimate(
                 "Tick some clips to see an estimated output size."
             )
             return
-        settings = self.current_settings()
-        key = self._preset_key()
         # Estimated over the same pieces the queue will actually make, so a
         # clip with three selects reads as three files rather than one, and
         # the size is the three ranges rather than the whole recording.
-        pieces = [piece for clip in clips for piece in clip.for_export()]
+        self._show_estimate(
+            [piece for clip in clips for piece in clip.for_export()],
+            joined=False)
+
+    def _show_estimate(self, pieces, joined: bool) -> None:
+        settings = self.current_settings()
+        key = self._preset_key()
         total = sum(estimate_output_size(c, key, settings) for c in pieces)
 
-        if self.export_panel.join_enabled() and len(pieces) > 1:
+        if joined and len(pieces) > 1:
             if key == "social" and settings.social_mode == "size":
                 total = settings.social_size_mb * 1024 * 1024
             summary = f"1 joined file, about {human_size(total)}"
@@ -2356,16 +2376,41 @@ class MainWindow(QMainWindow):
     # -- queue ----------------------------------------------------------------
 
     def _add_to_queue(self) -> None:
-        clips = self.selected_clips()
-        # A filled assembly already names its material, so the ticks are not
-        # what is being exported and their absence is not an error. Asking
-        # somebody to re-tick rows they have already arranged into a list would
-        # be asking them to say the same thing twice.
-        if not clips and self.export_panel.join_enabled():
-            clips = self.clips
-        if not clips:
-            QMessageBox.warning(self, "Nothing ticked", "Tick at least one clip first.")
-            return
+        # A filled assembly names its own material, so it is resolved once,
+        # here, and the same pieces then answer every question below —
+        # validation, estimate, runtime and the queue itself. Deriving any of
+        # those from the ticked rows instead let an unrelated clip on the card
+        # refuse an assembly that was perfectly valid.
+        assembling = self.export_panel.join_enabled()
+        if assembling:
+            pieces, gaps = self._assembly_export_pieces()
+            if gaps:
+                QMessageBox.warning(
+                    self, "The assembly refers to material that is not here",
+                    "Nothing has been queued.\n\n"
+                    + "\n".join(f"• {a}" for a in gaps)
+                    + "\n\nRemove those rows, or rescan the card if the "
+                      "footage should still be there.",
+                )
+                return
+            if len(pieces) < 2:
+                QMessageBox.warning(
+                    self, "Not enough in the assembly",
+                    "An assembly needs at least two ranges to be worth "
+                    "joining. Use Add to queue for a single range.",
+                )
+                return
+        else:
+            clips = self.selected_clips()
+            if not clips:
+                QMessageBox.warning(
+                    self, "Nothing ticked", "Tick at least one clip first.")
+                return
+            # One clip with three selects becomes three ordinary clips here,
+            # and everything below carries on believing a recording has one in
+            # point and one out point.
+            pieces = [piece for clip in clips for piece in clip.for_export()]
+
         out_dir = Path(self.export_panel.output_text().strip())
         if not str(out_dir).strip():
             QMessageBox.warning(self, "No output folder", "Choose where the exports should go.")
@@ -2384,12 +2429,6 @@ class MainWindow(QMainWindow):
         before = len(self.jobs)
 
         # One clip with three selects becomes three ordinary clips here, and
-        # everything below this line carries on believing a recording has one
-        # in point and one out point. Joining comes free: join_inputs already
-        # takes a list of clips each carrying its own trim, so three selects of
-        # one flight join exactly as three separate clips would.
-        pieces = [piece for clip in clips for piece in clip.for_export()]
-
         # Refuse before rendering names or creating concat files. The worker
         # repeats this named check because jobs can reach it by another route,
         # but a pilot choosing Vertical should hear about a narrow source now,
@@ -2404,27 +2443,10 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-        if self.export_panel.join_enabled():
-            # The assembly is the order, and it is also the content: what the
-            # list shows is what gets encoded. Inferring an order from the
-            # browser is what this replaced.
-            ordered, gaps = self._assembly_export_pieces()
-            if gaps:
-                QMessageBox.warning(
-                    self, "The assembly refers to material that is not here",
-                    "Nothing has been queued.\n\n"
-                    + "\n".join(f"• {a}" for a in gaps)
-                    + "\n\nRemove those rows, or rescan the card if the "
-                      "footage should still be there.",
-                )
-                return
-            if len(ordered) < 2:
-                QMessageBox.warning(
-                    self, "Not enough in the assembly",
-                    "An assembly needs at least two ranges to be worth "
-                    "joining. Use Add to queue for a single range.",
-                )
-                return
+        if assembling:
+            # Already resolved, in the order the list shows. The pieces that
+            # were validated above are the pieces that get joined.
+            ordered = pieces
 
             # Refused rather than exported wrongly. A join built from mismatched
             # clips does not fail; it produces a file that is silent after the
