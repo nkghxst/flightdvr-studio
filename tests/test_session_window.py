@@ -608,3 +608,62 @@ def test_a_reopened_session_brings_the_assembly_back_in_order(
     assert "hdz_002" in rows.list.item(0).text(), rows.list.item(0).text()
     assert "hdz_001" in rows.list.item(1).text(), rows.list.item(1).text()
     close(again)
+
+
+def test_an_unticked_source_cannot_downgrade_the_assembly_export(
+        app, sessions_home, card, monkeypatch):
+    """Sol's finding 1, and the worst of the four.
+
+    The queue built its pieces from the ticked rows and only then looked at the
+    assembly, so unticking one source turned a two-item join into a single
+    ordinary export — no warning, a different file, and a name that looked
+    plausible. Once the list has something in it, a browser tick is not an
+    input to this decision.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    said = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: said.append(a[1]))
+
+    one, two = a_clip("hdz_001.ts"), a_clip("hdz_002.ts")
+    window = open_window(app, card, [one, two])
+    window.export_panel.out_edit.setCurrentText(str(sessions_home / "out"))
+
+    for row in range(window.table.rowCount()):
+        window.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+    window._fill_assembly()
+    assert len(window.export_panel.assembly_panel.items()) == 2
+
+    # Untick everything. The assembly still names both recordings.
+    for row in range(window.table.rowCount()):
+        window.table.item(row, 0).setCheckState(Qt.CheckState.Unchecked)
+
+    window.jobs.clear()
+    window._add_to_queue()
+
+    assert said == [], f"warned instead of exporting the assembly: {said}"
+    assert len(window.jobs) == 1, [j.out_path.name for j in window.jobs]
+    names = [c.path.name for c in window.jobs[0].clips]
+    assert names == ["hdz_001.ts", "hdz_002.ts"], names
+    close(window)
+
+
+def test_filling_the_assembly_schedules_the_save(app, sessions_home, card):
+    """Sol's finding 4. Reordering scheduled the write and filling did not, so
+    the assembly relied on a close happening to flush it."""
+    from PySide6.QtCore import Qt
+
+    one, two = a_clip("hdz_001.ts"), a_clip("hdz_002.ts")
+    window = open_window(app, card, [one, two])
+    for row in range(window.table.rowCount()):
+        window.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+
+    window._session_timer.stop()
+    window._fill_assembly()
+    assert window._session_timer.isActive(), "filling did not schedule a save"
+
+    window._session_timer.stop()
+    window.export_panel.assembly_panel.fill_requested.emit()
+    assert window._session_timer.isActive(), "Default order did not schedule a save"
+    close(window)

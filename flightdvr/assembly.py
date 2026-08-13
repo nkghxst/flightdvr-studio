@@ -31,7 +31,7 @@ file that is not what anybody asked for.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .format import human_duration, natural_key
 from .media import ClipInfo, Select
@@ -58,36 +58,45 @@ class Item:
 
 
 @dataclass
-class Piece:
-    """An item resolved against the clips actually in front of us."""
+class Row:
+    """One entry, resolved or not, in the position the assembly stored it.
+
+    Resolved and missing entries are deliberately the *same* type in one
+    ordered list. They were two lists once, and the panel drew one after the
+    other — which put an interleaved gap at the bottom, and then handed that
+    display order back to be persisted. The stored order was quietly rewritten
+    by the act of looking at it. A single sequence makes that unrepresentable.
+    """
 
     item: Item
-    clip: ClipInfo
-    select: Select
-    number: int             # which range of its own clip, one-based, for display
+    clip: ClipInfo | None = None
+    select: Select | None = None
+    number: int = 1              # which range of its own clip, one-based
+    remembered: str = ""         # the clip's filename, when only the session knows it
+
+    @property
+    def missing(self) -> bool:
+        return self.clip is None or self.select is None
+
+    @property
+    def whole_clip(self) -> bool:
+        """A reference to the recording itself rather than to a range of it."""
+        return not self.item.sid
 
     @property
     def duration(self) -> float:
-        return self.select.duration
+        return self.select.duration if self.select else 0.0
 
     def label(self) -> str:
         """What the row says. The clip always; the range only when it needs it."""
+        if self.missing:
+            name = self.remembered or "a recording that is no longer here"
+            return f"{name}  ·  missing"
         if self.select.name:
             return f"{self.clip.path.name}  ·  {self.select.name}"
         if self.number > 1:
             return f"{self.clip.path.name}  ·  range {self.number}"
         return self.clip.path.name
-
-
-@dataclass
-class Gone:
-    """An item whose material is not here, kept so it can be shown."""
-
-    item: Item
-    name: str               # the clip's filename when the session remembers it
-
-    def label(self) -> str:
-        return f"{self.name or 'a recording that is no longer here'}  ·  missing"
 
 
 def default_items(clips: list[ClipInfo]) -> list[Item]:
@@ -96,7 +105,7 @@ def default_items(clips: list[ClipInfo]) -> list[Item]:
     Counter order rather than timestamp order, because the goggles cannot keep
     time — the same reason the browser sorts that way. Within one recording the
     ranges stay in the order they occur, which is the only order that is not a
-    guess.
+    guess. A clip nobody has trimmed contributes itself, whole.
     """
     ordered: list[Item] = []
     for clip in sorted(clips, key=lambda c: (c.sequence, natural_key(c.path.name))):
@@ -109,51 +118,78 @@ def default_items(clips: list[ClipInfo]) -> list[Item]:
 
 
 def resolve(items: list[Item], clips: list[ClipInfo],
-            names: dict[str, str] | None = None) -> tuple[list[Piece], list[Gone]]:
-    """Turn stored references into the material they name, in stored order.
+            names: dict[str, str] | None = None) -> list[Row]:
+    """Turn stored references into rows, in stored order, resolved or not.
 
-    Anything that cannot be found comes back as `Gone` rather than being
-    dropped. An assembly quietly one item shorter than it was is the failure
-    this design exists to prevent: the export would succeed and be wrong.
+    Nothing is dropped and nothing is moved. An assembly quietly one item
+    shorter than it was, or one item out of order, would export cleanly and be
+    wrong — which is the failure this whole design exists to prevent.
     """
     by_fingerprint = {c.fingerprint: c for c in clips}
     remembered = names or {}
 
-    pieces: list[Piece] = []
-    missing: list[Gone] = []
+    rows: list[Row] = []
     for item in items:
         clip = by_fingerprint.get(item.fingerprint)
         if clip is None:
-            missing.append(Gone(item, remembered.get(item.fingerprint, "")))
+            rows.append(Row(item, remembered=remembered.get(item.fingerprint, "")))
             continue
-        ranges = clip.real_selects
         if not item.sid:
             # The whole recording. Described rather than stored, so retrimming
-            # the clip later changes what this item means — which is right: it
+            # the clip later changes what this row covers — which is right: it
             # means "this recording", and that is still what it is.
-            whole = Select(0.0, clip.duration, "", sid="")
-            pieces.append(Piece(item, clip, whole, 1))
+            rows.append(Row(item, clip, Select(0.0, clip.duration, "", sid=""), 1))
             continue
+        ranges = clip.real_selects
         found = next((s for s in ranges if s.sid == item.sid), None)
         if found is None:
-            missing.append(Gone(item, clip.path.name))
+            rows.append(Row(item, remembered=clip.path.name))
             continue
-        pieces.append(Piece(item, clip, found, ranges.index(found) + 1))
-    return pieces, missing
+        rows.append(Row(item, clip, found, ranges.index(found) + 1))
+    return rows
 
 
-def total_duration(pieces: list[Piece]) -> float:
-    return sum(p.duration for p in pieces)
+def present(rows: list[Row]) -> list[Row]:
+    return [r for r in rows if not r.missing]
 
 
-def summary(pieces: list[Piece], missing: list[Gone]) -> str:
+def absent(rows: list[Row]) -> list[Row]:
+    return [r for r in rows if r.missing]
+
+
+def export_piece(row: Row) -> ClipInfo:
+    """The clip a resolved row contributes to an export, carrying its trim.
+
+    Built from what the *item* means rather than from `for_export()`, which
+    expands a clip into its selects and therefore cannot represent "the whole
+    recording" once that recording has gained a range. Copied, not shared, for
+    the same reason `per_select_clips` copies: a queued job keeps its clip
+    until it runs, and adjusting a select afterwards must not change an export
+    already waiting.
+    """
+    if row.missing:
+        raise ValueError("a missing row has no material to export")
+    if row.whole_clip:
+        return replace(row.clip, selects=[], current=0)
+    one = row.select
+    return replace(row.clip,
+                   selects=[Select(one.start, one.end, one.name, sid=one.sid)],
+                   current=0)
+
+
+def total_duration(rows: list[Row]) -> float:
+    return sum(r.duration for r in present(rows))
+
+
+def summary(rows: list[Row]) -> str:
     """One line under the list, saying what is in it."""
-    if not pieces and not missing:
+    if not rows:
         return "Nothing in the assembly yet"
 
-    count = len(pieces)
+    count = len(present(rows))
+    gaps = len(absent(rows))
     parts = [f"{count} item{'' if count == 1 else 's'}",
-             human_duration(total_duration(pieces))]
-    if missing:
-        parts.append(f"{len(missing)} missing")
+             human_duration(total_duration(rows))]
+    if gaps:
+        parts.append(f"{gaps} missing")
     return "  ·  ".join(parts)

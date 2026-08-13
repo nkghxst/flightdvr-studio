@@ -9,6 +9,19 @@ export would be wrong in a way nobody could see until they watched it.
 These tests state that contract before the assembly is built on it.
 """
 import json
+import tempfile
+
+import pytest
+from pathlib import Path as _Path
+
+_TMP = [_Path(tempfile.mkdtemp())]
+
+
+@pytest.fixture
+def qt_app():
+    from PySide6.QtWidgets import QApplication
+
+    yield QApplication.instance() or QApplication([])
 
 from flightdvr.media import Select
 from flightdvr.session import SCHEMA, Session
@@ -151,15 +164,15 @@ def _clip(tmp_path, name, ranges, sequence_size=1):
 
 
 def test_the_default_order_is_counter_then_along_each_recording(tmp_path):
-    from flightdvr.assembly import default_items, resolve
+    from flightdvr.assembly import absent, default_items, resolve
 
     second = _clip(tmp_path, "hdz_048.ts", [(5.0, 9.0, "late"), (1.0, 3.0, "early")])
     first = _clip(tmp_path, "hdz_047.ts", [(0.0, 2.0, "")], sequence_size=2)
 
-    pieces, missing = resolve(default_items([second, first]), [second, first])
+    rows = resolve(default_items([second, first]), [second, first])
 
-    assert not missing
-    assert [(p.clip.path.name, p.select.name) for p in pieces] == [
+    assert not absent(rows)
+    assert [(r.clip.path.name, r.select.name) for r in rows] == [
         ("hdz_047.ts", ""),
         ("hdz_048.ts", "early"),
         ("hdz_048.ts", "late"),
@@ -173,37 +186,37 @@ def test_an_assembly_survives_deleting_an_earlier_range_of_the_same_clip(tmp_pat
     named range 2 pointing at range 3 — an export that succeeds, plays, and
     contains footage nobody chose.
     """
-    from flightdvr.assembly import Item, resolve
+    from flightdvr.assembly import Item, absent, present, resolve
 
     clip = _clip(tmp_path, "hdz_047.ts",
                  [(0.0, 2.0, "one"), (4.0, 6.0, "two"), (8.0, 10.0, "three")])
     wanted = Item(clip.fingerprint, clip.selects[2].sid)
 
     del clip.selects[0]
-    pieces, missing = resolve([wanted], [clip])
+    rows = resolve([wanted], [clip])
 
-    assert not missing
-    assert pieces[0].select.name == "three"
+    assert not absent(rows)
+    assert rows[0].select.name == "three"
 
 
 def test_material_that_has_gone_is_reported_rather_than_dropped(tmp_path):
-    from flightdvr.assembly import Item, resolve
+    from flightdvr.assembly import Item, absent, present, resolve
 
     clip = _clip(tmp_path, "hdz_047.ts", [(0.0, 2.0, "kept")])
     deleted_range = Item(clip.fingerprint, "a-range-that-was-removed")
     absent_clip = Item("fp-not-on-this-card", "whatever")
 
-    pieces, missing = resolve(
+    rows = resolve(
         [Item(clip.fingerprint, clip.selects[0].sid), deleted_range, absent_clip],
         [clip], names={"fp-not-on-this-card": "hdz_099.ts"})
 
-    assert [p.select.name for p in pieces] == ["kept"]
-    assert [g.item for g in missing] == [deleted_range, absent_clip]
-    assert "hdz_099.ts" in missing[1].label()
+    assert [r.select.name for r in present(rows)] == ["kept"]
+    assert [r.item for r in absent(rows)] == [deleted_range, absent_clip]
+    assert "hdz_099.ts" in rows[2].label()
 
 
 def test_the_assembly_order_comes_back_after_a_save_and_reload(tmp_path):
-    from flightdvr.assembly import Item, resolve
+    from flightdvr.assembly import Item, absent, present, resolve
     from flightdvr.session import Session
 
     clip = _clip(tmp_path, "hdz_047.ts", [(0.0, 2.0, "one"), (4.0, 6.0, "two")])
@@ -216,7 +229,76 @@ def test_the_assembly_order_comes_back_after_a_save_and_reload(tmp_path):
     path = session.save(tmp_path / "card.flightdvr")
 
     again = Session.load(path)
-    pieces, missing = resolve(again.assembly, [clip])
+    rows = resolve(again.assembly, [clip])
 
-    assert not missing
-    assert [p.select.name for p in pieces] == ["two", "one"], "order not restored"
+    assert not absent(rows)
+    assert [r.select.name for r in rows] == ["two", "one"], "order not restored"
+
+
+# --- the four blockers Sol found ---------------------------------------------
+
+def test_a_gap_between_two_items_keeps_its_place_through_the_panel(qt_app):
+    """Sol's finding 2, pinned across the whole round trip.
+
+    The panel drew resolved rows and then missing ones, so an interleaved gap
+    sank to the bottom — and `items()` reads the displayed order, which is what
+    gets persisted. Opening a card with a gap in the middle silently rewrote
+    the order it was stored in, and the assembly still looked healthy.
+    """
+    from flightdvr.assembly import Item, resolve
+    from flightdvr.assembly_panel import AssemblyPanel
+
+    here = _clip(_TMP[0], "hdz_047.ts", [(0.0, 5.0, "one")])
+    there = _clip(_TMP[0], "hdz_048.ts", [(0.0, 5.0, "three")])
+    stored = [Item(here.fingerprint, here.selects[0].sid),
+              Item("fp-gone", "a-range-that-went"),
+              Item(there.fingerprint, there.selects[0].sid)]
+
+    panel = AssemblyPanel()
+    panel.show_rows(resolve(stored, [here, there], names={"fp-gone": "hdz_099.ts"}))
+
+    assert "missing" in panel.list.item(1).text(), [
+        panel.list.item(n).text() for n in range(panel.list.count())]
+    assert panel.items() == stored, "the panel rewrote the stored order"
+
+    # And it still holds after an ordinary edit, which is what gets saved.
+    panel.list.item(2).setSelected(True)
+    panel._move(-1)
+    assert [i.sid for i in panel.items()] == [
+        stored[0].sid, stored[2].sid, stored[1].sid]
+
+
+def test_a_whole_recording_row_still_exports_after_the_clip_gains_a_range(tmp_path):
+    """Sol's finding 3. `for_export()` expands a clip into its selects, so a
+    row naming the whole recording vanished the moment somebody trimmed it."""
+    from flightdvr.assembly import Item, export_piece, resolve
+
+    clip = _clip(tmp_path, "hdz_047.ts", [])
+    whole = Item(clip.fingerprint)
+
+    rows = resolve([whole], [clip])
+    assert not rows[0].missing
+    assert export_piece(rows[0]).selects == []
+
+    clip.selects = [Select(4.0, 9.0, "added later")]
+    rows = resolve([whole], [clip])
+    assert not rows[0].missing, "the whole-recording row lost its material"
+    piece = export_piece(rows[0])
+    assert piece.selects == [], "a whole-recording row exported only a range"
+
+
+def test_export_piece_does_not_share_the_select_with_the_clip(tmp_path):
+    """The copying discipline per_select_clips has, kept here.
+
+    A queued job holds its clip until it runs, so a shared range meant editing
+    a trim afterwards silently changed an export already waiting in the queue.
+    """
+    from flightdvr.assembly import Item, export_piece, resolve
+
+    clip = _clip(tmp_path, "hdz_047.ts", [(1.0, 4.0, "one")])
+    piece = export_piece(resolve([Item(clip.fingerprint, clip.selects[0].sid)],
+                                 [clip])[0])
+
+    clip.selects[0].start = 99.0
+    assert piece.selects[0].start == 1.0, "the queued piece followed a later edit"
+    assert piece.selects[0].sid == clip.selects[0].sid

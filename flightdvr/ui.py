@@ -70,7 +70,7 @@ from .presets import (
 from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
 from .queue_panel import QueuePanel
-from .assembly import default_items, resolve
+from .assembly import absent, default_items, export_piece, present, resolve
 from .session import (
     REVIEW_STATES, SUFFIX as SESSION_SUFFIX, UNREVIEWED, Session,
     apply_settings, apply_to, capture_from, capture_settings, for_source,
@@ -2357,6 +2357,12 @@ class MainWindow(QMainWindow):
 
     def _add_to_queue(self) -> None:
         clips = self.selected_clips()
+        # A filled assembly already names its material, so the ticks are not
+        # what is being exported and their absence is not an error. Asking
+        # somebody to re-tick rows they have already arranged into a list would
+        # be asking them to say the same thing twice.
+        if not clips and self.export_panel.join_enabled():
+            clips = self.clips
         if not clips:
             QMessageBox.warning(self, "Nothing ticked", "Tick at least one clip first.")
             return
@@ -2398,16 +2404,16 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-        if self.export_panel.join_enabled() and len(pieces) > 1:
+        if self.export_panel.join_enabled():
             # The assembly is the order, and it is also the content: what the
             # list shows is what gets encoded. Inferring an order from the
             # browser is what this replaced.
-            ordered, absent = self._assembly_pieces(pieces)
-            if absent:
+            ordered, gaps = self._assembly_export_pieces()
+            if gaps:
                 QMessageBox.warning(
                     self, "The assembly refers to material that is not here",
                     "Nothing has been queued.\n\n"
-                    + "\n".join(f"• {a}" for a in absent)
+                    + "\n".join(f"• {a}" for a in gaps)
                     + "\n\nRemove those rows, or rescan the card if the "
                       "footage should still be there.",
                 )
@@ -2576,40 +2582,53 @@ class MainWindow(QMainWindow):
             note += f", {skipped} already in the queue"
         self.statusBar().showMessage(note, 5000)
 
-    def _assembly_pieces(self, pieces) -> tuple[list, list[str]]:
-        """The export pieces the assembly names, in the order it shows them.
+    def _assembly_rows(self):
+        """The assembly resolved against every clip on the card.
 
-        Matched on the range's stable id rather than on position, so an item
-        still finds its footage after an earlier range of the same recording
-        was deleted. Anything the list names and the card cannot supply is
-        returned by name instead of being skipped: a join that quietly leaves
-        a piece out produces a file that plays perfectly and is not the one
-        anybody asked for.
+        Deliberately not `selected_clips()`. Once the list has something in it
+        the assembly is both the order *and* the content, so a browser tick is
+        not an input to this decision — unticking a source used to downgrade a
+        two-item join into one ordinary single-clip job with no warning at all.
         """
-        # A piece with no select is the whole recording, and its item spells
-        # that as an empty id rather than as a range that does not exist.
-        available = {(p.fingerprint, p.selects[0].sid if p.selects else ""): p
-                     for p in pieces}
-        ordered, absent = [], []
-        for item in self.export_panel.assembly_panel.items():
-            found = available.get((item.fingerprint, item.sid))
-            if found is None:
-                remembered = (self.session.clips.get(item.fingerprint)
-                              if self.session else None)
-                absent.append(remembered.name if remembered and remembered.name
-                              else "a range that is no longer on this card")
-                continue
-            ordered.append(found)
-        return ordered, absent
+        # From the panel, not the session. What the list shows is what gets
+        # encoded, and a folder opened before any session exists still has a
+        # list — reading the session instead made the export silently find
+        # nothing to do and stop with "not enough in the assembly".
+        names = ({f: m.name for f, m in self.session.clips.items()}
+                 if self.session else {})
+        return resolve(self.export_panel.assembly_panel.items(),
+                       self.clips, names)
+
+    def _assembly_export_pieces(self) -> tuple[list, list[str]]:
+        """What the assembly contributes to the queue, in the order shown.
+
+        Built from what each row *means* rather than from `for_export()`. That
+        expansion turns a clip into its selects, so a row naming the whole
+        recording disappeared the moment that recording gained a range, and
+        the export reported its own material missing.
+        """
+        rows = self._assembly_rows()
+        gaps = [r.remembered or "a range that is no longer on this card"
+                for r in absent(rows)]
+        if gaps:
+            return [], gaps
+        return [export_piece(r) for r in present(rows)], []
 
     def _fill_assembly(self) -> None:
         """Put the ticked ranges into the list, in the default order."""
         self._store_assembly(default_items(self.selected_clips()))
 
     def _store_assembly(self, items) -> None:
+        """Set the list and schedule the write.
+
+        Filling and resetting change the stored assembly exactly as reordering
+        does, and only reordering used to say so. A close happened to flush it,
+        which is not the same as being saved.
+        """
         if self.session is not None:
             self.session.assembly = list(items)
         self._refresh_assembly(items)
+        self._touch_session()
 
     def _capture_assembly(self) -> None:
         """Take the order back from the list after somebody rearranged it."""
@@ -2623,8 +2642,8 @@ class MainWindow(QMainWindow):
                   else (self.session.assembly if self.session else []))
         names = ({f: m.name for f, m in self.session.clips.items()}
                  if self.session else {})
-        resolved, gone = resolve(stored, self.clips, names)
-        self.export_panel.assembly_panel.show_pieces(resolved, gone)
+        self.export_panel.assembly_panel.show_rows(
+            resolve(stored, self.clips, names))
 
     def _rebuild_queue(self) -> None:
         # The single funnel for anything that changes the queue, so this is

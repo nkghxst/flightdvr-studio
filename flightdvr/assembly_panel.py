@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QPushButton, QVBoxLayout, QWidget,
 )
 
-from .assembly import Gone, Item, Piece, summary
+from .assembly import Item, Row, summary
 from .format import human_duration
 from .widgets import dim
 
@@ -119,31 +119,34 @@ class AssemblyPanel(QWidget):
 
     # -- what is in it --------------------------------------------------------
 
-    def show_pieces(self, pieces: list[Piece], missing: list[Gone]) -> None:
-        """Redraw from what the model resolved, keeping the selection put."""
-        chosen = {row for row in self._selected_rows()}
+    def show_rows(self, rows: list[Row]) -> None:
+        """Redraw from the model, in the model's order, keeping the selection.
+
+        One loop over one ordered list. Drawing the resolved rows and then the
+        missing ones put an interleaved gap at the bottom, and `items()` then
+        handed that altered order back to be saved — so merely opening a card
+        with a gap in the middle rewrote the order it was stored in.
+        """
+        chosen = set(self._selected_rows())
         self.list.clear()
 
-        for piece in pieces:
-            row = QListWidgetItem(
-                f"{piece.label()}   {human_duration(piece.duration)}")
-            row.setData(ITEM_ROLE, piece.item)
-            self.list.addItem(row)
-
-        # Missing material stays visible and stays in place. Dropping it would
-        # renumber everything after it and lose the only evidence that the
-        # assembly ever referred to something else.
-        for gone in missing:
-            row = QListWidgetItem(gone.label())
-            row.setData(ITEM_ROLE, gone.item)
-            row.setFlags(row.flags() & ~Qt.ItemFlag.ItemIsEnabled)
-            self.list.addItem(row)
+        for row in rows:
+            text = row.label()
+            if not row.missing:
+                text = f"{text}   {human_duration(row.duration)}"
+            entry = QListWidgetItem(text)
+            entry.setData(ITEM_ROLE, row.item)
+            if row.missing:
+                # Visible, in place, and not selectable as material — it is a
+                # problem to resolve, not something to arrange.
+                entry.setFlags(entry.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            self.list.addItem(entry)
 
         for index in chosen:
             if index < self.list.count():
                 self.list.item(index).setSelected(True)
 
-        self.summary_label.setText(summary(pieces, missing))
+        self.summary_label.setText(summary(rows))
         self._update_buttons()
 
     def items(self) -> list[Item]:
