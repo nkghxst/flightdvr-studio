@@ -70,6 +70,7 @@ from .presets import (
 from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
 from .queue_panel import QueuePanel
+from .assembly import default_items, resolve
 from .session import (
     REVIEW_STATES, SUFFIX as SESSION_SUFFIX, UNREVIEWED, Session,
     apply_settings, apply_to, capture_from, capture_settings, for_source,
@@ -690,6 +691,9 @@ class MainWindow(QMainWindow):
         panel = self.export_panel = ExportPanel(self)
         panel.preset_changed.connect(self._on_preset_changed)
         panel.settings_changed.connect(self._on_export_settings_changed)
+        panel.assembly_panel.fill_requested.connect(self._fill_assembly)
+        panel.assembly_panel.order_changed.connect(self._capture_assembly)
+        panel.assembly_panel.export_requested.connect(self._add_to_queue)
         self.frame_view.vertical_position_changed.connect(
             panel.set_vertical_position
         )
@@ -847,6 +851,9 @@ class MainWindow(QMainWindow):
             self._load_selected_clip()
         self._update_estimate()
         self._refresh_review_controls()
+        # After the trims, because the assembly names ranges and the ranges
+        # only exist once apply_to has put them back on the clips.
+        self._refresh_assembly()
 
         notes = []
         if restored:
@@ -2392,10 +2399,26 @@ class MainWindow(QMainWindow):
                 return
 
         if self.export_panel.join_enabled() and len(pieces) > 1:
-            # Joined in DVR counter order: the file timestamps cannot be
-            # trusted. Selects of one clip keep the order they were made in,
-            # which is the order they appear along the recording.
-            ordered = sorted(pieces, key=self._join_rank)
+            # The assembly is the order, and it is also the content: what the
+            # list shows is what gets encoded. Inferring an order from the
+            # browser is what this replaced.
+            ordered, absent = self._assembly_pieces(pieces)
+            if absent:
+                QMessageBox.warning(
+                    self, "The assembly refers to material that is not here",
+                    "Nothing has been queued.\n\n"
+                    + "\n".join(f"• {a}" for a in absent)
+                    + "\n\nRemove those rows, or rescan the card if the "
+                      "footage should still be there.",
+                )
+                return
+            if len(ordered) < 2:
+                QMessageBox.warning(
+                    self, "Not enough in the assembly",
+                    "An assembly needs at least two ranges to be worth "
+                    "joining. Use Add to queue for a single range.",
+                )
+                return
 
             # Refused rather than exported wrongly. A join built from mismatched
             # clips does not fail; it produces a file that is silent after the
@@ -2553,26 +2576,55 @@ class MainWindow(QMainWindow):
             note += f", {skipped} already in the queue"
         self.statusBar().showMessage(note, 5000)
 
-    def _join_rank(self, piece) -> tuple:
-        """Where a piece goes in a joined export.
+    def _assembly_pieces(self, pieces) -> tuple[list, list[str]]:
+        """The export pieces the assembly names, in the order it shows them.
 
-        The session's order first, when it has an opinion about this clip. That
-        is the whole point of storing it: DVR counter order is a sensible
-        default and not always the one somebody chose.
-
-        Anything the stored order has never heard of — a clip added since, or a
-        session written before the field existed — sorts after the remembered
-        ones by counter, which is exactly what happened before there was an
-        order to remember. Selects of one clip stay in the order they occur
-        along the recording.
+        Matched on the range's stable id rather than on position, so an item
+        still finds its footage after an earlier range of the same recording
+        was deleted. Anything the list names and the card cannot supply is
+        returned by name instead of being skipped: a join that quietly leaves
+        a piece out produces a file that plays perfectly and is not the one
+        anybody asked for.
         """
-        remembered = self.session.join_order if self.session else []
-        try:
-            position = remembered.index(piece.fingerprint)
-        except ValueError:
-            position = len(remembered)
-        return (position, piece.sequence, natural_key(piece.path.name),
-                piece.trim_in)
+        # A piece with no select is the whole recording, and its item spells
+        # that as an empty id rather than as a range that does not exist.
+        available = {(p.fingerprint, p.selects[0].sid if p.selects else ""): p
+                     for p in pieces}
+        ordered, absent = [], []
+        for item in self.export_panel.assembly_panel.items():
+            found = available.get((item.fingerprint, item.sid))
+            if found is None:
+                remembered = (self.session.clips.get(item.fingerprint)
+                              if self.session else None)
+                absent.append(remembered.name if remembered and remembered.name
+                              else "a range that is no longer on this card")
+                continue
+            ordered.append(found)
+        return ordered, absent
+
+    def _fill_assembly(self) -> None:
+        """Put the ticked ranges into the list, in the default order."""
+        self._store_assembly(default_items(self.selected_clips()))
+
+    def _store_assembly(self, items) -> None:
+        if self.session is not None:
+            self.session.assembly = list(items)
+        self._refresh_assembly(items)
+
+    def _capture_assembly(self) -> None:
+        """Take the order back from the list after somebody rearranged it."""
+        if self.session is not None:
+            self.session.assembly = self.export_panel.assembly_panel.items()
+        self._touch_session()
+
+    def _refresh_assembly(self, items=None) -> None:
+        """Resolve the stored list against the clips currently in front of us."""
+        stored = (list(items) if items is not None
+                  else (self.session.assembly if self.session else []))
+        names = ({f: m.name for f, m in self.session.clips.items()}
+                 if self.session else {})
+        resolved, gone = resolve(stored, self.clips, names)
+        self.export_panel.assembly_panel.show_pieces(resolved, gone)
 
     def _rebuild_queue(self) -> None:
         # The single funnel for anything that changes the queue, so this is

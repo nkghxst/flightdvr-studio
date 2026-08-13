@@ -33,6 +33,7 @@ from .format import (
     expand_template,
 )
 from .media import ClipInfo
+from .assembly_panel import AssemblyPanel
 from .presets import (
     COLOUR_MODES, EDIT_CODECS, PRESET_ORDER, PRESETS, QUALITY_LEVELS,
     SOCIAL_QUALITY_LEVELS, SPEEDS, ExportSettings, edit_bitrate_mbps,
@@ -194,14 +195,16 @@ class ExportPanel(QWidget):
         )
         out_layout.addWidget(self.audio_check)
 
-        self.join_check = QCheckBox("Join the ticked clips into one file")
-        self.join_check.setToolTip(
-            "Useful when the DVR split a single flight across several recordings"
-        )
-        self.join_check.toggled.connect(
+        # The join checkbox that used to live here is now the assembly list:
+        # it asked for a joined file and inferred the order, which cannot say
+        # anything about two ranges of one recording and shows nobody what they
+        # are about to encode. `join_enabled()` survives as "the assembly has
+        # something in it", so the estimate and summary code paths are unchanged.
+        self.assembly_panel = AssemblyPanel()
+        self.assembly_panel.order_changed.connect(
             lambda *_: self.settings_changed.emit()
         )
-        out_layout.addWidget(self.join_check)
+        out_layout.addWidget(self.assembly_panel)
 
         date_row = QHBoxLayout()
         self.date_check = QCheckBox("Start filenames with the flight date")
@@ -695,7 +698,8 @@ class ExportPanel(QWidget):
         return self.subfolder_check.isChecked()
 
     def join_enabled(self) -> bool:
-        return self.join_check.isChecked()
+        """Whether an assembly is waiting to be exported as one file."""
+        return not self.assembly_panel.is_empty()
 
     def flight_date(self) -> date | None:
         if not self.date_check.isChecked():

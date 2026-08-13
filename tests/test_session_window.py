@@ -507,23 +507,30 @@ def test_a_card_with_no_stored_settings_leaves_the_panel_alone(app,
     close(window)
 
 
-def test_the_remembered_join_order_decides_the_queue(app, sessions_home, card):
-    """The field round-tripped through JSON and nothing read it, so it was
-    inert: every joined export still came out in DVR counter order. Asserting
-    the stored list is not enough — this asserts the jobs."""
+def test_the_assembly_order_decides_the_queue(app, sessions_home, card):
+    """What replaced the remembered join order.
+
+    `join_order` could reverse two clips and nothing more: it stored one
+    position per clip, so two ranges of a single recording always came out in
+    source order however anybody wanted them. The assembly stores a position
+    per *range*, which is why this asserts the jobs rather than the list.
+    """
     from PySide6.QtCore import Qt
 
     first, second = a_clip("hdz_001.ts"), a_clip("hdz_002.ts")
     window = open_window(app, card, [first, second])
     window.export_panel.out_edit.setCurrentText(str(sessions_home / "out"))
 
-    # Deliberately the reverse of counter order, which is what makes this
-    # distinguishable from the default at all.
-    window.session.join_order = [second.fingerprint, first.fingerprint]
-
     for row in range(window.table.rowCount()):
         window.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
-    window.export_panel.join_check.setChecked(True)
+    window._fill_assembly()
+
+    # Deliberately the reverse of counter order, which is what makes this
+    # distinguishable from the default at all.
+    panel = window.export_panel.assembly_panel
+    panel.list.item(1).setSelected(True)
+    panel._move(-1)
+
     window.jobs.clear()
     window._add_to_queue()
 
@@ -533,25 +540,71 @@ def test_the_remembered_join_order_decides_the_queue(app, sessions_home, card):
     close(window)
 
 
-def test_a_clip_the_order_never_heard_of_goes_after_the_ones_it_did(
-        app, sessions_home, card):
-    """A clip added since, or a session written before the field existed. It
-    sorts by counter after the remembered ones, which is what happened when
-    there was no order to remember."""
-    from PySide6.QtCore import Qt
+def test_an_assembly_naming_footage_that_has_gone_queues_nothing(
+        app, sessions_home, card, monkeypatch):
+    """The failure the old order could not even represent.
 
-    one, two, three = (a_clip("hdz_001.ts"), a_clip("hdz_002.ts"),
-                       a_clip("hdz_003.ts"))
-    window = open_window(app, card, [one, two, three])
+    A stored order was a list of fingerprints used for sorting, so a clip that
+    had gone simply did not sort. An assembly names material, and material that
+    is not here has to stop the export rather than shorten it — a join quietly
+    one piece short produces a file that plays perfectly and is not the one
+    anybody asked for.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    from flightdvr.assembly import Item
+
+    one, two = a_clip("hdz_001.ts"), a_clip("hdz_002.ts")
+    window = open_window(app, card, [one, two])
     window.export_panel.out_edit.setCurrentText(str(sessions_home / "out"))
-    window.session.join_order = [three.fingerprint, two.fingerprint]
 
     for row in range(window.table.rowCount()):
         window.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
-    window.export_panel.join_check.setChecked(True)
+    window._fill_assembly()
+    window._store_assembly(
+        window.export_panel.assembly_panel.items()
+        + [Item("a-clip-that-is-not-on-this-card", "")])
+
+    said = []
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda *a, **k: said.append(a[1]))
     window.jobs.clear()
     window._add_to_queue()
 
-    names = [c.path.name for c in window.jobs[0].clips]
-    assert names == ["hdz_003.ts", "hdz_002.ts", "hdz_001.ts"], names
+    assert window.jobs == [], "queued an assembly it could not fulfil"
+    assert said, "queued nothing and said nothing"
     close(window)
+
+
+
+
+def test_a_reopened_session_brings_the_assembly_back_in_order(
+        app, sessions_home, card):
+    """A list you have to rebuild every time you open the card is not a list.
+
+    Ordered by range id rather than by position, so this also proves the
+    reference survives the round trip through the file: the clips are rescanned
+    from disk, and the items still find the ranges they named.
+    """
+    from PySide6.QtCore import Qt
+
+    one, two = a_clip("hdz_001.ts"), a_clip("hdz_002.ts")
+    window = open_window(app, card, [one, two])
+    for row in range(window.table.rowCount()):
+        window.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+    window._fill_assembly()
+
+    panel = window.export_panel.assembly_panel
+    panel.list.item(1).setSelected(True)
+    panel._move(-1)
+    window._capture_assembly()
+    window._write_session()
+    close(window)
+
+    again = open_window(app, card, [a_clip("hdz_001.ts"), a_clip("hdz_002.ts")])
+    rows = again.export_panel.assembly_panel
+    assert rows.list.count() == 2, "the assembly did not come back"
+    assert "hdz_002" in rows.list.item(0).text(), rows.list.item(0).text()
+    assert "hdz_001" in rows.list.item(1).text(), rows.list.item(1).text()
+    close(again)

@@ -1,0 +1,203 @@
+# FlightDVR Studio - browse, trim and convert HDZero goggle DVR footage.
+# Copyright (C) 2026 Isadu Nkemi
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along with
+# this program. If not, see <https://www.gnu.org/licenses/>.
+
+"""The list of ranges that will become one file, in the order chosen.
+
+The old join checkbox asked for a result and inferred the order. This asks for
+the order and shows it, which is the whole point: a delivery is a decision, and
+a decision nobody can see before pressing Export is not one they made.
+
+Reordering is by button and by keyboard, never only by dragging. Dragging is a
+fine way to move a row and a poor way to be the only way — it needs a pointer,
+a steady hand and a visible target, and this list is a thing people will edit
+from a laptop trackpad on a field table.
+"""
+
+from __future__ import annotations
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import (
+    QAbstractItemView, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QPushButton, QVBoxLayout, QWidget,
+)
+
+from .assembly import Gone, Item, Piece, summary
+from .format import human_duration
+from .widgets import dim
+
+ITEM_ROLE = Qt.ItemDataRole.UserRole
+
+
+class AssemblyPanel(QWidget):
+    """A compact ordered list, and the four things you can do to it."""
+
+    fill_requested = Signal()          # take the ticked ranges
+    export_requested = Signal()        # queue the list, in the order shown
+    order_changed = Signal()           # the list itself changed
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        header = QHBoxLayout()
+        header.addWidget(QLabel("<b>Assembly</b>"))
+        header.addStretch(1)
+        self.fill_button = QPushButton("Use ticked ranges")
+        self.fill_button.setToolTip(
+            "Fill the list from the ranges ticked in the browser, in DVR "
+            "counter order and then along each recording"
+        )
+        self.fill_button.clicked.connect(lambda *_: self.fill_requested.emit())
+        header.addWidget(self.fill_button)
+        layout.addLayout(header)
+
+        self.list = QListWidget()
+        self.list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.list.setAlternatingRowColors(True)
+        self.list.setMinimumHeight(120)
+        layout.addWidget(self.list)
+
+        self.summary_label = dim(QLabel("Nothing in the assembly yet"))
+        layout.addWidget(self.summary_label)
+
+        buttons = QHBoxLayout()
+        self.up_button = QPushButton("Move up")
+        self.down_button = QPushButton("Move down")
+        self.remove_button = QPushButton("Remove")
+        self.remove_button.setToolTip(
+            "Take it out of this list. The range itself is left alone."
+        )
+        self.reset_button = QPushButton("Default order")
+        for button, slot in (
+            (self.up_button, lambda *_: self._move(-1)),
+            (self.down_button, lambda *_: self._move(1)),
+            (self.remove_button, lambda *_: self._remove()),
+            (self.reset_button, lambda *_: self.fill_requested.emit()),
+        ):
+            button.clicked.connect(slot)
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        self.export_button = QPushButton("Add assembly to queue")
+        self.export_button.setToolTip(
+            "Queue one joined export of exactly this list, in this order"
+        )
+        self.export_button.clicked.connect(
+            lambda *_: self.export_requested.emit())
+        layout.addWidget(self.export_button)
+
+        # The keyboard has to reach everything the buttons do. Alt with the
+        # arrows is the usual spelling for "move the thing", and leaves plain
+        # Up and Down to do what they always do in a list.
+        for keys, slot in (
+            ("Alt+Up", lambda: self._move(-1)),
+            ("Alt+Down", lambda: self._move(1)),
+            ("Del", self._remove),
+        ):
+            shortcut = QShortcut(QKeySequence(keys), self.list)
+            shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+            shortcut.activated.connect(slot)
+
+        self.list.itemSelectionChanged.connect(self._update_buttons)
+        self._update_buttons()
+
+    # -- what is in it --------------------------------------------------------
+
+    def show_pieces(self, pieces: list[Piece], missing: list[Gone]) -> None:
+        """Redraw from what the model resolved, keeping the selection put."""
+        chosen = {row for row in self._selected_rows()}
+        self.list.clear()
+
+        for piece in pieces:
+            row = QListWidgetItem(
+                f"{piece.label()}   {human_duration(piece.duration)}")
+            row.setData(ITEM_ROLE, piece.item)
+            self.list.addItem(row)
+
+        # Missing material stays visible and stays in place. Dropping it would
+        # renumber everything after it and lose the only evidence that the
+        # assembly ever referred to something else.
+        for gone in missing:
+            row = QListWidgetItem(gone.label())
+            row.setData(ITEM_ROLE, gone.item)
+            row.setFlags(row.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            self.list.addItem(row)
+
+        for index in chosen:
+            if index < self.list.count():
+                self.list.item(index).setSelected(True)
+
+        self.summary_label.setText(summary(pieces, missing))
+        self._update_buttons()
+
+    def items(self) -> list[Item]:
+        """The list as stored references, in exactly the order displayed."""
+        return [self.list.item(row).data(ITEM_ROLE)
+                for row in range(self.list.count())]
+
+    def is_empty(self) -> bool:
+        return self.list.count() == 0
+
+    # -- editing it -----------------------------------------------------------
+
+    def _selected_rows(self) -> list[int]:
+        return sorted(self.list.row(i) for i in self.list.selectedItems())
+
+    def _move(self, step: int) -> None:
+        """Move the selection one place, keeping it selected and contiguous.
+
+        Walking the rows from the leading edge is what stops a multi-row
+        selection from turning inside out: moving the top one first when going
+        up, the bottom one first when going down.
+        """
+        rows = self._selected_rows()
+        if not rows:
+            return
+        if step < 0 and rows[0] == 0:
+            return
+        if step > 0 and rows[-1] == self.list.count() - 1:
+            return
+
+        for row in (rows if step < 0 else reversed(rows)):
+            taken = self.list.takeItem(row)
+            self.list.insertItem(row + step, taken)
+            taken.setSelected(True)
+        self.order_changed.emit()
+        self._update_buttons()
+
+    def _remove(self) -> None:
+        """Take rows out of the list. The ranges themselves are untouched."""
+        rows = self._selected_rows()
+        if not rows:
+            return
+        for row in reversed(rows):
+            self.list.takeItem(row)
+        self.order_changed.emit()
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        rows = self._selected_rows()
+        count = self.list.count()
+        self.up_button.setEnabled(bool(rows) and rows[0] > 0)
+        self.down_button.setEnabled(bool(rows) and rows[-1] < count - 1)
+        self.remove_button.setEnabled(bool(rows))
+        self.reset_button.setEnabled(count > 0)
+        # One item is a trim, not an assembly, and the ordinary Add to queue
+        # already does that better. Two is where a join begins to mean anything.
+        self.export_button.setEnabled(count > 1)

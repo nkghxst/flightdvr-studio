@@ -42,7 +42,11 @@ class Item:
     """One entry in the list: which recording, and which range of it."""
 
     fingerprint: str
-    sid: str
+    # The range's stable id, or empty for "the whole recording". A clip nobody
+    # has trimmed has no range to point at, and refusing to hold one would make
+    # the assembly unable to express the commonest join there is: two untouched
+    # recordings of one flight the DVR happened to split.
+    sid: str = ""
 
     def as_dict(self) -> dict:
         return {"clip": self.fingerprint, "range": self.sid}
@@ -96,8 +100,11 @@ def default_items(clips: list[ClipInfo]) -> list[Item]:
     """
     ordered: list[Item] = []
     for clip in sorted(clips, key=lambda c: (c.sequence, natural_key(c.path.name))):
-        for select in sorted(clip.real_selects, key=lambda s: s.start):
-            ordered.append(Item(clip.fingerprint, select.sid))
+        ranges = sorted(clip.real_selects, key=lambda s: s.start)
+        if not ranges:
+            ordered.append(Item(clip.fingerprint))
+            continue
+        ordered.extend(Item(clip.fingerprint, s.sid) for s in ranges)
     return ordered
 
 
@@ -120,6 +127,13 @@ def resolve(items: list[Item], clips: list[ClipInfo],
             missing.append(Gone(item, remembered.get(item.fingerprint, "")))
             continue
         ranges = clip.real_selects
+        if not item.sid:
+            # The whole recording. Described rather than stored, so retrimming
+            # the clip later changes what this item means — which is right: it
+            # means "this recording", and that is still what it is.
+            whole = Select(0.0, clip.duration, "", sid="")
+            pieces.append(Piece(item, clip, whole, 1))
+            continue
         found = next((s for s in ranges if s.sid == item.sid), None)
         if found is None:
             missing.append(Gone(item, clip.path.name))
