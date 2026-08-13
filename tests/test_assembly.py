@@ -132,3 +132,91 @@ def test_an_id_survives_the_round_trip_through_a_scanned_clip(tmp_path):
     clip.selects[0].name = "renamed after reopening"
     capture_from(session, [clip])
     assert [s.sid for s in session.clips[clip.fingerprint].selects] == stored
+
+
+# --- the ordered list itself -------------------------------------------------
+
+def _clip(tmp_path, name, ranges, sequence_size=1):
+    from datetime import datetime
+
+    from flightdvr.media import ClipInfo
+
+    source = tmp_path / name
+    source.write_bytes(b"x" * sequence_size)
+    clip = ClipInfo(path=source, size=source.stat().st_size,
+                    modified=datetime.fromtimestamp(source.stat().st_mtime),
+                    duration=60.0, width=1280, height=720, fps=60.0)
+    clip.selects = [Select(start, end, label) for start, end, label in ranges]
+    return clip
+
+
+def test_the_default_order_is_counter_then_along_each_recording(tmp_path):
+    from flightdvr.assembly import default_items, resolve
+
+    second = _clip(tmp_path, "hdz_048.ts", [(5.0, 9.0, "late"), (1.0, 3.0, "early")])
+    first = _clip(tmp_path, "hdz_047.ts", [(0.0, 2.0, "")], sequence_size=2)
+
+    pieces, missing = resolve(default_items([second, first]), [second, first])
+
+    assert not missing
+    assert [(p.clip.path.name, p.select.name) for p in pieces] == [
+        ("hdz_047.ts", ""),
+        ("hdz_048.ts", "early"),
+        ("hdz_048.ts", "late"),
+    ]
+
+
+def test_an_assembly_survives_deleting_an_earlier_range_of_the_same_clip(tmp_path):
+    """The defect the whole design exists to prevent.
+
+    With positions as identity, removing range 1 would leave the item that
+    named range 2 pointing at range 3 — an export that succeeds, plays, and
+    contains footage nobody chose.
+    """
+    from flightdvr.assembly import Item, resolve
+
+    clip = _clip(tmp_path, "hdz_047.ts",
+                 [(0.0, 2.0, "one"), (4.0, 6.0, "two"), (8.0, 10.0, "three")])
+    wanted = Item(clip.fingerprint, clip.selects[2].sid)
+
+    del clip.selects[0]
+    pieces, missing = resolve([wanted], [clip])
+
+    assert not missing
+    assert pieces[0].select.name == "three"
+
+
+def test_material_that_has_gone_is_reported_rather_than_dropped(tmp_path):
+    from flightdvr.assembly import Item, resolve
+
+    clip = _clip(tmp_path, "hdz_047.ts", [(0.0, 2.0, "kept")])
+    deleted_range = Item(clip.fingerprint, "a-range-that-was-removed")
+    absent_clip = Item("fp-not-on-this-card", "whatever")
+
+    pieces, missing = resolve(
+        [Item(clip.fingerprint, clip.selects[0].sid), deleted_range, absent_clip],
+        [clip], names={"fp-not-on-this-card": "hdz_099.ts"})
+
+    assert [p.select.name for p in pieces] == ["kept"]
+    assert [g.item for g in missing] == [deleted_range, absent_clip]
+    assert "hdz_099.ts" in missing[1].label()
+
+
+def test_the_assembly_order_comes_back_after_a_save_and_reload(tmp_path):
+    from flightdvr.assembly import Item, resolve
+    from flightdvr.session import Session
+
+    clip = _clip(tmp_path, "hdz_047.ts", [(0.0, 2.0, "one"), (4.0, 6.0, "two")])
+    chosen = [Item(clip.fingerprint, clip.selects[1].sid),
+              Item(clip.fingerprint, clip.selects[0].sid)]
+
+    session = Session(title="card", source=str(tmp_path))
+    session.marks(clip.fingerprint, clip.path.name).selects = list(clip.selects)
+    session.assembly = list(chosen)
+    path = session.save(tmp_path / "card.flightdvr")
+
+    again = Session.load(path)
+    pieces, missing = resolve(again.assembly, [clip])
+
+    assert not missing
+    assert [p.select.name for p in pieces] == ["two", "one"], "order not restored"

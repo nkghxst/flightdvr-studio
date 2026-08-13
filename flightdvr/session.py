@@ -45,6 +45,7 @@ from .format import canonical_path, folder_label
 # and is re-exported here: everything that already imports it from this module
 # goes on working, and the dependency runs the way round it should.
 from .media import Select  # noqa: F401  (re-exported)
+from .assembly import Item as AssemblyItem
 
 SUFFIX = ".flightdvr.json"
 
@@ -117,6 +118,12 @@ class Session:
     # order settled it.
     join_order: list[str] = field(default_factory=list)
 
+    # The ordered assembly, as references rather than material: clip
+    # fingerprint plus range id. Stored beside join_order rather than
+    # replacing the field, so a session written here still opens in 1.5
+    # with its joins intact.
+    assembly: list[AssemblyItem] = field(default_factory=list)
+
     # Every export choice, exactly as ExportPanel.capture() produces it. Stored
     # rather than re-derived so reopening a card finds the preset and the
     # output folder it was being worked with, not whatever the panel happens to
@@ -156,6 +163,8 @@ class Session:
         # card nobody has joined or configured stays as small as it was.
         if self.join_order:
             stored["join_order"] = list(self.join_order)
+        if self.assembly:
+            stored["assembly"] = [i.as_dict() for i in self.assembly]
         if self.export:
             stored["export"] = dict(self.export)
         return stored
@@ -200,6 +209,9 @@ class Session:
                     if isinstance(m, dict)
                 },
                 join_order=[str(f) for f in (raw.get("join_order") or [])],
+                assembly=[AssemblyItem.from_dict(i)
+                          for i in (raw.get("assembly") or [])
+                          if isinstance(i, dict)],
                 export=dict(raw.get("export") or {}),
                 path=Path(path),
             )
