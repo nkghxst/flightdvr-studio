@@ -61,9 +61,9 @@ def pytest_configure(config):
     )
 
 
-@pytest.fixture(autouse=True)
-def isolated_settings(tmp_path, monkeypatch):
-    """Give every test its own settings, and never touch the real ones.
+@pytest.fixture(scope="session", autouse=True)
+def settings_backend(tmp_path_factory):
+    """Give the UI suite a disposable settings store, never the real ones.
 
     `MainWindow` restores its export panel from `QSettings(ORG, APP_NAME)` —
     the settings of whoever is running the tests. That was harmless while
@@ -75,19 +75,54 @@ def isolated_settings(tmp_path, monkeypatch):
     rarely the run that caused it — and any run of the app, or any probe of the
     queue by hand, is enough to write one.
 
+    This fixture is session-scoped because the UI module has a module-scoped
+    window fixture. A function-scoped patch starts too late: that window is
+    constructed first and retains the real store for every test in its module.
+
     Done by replacing the class the window builds its store from. The
     documented route — `setDefaultFormat` plus `setPath` — does not work here:
     `QSettings(organization, application)` stays on `NativeFormat` in Qt 6.11
     whatever the default is set to, so on Windows it reads the registry and the
     redirection is silently ignored.
+
+    No process-wide QSettings format, path, organization, or application value
+    is changed; the module attribute is restored when the session ends.
+    """
+    from PySide6.QtCore import QSettings
+    import flightdvr.ui as ui
+
+    store = str(tmp_path_factory.mktemp("flightdvr-settings") / "settings.ini")
+    original = ui.QSettings
+
+    def disposable_settings(*_args, **_kw):
+        return QSettings(store, QSettings.Format.IniFormat)
+
+    ui.QSettings = disposable_settings
+    try:
+        yield store
+    finally:
+        ui.QSettings = original
+
+
+@pytest.fixture(autouse=True)
+def isolated_settings(settings_backend):
+    """Start and finish each test with an empty disposable settings store.
+
+    The session fixture above must install the redirection early enough for
+    module-scoped windows. Clearing this same store per test retains the old
+    suite guarantee that one window's saved template or preset cannot leak
+    into the next test.
     """
     from PySide6.QtCore import QSettings
 
-    store = str(tmp_path / "settings.ini")
-    monkeypatch.setattr(
-        "flightdvr.ui.QSettings",
-        lambda *_args, **_kw: QSettings(store, QSettings.Format.IniFormat),
-    )
+    store = QSettings(settings_backend, QSettings.Format.IniFormat)
+    store.clear()
+    store.sync()
+    try:
+        yield
+    finally:
+        store.clear()
+        store.sync()
 
 
 @dataclass(frozen=True)
