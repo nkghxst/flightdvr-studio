@@ -1341,6 +1341,22 @@ def window(qt_app):
     made.close()
 
 
+def test_module_window_uses_disposable_settings(window):
+    """A module-scoped window must not be built from the user's registry.
+
+    The autouse settings fixture used to be function-scoped, so this window
+    was constructed before its monkeypatch ran and retained the real store.
+    """
+    from PySide6.QtCore import QSettings
+    from flightdvr.ui import APP_NAME, ORG
+
+    real = Path(QSettings(ORG, APP_NAME).fileName())
+    actual = Path(window.settings_store.fileName())
+
+    assert actual != real
+    assert window.settings_store.format() == QSettings.Format.IniFormat
+
+
 def shortcuts_on(widget) -> dict:
     from PySide6.QtGui import QShortcut
     return {s.key().toString(): s for s in widget.findChildren(QShortcut)
