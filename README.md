@@ -325,6 +325,20 @@ frames (hold **Shift** for ten). The preview decodes only a small window around
 the playhead, shows its exact timestamp and source frame number, and replaces
 that window when you seek elsewhere rather than decoding the whole recording.
 
+**Grab still…** saves the frame you are paused on as a full-resolution PNG. It
+uses the frame number and timestamp the preview decoder has already established
+rather than picking a nearby picture from the wall clock, and it saves at the
+source's own dimensions — what the preview scaled to fit the window has no
+effect on the file.
+
+It offers a name built from the naming template and the Output box, with a
+`still` suffix, then lets you change it: the save dialog is where the still
+finally lands, unlike an export, which goes where the queue said it would. The
+button only does anything when a real decoded frame is on screen. The PNG is
+written beside its target and moved into place only once ffmpeg has produced a
+readable image, so a cancelled or failed capture leaves nothing behind and never
+damages a file already there.
+
 The preview is silent. Sound would need a second pipe and a second clock, and
 DVR audio is motor whine — an in point is something you find by eye.
 
@@ -367,9 +381,12 @@ mismatched set, because copying without re-encoding cannot change anything.
 | **Master** | H.264 `.mp4`, quality-based | 11 GB/hour | archiving, sending to editors online |
 | **Social** | H.264 `.mp4`, size-targeted | you choose | WhatsApp, Instagram, Discord |
 | **Upload** | H.264 `.mp4` at 1080p or above | 20 GB/hour | YouTube, Instagram, Reddit |
+| **Vertical** | H.264 `.mp4`, 9:16 crop | 11 GB/hour | Reels, Shorts, TikTok, sending to a phone |
 | **Remux** | `.ts` → `.mp4`, no re-encode | same as source | instant lossless rewrap |
+| **Slow motion** | H.264 `.mp4` at half speed | 18 GB/hour | showing the moment something went wrong |
 
-Sizes are for 720p60; other resolutions are scaled accordingly.
+Sizes are for 720p60; other resolutions are scaled accordingly. Slow motion is
+per hour of *recording* — the file it writes runs for two.
 
 **Edit** exists because the free version of DaVinci Resolve on Windows cannot
 decode H.265, so the original files cannot go on a timeline at all. Mezzanine
@@ -396,6 +413,46 @@ not offered.
 **Social** hits an exact file size using a two-pass encode, landing within about
 one percent of the number you ask for. It can also downscale and halve the frame
 rate. Only sizes smaller than the source are offered, so it never upscales.
+
+**Vertical** crops a 9:16 slice out of the recording for phone feeds. It crops
+rather than padding, so the picture fills the screen instead of sitting in a
+letterbox — and because a 16:9 recording is much wider than 9:16 is, *which*
+slice you keep is a real decision. A slider chooses it from left to right, or
+drag the crop on the preview itself; the shaded area is what will be thrown
+away.
+
+The frame it takes is the largest exact 9:16 rectangle in the source. A 720p60
+recording gives a 396×704 crop, delivered at 720×1280; a 1080p one gives
+594×1056 at 1080×1920. That costs eight lines top and bottom at 720p, which is
+the price of an exactly square pixel: the alternative that keeps the full height
+is 0.25% out, and ffmpeg hides that difference in a sample-aspect flag rather
+than in the picture, so it looks correct until a platform ignores the flag.
+Taking the eight lines is the version that is true everywhere.
+
+A source too narrow to hold a 9:16 crop is refused with both numbers rather than
+padded with bars.
+
+Worth knowing before you use it: **the goggle OSD lives at the edges of the
+frame**, so a vertical crop cuts off the timer, battery and warnings at the
+sides. That is unavoidable in a 9:16 slice of a 16:9 recording, and the preview
+shows exactly what goes.
+
+**Slow motion** plays the recording at half speed while keeping every frame that
+was recorded. Nothing is invented between frames: a 60 fps source becomes 30 fps,
+and a 90 fps source becomes 45 fps. The output rate comes from the recording
+rather than being rounded to the frame rates the Social preset offers.
+
+It has its own quality setting, independent of Master, so changing one does not
+silently change the other. Sound is dropped, whatever the **Keep the audio
+track** tickbox says: audio at half pitch is not slow motion, and normal-speed
+audio over slowed video drifts apart within seconds.
+
+It refuses a clip whose frame rate cannot be read, and a joined set recorded at
+different rates. Every other preset may reasonably guess at a rate; this is the
+only one that promises to keep every frame exactly once, and neither case can
+keep that promise without inventing or discarding frames. That refusal is worth
+having: before it existed, falling back to 60 threw away a third of the frames
+of a 90 fps recording and reported a successful export.
 
 **Keep the audio track** can be turned off on any preset. DVR audio is mostly
 motor noise and wind, and dropping it buys bitrate on a size-targeted export.
@@ -433,6 +490,37 @@ row opens what it produced.
 
 Below the queue is an overall progress bar with elapsed and estimated remaining
 time, weighted by footage length rather than job count.
+
+### Naming what comes out
+
+The queue shows the filename that will be written, and the **Name** field under
+Output decides how that name is built. It takes a template and shows an example
+as you type. The default is:
+
+```
+{date}_{clip}_{range_number}_{range}_{preset}
+```
+
+| Field | Means |
+|---|---|
+| `{date}` | the flight date, as used when copying originals to the library |
+| `{session}` | the session name, when one has been given |
+| `{clip}` | the recording's filename without its extension |
+| `{range_number}` | the one-based number, when a clip has more than one range |
+| `{range}` | the name of that range, when a clip has more than one |
+| `{preset}` | the preset suffix — `master`, `upload`, and blank for Remux |
+
+**An empty field takes its separator with it**, which is what lets one string
+cover every case without leaving gaps: an untitled single range is
+`hdz_048_upload`, a named second range out of several is
+`hdz_048_2_Tree-dive_upload`, and a Remux export, whose suffix is deliberately
+blank, is just `hdz_048`.
+
+A template names a file, never a folder — the Output box still decides where it
+is written. Slashes, unknown fields, unpaired braces and characters the
+operating system will not accept are reported as you type; the finished name is
+checked again before anything is queued, which is what catches a reserved name
+that only appears once the fields are filled in.
 
 ### What it will not do quietly
 
@@ -651,7 +739,7 @@ Where this is going next — and what it deliberately will not do — is in
 |---|---|---|
 | Media and export | `media.py`, `presets.py`, `jobs.py` | ffmpeg discovery, probing, export commands and the worker queue |
 | Browsing and analysis | `scan.py`, `thumbs.py`, `trim.py`, `motion.py` | clip discovery, cached frames, trimming and flight readings |
-| Playback and decisions | `player.py`, `session.py` | bounded in-window playback and saved review decisions |
+| Playback and decisions | `player.py`, `stills.py`, `session.py` | bounded in-window playback, full-resolution stills and saved review decisions |
 | Interface | `browser_panel.py`, `preview_panel.py`, `export_panel.py`, `queue_panel.py`, `ui.py` | panel-local behaviour and cross-panel workflows |
 
 The module-by-module layout is maintained in
