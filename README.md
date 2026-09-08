@@ -325,6 +325,20 @@ frames (hold **Shift** for ten). The preview decodes only a small window around
 the playhead, shows its exact timestamp and source frame number, and replaces
 that window when you seek elsewhere rather than decoding the whole recording.
 
+**Grab still…** saves the frame you are paused on as a full-resolution PNG. It
+uses the frame number and timestamp the preview decoder has already established
+rather than picking a nearby picture from the wall clock, and it saves at the
+source's own dimensions — what the preview scaled to fit the window has no
+effect on the file.
+
+It offers a name built from the naming template and the Output box, with a
+`still` suffix, then lets you change it: the save dialog is where the still
+finally lands, unlike an export, which goes where the queue said it would. The
+button only does anything when a real decoded frame is on screen. The PNG is
+written beside its target and moved into place only once ffmpeg has produced a
+readable image, so a cancelled or failed capture leaves nothing behind and never
+damages a file already there.
+
 The preview is silent. Sound would need a second pipe and a second clock, and
 DVR audio is motor whine — an in point is something you find by eye.
 
@@ -340,16 +354,93 @@ instant rather than waiting on a seek.
 Trims survive into a joined export: each clip keeps its own in and out points.
 *Remux* is the exception and will say so — see below.
 
-**Joining clips into one file** is the *Join the ticked clips into one file*
-box, for when the DVR split a single flight across several recordings. Clips
-are joined in DVR counter order rather than by timestamp, because
-[the goggles cannot keep time](#the-goggles-cannot-keep-time).
+## Joining several ranges into one file
+
+When the DVR split one flight across several recordings, or when two moments
+out of one recording belong together, the **Assembly** list under *Output* is
+what makes them a single file. It is an ordered list you can look at before
+committing to an encode, which is the whole point of it: a delivery is a
+decision, and a decision nobody can see beforehand is not one they made.
+
+It replaces the *Join the ticked clips into one file* tickbox. That box asked
+for a joined file and worked the order out for itself — DVR counter order with
+a stored per-clip preference laid over it — so it could not express two ranges
+of one recording in any order but the one they happen to occur in, and it
+showed nobody what was about to be encoded.
+
+**Use ticked ranges** fills the list from the ranges ticked in the browser, in
+DVR counter order and then along each recording, because
+[the goggles cannot keep time](#the-goggles-cannot-keep-time). A recording you
+have not trimmed goes in whole.
+
+**Default order** runs that same fill again. It is not a sort of what is already
+in the list: it rebuilds the list from whatever is ticked *now*, and the order
+and the contents you had are replaced. A row you removed comes back if its
+recording is still ticked, and a row whose recording you have since unticked
+does not come back at all. It is the way back to a known state rather than an
+undo.
+
+Then arrange it:
+
+| | |
+|---|---|
+| **Move up** / **Move down**, or `Alt` `↑` / `Alt` `↓` | move the selected rows one place, keeping a multi-row selection together and in order |
+| **Remove**, or `Delete` | take rows out of the list — the range itself is left alone |
+| **Add assembly to queue** | queue one joined export of exactly this list, in this order |
+
+The keyboard reaches everything the buttons do. `Alt` with the arrows is the
+usual spelling for *move the thing*, which leaves plain `↑` and `↓` doing what
+they always do in a list.
+
+A row names the recording, and the range only when it needs to: the name you
+gave that range, `range 2` when you did not name it, and the filename on its
+own when the row is the whole recording. Its length follows, and the line under
+the list counts the items and adds up how much footage they come to — the
+duration of the material, not the runtime of the finished file. Those are the
+same number for every preset except *Slow motion*, which writes twice what goes
+in: two ten-second ranges read as twenty seconds here and produce forty.
+
+**A row is a reference, not a copy.** The list stores which recording and which
+range, never a position or the range itself, so retrimming a range afterwards
+changes what that row will export — it still means that range — and deleting or
+renaming some other range does not disturb it.
+
+A range that has genuinely gone stays **visible, in the position it was stored
+in**, marked `missing`. It cannot be selected or moved, because it is a problem
+to resolve rather than something to arrange, and the summary counts it. Queuing
+is refused while one is there, naming what it could not find, rather than
+quietly joining a shorter film than you asked for.
+
+Being unselectable, a missing row is also out of reach of **Remove** and
+`Delete`, which act on the selection. There are two ways past it. If the footage
+should still be there — a card remounted somewhere else, a folder moved — put it
+back and scan again, and the row resolves itself into the range it always named.
+Otherwise tick the ranges you do want and press **Use ticked ranges**, which
+rebuilds the list without the gap, at the cost of the order you had.
+
+The list is part of the [session](#sessions), so it survives closing the window
+and comes back with the card — filling it, reordering it, removing a row and
+resetting it all schedule the same save.
+
+Two more things worth knowing. **Add assembly to queue** wants at least two
+rows: one range is a trim, and ordinary **Add to queue** does that better. And
+once there is anything in the list, the size estimate follows the *list* rather
+than the ticks — the assembly is both the order and the content, so unticking
+one of its sources no longer quietly turns a two-clip join into a single-clip
+export.
+
+The joined file is named from the template like any other export, with
+`_joined` added to the `{clip}` field — so the default template turns three
+ranges beginning with `hdz_047.ts` into `hdz_047_joined_master.mp4`.
 
 Clips that do not match each other are fine. Different sizes, frame rates and
 codecs are brought to a common format — the largest size and rate among them,
 so nothing is thrown away to suit the smallest — and a clip with no sound gets
-silence rather than removing the audio from the rest. Only *Remux* refuses a
-mismatched set, because copying without re-encoding cannot change anything.
+silence rather than removing the audio from the rest. Two presets refuse a
+mismatched set instead: *Remux*, because copying without re-encoding cannot
+change anything, and *Slow motion*, because putting clips recorded at different
+rates onto one rate would have to invent or discard the frames it exists to
+keep.
 
 > **Remux is the exception.** It does no re-encoding, so it can only cut where a
 > keyframe already is, and a trimmed rewrap may be a second or so out. Every
@@ -367,9 +458,12 @@ mismatched set, because copying without re-encoding cannot change anything.
 | **Master** | H.264 `.mp4`, quality-based | 11 GB/hour | archiving, sending to editors online |
 | **Social** | H.264 `.mp4`, size-targeted | you choose | WhatsApp, Instagram, Discord |
 | **Upload** | H.264 `.mp4` at 1080p or above | 20 GB/hour | YouTube, Instagram, Reddit |
+| **Vertical** | H.264 `.mp4`, 9:16 crop | 11 GB/hour | Reels, Shorts, TikTok, sending to a phone |
 | **Remux** | `.ts` → `.mp4`, no re-encode | same as source | instant lossless rewrap |
+| **Slow motion** | H.264 `.mp4` at half speed | 18 GB/hour | showing the moment something went wrong |
 
-Sizes are for 720p60; other resolutions are scaled accordingly.
+Sizes are for 720p60; other resolutions are scaled accordingly. Slow motion is
+per hour of *recording* — the file it writes runs for two.
 
 **Edit** exists because the free version of DaVinci Resolve on Windows cannot
 decode H.265, so the original files cannot go on a timeline at all. Mezzanine
@@ -397,8 +491,55 @@ not offered.
 one percent of the number you ask for. It can also downscale and halve the frame
 rate. Only sizes smaller than the source are offered, so it never upscales.
 
-**Keep the audio track** can be turned off on any preset. DVR audio is mostly
-motor noise and wind, and dropping it buys bitrate on a size-targeted export.
+**Vertical** crops a 9:16 slice out of the recording for phone feeds. It crops
+rather than padding, so the picture fills the screen instead of sitting in a
+letterbox — and because a 16:9 recording is much wider than 9:16 is, *which*
+slice you keep is a real decision. A slider chooses it from left to right, or
+drag the crop on the preview itself; the shaded area is what will be thrown
+away.
+
+The frame it takes is the largest exact 9:16 rectangle in the source. A 720p60
+recording gives a 396×704 crop, delivered at 720×1280; a 1080p one gives
+594×1056 at 1080×1920. That costs eight lines top and bottom at 720p, which is
+the price of an exactly square pixel: the alternative that keeps the full height
+is 0.25% out, and ffmpeg hides that difference in a sample-aspect flag rather
+than in the picture, so it looks correct until a platform ignores the flag.
+Taking the eight lines is the version that is true everywhere.
+
+A source too narrow to hold a 9:16 crop is refused with both numbers rather than
+padded with bars.
+
+Worth knowing before you use it: **the goggle OSD lives at the edges of the
+frame**, so a vertical crop cuts off the timer, battery and warnings at the
+sides. That is unavoidable in a 9:16 slice of a 16:9 recording, and the preview
+shows exactly what goes.
+
+**Slow motion** plays the recording at half speed while keeping every frame that
+was recorded. Nothing is invented between frames: a 60 fps source becomes 30 fps,
+and a 90 fps source becomes 45 fps. The output rate comes from the recording
+rather than being rounded to the frame rates the Social preset offers.
+
+It has its own quality setting, independent of Master, so changing one does not
+silently change the other. Sound is left out, and **Keep the audio track** is
+greyed out while this preset is chosen rather than left looking effective:
+slowed motor noise drops an octave and is not worth having, and keeping the
+sound at normal speed over video that now runs twice as long would drift apart
+by the length of the clip. The preset's own panel says so, where the decision
+is made.
+
+It refuses a clip whose frame rate cannot be read, and a joined set recorded at
+different rates. Every other preset may reasonably guess at a rate; this is the
+only one that promises to keep every frame exactly once, and neither case can
+keep that promise without inventing or discarding frames. That refusal is worth
+having: before it existed, falling back to 60 threw away a third of the frames
+of a 90 fps recording and reported a successful export.
+
+**Keep the audio track** can be turned off on any preset that re-encodes. DVR
+audio is mostly motor noise and wind, and dropping it buys bitrate on a
+size-targeted export. It is greyed out for *Remux*, which copies the streams
+across and cannot be told otherwise, and for *Slow motion*, which always drops
+the sound — a tickbox that changes nothing is a promise the export does not
+keep.
 
 ### Hardware encoding
 
@@ -433,6 +574,37 @@ row opens what it produced.
 
 Below the queue is an overall progress bar with elapsed and estimated remaining
 time, weighted by footage length rather than job count.
+
+### Naming what comes out
+
+The queue shows the filename that will be written, and the **Name** field under
+Output decides how that name is built. It takes a template and shows an example
+as you type. The default is:
+
+```
+{date}_{clip}_{range_number}_{range}_{preset}
+```
+
+| Field | Means |
+|---|---|
+| `{date}` | the flight date, as used when copying originals to the library |
+| `{session}` | the session name, when one has been given |
+| `{clip}` | the recording's filename without its extension |
+| `{range_number}` | the one-based number, when a clip has more than one range |
+| `{range}` | the name of that range, when a clip has more than one |
+| `{preset}` | the preset suffix — `master`, `upload`, and blank for Remux |
+
+**An empty field takes its separator with it**, which is what lets one string
+cover every case without leaving gaps: an untitled single range is
+`hdz_048_upload`, a named second range out of several is
+`hdz_048_2_Tree-dive_upload`, and a Remux export, whose suffix is deliberately
+blank, is just `hdz_048`.
+
+A template names a file, never a folder — the Output box still decides where it
+is written. Slashes, unknown fields, unpaired braces and characters the
+operating system will not accept are reported as you type; the finished name is
+checked again before anything is queued, which is what catches a reserved name
+that only appears once the fields are filled in.
 
 ### What it will not do quietly
 
@@ -651,8 +823,9 @@ Where this is going next — and what it deliberately will not do — is in
 |---|---|---|
 | Media and export | `media.py`, `presets.py`, `jobs.py` | ffmpeg discovery, probing, export commands and the worker queue |
 | Browsing and analysis | `scan.py`, `thumbs.py`, `trim.py`, `motion.py` | clip discovery, cached frames, trimming and flight readings |
-| Playback and decisions | `player.py`, `session.py` | bounded in-window playback and saved review decisions |
-| Interface | `browser_panel.py`, `preview_panel.py`, `export_panel.py`, `queue_panel.py`, `ui.py` | panel-local behaviour and cross-panel workflows |
+| Playback and decisions | `player.py`, `stills.py`, `session.py` | bounded in-window playback, full-resolution stills and saved review decisions |
+| Delivery | `assembly.py` | the ordered list of ranges that becomes one file, held as references rather than positions |
+| Interface | `browser_panel.py`, `preview_panel.py`, `export_panel.py`, `assembly_panel.py`, `queue_panel.py`, `ui.py` | panel-local behaviour and cross-panel workflows |
 
 The module-by-module layout is maintained in
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#layout).
