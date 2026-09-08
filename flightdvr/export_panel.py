@@ -62,10 +62,12 @@ class ExportPanel(QWidget):
     output_changed = Signal()
     date_changed = Signal()
     add_requested = Signal()
+    bundle_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._ready = False
+        self._bundle: list[str] = []
         self._build()
         self._ready = True
         self._on_preset_changed()
@@ -243,6 +245,18 @@ class ExportPanel(QWidget):
         add.setMinimumHeight(30)
         add.clicked.connect(lambda *_: self.add_requested.emit())
         layout.addWidget(add)
+
+        # Beside the quick default rather than replacing it. One preset is
+        # still the common case, and a checklist in front of it every time
+        # would be ceremony of a different shape.
+        self.bundle_button = QPushButton("Add delivery bundle…")
+        self.bundle_button.setToolTip(
+            "Queue several presets of this material at once, after showing "
+            "exactly what each of them would write"
+        )
+        self.bundle_button.clicked.connect(
+            lambda *_: self.bundle_requested.emit())
+        layout.addWidget(self.bundle_button)
         return box
 
     def _build_edit_options(self) -> QWidget:
@@ -539,6 +553,12 @@ class ExportPanel(QWidget):
             "output_dir": self.out_edit.currentText(),
             "template": self.template(),
             "preset": self.preset_key(),
+            # Beside the single preset, never instead of it: reopening a card
+            # should find both the radio button it was left on and the bundle
+            # last delivered from it. Comma-joined because this dict is read
+            # back from QSettings as well as from a session's JSON, and a list
+            # does not survive that round trip on every platform.
+            "bundle": ",".join(self._bundle),
             "social_size_mb": self.social_size.value(),
             "vertical_position": self.vertical_position.value(),
         }
@@ -570,6 +590,10 @@ class ExportPanel(QWidget):
         preset = values.get("preset")
         if preset in self.preset_buttons:
             self.preset_buttons[preset].setChecked(True)
+
+        bundle = values.get("bundle")
+        if bundle is not None:
+            self.set_bundle(bundle)
 
         for key, combo in self._combo_settings():
             saved = values.get(key)
@@ -633,6 +657,21 @@ class ExportPanel(QWidget):
             if button.isChecked():
                 return key
         return "master"
+
+    def bundle(self) -> list[str]:
+        """The presets the last delivery bundle was made of."""
+        return list(self._bundle)
+
+    def set_bundle(self, keys) -> None:
+        """Remember a bundle selection, from the dialog or from storage.
+
+        Unknown keys are dropped rather than kept: a session written by a
+        version that offered a preset this one does not would otherwise put a
+        name into the checklist that nothing can tick.
+        """
+        if isinstance(keys, str):
+            keys = [part.strip() for part in keys.split(",")]
+        self._bundle = [key for key in PRESET_ORDER if key in set(keys or [])]
 
     def settings(self, hw_encoder: str) -> ExportSettings:
         """Return one value object; callers do not need to know our widgets."""

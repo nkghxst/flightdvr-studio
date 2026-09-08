@@ -63,7 +63,8 @@ from .media import (
     stop_process,
 )
 from .presets import (
-    PRESETS, ExportSettings, describe_join_problems, estimate_output_size,
+    PRESET_ORDER, PRESETS, ExportSettings, describe_join_problems,
+    estimate_output_size,
     join_problems, output_path, output_runtime, slow_problems, vertical_crop,
     vertical_problems, templated_output_path,
 )
@@ -71,6 +72,10 @@ from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
 from .queue_panel import QueuePanel
 from .assembly import absent, default_items, export_piece, present, resolve
+from .bundle import (
+    Piece, collisions as bundle_collisions, frozen_settings, plan_bundle,
+)
+from .bundle_panel import BundleDialog
 from .session import (
     REVIEW_STATES, SUFFIX as SESSION_SUFFIX, UNREVIEWED, Session,
     apply_settings, apply_to, capture_from, capture_settings, for_source,
@@ -700,6 +705,7 @@ class MainWindow(QMainWindow):
         panel.output_changed.connect(self._on_output_changed)
         panel.date_changed.connect(self._on_date_changed)
         panel.add_requested.connect(self._add_to_queue)
+        panel.bundle_requested.connect(self._add_bundle)
         return panel
 
     def _build_queue(self) -> QWidget:
@@ -2603,6 +2609,133 @@ class MainWindow(QMainWindow):
         if skipped > 0:
             note += f", {skipped} already in the queue"
         self.statusBar().showMessage(note, 5000)
+
+    # -- delivery bundles -----------------------------------------------------
+
+    def _bundle_material(self) -> tuple[list[Piece], bool, str]:
+        """The material a bundle would deliver, or why there is none.
+
+        Deliberately the same decision `_add_to_queue` makes, rather than a
+        second way of choosing what gets exported: the assembly is the job when
+        there is one, and the ticked ranges are the job when there is not. A
+        bundle that picked its material differently would quietly produce files
+        that do not match the ones the ordinary button makes from the same
+        screen — and the whole promise of the confirmation is that what it
+        lists is what arrives.
+
+        The index and total travel with each piece because `export_fields`
+        needs them per recording. Flattening first and numbering afterwards
+        would number every range on the card in one sequence, which is not what
+        the single-preset path writes.
+        """
+        if self.export_panel.join_enabled():
+            pieces, gaps = self._assembly_export_pieces()
+            if gaps:
+                listed = "\n".join(f"• {a}" for a in gaps)
+                return [], True, (
+                    "The assembly refers to material that is not here:\n\n"
+                    f"{listed}\n\n"
+                    "Remove those rows, or rescan the card if the footage "
+                    "should still be there.")
+            if len(pieces) < 2:
+                return [], True, (
+                    "An assembly needs at least two ranges to be worth "
+                    "joining. Use Add to queue for a single range.")
+            return [Piece(piece) for piece in pieces], True, ""
+
+        clips = self.selected_clips()
+        if not clips:
+            return [], False, "Tick at least one clip first."
+        grouped: list[Piece] = []
+        for clip in clips:
+            parts = clip.for_export()
+            for index, piece in enumerate(parts):
+                grouped.append(Piece(piece, index, len(parts)))
+        return grouped, False, ""
+
+    def _add_bundle(self) -> None:
+        """Show what several presets would write, then queue the chosen ones.
+
+        Every job is planned, named and sized before the first one is appended,
+        and the queue is mutated in one pass afterwards. Appending as each
+        member is confirmed would leave a half-added bundle behind the first
+        refusal, which is the failure the confirmation exists to prevent.
+        """
+        pieces, joined, problem = self._bundle_material()
+        if problem:
+            QMessageBox.warning(self, "Nothing to deliver", problem)
+            return
+
+        out_dir = Path(self.export_panel.output_text().strip())
+        if not str(out_dir).strip():
+            QMessageBox.warning(self, "No output folder",
+                                "Choose where the exports should go.")
+            return
+
+        settings = self.current_settings()
+        subfolders = self.export_panel.subfolders_enabled()
+        already = {
+            output_key(j.out_path) for j in self.jobs
+            if j.status in (JobStatus.PENDING, JobStatus.RUNNING)
+        }
+
+        members = plan_bundle(
+            PRESET_ORDER, pieces,
+            joined=joined,
+            out_dir=out_dir,
+            template=self.export_panel.template(),
+            subfolders=subfolders,
+            stamp=self.flight_date(),
+            session_name=self.session.title if self.session else "",
+            settings=settings,
+        )
+
+        dialog = BundleDialog(members, already, self.export_panel.bundle(), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dialog.selected_members()
+        if not chosen:
+            return
+
+        # Asked again against the queue as it is at this moment. The dialog is
+        # modal to this window, but a job can finish while it is open, and the
+        # check that matters is the one immediately before the mutation.
+        clashes = bundle_collisions(chosen, already)
+        if clashes:
+            listed = "\n".join(f"• {c}" for c in clashes)
+            QMessageBox.warning(
+                self, "This bundle cannot be queued",
+                f"Nothing has been queued:\n\n{listed}")
+            return
+
+        before = len(self.jobs)
+        for member in chosen:
+            # One snapshot per member, so changing the panel afterwards cannot
+            # reach a job that was confirmed under what it showed. The single
+            # preset path shares one settings object across its jobs; a bundle
+            # crosses presets, so each member keeps its own copy.
+            captured = frozen_settings(settings)
+            for planned in member.jobs:
+                concat = None
+                if joined:
+                    concat = write_concat_file(
+                        planned.clips, work_dir(),
+                        f"{planned.stem}_{_clip_set_id(planned.clips)}")
+                self.jobs.append(Job(
+                    list(planned.clips), member.key, captured, planned.target,
+                    concat_file=concat, out_dir=out_dir, stem=planned.stem,
+                    subfolders=subfolders, frozen=True))
+
+        # Remembered beside the single preset rather than instead of it, so the
+        # radio button the card was being worked with is still there next time.
+        self.export_panel.set_bundle([m.key for m in chosen])
+        self._touch_session()
+
+        self._rebuild_queue()
+        added = len(self.jobs) - before
+        names = ", ".join(m.label for m in chosen)
+        self.statusBar().showMessage(
+            f"{added} queued as a bundle: {names}", 6000)
 
     def _assembly_rows(self):
         """The assembly resolved against every clip on the card.
