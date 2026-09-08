@@ -611,11 +611,19 @@ def join_filtergraph(
     pix_fmt: str,
     tail: list[str] | None = None,
     vertical: bool = False,
+    allow_audio: bool = True,
 ) -> tuple[str, str, str]:
     """A filter_complex that normalises every clip and then joins them.
 
     Returns (graph, video label, audio label). The audio label is empty when
     the export carries no sound.
+
+    `allow_audio=False` is a veto for a preset whose output has no sound at
+    all, and it belongs here rather than at the command's tail. A joined export
+    maps this graph's labels explicitly, and an explicit `-map` is not what
+    `-an` suppresses — so a preset that builds an audio label and then asks for
+    silence gets the audio. That is #86: a slow join arrived with 104.833 s of
+    video beside 52.403 s of unslowed AAC.
 
     This replaces the concat demuxer, which needed every input to present
     identical streams and took its encoder settings from the first clip, so a
@@ -635,7 +643,8 @@ def join_filtergraph(
         fps = max((c.fps for c in clips if c.fps), default=60.0)
     else:
         width, height, fps = join_target_format(clips)
-    want_audio = settings.keep_audio and any(c.has_audio for c in clips)
+    want_audio = (allow_audio and settings.keep_audio
+                  and any(c.has_audio for c in clips))
 
     chains: list[str] = []
     labels: list[str] = []
@@ -981,15 +990,22 @@ def build_commands(
         pix_fmt: str,
         tail: list[str] | None = None,
         vertical: bool = False,
+        allow_audio: bool = True,
     ):
         """Filter arguments, and whether the result carries audio.
 
         A join routes through filter_complex so every clip can be brought to a
         common format first; a single clip keeps the simpler -vf chain.
+
+        `allow_audio=False` says this preset's output has no sound whatever the
+        settings ask for. It has to be answered here, where the graph and its
+        `-map` arguments are built, because a later `-an` does not undo an
+        explicit map. Only Slow motion uses it.
         """
         if joined:
             graph, video_label, audio_label = join_filtergraph(
-                clips, settings, pix_fmt, tail, vertical=vertical
+                clips, settings, pix_fmt, tail, vertical=vertical,
+                allow_audio=allow_audio,
             )
             args = ["-filter_complex", graph, "-map", video_label]
             if audio_label:
@@ -1105,7 +1121,13 @@ def build_commands(
             # output-side limit and has to be stated in the slowed timeline.
             head = ([ff, "-hide_banner", "-nostdin", "-y"]
                     + _input_args(sources, None, clip, time_scale=SLOW_FACTOR))
-        filters, mapped = picture("yuv420p", [f"setpts={SLOW_FACTOR}*PTS"])
+        # allow_audio=False rather than relying on the -an below. On a join the
+        # graph's audio label is mapped explicitly, and -an does not suppress an
+        # explicit map: #86 arrived as 104.833 s of video beside 52.403 s of
+        # source AAC, in a file twice the length of its own sound. The -an stays
+        # for the single-clip route, where it is what does the work.
+        filters, mapped = picture("yuv420p", [f"setpts={SLOW_FACTOR}*PTS"],
+                                  allow_audio=False)
         if settings.hardware:
             video = hardware_video_args(settings.hardware, settings.slow_crf)
         else:
