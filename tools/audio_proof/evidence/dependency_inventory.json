@@ -1,0 +1,59 @@
+{
+  "packages": {
+    "sounddevice": {
+      "version": "0.5.6",
+      "license": "MIT",
+      "project_urls": [
+        "Documentation, https://python-sounddevice.readthedocs.io/",
+        "Repository, https://github.com/spatialaudio/python-sounddevice/",
+        "Issues, https://github.com/spatialaudio/python-sounddevice/issues"
+      ],
+      "license_files": {
+        "sounddevice-0.5.6.dist-info/licenses/LICENSE": {
+          "sha256": "b6eea21bbafbaf7a2177e492f1be6b5efc6f4e708b1980773de51cdaa52f8211",
+          "text": "Copyright (c) 2015-2025 Matthias Geier\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE.\n"
+        }
+      }
+    },
+    "cffi": {
+      "version": "2.1.1",
+      "license": "MIT-0",
+      "project_urls": [
+        "Documentation, https://cffi.readthedocs.io/",
+        "Changelog, https://cffi.readthedocs.io/en/latest/whatsnew.html",
+        "Download, https://github.com/python-cffi/cffi/releases",
+        "Contact, https://groups.google.com/forum/#!forum/python-cffi",
+        "Source Code, https://github.com/python-cffi/cffi",
+        "Issue Tracker, https://github.com/python-cffi/cffi/issues"
+      ],
+      "license_files": {
+        "cffi-2.1.1.dist-info/licenses/LICENSE": {
+          "sha256": "5ba24ddc57067f9249add644c3afc41a5d6dc37e23433ef759d95df370b0af63",
+          "text": "\nExcept when otherwise stated (look for LICENSE files in directories or\ninformation at the beginning of each file) all software and\ndocumentation is licensed as follows: \n\n    MIT No Attribution\n\n    Permission is hereby granted, free of charge, to any person \n    obtaining a copy of this software and associated documentation \n    files (the \"Software\"), to deal in the Software without \n    restriction, including without limitation the rights to use, \n    copy, modify, merge, publish, distribute, sublicense, and/or \n    sell copies of the Software, and to permit persons to whom the \n    Software is furnished to do so.\n\n    THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS \n    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, \n    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL \n    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER \n    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING \n    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER \n    DEALINGS IN THE SOFTWARE.\n\n"
+        }
+      }
+    },
+    "pycparser": {
+      "version": "3.0",
+      "license": "BSD-3-Clause",
+      "project_urls": [
+        "Homepage, https://github.com/eliben/pycparser"
+      ],
+      "license_files": {
+        "pycparser-3.0.dist-info/licenses/LICENSE": {
+          "sha256": "0c846399369ea76ddd7b5c44fe6d16497415fcf015f5cbb508c24bf98b81c5b1",
+          "text": "pycparser -- A C parser in Python\n\nCopyright (c) 2008-2022, Eli Bendersky\nAll rights reserved.\n\nRedistribution and use in source and binary forms, with or without modification,\nare permitted provided that the following conditions are met:\n\n* Redistributions of source code must retain the above copyright notice, this \n  list of conditions and the following disclaimer.\n* Redistributions in binary form must reproduce the above copyright notice, \n  this list of conditions and the following disclaimer in the documentation \n  and/or other materials provided with the distribution.\n* Neither the name of the copyright holder nor the names of its contributors may \n  be used to endorse or promote products derived from this software without \n  specific prior written permission.\n\nTHIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\" AND \nANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED \nWARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE \nDISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE \nLIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR \nCONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE \nGOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) \nHOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT \nLIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT \nOF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n"
+        }
+      }
+    }
+  },
+  "portaudio": [
+    1246976,
+    "PortAudio V19.7.0-devel, revision unknown"
+  ],
+  "loaded_library": "D:\\Dev\\test-output\\flightdvr-audio-proof-20260908\\venv\\Lib\\site-packages\\_sounddevice_data\\portaudio-binaries\\libportaudio64bit.dll",
+  "loaded_library_sha256": "ec080194f01e4095c7fb43dbd7ed05af922c5b34295056a9ff56782741d65481",
+  "portaudio_supplied_notice": "PortAudio binaries\n==================\n\nThis repository provides pre-compiled dynamic libraries for\n[PortAudio](http://www.portaudio.com/).\n\nDLLs for Windows (32-bit and 64-bit)\n------------------------------------\n\nThere are two sets of DLL files,\none including the default host APIs,\nnamely MME, DirectSound, WDM/KS and WASAPI,\nand another one (`*-asio.dll`) where ASIO is enabled as well.\nFor more information about the ASIO SDK see\nhttp://www.steinberg.net/en/company/developers.html.\n\ndylib for macOS (64-bit, \"universal\")\n----------------------------------------\n\nThe file `libportaudio.dylib` is compatible both\nwith Intel (`x86_64`) and with Apple Silicon (`arm64`) CPUs.\n\nDetails\n-------\n\nAll files were auto-created with Github Actions.\nFor all the details, see [the config file](.github/workflows/build-libs.yml).\n\nCopyright\n---------\n\n* PortAudio by Ross Bencina and Phil Burk, MIT License.\n\n* Steinberg Audio Stream I/O API by Steinberg Media Technologies GmbH.\n",
+  "audio_stream_opened": false,
+  "device_enumeration_requested": false
+}

@@ -1,0 +1,70 @@
+{
+  "scope": "synthetic PCM/math/thread proof only; no physical audio or video",
+  "rate": 48000,
+  "channels": 2,
+  "output_frames": 96000,
+  "max_reference_error": 2.9802322387695312e-08,
+  "nonzero_seek_count": 13,
+  "max_seek_reference_error": 2.9802322387695312e-08,
+  "capture": {
+    "wall_s": 1.0694113000063226,
+    "process_cpu_s": 0.578125,
+    "worker_cpu_s": 0.203125,
+    "queue_high_water_blocks": 4,
+    "source_cache_blocks": 4,
+    "music_cache_blocks": 4
+  },
+  "controls": {
+    "label": "fake sink; scheduler and CPU timings, NOT audible latency",
+    "updates": 80,
+    "control_ms_p95": 1.7325000371783972,
+    "control_ms_max": 13.627200038172305,
+    "pull_ms_p95": 1.8177999882027507,
+    "scheduler_lateness_ms_max": 3.755199955776334,
+    "reprime_ms": 28.797100007068366,
+    "stop_ms": 0.32049999572336674,
+    "cpu_s": 0.15625,
+    "wall_s": 0.8227441000053659,
+    "cpu_per_wall": 0.18991324276768554,
+    "queue_high_water_blocks": 4,
+    "discarded_stale_blocks": 7,
+    "worker_alive_after_stop": false
+  },
+  "reference_command": [
+    "D:\\Dev\\tools\\ffmpeg\\ffmpeg-n7.1.5-12-g1fdbca85aa-win64-gpl-7.1\\bin\\ffmpeg.exe",
+    "-hide_banner",
+    "-nostdin",
+    "-v",
+    "error",
+    "-y",
+    "-i",
+    "D:\\Dev\\test-output\\flightdvr-audio-proof-20260908\\final\\synthetic_source.wav",
+    "-stream_loop",
+    "-1",
+    "-i",
+    "D:\\Dev\\test-output\\flightdvr-audio-proof-20260908\\final\\synthetic_music.wav",
+    "-filter_complex",
+    "[0:a]asplit=2[s0][s1];[s0]atrim=start_sample=4800:end_sample=28800,asetpts=PTS-STARTPTS[a];anullsrc=r=48000:cl=stereo,atrim=end_sample=48000[z];[s1]atrim=start_sample=52800:end_sample=76800,asetpts=PTS-STARTPTS[c];[a][z][c]concat=n=3:v=0:a=1,volume=0.2[d];[1:a]atrim=end_sample=96000,asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp,afade=t=in:ss=0:ns=4800,afade=t=out:ss=86400:ns=9600,volume=0.8[m];[d][m]amix=inputs=2:normalize=0:duration=first:dropout_transition=0[out]",
+    "-map",
+    "[out]",
+    "-c:a",
+    "pcm_f32le",
+    "-f",
+    "f32le",
+    "D:\\Dev\\test-output\\flightdvr-audio-proof-20260908\\final\\reference.f32"
+  ],
+  "media_sha256": {
+    "synthetic_source.wav": "494e6ebce19fa83d3a6bde6a9577c9cbb5d2b79aafec656641e40450bff5c807",
+    "synthetic_music.wav": "d8eba6f7cdafff4125534a9eab17981222322a584a8c02f59f574bc4e97b66bf"
+  },
+  "ffmpeg_sha256": "efabedca4b599c13e073bb08f66369619e9deb1db1dc1f32822583379d6513de",
+  "dependency_versions": {
+    "sounddevice": "0.5.6",
+    "cffi": "2.1.1",
+    "pycparser": "3.0"
+  },
+  "portaudio": [
+    1246976,
+    "PortAudio V19.7.0-devel, revision unknown"
+  ]
+}
