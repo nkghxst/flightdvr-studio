@@ -127,6 +127,13 @@ class Job:
     stem: str = ""
     subfolders: bool = True
 
+    # A bundle member is named and sized in a confirmation the user reads
+    # before agreeing to it, so it keeps the name it was shown under. The
+    # retarget above exists for the opposite case — an ordinary job queued
+    # before somebody remembered to tick the flight date — and applying it
+    # here would rename a file the dialog had already promised.
+    frozen: bool = False
+
     status: JobStatus = JobStatus.PENDING
     progress: float = 0.0
     speed: str = ""
@@ -136,6 +143,8 @@ class Job:
     def retarget(self, flight_date) -> None:
         """Recompute the output path after an output setting changed."""
         if self.status is not JobStatus.PENDING or self.out_dir is None:
+            return
+        if self.frozen:
             return
         from .presets import output_path
         self.out_path = output_path(
