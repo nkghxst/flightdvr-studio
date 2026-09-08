@@ -2708,23 +2708,49 @@ class MainWindow(QMainWindow):
                 f"Nothing has been queued:\n\n{listed}")
             return
 
+        # Staged entirely outside the queue first. Sol's finding: building the
+        # concat lists inside the loop that appends meant a second member whose
+        # list could not be written left the first one already in `self.jobs` —
+        # neither the one action that was promised nor a refusal, and the queue
+        # not even redrawn to show what had happened. Nothing reaches the window
+        # until every selected member is ready.
+        staged: list[Job] = []
+        written: list[Path] = []
+        try:
+            for member in chosen:
+                # One snapshot per member, so changing the panel afterwards
+                # cannot reach a job that was confirmed under what it showed.
+                # The single preset path shares one settings object across its
+                # jobs; a bundle crosses presets, so each member keeps its own.
+                captured = frozen_settings(settings)
+                for planned in member.jobs:
+                    concat = None
+                    if joined:
+                        concat = write_concat_file(
+                            planned.clips, work_dir(),
+                            f"{planned.stem}_{_clip_set_id(planned.clips)}")
+                        written.append(concat)
+                    staged.append(Job(
+                        list(planned.clips), member.key, captured,
+                        planned.target, concat_file=concat, out_dir=out_dir,
+                        stem=planned.stem, subfolders=subfolders, frozen=True))
+        except OSError as exc:
+            # The lists already written belong to an action that is not
+            # happening, so they are taken back where they can be. A failure to
+            # remove one is not worth a second message: the work directory is
+            # temporary, and the queue is what had to be left alone.
+            for path in written:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            QMessageBox.warning(
+                self, "This bundle could not be prepared",
+                f"Nothing has been queued.\n\n{exc}")
+            return
+
         before = len(self.jobs)
-        for member in chosen:
-            # One snapshot per member, so changing the panel afterwards cannot
-            # reach a job that was confirmed under what it showed. The single
-            # preset path shares one settings object across its jobs; a bundle
-            # crosses presets, so each member keeps its own copy.
-            captured = frozen_settings(settings)
-            for planned in member.jobs:
-                concat = None
-                if joined:
-                    concat = write_concat_file(
-                        planned.clips, work_dir(),
-                        f"{planned.stem}_{_clip_set_id(planned.clips)}")
-                self.jobs.append(Job(
-                    list(planned.clips), member.key, captured, planned.target,
-                    concat_file=concat, out_dir=out_dir, stem=planned.stem,
-                    subfolders=subfolders, frozen=True))
+        self.jobs.extend(staged)
 
         # Remembered beside the single preset rather than instead of it, so the
         # radio button the card was being worked with is still there next time.

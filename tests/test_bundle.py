@@ -605,6 +605,67 @@ def test_the_bundle_is_remembered_beside_the_preset_not_instead_of_it(
         "restoring the bundle moved the single preset")
 
 
+def test_a_concat_list_that_cannot_be_written_leaves_the_queue_untouched(
+        window, bench, monkeypatch, tmp_path):
+    """Sol's finding on #82. Preparation used to happen inside the appending loop.
+
+    A joined bundle writes a concat list per member. Building those in the same
+    loop that appended meant a second member whose list could not be written
+    left the first one already in `self.jobs` — neither the one action the
+    dialog promised nor a refusal, and the queue not even redrawn to show what
+    had happened. Everything is staged outside the queue now, so a failure
+    halfway through has to leave the window exactly as it was.
+
+    The sentinel job is the point: "the queue is empty afterwards" would pass
+    against code that cleared it.
+    """
+    from flightdvr.assembly import Item, resolve
+    from flightdvr.jobs import Job
+    from flightdvr.presets import ExportSettings
+
+    sentinel = Job([bench[0]], "master", ExportSettings(),
+                   tmp_path / "already-there.mp4")
+    window.jobs.append(sentinel)
+    window.export_panel.set_bundle(["remux"])
+
+    items = [Item(bench[0].fingerprint, bench[0].real_selects[0].sid),
+             Item(bench[1].fingerprint, bench[1].real_selects[0].sid)]
+    window.export_panel.assembly_panel.show_rows(resolve(items, bench))
+
+    prepared = []
+
+    def failing(clips, work, stem):
+        prepared.append(stem)
+        if len(prepared) > 1:
+            raise OSError("synthetic second concat preparation failure")
+        written = tmp_path / f"{stem}.txt"
+        written.write_text("first member", encoding="utf-8")
+        return written
+
+    redraws = []
+    touches = []
+    warned = []
+    monkeypatch.setattr("flightdvr.ui.write_concat_file", failing)
+    monkeypatch.setattr(window, "_rebuild_queue", lambda: redraws.append(1))
+    monkeypatch.setattr(window, "_touch_session", lambda: touches.append(1))
+    monkeypatch.setattr("flightdvr.ui.QMessageBox.warning",
+                        lambda *args, **kw: warned.append(args))
+
+    _accept(monkeypatch, ["master", "upload"])
+    window._add_bundle()
+
+    assert len(prepared) == 2, "the second member was never prepared"
+    assert window.jobs == [sentinel], (
+        "a member of a bundle that could not be prepared reached the queue")
+    assert window.export_panel.bundle() == ["remux"], (
+        "the remembered selection moved for a bundle that was never queued")
+    assert touches == [], "a failed bundle scheduled a session write"
+    assert redraws == [], "a failed bundle redrew the queue"
+    assert warned, "the failure was silent"
+    assert not list(tmp_path.glob("*_joined*.txt")), (
+        "the concat list of the abandoned action was left behind")
+
+
 # -- through real ffmpeg --------------------------------------------------------
 
 
