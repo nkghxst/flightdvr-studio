@@ -25,6 +25,7 @@ import subprocess
 import threading
 import time
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -139,6 +140,18 @@ class Job:
     speed: str = ""
     message: str = ""
     elapsed: float = 0.0
+
+    def __post_init__(self) -> None:
+        """Own the export choices that were submitted with this job.
+
+        The UI currently constructs fresh scalar-only settings for each queue
+        action, so no presentation-to-queue alias defect has been observed.
+        Deep copying here establishes the commit-to-render boundary before
+        music adds nested values: later plan edits cannot alter a waiting or
+        running job. The Job itself intentionally remains mutable for progress,
+        status, cancellation and the existing pending-path retarget rule.
+        """
+        self.settings = deepcopy(self.settings)
 
     def retarget(self, flight_date) -> None:
         """Recompute the output path after an output setting changed."""
