@@ -103,6 +103,15 @@ SHORTCUT_GROUPS: tuple[ShortcutGroup, ...] = (
         ),
     ),
     ShortcutGroup(
+        "The Assembly list",
+        "Click a row in the Assembly list under Output.",
+        (
+            Shortcut(("Alt+Up",), "Move the selected rows up"),
+            Shortcut(("Alt+Down",), "Move the selected rows down"),
+            Shortcut(("Del",), "Remove the selected Assembly rows"),
+        ),
+    ),
+    ShortcutGroup(
         "Anywhere",
         "No particular focus needed.",
         (
