@@ -499,3 +499,127 @@ def test_the_filename_says_slow_without_a_second_naming_rule():
     target = templated_output_path(Path("/out"), "hdz_022_slow", "slowmo",
                                    subfolders=False)
     assert target.name == "hdz_022_slow.mp4"
+
+
+# -- a join must not build the audio it then claims to drop (#86) ------------
+#
+# Reported by Nk against a real joined export: 104.833333 s of video beside
+# 52.403 s of AAC — the source audio, unslowed, in a file twice its length.
+# `-an` was there all along. It does not help, because the joined route goes
+# through `picture()`, which maps the filter graph's audio label explicitly,
+# and an explicit -map is not what -an suppresses. The fix is not another -an:
+# the graph must not build that stream at all.
+
+def joined_slow_command(clips, **settings) -> list[str]:
+    return build_commands(
+        TOOLS, clips[0], "slowmo", ExportSettings(**settings),
+        Path("out/hdz_022_joined_slow.mp4"), Path("work"), clips=clips,
+    )[0]
+
+
+def audio_graph_parts(command: list[str]) -> str:
+    """The filter_complex, or an empty string when there is not one."""
+    if "-filter_complex" not in command:
+        return ""
+    return command[command.index("-filter_complex") + 1]
+
+
+def mapped_labels(command: list[str]) -> list[str]:
+    return [command[i + 1] for i, arg in enumerate(command) if arg == "-map"]
+
+
+@pytest.mark.parametrize("keep_audio", [True, False])
+def test_a_slow_join_maps_no_audio_however_the_tickbox_is_set(keep_audio):
+    """The defect, stated as the file it produced.
+
+    Both clips have sound, so before the fix the graph built `[ja]` and mapped
+    it, and the export carried the source audio at its own length against
+    doubled video.
+    """
+    clips = [boxpro_clip(path=Path("hdz_022.ts")),
+             boxpro_clip(path=Path("hdz_023.ts"))]
+    command = joined_slow_command(clips, keep_audio=keep_audio)
+
+    assert mapped_labels(command) == ["[vout]"], "a slow join mapped audio"
+    assert "-c:a" not in command
+    assert "-an" in command
+    graph = audio_graph_parts(command)
+    assert "[ja]" not in graph, "the graph still built a joined audio stream"
+    assert "aresample" not in graph
+    assert ":a=0" in graph, "concat was still asked for an audio stream"
+
+
+def test_a_slow_join_does_not_invent_silence_for_a_quiet_clip():
+    """The silence branch is the one that would survive a naive fix.
+
+    `join_filtergraph` gives a clip with no sound an `anullsrc` of its own
+    length so the others keep theirs. On a slow join there is no audio to keep,
+    so generating silence is work done to produce a stream that must not exist.
+    """
+    clips = [boxpro_clip(path=Path("hdz_022.ts")),
+             boxpro_clip(path=Path("hdz_023.ts"), audio_codec="")]
+    graph = audio_graph_parts(joined_slow_command(clips))
+
+    assert "anullsrc" not in graph
+    assert "[ja]" not in graph
+
+
+def test_a_slow_join_still_slows_the_picture_the_same_way():
+    """The fix must not reach the video half of the graph."""
+    clips = [boxpro_clip(path=Path("hdz_022.ts")),
+             boxpro_clip(path=Path("hdz_023.ts"))]
+    command = joined_slow_command(clips)
+
+    assert f"setpts={SLOW_FACTOR}*PTS" in audio_graph_parts(command)
+    assert rate_asked_for(command) == 30.0
+    assert mapped_labels(command) == ["[vout]"]
+
+
+def test_every_other_preset_still_joins_its_audio():
+    """The guard against over-fixing.
+
+    Without this, dropping audio from every join would pass the tests above
+    while quietly silencing Master, Upload and the rest.
+    """
+    clips = [boxpro_clip(path=Path("hdz_022.ts")),
+             boxpro_clip(path=Path("hdz_023.ts"))]
+    for key in ("master", "upload", "social", "edit", "vertical"):
+        command = build_commands(
+            TOOLS, clips[0], key, ExportSettings(),
+            Path(f"out/hdz_022_joined_{key}.mp4"), Path("work"), clips=clips,
+        )[0]
+        assert "[ja]" in mapped_labels(command), f"{key} lost its joined audio"
+        assert "-an" not in command, f"{key} was silenced"
+
+
+def test_a_join_the_user_asked_to_silence_is_still_silent_elsewhere():
+    """`keep_audio=False` already worked on other presets; it must keep working."""
+    clips = [boxpro_clip(path=Path("hdz_022.ts")),
+             boxpro_clip(path=Path("hdz_023.ts"))]
+    command = build_commands(
+        TOOLS, clips[0], "master", ExportSettings(keep_audio=False),
+        Path("out/hdz_022_joined_master.mp4"), Path("work"), clips=clips,
+    )[0]
+    # Deliberately not asserting the video label: a preset with no tail
+    # filters maps [jv] and one with a tail maps [vout], and this test is
+    # about the audio.
+    assert not any(label.startswith("[ja]") for label in mapped_labels(command))
+    assert "-an" in command
+
+
+def test_the_slow_route_does_not_change_the_settings_it_was_given():
+    """The caller's ExportSettings belongs to the panel and to queued jobs.
+
+    A fix that reached for `settings.keep_audio = False` would silence a job
+    somebody else is holding, which is the shape of defect this queue has been
+    bitten by before.
+    """
+    clips = [boxpro_clip(path=Path("hdz_022.ts")),
+             boxpro_clip(path=Path("hdz_023.ts"))]
+    settings = ExportSettings(keep_audio=True)
+    joined_slow_command_settings = build_commands(
+        TOOLS, clips[0], "slowmo", settings,
+        Path("out/x_slow.mp4"), Path("work"), clips=clips,
+    )
+    assert joined_slow_command_settings
+    assert settings.keep_audio is True, "the slow route mutated its caller's settings"

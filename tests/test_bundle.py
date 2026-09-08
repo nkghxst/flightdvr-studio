@@ -715,3 +715,47 @@ def test_a_two_member_bundle_really_writes_two_playable_files(tools, clip, tmp_p
         assert path.exists(), f"{path.name} was never written"
         assert probe_output(tools, path)["has_video"], (
             f"{path.name} was reported done and holds no video")
+
+
+# -- the slow member of a bundle reaches the corrected join (#86) -------------
+
+
+def test_a_slow_bundle_member_of_an_assembly_builds_a_silent_join(tmp_path):
+    """#86 through the route a bundle actually takes.
+
+    A bundle plans one job per member and hands each to the same worker, so a
+    Slow motion member of an Assembly bundle reaches `build_commands` with
+    several clips — the joined branch, which is where the unwanted audio came
+    from. This asserts the forwarding rather than the fix: the command that
+    member would run maps no audio label at all.
+
+    Deliberately no UI: the point is which code path the planned job lands on.
+    """
+    from flightdvr.bundle import Piece, plan_bundle
+    from flightdvr.media import Tools
+    from flightdvr.presets import ExportSettings, build_commands
+
+    tools = Tools(Path("ffmpeg"), Path("ffprobe"))
+    settings = ExportSettings(keep_audio=True)
+    clips = [_clip(tmp_path, "hdz_047.ts", [(0.0, 4.0, "")], sequence_size=2),
+             _clip(tmp_path, "hdz_048.ts", [(0.0, 4.0, "")], sequence_size=3)]
+    joined_pieces = [Piece(c.for_export()[0]) for c in clips]
+
+    member = plan_bundle(["slowmo"], joined_pieces, joined=True,
+                         out_dir=tmp_path / "out",
+                         template="{clip}_{preset}", subfolders=False,
+                         stamp=None, session_name="", settings=settings)[0]
+    assert member.usable, member.problem
+    planned = member.jobs[0]
+    assert len(planned.clips) == 2, "the member was not planned as a join"
+
+    command = build_commands(
+        tools, planned.clips[0], "slowmo", settings, planned.target,
+        tmp_path / "work", clips=planned.clips,
+    )[0]
+
+    mapped = [command[i + 1] for i, arg in enumerate(command) if arg == "-map"]
+    assert mapped == ["[vout]"], f"the bundle's slow join mapped {mapped}"
+    assert "[ja]" not in command[command.index("-filter_complex") + 1]
+    assert "-an" in command
+    assert settings.keep_audio is True, "the route mutated the caller's settings"

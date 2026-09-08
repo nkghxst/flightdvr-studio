@@ -423,3 +423,70 @@ def test_a_guessed_rate_really_does_lose_frames(tools, tmp_path, clip_at_90):
         f"the guessed 60 fps rate kept all {source_frames} frames of a 90 fps "
         "recording — the refusal in slow_problems should be reconsidered"
     )
+
+
+# -- #86: a joined slow export, measured rather than argued about ------------
+
+def joined_facts(tools, out: Path) -> tuple[bool, int, float]:
+    facts = probe_output(tools, out)
+    return facts["has_audio"], facts["frames"], facts["duration"]
+
+
+@pytest.mark.parametrize("keep_audio", [True, False])
+def test_a_slow_join_of_two_sounding_clips_writes_no_audio(
+        tools, clip, second_clip, tmp_path, keep_audio):
+    """The defect as Nk met it: audio in a file twice the length of that audio.
+
+    Both fixtures carry sound, which is the property that makes this worth
+    running — asserted here rather than assumed, because a silent fixture would
+    pass this test while proving nothing.
+    """
+    assert clip.has_audio and second_clip.has_audio, "these fixtures need sound"
+    pieces = [probed(tools, clip), probed(tools, second_clip)]
+    footage = sum(p.duration for p in pieces)
+
+    out = target(tmp_path, f"joined_slow_keep_{keep_audio}")
+    ok, message = slow_export(tools, tmp_path, pieces, out,
+                              ExportSettings(keep_audio=keep_audio))
+    assert ok, message
+
+    has_audio, frames, duration = joined_facts(tools, out)
+    assert not has_audio, "a slow join carried the source audio"
+    # The picture is untouched by the fix, and this is what says so: twice the
+    # footage that went in, within the tolerance the joined path already has.
+    assert duration == pytest.approx(footage * 2, abs=0.5), (
+        f"{duration:.3f} s out of {footage:.3f} s of footage")
+    assert frames > 0
+
+
+def test_a_slow_join_of_a_silent_clip_and_a_sounding_one_writes_no_audio(
+        tools, clip, silent_clip, tmp_path):
+    """The silence branch, which is the one a naive fix leaves behind.
+
+    `join_filtergraph` gives a soundless clip an `anullsrc` of its own length so
+    the others keep theirs. On a slow join there is nothing to keep, so that
+    silence would exist only to be muxed into a file that promises none.
+    """
+    assert clip.has_audio, "the sounding fixture lost its audio"
+    assert not silent_clip.has_audio, "the silent fixture is not silent"
+    pieces = [probed(tools, silent_clip), probed(tools, clip)]
+
+    out = target(tmp_path, "joined_slow_mixed")
+    ok, message = slow_export(tools, tmp_path, pieces, out)
+    assert ok, message
+    assert not probe_output(tools, out)["has_audio"]
+
+
+def test_the_same_two_clips_still_join_with_audio_for_master(
+        tools, clip, second_clip, tmp_path):
+    """The guard. Silencing every join would satisfy the tests above."""
+    from flightdvr.presets import output_path
+
+    pieces = [probed(tools, clip), probed(tools, second_clip)]
+    out = output_path(tmp_path, "joined_master", "master", False, None)
+    job = Job(clips=pieces, preset_key="master", settings=ExportSettings(),
+              out_path=out, concat_file=None)
+    ok, message = ExportWorker(tools, [job], tmp_path)._run_job(0, job)
+    assert ok, message
+    assert probe_output(tools, out)["has_audio"], (
+        "the fix reached a join that should have kept its sound")
