@@ -40,16 +40,26 @@ def test_no_duration_bounds_are_the_reset_that_keeps_unknown_clips():
     clips = [clip("known", 12), clip("zero", 0), clip("missing", None)]
 
     assert names(ClipFilter().apply(clips)) == names(
-        ClipFilter(minimum=None, maximum=None, show_unknown=False).apply(clips)
+        ClipFilter(minimum=None, maximum=None, show_unknown=True).apply(clips)
     ) == ["known", "zero", "missing"]
+
+
+def test_explicitly_hiding_unknowns_works_without_bounds_and_is_active():
+    clips = [clip("known", 12), clip("zero", 0), clip("missing", None)]
+
+    policy = ClipFilter(show_unknown=False)
+
+    assert policy.is_active
+    assert names(policy.apply(clips)) == ["known"]
 
 
 @pytest.mark.parametrize(
     "value", [None, 0, -1, nan, inf, "12", "not-a-duration"])
-def test_unknown_duration_values_are_hidden_by_an_active_range(value):
+def test_unknown_duration_values_follow_the_explicit_visibility_toggle(value):
     unknown = clip("unknown", value)
 
-    assert not ClipFilter(minimum=10).matches(unknown)
+    assert ClipFilter(minimum=10).matches(unknown)
+    assert not ClipFilter(minimum=10, show_unknown=False).matches(unknown)
     assert ClipFilter(minimum=10, show_unknown=True).matches(unknown)
 
 

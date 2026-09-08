@@ -26,10 +26,11 @@ Consequently a positive finite number is known here; zero, negative, missing,
 non-finite and otherwise malformed values are unknown.
 
 An empty ``ClipFilter`` is the reset state and includes every clip, including
-unknown-duration clips. Once a minimum or maximum is active, ``show_unknown``
-decides whether unknown durations remain visible. ``review_filter`` is a
-predicate supplied by the caller, which keeps this policy independent of the
-browser's review constants and lets it compose with review or exported views.
+unknown-duration clips. ``show_unknown`` defaults to that reset behaviour;
+setting it to ``False`` explicitly hides unknown durations whether or not a
+minimum or maximum is active. ``review_filter`` is a predicate supplied by the
+caller, which keeps this policy independent of the browser's review constants
+and lets it compose with review or exported views.
 """
 
 from __future__ import annotations
@@ -83,7 +84,7 @@ class ClipFilter:
 
     minimum: Real | None = None
     maximum: Real | None = None
-    show_unknown: bool = False
+    show_unknown: bool = True
     review_filter: Callable[[object], bool] | None = None
 
     def __post_init__(self) -> None:
@@ -101,14 +102,16 @@ class ClipFilter:
 
     @property
     def is_active(self) -> bool:
-        """Whether a duration bound, rather than only review logic, is set."""
-        return self.minimum is not None or self.maximum is not None
+        """Whether this duration policy is more restrictive than its reset."""
+        return (self.minimum is not None
+                or self.maximum is not None
+                or not self.show_unknown)
 
     def _duration_matches(self, value: object) -> bool:
         known = _known_duration(value)
         if known is None:
-            # No duration bound is the reset state: it must not hide clips
-            # merely because their probe could not provide a length.
+            # Unknowns are visible by default, but an explicit toggle must
+            # hide them even when no numeric bound is configured.
             return not self.is_active or self.show_unknown
         return ((self.minimum is None or known >= self.minimum)
                 and (self.maximum is None or known <= self.maximum))
