@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout,
     QWidget,
@@ -26,6 +26,51 @@ from PySide6.QtWidgets import (
 from .player import FrameView
 from .trim import TrimBar
 from .widgets import INNER, TIGHT, PreviewPanel as AspectPreviewBox, dim
+
+
+# What the sidebar says about where the keys are going.
+#
+# Not a substitute for the picture's focus ring — `FrameView.paintEvent` already
+# draws one, and the F1 catalog already tells people to look for it. The ring
+# says *where* the keys go; these say *what they do there*, which is the half
+# #88 was missing: with the name field focused there was no way to know that
+# Enter keeps a name and Escape puts the old one back, because neither did
+# anything at all.
+PICTURE_KEYS = "Silent · click the picture, then Space plays"
+NAMING_KEYS = "Naming a range · Enter keeps it, Esc puts back the last one"
+
+
+class RangeNameEdit(QLineEdit):
+    """A name field you can leave deliberately, in both directions.
+
+    Reported in #88: `I` and `O` typed into this box instead of setting trim
+    points, and `Space` put a space in the name. Both are Qt behaving
+    correctly — the preview shortcuts are scoped to the picture, so with focus
+    here they do not fire, and the keys are text like any others.
+
+    What was missing was a way out. There was no commit and no cancel, and the
+    field committed on every keystroke, so a stray key was already in the
+    session before anybody noticed. Enter keeps the name, Escape puts back the
+    last one that was kept, and both hand the keys back to the picture.
+    """
+
+    cancelled = Signal()
+    focus_changed = Signal(bool)          # True when this field has the keys
+
+    def keyPressEvent(self, event):       # noqa: D102  (Qt entry point)
+        if event.key() == Qt.Key.Key_Escape:
+            self.cancelled.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusInEvent(self, event):        # noqa: D102
+        super().focusInEvent(event)
+        self.focus_changed.emit(True)
+
+    def focusOutEvent(self, event):       # noqa: D102
+        super().focusOutEvent(event)
+        self.focus_changed.emit(False)
 
 
 class PreviewView(QObject):
@@ -52,6 +97,10 @@ class PreviewView(QObject):
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
+        # The last name that was actually kept, so Escape has something to put
+        # back. Held here rather than read from the clip: this panel is given
+        # names, it does not own them.
+        self._committed_name = ""
         self.preview_box = self._build_preview_box()
         self.trim_band = self._build_trim_band()
 
@@ -138,12 +187,20 @@ class PreviewView(QObject):
         ):
             button = QPushButton(text)
             button.setToolTip(tip)
-            button.clicked.connect(lambda *_, signal=requested: signal.emit())
+            # The keys go back to the picture afterwards. Qt leaves focus on a
+            # clicked button, so on the base the next Space re-fired it: In,
+            # then Space, moved the in point again — measured at 4.00 -> 8.50
+            # in an isolated instance. Nobody pressing In means "In twice".
+            button.clicked.connect(
+                lambda *_, signal=requested: (signal.emit(),
+                                              self.hand_keys_to_picture()))
             trim_row.addWidget(button)
         column.addLayout(trim_row)
         column.addStretch(1)
 
-        keys = dim(QLabel("Silent · click the picture, then Space plays"))
+        self.focus_note = dim(QLabel(PICTURE_KEYS))
+        self.focus_note.setWordWrap(True)
+        keys = self.focus_note
         keys.setToolTip(
             "With the picture focused:\n"
             "Space or K — play or pause\n"
@@ -209,14 +266,24 @@ class PreviewView(QObject):
         self.select_label.setMinimumWidth(96)
         row.addWidget(self.select_label)
 
-        self.select_name = QLineEdit()
+        self.select_name = RangeNameEdit()
         self.select_name.setPlaceholderText(
             "Name this range — launch, tree dive…")
         self.select_name.setMaximumWidth(280)
         self.select_name.setToolTip(
-            "Used in the filename when a clip has more than one range")
-        self.select_name.textEdited.connect(
-            lambda text: self.select_renamed.emit(text))
+            "Enter keeps the name, Esc puts back the last one.\n"
+            "Shown here and in the Assembly. It reaches the filename only "
+            "when the clip has more than one range, which is what it has "
+            "always done."
+        )
+        # Committed deliberately, not on every keystroke. `editingFinished`
+        # covers Enter and clicking away; `returnPressed` additionally hands
+        # the keys back, because staying in a text box after saying you are
+        # finished is how `Space` ended up in a range name.
+        self.select_name.editingFinished.connect(self._commit_name)
+        self.select_name.returnPressed.connect(self._leave_name_field)
+        self.select_name.cancelled.connect(self._cancel_name)
+        self.select_name.focus_changed.connect(self._say_where_the_keys_are)
         row.addWidget(self.select_name)
 
         # What the recording looks like it spends its time doing, and an offer
@@ -250,37 +317,108 @@ class PreviewView(QObject):
 
         add = QPushButton("Add range")
         add.setToolTip("Keep another range out of this clip  (N)")
-        add.clicked.connect(lambda *_: self.select_added.emit())
+        # The keys go back to the picture, like every other button here — and
+        # to the *picture*, not to the new range's name field. `N` adds a range
+        # from the picture, and landing in a text box would put the next Space
+        # into the name, which is one of the things #88 reported.
+        add.clicked.connect(
+            lambda *_: (self.select_added.emit(),
+                        self.hand_keys_to_picture()))
         row.addWidget(add)
 
         self.select_remove = QPushButton("Remove")
         self.select_remove.setToolTip("Drop the range being edited")
         self.select_remove.clicked.connect(
-            lambda *_: self.select_removed.emit())
+            lambda *_: (self.select_removed.emit(),
+                        self.hand_keys_to_picture()))
         row.addWidget(self.select_remove)
 
         self.select_add = add
         # Everything except Add is about *which* of several ranges you are
         # editing, so none of it means anything until there are several.
-        self._only_when_several = [self.select_label, self.select_name,
-                                   self.select_remove]
+        # The name is no longer in here: it follows `nameable` instead, so a
+        # lone range can be named (#87).
+        self._only_when_several = [self.select_label, self.select_remove]
         return row
 
-    def show_selects(self, count: int, index: int, name: str) -> None:
+    # -- who has the keys ------------------------------------------------------
+
+    def hand_keys_to_picture(self) -> None:
+        """Give focus back to the picture, where the trim keys live.
+
+        Called after every pointer action in this panel. The shortcuts are
+        deliberately scoped to the picture, so anything that leaves focus
+        somewhere else leaves them switched off — which is what #88 reported
+        from the other side: `Space` re-firing the In button it was still on.
+        """
+        self.frame_view.setFocus()
+
+    def _say_where_the_keys_are(self, editing: bool) -> None:
+        """One line naming the mode, and what its keys do.
+
+        The picture has a focus ring of its own, so *where* the keys go is
+        already visible. What was not was what Enter and Escape do once a name
+        is being typed — which was nothing, before this.
+        """
+        self.focus_note.setText(NAMING_KEYS if editing else PICTURE_KEYS)
+
+    # -- naming a range --------------------------------------------------------
+
+    def _commit_name(self) -> None:
+        """Keep what was typed. Called by Enter and by clicking away."""
+        typed = self.select_name.text()
+        if typed == self._committed_name:
+            return
+        self._committed_name = typed
+        self.select_renamed.emit(typed)
+
+    def _cancel_name(self) -> None:
+        """Escape: put back the last kept name and hand the keys back."""
+        self.select_name.setText(self._committed_name)
+        self.hand_keys_to_picture()
+
+    def _leave_name_field(self) -> None:
+        """Enter: keep it, then stop being a text box.
+
+        `returnPressed` arrives before `editingFinished` here, so the commit is
+        explicit rather than relying on the order.
+        """
+        self._commit_name()
+        self.hand_keys_to_picture()
+
+    def show_selects(self, count: int, index: int, name: str,
+                     nameable: bool = False) -> None:
         """Say which range is being edited, and hide what does not apply yet.
 
         Add stays whatever happens: it is how a second range comes to exist,
         and hiding it would leave the N key as the only way to reach a feature
-        nobody would know was there. The rest — which one of several, its name,
-        and dropping it — appears once there is more than one.
+        nobody would know was there.
+
+        The name field now appears for a *single* range too (#87): a lone range
+        could not be named, which left an Assembly row saying only the
+        recording's filename and made ordering it harder than it needed to be.
+        `nameable` is the caller's answer to "is there a real range here",
+        because clearing a trim leaves an empty select behind and offering to
+        name that would be naming something the export does not believe in.
+
+        Which one of several, and dropping it, still appear only when there is
+        more than one: "Range 1 of 1" says nothing, and removing the only range
+        is what Reset already does.
         """
         several = count > 1
         for widget in self._only_when_several:
             widget.setVisible(several)
+        self.select_name.setVisible(nameable)
         self.select_label.setText(
             f"Range {index + 1} of {count}" if several else "")
+        self._committed_name = name
         if self.select_name.text() != name:
             self.select_name.setText(name)
+            # Show the beginning of the name, not its tail. `setText` leaves the
+            # cursor at the end, so a long one arrived reading "ve, second
+            # attempt" — seen in the native shots, and worse now that a lone
+            # range can carry a name nobody chose to abbreviate.
+            self.select_name.setCursorPosition(0)
 
     def _build_trim_band(self) -> QWidget:
         """The full-width filmstrip directly under the preview it scrubs."""
