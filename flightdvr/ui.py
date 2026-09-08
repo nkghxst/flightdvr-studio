@@ -2020,8 +2020,14 @@ class MainWindow(QMainWindow):
         self.trim_bar.update()
 
         editing = clip.selects[clip.current] if ranges else None
+        # `real_selects` rather than `selects`: clearing a trim leaves an empty
+        # placeholder behind, and a name typed onto that would belong to a
+        # range the export does not believe exists. An untrimmed recording has
+        # nothing to name, which is also why naming cannot silently turn a
+        # whole-recording assembly reference into an explicit range (#87).
         self.preview_view.show_selects(len(ranges), clip.current,
-                                       editing.name if editing else "")
+                                       editing.name if editing else "",
+                                       nameable=bool(clip.real_selects))
 
     def _pick_select(self, index: int) -> None:
         clip = self._trim_clip
