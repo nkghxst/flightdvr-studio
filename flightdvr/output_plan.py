@@ -51,7 +51,10 @@ class OutputTarget:
             raise ValueError("an output target needs at least one source reference")
         if not self.is_assembly and len(self.items) != 1:
             raise ValueError("a clip/range target has exactly one source reference")
-        if any(not isinstance(item, Item) or not item.fingerprint
+        if any(not isinstance(item, Item)
+               or not isinstance(item.fingerprint, str)
+               or not item.fingerprint.strip()
+               or not isinstance(item.sid, str)
                for item in self.items):
             raise ValueError("output targets require existing clip fingerprints")
 

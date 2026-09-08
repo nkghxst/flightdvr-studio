@@ -84,6 +84,8 @@ def test_invalid_targets_and_unknown_presets_fail_before_entering_the_plan():
         OutputTarget((Item("a"), Item("b")))
     with pytest.raises(ValueError, match="fingerprints"):
         OutputTarget.clip_or_range("")
+    with pytest.raises(ValueError, match="fingerprints"):
+        OutputTarget.clip_or_range("clip-a", sid=object())
 
     plan = OutputPlan()
     target = OutputTarget.clip_or_range("clip-a")
