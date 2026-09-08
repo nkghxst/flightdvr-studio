@@ -57,6 +57,7 @@ from .format import (
     existing_ancestor, expand_template, export_fields, human_duration,
     human_size, natural_key, output_key, select_stem, work_dir,
 )
+from .help_content import naming_help_html, release_links
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
 from .media import (
     ClipInfo, Select, Tools, available_encoders, detect_hardware_encoder, probe,
@@ -340,7 +341,7 @@ class MainWindow(QMainWindow):
         # One grid for every group rather than one each. Separate grids size
         # their key column independently, so "Shift+Left Shift+Right" made the
         # picture's descriptions start further right than the queue's and the
-        # list read as four unrelated tables.
+        # list read as several unrelated tables.
         grid = QGridLayout(body)
         grid.setContentsMargins(EDGE, EDGE, EDGE, EDGE)
         grid.setHorizontalSpacing(GAP)
@@ -368,6 +369,16 @@ class MainWindow(QMainWindow):
                 grid.addWidget(QLabel(keys), row, 0)
                 grid.addWidget(QLabel(shortcut.description), row, 1)
                 row += 1
+
+        if row:
+            grid.setRowMinimumHeight(row, GAP)
+            row += 1
+        naming = QLabel(naming_help_html())
+        naming.setTextFormat(Qt.TextFormat.RichText)
+        naming.setWordWrap(True)
+        naming.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction)
+        grid.addWidget(naming, row, 0, 1, 2)
         grid.setColumnStretch(1, 1)
 
         layout = QVBoxLayout(dialog)
@@ -414,6 +425,24 @@ class MainWindow(QMainWindow):
         from .media import is_bundled, packaged_file
         from .updates import PROJECT_PAGE
 
+        # A source checkout can carry the same __version__ as a release while
+        # containing commits that were never published. Do not turn that
+        # string into a tag URL: release_links uses the generic published and
+        # source-changelog destinations until a separately verified build tag
+        # is supplied by a future packaging path.
+        links = release_links(__version__)
+        if links.is_published_build:
+            release_label = (
+                f"Release notes for FlightDVR Studio {links.version}"
+            )
+            release_note = ""
+        else:
+            release_label = "Published release notes"
+            release_note = (
+                "This development build has no verified version-specific "
+                "release page."
+            )
+
         # Each package format puts the licence somewhere different, and only
         # the Windows installer carries its own ffmpeg. Saying otherwise in a
         # notice whose whole job is accuracy would be a poor look.
@@ -442,6 +471,11 @@ class MainWindow(QMainWindow):
             f"{ffmpeg_line} Qt's own licence is in "
             "<code>LICENSE.LGPL-3.0.txt</code>. See THIRD-PARTY-NOTICES.md for "
             "versions, origins and the offer of source.<br><br>"
+            f"Release notes: <a href='{links.current_url}'>"
+            f"{release_label}</a> · "
+            f"<a href='{links.all_releases_url}'>All releases</a> · "
+            f"<a href='{links.source_changelog_url}'>Source changelog</a>"
+            f"{(' <br>' + release_note) if release_note else ''}<br><br>"
             # The source itself, which is the thing the licence above is
             # promising. A notice that says you may redistribute the program
             # is more use when it also says where the program is.

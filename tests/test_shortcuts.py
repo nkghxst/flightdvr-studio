@@ -49,6 +49,7 @@ PROVIDED_BY_QT = {
     "The clip list": {"Space"},
     "The picture": set(),
     "The export queue": {"Delete"},
+    "The Assembly list": set(),
     "Anywhere": set(),
 }
 
@@ -128,6 +129,12 @@ def test_the_dialog_lists_every_key_the_clip_list_actually_binds(window):
     assert by_shortcut_object("The clip list") == installed_on(window.table)
 
 
+def test_the_dialog_lists_every_key_the_assembly_list_actually_binds(window):
+    """Assembly movement is scoped to its list, not to the whole window."""
+    assembly_list = window.export_panel.assembly_panel.list
+    assert by_shortcut_object("The Assembly list") == installed_on(assembly_list)
+
+
 def test_the_dialog_lists_every_window_wide_key(window):
     """The section the README got most wrong: it named two of these and there
     are ten, seven of them QShortcuts and three menu actions."""
@@ -141,6 +148,7 @@ def test_nothing_is_exempt_that_qt_does_not_actually_provide(window):
     not be exempt on the picture, where it is a real shortcut object."""
     assert PROVIDED_BY_QT["The picture"] == set()
     assert PROVIDED_BY_QT["Anywhere"] == set()
+    assert PROVIDED_BY_QT["The Assembly list"] == set()
     assert "Space" in installed_on(window.frame_view), (
         "Space is exempt on the clip list only because the picture owns it")
     assert "Space" not in installed_on(window.table)
@@ -156,6 +164,13 @@ def test_delete_is_documented_under_the_queue_and_not_the_clip_list(window):
     into the dialog would have taught it to a wider audience."""
     assert "Delete" in documented("The export queue")
     assert "Delete" not in documented("The clip list")
+
+
+def test_assembly_keys_are_documented_under_their_assembly_scope(window):
+    """The live Assembly bindings must not be taught as window-wide keys."""
+    assembly = documented("The Assembly list")
+    assert assembly == {"Alt+Up", "Alt+Down", "Del"}
+    assert not (assembly & documented("Anywhere"))
 
 
 def test_delete_only_drops_queue_rows_while_the_queue_has_focus(window,
