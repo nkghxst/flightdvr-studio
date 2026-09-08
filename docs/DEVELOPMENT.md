@@ -86,6 +86,7 @@ Windows.
 | `flightdvr/player.py` | In-window playback through ffmpeg, and the picture trims are set on |
 | `flightdvr/stills.py` | The paused preview frame, extracted at full resolution |
 | `flightdvr/session.py` | Review states, trims and settings, written down per card |
+| `flightdvr/assembly.py` | The ordered list of ranges that becomes one file, and what it resolves to |
 | `flightdvr/format.py` | Values into strings and paths. Pure functions, no Qt |
 | `flightdvr/external.py` | Handing a clip to a player that can decode it |
 | `flightdvr/updates.py` | The only network call: whether a newer release exists |
@@ -95,6 +96,7 @@ Windows.
 | `flightdvr/browser_panel.py` | Clip table construction and thumbnail sizing |
 | `flightdvr/preview_panel.py` | Preview, transport controls and filmstrip view |
 | `flightdvr/export_panel.py` | Export controls, settings and source-derived choices |
+| `flightdvr/assembly_panel.py` | The assembly list, its ordering controls and its summary |
 | `flightdvr/queue_panel.py` | Queue widgets, summaries and progress rendering |
 | `flightdvr/ui.py` | MainWindow orchestration and workflows spanning panels |
 | `packaging/` | Per-platform build scripts, the PyInstaller spec, the icon |
@@ -723,6 +725,47 @@ real measurements still returned 540–660 and 600–720 exactly after this chan
 No audio — a second pipe, a second clock and an output device, for footage
 whose soundtrack is motor whine. No reverse play: a forward-only pipe cannot do
 it honestly. Both are said in the UI so their absence is not filed as a bug.
+
+## The assembly
+
+The join tickbox asked for a joined file and inferred the order — DVR counter
+order with a stored per-clip preference over it. That cannot express two ranges
+of one recording in any order but the one they occur in, and it shows nobody
+what they are about to encode. `assembly.py` holds the list; `assembly_panel.py`
+draws it; `ui.py` resolves it and turns it into queue jobs.
+
+**Entries are references, never positions or ranges.** An `Item` is a clip
+fingerprint plus a range id, so it survives the range being retrimmed and an
+earlier sibling being deleted. An empty `sid` means the recording itself, and
+that row is *described* at resolve time rather than stored — retrimming the clip
+later changes what it covers, which is right, because it still means "this
+recording".
+
+**Resolved and missing entries are one list of one type.** They were two lists,
+drawn one after the other, which put an interleaved gap at the bottom — and
+`items()` then handed that display order back to be persisted, so merely opening
+a card with a gap in the middle rewrote the order it was stored in. A single
+ordered sequence makes that unrepresentable. A missing row keeps its stored
+position and loses `ItemIsEnabled`, because it is a problem to resolve rather
+than something to arrange.
+
+**The export is built from what each row means**, not from `for_export()`.
+That expansion turns a clip into its selects, so a row naming a whole recording
+disappeared the moment that recording gained a range and the export reported its
+own material missing. `export_piece()` copies the clip rather than sharing it,
+for the same reason `per_select_clips` does: a queued job keeps its clip until
+it runs.
+
+**Once the list has something in it, it is the content as well as the order.**
+`_assembly_rows()` resolves against every clip on the card and reads the panel
+rather than the session — deriving from the ticked rows let an unrelated clip
+refuse a valid assembly, and unticking a source quietly downgraded a two-item
+join into a single-clip job. Reading the session instead made an export find
+nothing to do on a folder opened before any session existed.
+
+Filling, resetting, reordering and removing all go through the same capture into
+`session.assembly` and the same autosave schedule. Only reordering used to say
+so; a close happened to flush the rest, which is not the same as being saved.
 
 ## Outstanding
 

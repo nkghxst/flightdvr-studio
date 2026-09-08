@@ -354,16 +354,78 @@ instant rather than waiting on a seek.
 Trims survive into a joined export: each clip keeps its own in and out points.
 *Remux* is the exception and will say so — see below.
 
-**Joining clips into one file** is the *Join the ticked clips into one file*
-box, for when the DVR split a single flight across several recordings. Clips
-are joined in DVR counter order rather than by timestamp, because
-[the goggles cannot keep time](#the-goggles-cannot-keep-time).
+## Joining several ranges into one file
+
+When the DVR split one flight across several recordings, or when two moments
+out of one recording belong together, the **Assembly** list under *Output* is
+what makes them a single file. It is an ordered list you can look at before
+committing to an encode, which is the whole point of it: a delivery is a
+decision, and a decision nobody can see beforehand is not one they made.
+
+It replaces the *Join the ticked clips into one file* tickbox. That box asked
+for a joined file and worked the order out for itself — DVR counter order with
+a stored per-clip preference laid over it — so it could not express two ranges
+of one recording in any order but the one they happen to occur in, and it
+showed nobody what was about to be encoded.
+
+**Use ticked ranges** fills the list from the ranges ticked in the browser, in
+DVR counter order and then along each recording, because
+[the goggles cannot keep time](#the-goggles-cannot-keep-time). A recording you
+have not trimmed goes in whole. **Default order** puts the list back to that
+order after you have rearranged it.
+
+Then arrange it:
+
+| | |
+|---|---|
+| **Move up** / **Move down**, or `Alt` `↑` / `Alt` `↓` | move the selected rows one place, keeping a multi-row selection together and in order |
+| **Remove**, or `Delete` | take rows out of the list — the range itself is left alone |
+| **Add assembly to queue** | queue one joined export of exactly this list, in this order |
+
+The keyboard reaches everything the buttons do. `Alt` with the arrows is the
+usual spelling for *move the thing*, which leaves plain `↑` and `↓` doing what
+they always do in a list.
+
+A row names the recording, and the range only when it needs to: the name you
+gave that range, `range 2` when you did not name it, and the filename on its
+own when the row is the whole recording. Its length follows, and the line under
+the list counts the items and adds up how long the finished file will run.
+
+**A row is a reference, not a copy.** The list stores which recording and which
+range, never a position or the range itself, so retrimming a range afterwards
+changes what that row will export — it still means that range — and deleting or
+renaming some other range does not disturb it.
+
+A range that has genuinely gone stays **visible, in the position it was stored
+in**, marked `missing`. It cannot be selected or moved, because it is a problem
+to resolve rather than something to arrange, and the summary counts it. Queuing
+is refused while one is there, naming what it could not find, rather than
+quietly joining a shorter film than you asked for. Remove those rows, or rescan
+the card if the footage should still be there.
+
+The list is part of the [session](#sessions), so it survives closing the window
+and comes back with the card — filling it, reordering it, removing a row and
+resetting it all schedule the same save.
+
+Two more things worth knowing. **Add assembly to queue** wants at least two
+rows: one range is a trim, and ordinary **Add to queue** does that better. And
+once there is anything in the list, the size estimate follows the *list* rather
+than the ticks — the assembly is both the order and the content, so unticking
+one of its sources no longer quietly turns a two-clip join into a single-clip
+export.
+
+The joined file is named from the template like any other export, with
+`_joined` added to the `{clip}` field — so the default template turns three
+ranges beginning with `hdz_047.ts` into `hdz_047_joined_master.mp4`.
 
 Clips that do not match each other are fine. Different sizes, frame rates and
 codecs are brought to a common format — the largest size and rate among them,
 so nothing is thrown away to suit the smallest — and a clip with no sound gets
-silence rather than removing the audio from the rest. Only *Remux* refuses a
-mismatched set, because copying without re-encoding cannot change anything.
+silence rather than removing the audio from the rest. Two presets refuse a
+mismatched set instead: *Remux*, because copying without re-encoding cannot
+change anything, and *Slow motion*, because putting clips recorded at different
+rates onto one rate would have to invent or discard the frames it exists to
+keep.
 
 > **Remux is the exception.** It does no re-encoding, so it can only cut where a
 > keyframe already is, and a trimmed rewrap may be a second or so out. Every
@@ -443,9 +505,12 @@ and a 90 fps source becomes 45 fps. The output rate comes from the recording
 rather than being rounded to the frame rates the Social preset offers.
 
 It has its own quality setting, independent of Master, so changing one does not
-silently change the other. Sound is dropped, whatever the **Keep the audio
-track** tickbox says: audio at half pitch is not slow motion, and normal-speed
-audio over slowed video drifts apart within seconds.
+silently change the other. Sound is left out, and **Keep the audio track** is
+greyed out while this preset is chosen rather than left looking effective:
+slowed motor noise drops an octave and is not worth having, and keeping the
+sound at normal speed over video that now runs twice as long would drift apart
+by the length of the clip. The preset's own panel says so, where the decision
+is made.
 
 It refuses a clip whose frame rate cannot be read, and a joined set recorded at
 different rates. Every other preset may reasonably guess at a rate; this is the
@@ -454,8 +519,12 @@ keep that promise without inventing or discarding frames. That refusal is worth
 having: before it existed, falling back to 60 threw away a third of the frames
 of a 90 fps recording and reported a successful export.
 
-**Keep the audio track** can be turned off on any preset. DVR audio is mostly
-motor noise and wind, and dropping it buys bitrate on a size-targeted export.
+**Keep the audio track** can be turned off on any preset that re-encodes. DVR
+audio is mostly motor noise and wind, and dropping it buys bitrate on a
+size-targeted export. It is greyed out for *Remux*, which copies the streams
+across and cannot be told otherwise, and for *Slow motion*, which always drops
+the sound — a tickbox that changes nothing is a promise the export does not
+keep.
 
 ### Hardware encoding
 
@@ -740,7 +809,8 @@ Where this is going next — and what it deliberately will not do — is in
 | Media and export | `media.py`, `presets.py`, `jobs.py` | ffmpeg discovery, probing, export commands and the worker queue |
 | Browsing and analysis | `scan.py`, `thumbs.py`, `trim.py`, `motion.py` | clip discovery, cached frames, trimming and flight readings |
 | Playback and decisions | `player.py`, `stills.py`, `session.py` | bounded in-window playback, full-resolution stills and saved review decisions |
-| Interface | `browser_panel.py`, `preview_panel.py`, `export_panel.py`, `queue_panel.py`, `ui.py` | panel-local behaviour and cross-panel workflows |
+| Delivery | `assembly.py` | the ordered list of ranges that becomes one file, held as references rather than positions |
+| Interface | `browser_panel.py`, `preview_panel.py`, `export_panel.py`, `assembly_panel.py`, `queue_panel.py`, `ui.py` | panel-local behaviour and cross-panel workflows |
 
 The module-by-module layout is maintained in
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#layout).
