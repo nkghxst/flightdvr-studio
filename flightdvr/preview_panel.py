@@ -28,10 +28,14 @@ from .trim import TrimBar
 from .widgets import INNER, TIGHT, PreviewPanel as AspectPreviewBox, dim
 
 
-# What the sidebar says about where the keys are going. Two sentences rather
-# than a focus ring: the picture is a FrameView and lives in player.py, so this
-# panel cannot draw on it, and #88 is a report about not knowing which mode you
-# are in.
+# What the sidebar says about where the keys are going.
+#
+# Not a substitute for the picture's focus ring — `FrameView.paintEvent` already
+# draws one, and the F1 catalog already tells people to look for it. The ring
+# says *where* the keys go; these say *what they do there*, which is the half
+# #88 was missing: with the name field focused there was no way to know that
+# Enter keeps a name and Escape puts the old one back, because neither did
+# anything at all.
 PICTURE_KEYS = "Silent · click the picture, then Space plays"
 NAMING_KEYS = "Naming a range · Enter keeps it, Esc puts back the last one"
 
@@ -346,10 +350,11 @@ class PreviewView(QObject):
         self.frame_view.setFocus()
 
     def _say_where_the_keys_are(self, editing: bool) -> None:
-        """One line that says which mode you are in, because focus is invisible.
+        """One line naming the mode, and what its keys do.
 
-        `FrameView` draws no focus ring, and this panel cannot give it one —
-        it lives in `player.py`. So the sidebar says it in words instead.
+        The picture has a focus ring of its own, so *where* the keys go is
+        already visible. What was not was what Enter and Escape do once a name
+        is being typed — which was nothing, before this.
         """
         self.focus_note.setText(NAMING_KEYS if editing else PICTURE_KEYS)
 

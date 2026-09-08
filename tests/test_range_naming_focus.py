@@ -200,10 +200,11 @@ def test_showing_a_range_resets_what_escape_would_restore(view):
 
 
 def test_the_sidebar_says_which_mode_the_keys_are_in(view):
-    """Focus is invisible, so it is said in words.
+    """The picture has a focus ring; what it cannot say is what Enter does.
 
-    `FrameView` draws no focus ring and lives in `player.py`, outside this
-    change, so the sidebar carries the state instead.
+    `FrameView.paintEvent` draws a ring when it has focus, so where the keys go
+    is already visible. The sentence carries the half that was missing: with a
+    name being typed, that Enter keeps it and Escape puts back the last one.
     """
     from flightdvr.preview_panel import NAMING_KEYS, PICTURE_KEYS
 
