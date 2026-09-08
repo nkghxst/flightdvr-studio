@@ -371,8 +371,14 @@ showed nobody what was about to be encoded.
 **Use ticked ranges** fills the list from the ranges ticked in the browser, in
 DVR counter order and then along each recording, because
 [the goggles cannot keep time](#the-goggles-cannot-keep-time). A recording you
-have not trimmed goes in whole. **Default order** puts the list back to that
-order after you have rearranged it.
+have not trimmed goes in whole.
+
+**Default order** runs that same fill again. It is not a sort of what is already
+in the list: it rebuilds the list from whatever is ticked *now*, and the order
+and the contents you had are replaced. A row you removed comes back if its
+recording is still ticked, and a row whose recording you have since unticked
+does not come back at all. It is the way back to a known state rather than an
+undo.
 
 Then arrange it:
 
@@ -389,7 +395,10 @@ they always do in a list.
 A row names the recording, and the range only when it needs to: the name you
 gave that range, `range 2` when you did not name it, and the filename on its
 own when the row is the whole recording. Its length follows, and the line under
-the list counts the items and adds up how long the finished file will run.
+the list counts the items and adds up how much footage they come to — the
+duration of the material, not the runtime of the finished file. Those are the
+same number for every preset except *Slow motion*, which writes twice what goes
+in: two ten-second ranges read as twenty seconds here and produce forty.
 
 **A row is a reference, not a copy.** The list stores which recording and which
 range, never a position or the range itself, so retrimming a range afterwards
@@ -400,8 +409,14 @@ A range that has genuinely gone stays **visible, in the position it was stored
 in**, marked `missing`. It cannot be selected or moved, because it is a problem
 to resolve rather than something to arrange, and the summary counts it. Queuing
 is refused while one is there, naming what it could not find, rather than
-quietly joining a shorter film than you asked for. Remove those rows, or rescan
-the card if the footage should still be there.
+quietly joining a shorter film than you asked for.
+
+Being unselectable, a missing row is also out of reach of **Remove** and
+`Delete`, which act on the selection. There are two ways past it. If the footage
+should still be there — a card remounted somewhere else, a folder moved — put it
+back and scan again, and the row resolves itself into the range it always named.
+Otherwise tick the ranges you do want and press **Use ticked ranges**, which
+rebuilds the list without the gap, at the cost of the order you had.
 
 The list is part of the [session](#sessions), so it survives closing the window
 and comes back with the card — filling it, reordering it, removing a row and

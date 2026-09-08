@@ -737,9 +737,15 @@ draws it; `ui.py` resolves it and turns it into queue jobs.
 **Entries are references, never positions or ranges.** An `Item` is a clip
 fingerprint plus a range id, so it survives the range being retrimmed and an
 earlier sibling being deleted. An empty `sid` means the recording itself, and
-that row is *described* at resolve time rather than stored — retrimming the clip
-later changes what it covers, which is right, because it still means "this
-recording".
+the two kinds of reference behave differently on purpose. A range reference
+follows that range's edits. A whole-recording row keeps exporting the whole
+recording however the clip is trimmed afterwards: `resolve()` describes it as
+`Select(0.0, clip.duration)` rather than storing anything, and `export_piece()`
+clears `selects` on the copy it hands the queue, so `for_export()`'s expansion
+into selects — which used to make such a row vanish the moment its recording
+gained a range — never reaches it.
+`test_a_whole_recording_row_still_exports_after_the_clip_gains_a_range` holds
+that: a range added at 4-9 s leaves the exported piece's `selects` empty.
 
 **Resolved and missing entries are one list of one type.** They were two lists,
 drawn one after the other, which put an interleaved gap at the bottom — and
