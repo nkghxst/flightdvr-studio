@@ -1,0 +1,175 @@
+{
+  "version": "1",
+  "pip_version": "25.0.1",
+  "install": [
+    {
+      "download_info": {
+        "url": "https://files.pythonhosted.org/packages/8d/3e/cbc593c31a5f0d817b3fe97e64aa8461bd0f55cb07b67ce1b776296ae336/sounddevice-0.5.6-py3-none-win_amd64.whl",
+        "archive_info": {
+          "hash": "sha256=7f4162f514f007b0bf25a3ccfed3f1705bc2ec311888a90232729eec4f57a4f4",
+          "hashes": {
+            "sha256": "7f4162f514f007b0bf25a3ccfed3f1705bc2ec311888a90232729eec4f57a4f4"
+          }
+        }
+      },
+      "is_direct": false,
+      "is_yanked": false,
+      "requested": true,
+      "metadata": {
+        "metadata_version": "2.4",
+        "name": "sounddevice",
+        "version": "0.5.6",
+        "dynamic": [
+          "license-file"
+        ],
+        "summary": "Play and Record Sound with Python",
+        "description": "Play and Record Sound with Python\n=================================\n\nThis Python_ module provides bindings for the PortAudio_ library and a few\nconvenience functions to play and record NumPy_ arrays containing audio signals.\n\nThe ``sounddevice`` module is available for Linux, macOS and Windows.\n\nDocumentation:\n   https://python-sounddevice.readthedocs.io/\n\nSource code repository and issue tracker:\n   https://github.com/spatialaudio/python-sounddevice/\n\nLicense:\n   MIT -- see the file ``LICENSE`` for details.\n\n.. _Python: https://www.python.org/\n.. _PortAudio: http://www.portaudio.com/\n.. _NumPy: https://numpy.org/\n",
+        "description_content_type": "text/x-rst",
+        "keywords": [
+          "sound",
+          "audio",
+          "PortAudio",
+          "play",
+          "record",
+          "playrec"
+        ],
+        "author_email": "Matthias Geier <Matthias.Geier@gmail.com>",
+        "license_expression": "MIT",
+        "license_file": [
+          "LICENSE"
+        ],
+        "classifier": [
+          "Operating System :: OS Independent",
+          "Programming Language :: Python",
+          "Programming Language :: Python :: 3",
+          "Topic :: Multimedia :: Sound/Audio"
+        ],
+        "requires_dist": [
+          "cffi",
+          "numpy; extra == \"numpy\""
+        ],
+        "requires_python": ">=3.7",
+        "project_url": [
+          "Documentation, https://python-sounddevice.readthedocs.io/",
+          "Repository, https://github.com/spatialaudio/python-sounddevice/",
+          "Issues, https://github.com/spatialaudio/python-sounddevice/issues"
+        ],
+        "provides_extra": [
+          "numpy"
+        ]
+      }
+    },
+    {
+      "download_info": {
+        "url": "https://files.pythonhosted.org/packages/d9/79/615cc094e2fb508cade7de88d3b4f6c4ec2bab695c97bce9153dc65aadf5/cffi-2.1.1-cp312-cp312-win_amd64.whl",
+        "archive_info": {
+          "hash": "sha256=f53e442b08449d42821fa4a4fba000095af9f62742a500f978a9f557ec44339a",
+          "hashes": {
+            "sha256": "f53e442b08449d42821fa4a4fba000095af9f62742a500f978a9f557ec44339a"
+          }
+        }
+      },
+      "is_direct": false,
+      "is_yanked": false,
+      "requested": true,
+      "metadata": {
+        "metadata_version": "2.4",
+        "name": "cffi",
+        "version": "2.1.1",
+        "dynamic": [
+          "license-file"
+        ],
+        "summary": "Foreign Function Interface for Python calling C code.",
+        "description": "[![GitHub Actions Status](https://github.com/python-cffi/cffi/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/python-cffi/cffi/actions/workflows/ci.yaml?query=branch%3Amain++)\r\n[![PyPI version](https://img.shields.io/pypi/v/cffi.svg)](https://pypi.org/project/cffi)\r\n[![Read the Docs](https://img.shields.io/badge/docs-latest-blue.svg)][Documentation]\r\n\r\n\r\nCFFI\r\n====\r\n\r\nForeign Function Interface for Python calling C code.\r\n\r\nPlease see the [Documentation] or uncompiled in the `doc/` subdirectory.\r\n\r\nDownload\r\n--------\r\n\r\n[Download page](https://github.com/python-cffi/cffi/releases)\r\n\r\nSource Code\r\n-----------\r\n\r\nSource code is publicly available on\r\n[GitHub](https://github.com/python-cffi/cffi).\r\n\r\nContact\r\n-------\r\n\r\n[Mailing list](https://groups.google.com/forum/#!forum/python-cffi)\r\n\r\nTesting/development tips\r\n------------------------\r\n\r\nAfter `git clone` or `wget && tar`, we will get a directory called `cffi` or `cffi-x.x.x`. We call it `repo-directory`. To run tests under CPython, run the following in the `repo-directory`:\r\n\r\n    pip install pytest\r\n    pip install -e .  # editable install of CFFI for local development\r\n    pytest src/c/ testing/\r\n\r\n[Documentation]: http://cffi.readthedocs.org/\r\n",
+        "description_content_type": "text/markdown",
+        "author": "Armin Rigo, Maciej Fijalkowski",
+        "maintainer": "Matt Davis, Matt Clay",
+        "license_expression": "MIT-0",
+        "license_file": [
+          "LICENSE"
+        ],
+        "classifier": [
+          "Programming Language :: Python",
+          "Programming Language :: Python :: 3",
+          "Programming Language :: Python :: 3.10",
+          "Programming Language :: Python :: 3.11",
+          "Programming Language :: Python :: 3.12",
+          "Programming Language :: Python :: 3.13",
+          "Programming Language :: Python :: 3.14",
+          "Programming Language :: Python :: 3.15",
+          "Programming Language :: Python :: Free Threading :: 2 - Beta",
+          "Programming Language :: Python :: Implementation :: CPython"
+        ],
+        "requires_dist": [
+          "pycparser; implementation_name != \"PyPy\""
+        ],
+        "requires_python": ">=3.10",
+        "project_url": [
+          "Documentation, https://cffi.readthedocs.io/",
+          "Changelog, https://cffi.readthedocs.io/en/latest/whatsnew.html",
+          "Download, https://github.com/python-cffi/cffi/releases",
+          "Contact, https://groups.google.com/forum/#!forum/python-cffi",
+          "Source Code, https://github.com/python-cffi/cffi",
+          "Issue Tracker, https://github.com/python-cffi/cffi/issues"
+        ]
+      }
+    },
+    {
+      "download_info": {
+        "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
+        "archive_info": {
+          "hash": "sha256=b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+          "hashes": {
+            "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"
+          }
+        }
+      },
+      "is_direct": false,
+      "is_yanked": false,
+      "requested": false,
+      "metadata": {
+        "metadata_version": "2.4",
+        "name": "pycparser",
+        "version": "3.0",
+        "dynamic": [
+          "license-file"
+        ],
+        "summary": "C parser in Python",
+        "description": "===============\npycparser v3.00\n===============\n\n\n.. image:: https://github.com/eliben/pycparser/workflows/pycparser-tests/badge.svg\n  :align: center\n  :target: https://github.com/eliben/pycparser/actions\n\n----\n\n.. contents::\n    :backlinks: none\n\n.. sectnum::\n\nIntroduction\n============\n\nWhat is pycparser?\n------------------\n\n**pycparser** is a parser for the C language, written in pure Python. It is a\nmodule designed to be easily integrated into applications that need to parse\nC source code.\n\nWhat is it good for?\n--------------------\n\nAnything that needs C code to be parsed. The following are some uses for\n**pycparser**, taken from real user reports:\n\n* C code obfuscator\n* Front-end for various specialized C compilers\n* Static code checker\n* Automatic unit-test discovery\n* Adding specialized extensions to the C language\n\nOne of the most popular uses of **pycparser** is in the `cffi\n<https://cffi.readthedocs.io/en/latest/>`_ library, which uses it to parse the\ndeclarations of C functions and types in order to auto-generate FFIs.\n\n**pycparser** is unique in the sense that it's written in pure Python - a very\nhigh level language that's easy to experiment with and tweak. To people familiar\nwith Lex and Yacc, **pycparser**'s code will be simple to understand. It also\nhas no external dependencies (except for a Python interpreter), making it very\nsimple to install and deploy.\n\nWhich version of C does pycparser support?\n------------------------------------------\n\n**pycparser** aims to support the full C99 language (according to the standard\nISO/IEC 9899). Some features from C11 are also supported, and patches to support\nmore are welcome.\n\n**pycparser** supports very few GCC extensions, but it's fairly easy to set\nthings up so that it parses code with a lot of GCC-isms successfully. See the\n`FAQ <https://github.com/eliben/pycparser/wiki/FAQ>`_ for more details.\n\nWhat grammar does pycparser follow?\n-----------------------------------\n\n**pycparser** very closely follows the C grammar provided in Annex A of the C99\nstandard (ISO/IEC 9899).\n\nHow is pycparser licensed?\n--------------------------\n\n`BSD license <https://github.com/eliben/pycparser/blob/master/LICENSE>`_.\n\nContact details\n---------------\n\nFor reporting problems with **pycparser** or submitting feature requests, please\nopen an `issue <https://github.com/eliben/pycparser/issues>`_, or submit a\npull request.\n\n\nInstalling\n==========\n\nPrerequisites\n-------------\n\n**pycparser** is being tested with modern versions of Python on\nLinux, macOS and Windows. See `the CI dashboard <https://github.com/eliben/pycparser/actions/workflows/ci.yml>`__\nfor details.\n\n**pycparser** has no external dependencies.\n\nInstallation process\n--------------------\n\nThe recommended way to install **pycparser** is with ``pip``::\n\n    > pip install pycparser\n\nUsing\n=====\n\nInteraction with the C preprocessor\n-----------------------------------\n\nIn order to be compilable, C code must be preprocessed by the C preprocessor -\n``cpp``. A compatible ``cpp`` handles preprocessing directives like ``#include`` and\n``#define``, removes comments, and performs other minor tasks that prepare the C\ncode for compilation.\n\nFor all but the most trivial snippets of C code **pycparser**, like a C\ncompiler, must receive preprocessed C code in order to function correctly. If\nyou import the top-level ``parse_file`` function from the **pycparser** package,\nit will interact with ``cpp`` for you, as long as it's in your PATH, or you\nprovide a path to it.\n\nNote also that you can use ``gcc -E`` or ``clang -E`` instead of ``cpp``. See\nthe ``using_gcc_E_libc.py`` example for more details. Windows users can download\nand install a binary build of Clang for Windows `from this website\n<http://llvm.org/releases/download.html>`_.\n\nWhat about the standard C library headers?\n------------------------------------------\n\nC code almost always ``#include``\\s various header files from the standard C\nlibrary, like ``stdio.h``. While (with some effort) **pycparser** can be made to\nparse the standard headers from any C compiler, it's much simpler to use the\nprovided \"fake\" standard includes for C11 in ``utils/fake_libc_include``. These\nare standard C header files that contain only the bare necessities to allow\nvalid parsing of the files that use them. As a bonus, since they're minimal, it\ncan significantly improve the performance of parsing large C files.\n\nThe key point to understand here is that **pycparser** doesn't really care about\nthe semantics of types. It only needs to know whether some token encountered in\nthe source is a previously defined type. This is essential in order to be able\nto parse C correctly.\n\nSee `this blog post\n<https://eli.thegreenplace.net/2015/on-parsing-c-type-declarations-and-fake-headers>`_\nfor more details.\n\nNote that the fake headers are not included in the ``pip`` package nor installed\nvia the package build (`#224 <https://github.com/eliben/pycparser/issues/224>`_).\n\nBasic usage\n-----------\n\nTake a look at the |examples|_ directory of the distribution for a few examples\nof using **pycparser**. These should be enough to get you started. Please note\nthat most realistic C code samples would require running the C preprocessor\nbefore passing the code to **pycparser**; see the previous sections for more\ndetails.\n\n.. |examples| replace:: ``examples``\n.. _examples: examples\n\n\nAdvanced usage\n--------------\n\nThe public interface of **pycparser** is well documented with comments in\n``pycparser/c_parser.py``. For a detailed overview of the various AST nodes\ncreated by the parser, see ``pycparser/_c_ast.cfg``.\n\nThere's also a `FAQ available here <https://github.com/eliben/pycparser/wiki/FAQ>`_.\nIn any case, you can always drop me an `email <eliben@gmail.com>`_ for help.\n\n\nModifying\n=========\n\nThere are a few points to keep in mind when modifying **pycparser**:\n\n* The code for **pycparser**'s AST nodes is automatically generated from a\n  configuration file - ``_c_ast.cfg``, by ``_ast_gen.py``. If you modify the AST\n  configuration, make sure to re-generate the code. This can be done by running\n  the ``_ast_gen.py`` script (from the repository root or the\n  ``pycparser`` directory).\n* Read the docstring in the constructor of the ``CParser`` class for details\n  on configuration and compatibility arguments.\n\n\nPackage contents\n================\n\nOnce you unzip the ``pycparser`` package, you'll see the following files and\ndirectories:\n\nREADME.rst:\n  This README file.\n\nLICENSE:\n  The pycparser license\n\nsetup.py:\n  Legacy installation script (build metadata lives in ``pyproject.toml``).\n\npyproject.toml:\n  Package metadata and build configuration.\n\nexamples/:\n  A directory with some examples of using **pycparser**\n\npycparser/:\n  The **pycparser** module source code.\n\ntests/:\n  Unit tests.\n\nutils/fake_libc_include:\n  Minimal standard C library include files that should allow to parse any C code.\n  Note that these headers now include C11 code, so they may not work when the\n  preprocessor is configured to an earlier C standard (like ``-std=c99``).\n\nutils/internal/:\n  Internal utilities for my own use. You probably don't need them.\n\n\nContributors\n============\n\nSome people have contributed to **pycparser** by opening issues on bugs they've\nfound and/or submitting patches. The list of contributors is in the CONTRIBUTORS\nfile in the source distribution. After **pycparser** moved to Github I stopped\nupdating this list because Github does a much better job at tracking\ncontributions.\n",
+        "description_content_type": "text/x-rst",
+        "author_email": "Eli Bendersky <eliben@gmail.com>",
+        "maintainer_email": "Eli Bendersky <eliben@gmail.com>",
+        "license_expression": "BSD-3-Clause",
+        "license_file": [
+          "LICENSE"
+        ],
+        "classifier": [
+          "Development Status :: 5 - Production/Stable",
+          "Programming Language :: Python :: 3",
+          "Programming Language :: Python :: 3.10",
+          "Programming Language :: Python :: 3.11",
+          "Programming Language :: Python :: 3.12",
+          "Programming Language :: Python :: 3.13",
+          "Programming Language :: Python :: 3.14"
+        ],
+        "requires_python": ">=3.10",
+        "project_url": [
+          "Homepage, https://github.com/eliben/pycparser"
+        ]
+      }
+    }
+  ],
+  "environment": {
+    "implementation_name": "cpython",
+    "implementation_version": "3.12.10",
+    "os_name": "nt",
+    "platform_machine": "AMD64",
+    "platform_release": "11",
+    "platform_system": "Windows",
+    "platform_version": "10.0.26340",
+    "python_full_version": "3.12.10",
+    "platform_python_implementation": "CPython",
+    "python_version": "3.12",
+    "sys_platform": "win32"
+  }
+}
