@@ -317,16 +317,20 @@ class PreviewView(QObject):
 
         add = QPushButton("Add range")
         add.setToolTip("Keep another range out of this clip  (N)")
-        # Deliberately not focusing the new range's name field. `N` adds a
-        # range from the picture, and jumping into a text box would put the
-        # next Space into the name — which is one of the things #88 reported.
-        add.clicked.connect(lambda *_: self.select_added.emit())
+        # The keys go back to the picture, like every other button here — and
+        # to the *picture*, not to the new range's name field. `N` adds a range
+        # from the picture, and landing in a text box would put the next Space
+        # into the name, which is one of the things #88 reported.
+        add.clicked.connect(
+            lambda *_: (self.select_added.emit(),
+                        self.hand_keys_to_picture()))
         row.addWidget(add)
 
         self.select_remove = QPushButton("Remove")
         self.select_remove.setToolTip("Drop the range being edited")
         self.select_remove.clicked.connect(
-            lambda *_: self.select_removed.emit())
+            lambda *_: (self.select_removed.emit(),
+                        self.hand_keys_to_picture()))
         row.addWidget(self.select_remove)
 
         self.select_add = add

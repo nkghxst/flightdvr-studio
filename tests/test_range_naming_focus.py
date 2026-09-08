@@ -363,3 +363,56 @@ def test_the_name_belongs_to_the_range_not_to_its_position(qt_app):
             "removing a range moved another range's identity")
     finally:
         window.close()
+
+
+def test_every_button_in_this_panel_hands_the_keys_back(view, monkeypatch):
+    """Sol's finding on #94: two of the five were only claimed, not wired.
+
+    In, Out and Reset handed focus back; Add range and Remove emitted their
+    action and stopped, so the QPushButton-keeps-focus class of #88 was still
+    live on two buttons — and the tests missed it because they called the
+    window's handlers directly instead of pressing the buttons.
+
+    So this presses the real buttons and asserts on the panel's own behaviour.
+    Written as a sweep of every button in the row rather than two more cases,
+    because the defect was a button being forgotten, and a test that lists them
+    by hand can forget the next one the same way.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    handed = []
+    monkeypatch.setattr(view, "hand_keys_to_picture",
+                        lambda: handed.append(1))
+    view.show_selects(2, 0, "", nameable=True)
+
+    buttons = {b.text(): b for b in view.preview_box.findChildren(QPushButton)}
+    buttons.update({b.text(): b
+                    for b in view.trim_band.findChildren(QPushButton)})
+    expected = ["In", "Out", "Reset", "Add range", "Remove"]
+    assert set(expected) <= set(buttons), f"missing buttons: {sorted(buttons)}"
+
+    for label in expected:
+        handed.clear()
+        buttons[label].click()
+        assert handed == [1], f"{label} did not hand the keys back"
+
+
+def test_adding_a_range_does_not_land_in_the_name_field(view, monkeypatch):
+    """The other half: back to the picture, not into a text box.
+
+    Handing focus to the new range's name field would be a tidy-looking answer
+    that recreates the reported bug — the next Space would type a space.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    targets = []
+    monkeypatch.setattr(view, "hand_keys_to_picture",
+                        lambda: targets.append("picture"))
+    monkeypatch.setattr(view.select_name, "setFocus",
+                        lambda *a: targets.append("name field"))
+    view.show_selects(1, 0, "", nameable=True)
+
+    add = next(b for b in view.trim_band.findChildren(QPushButton)
+               if b.text() == "Add range")
+    add.click()
+    assert targets == ["picture"]
