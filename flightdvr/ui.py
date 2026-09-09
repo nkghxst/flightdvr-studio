@@ -34,8 +34,8 @@ from PySide6.QtCore import (
     QPoint, QRect, QRectF, QSettings, Qt, QThread, QTimer, Signal,
 )
 from PySide6.QtGui import (
-    QColor, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPalette,
-    QPen, QPixmap, QShortcut,
+    QAction, QActionGroup, QColor, QIcon, QImage, QKeySequence, QPainter,
+    QPainterPath, QPalette, QPen, QPixmap, QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
@@ -45,6 +45,10 @@ from PySide6.QtWidgets import (
 )
 
 from . import scan
+from .classic_layout import (
+    BrowserMode, ClassicLayout, hidden_summary, length_filter,
+    split_sizes,
+)
 from .browser_panel import (
     FILTER_ALL, FILTER_EXPORTED, REVIEW_LABELS, REVIEW_ROLE,
     BrowserPanel, review_state_text, review_state_tooltip,
@@ -127,6 +131,7 @@ class MainWindow(QMainWindow):
         self.tools = tools
         self.settings_store = QSettings(ORG, APP_NAME)
         self.clips: list[ClipInfo] = []
+        self._layout_state = ClassicLayout.default()
         self.clip_by_path: dict[str, ClipInfo] = {}
         self.jobs: list[Job] = []
         self.worker: ExportWorker | None = None
@@ -612,6 +617,8 @@ class MainWindow(QMainWindow):
         panel.selection_changed.connect(self._on_clip_selected)
         panel.filter_changed.connect(self._refresh_review_filter)
         panel.review_requested.connect(self._set_review)
+        panel.length_filter_changed.connect(self._refresh_review_filter)
+        panel.mode_requested.connect(self.set_browser_mode)
         return panel
 
     # Compatibility views for the established MainWindow API. They keep
@@ -817,6 +824,36 @@ class MainWindow(QMainWindow):
 
         self.recent_menu = menu.addMenu("Recent sessions")
         self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
+
+        # The browser's own toggles are the everyday route. This is the
+        # discoverable one, and the only home for the reset: an escape hatch
+        # beside the controls it undoes invites being pressed by accident.
+        view_menu = self.view_menu = self.menuBar().addMenu("&View")
+        self.browser_mode_actions: dict[BrowserMode, QAction] = {}
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        for mode in BrowserMode:
+            action = view_menu.addAction(f"Clip list: {mode.label}")
+            action.setCheckable(True)
+            action.setChecked(mode is self._layout_state.browser)
+            action.triggered.connect(
+                lambda *_, chosen=mode: self.set_browser_mode(chosen))
+            group.addAction(action)
+            self.browser_mode_actions[mode] = action
+
+        view_menu.addSeparator()
+        self.queue_action = view_menu.addAction("Export queue")
+        self.queue_action.setCheckable(True)
+        self.queue_action.toggled.connect(self._on_queue_action)
+
+        # No Music entry. Music is not built, and a menu item that toggles
+        # nothing is worse than an absent one.
+
+        view_menu.addSeparator()
+        reset_action = view_menu.addAction("Restore default layout")
+        reset_action.setToolTip(
+            "Put the clip list, the queue and the split back as they open")
+        reset_action.triggered.connect(lambda *_: self.restore_default_layout())
 
         # About was reachable only from a button beside the queue, which is a
         # strange home for a licence notice and the last place anyone looks for
@@ -1428,27 +1465,151 @@ class MainWindow(QMainWindow):
         reviewed = sum(1 for clip in self.clips if clip.review != UNREVIEWED)
         self.browser_panel.set_review_progress(reviewed, len(self.clips))
 
-    def _apply_review_filter_to_row(self, row: int, clip: ClipInfo) -> None:
+    def _review_predicate(self):
+        """The Show box as a plain predicate over clips.
+
+        Pulled out so the length filter can compose with it rather than
+        reimplement it: `ClipFilter` takes this as its `review_filter` and a
+        clip then has to pass both.
+        """
         wanted = str(self.browser_panel.review_filter.currentData())
-        name = self.table.item(row, 0)
-        exported = bool(name and name.data(EXPORTED_ROLE))
-        visible = (
-            wanted == FILTER_ALL
-            or (wanted == FILTER_EXPORTED and exported)
-            or (wanted not in (FILTER_ALL, FILTER_EXPORTED)
-                and clip.review == wanted)
-        )
-        self.table.setRowHidden(row, not visible)
+        exported_paths = {
+            self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            for row in range(self.table.rowCount())
+            if self.table.item(row, 0) is not None
+            and self.table.item(row, 0).data(EXPORTED_ROLE)
+        }
+
+        def wanted_here(clip: ClipInfo) -> bool:
+            if wanted == FILTER_ALL:
+                return True
+            if wanted == FILTER_EXPORTED:
+                return str(clip.path) in exported_paths
+            return clip.review == wanted
+
+        return wanted_here
+
+    def _clip_filter(self):
+        """Length plus review, as one policy object."""
+        panel = self.browser_panel
+        return length_filter(
+            panel.min_length.value(), panel.max_length.value(),
+            panel.show_unknown.isChecked(), self._review_predicate())
+
+    def _apply_review_filter_to_row(self, row: int, clip: ClipInfo) -> None:
+        """Hide a row, and only that.
+
+        Nothing here clears a tick, edits a review state, touches a saved range
+        or reaches a queued job — a clip the filter is hiding is still ticked
+        and still exported by `selected_clips`.
+        """
+        self.table.setRowHidden(row, not self._clip_filter().matches(clip))
 
     def _refresh_review_filter(self, *_args) -> None:
+        shown = 0
+        by_length = 0
+        clips = self._clip_filter()
+        # Length alone, so the count can say how much of the hiding this
+        # control is responsible for rather than only that something is gone.
+        lengths = length_filter(
+            self.browser_panel.min_length.value(),
+            self.browser_panel.max_length.value(),
+            self.browser_panel.show_unknown.isChecked())
         for row in range(self.table.rowCount()):
             name = self.table.item(row, 0)
             if name is None:
                 continue
             clip = self.clip_by_path.get(name.data(Qt.ItemDataRole.UserRole))
-            if clip is not None:
-                self._apply_review_filter_to_row(row, clip)
+            if clip is None:
+                continue
+            visible = clips.matches(clip)
+            self.table.setRowHidden(row, not visible)
+            if visible:
+                shown += 1
+            elif not lengths.matches(clip):
+                by_length += 1
+        self.browser_panel.set_hidden_summary(
+            hidden_summary(self.table.rowCount(), shown, by_length))
         self._keep_selection_visible()
+        self._refresh_browser_summary()
+
+    # -- how much room the list is asking for ---------------------------------
+
+    @property
+    def browser_mode(self) -> BrowserMode:
+        return self._layout_state.browser
+
+    def set_browser_mode(self, mode: BrowserMode) -> None:
+        """Show the list large, small or not at all.
+
+        Nothing here moves the splitter. Narrowing the left column is the
+        textbook way to shorten the picture, and it was measured buying the
+        list nothing: the column is already at its own minimum width at the
+        sizes this window opens at. Expanded asks the preview for a height
+        ceiling instead, which is the one thing that does hand the list room.
+        """
+        mode = BrowserMode(mode)
+        self._layout_state = self._layout_state.with_browser(mode)
+        self.browser_panel.show_mode(mode)
+        action = self.browser_mode_actions.get(mode)
+        if action is not None and not action.isChecked():
+            blocked = action.blockSignals(True)
+            action.setChecked(True)
+            action.blockSignals(blocked)
+        # Expanded buys list height from the picture, because at the sizes
+        # this window actually opens at the splitter has nothing left to give:
+        # the left column is already at its own minimum width. The cap never
+        # goes through the preview's content floor, so every control it holds
+        # stays usable and the picture letterboxes rather than distorting.
+        box = self.preview_box
+        if mode is BrowserMode.EXPANDED:
+            box.set_height_cap(box.content_floor())
+        else:
+            box.set_height_cap(None)
+
+        # The splitter is deliberately not touched here. No mode wants a
+        # different split, and re-imposing the computed one moved it by a
+        # pixel: `round(1216 * 0.59)` is 717 where the layout had settled on
+        # 718, so a round trip did not land where it started. Leaving it alone
+        # is what actually preserves a dragged position, on every platform.
+        self._relayout()
+        self._refresh_browser_summary()
+
+    def restore_default_layout(self) -> None:
+        """Put the list, the queue and the split back the way they open."""
+        default = ClassicLayout.default()
+        self.set_browser_mode(default.browser)
+        if self.splitter is not None:
+            total = sum(self.splitter.sizes())
+            if total > 0:
+                self.splitter.setSizes(list(split_sizes(default.browser, total)))
+        self.queue_panel.toggle.setChecked(default.queue_open)
+        self._layout_state = default
+
+    def _on_queue_action(self, open_: bool) -> None:
+        self._layout_state = self._layout_state.with_queue(bool(open_))
+        if self.queue_panel.toggle.isChecked() != bool(open_):
+            self.queue_panel.toggle.setChecked(bool(open_))
+
+    def _refresh_browser_summary(self) -> None:
+        """The one line that stands in for the list while it is collapsed."""
+        clip = self._highlighted_clip()
+        if clip is None:
+            self.browser_panel.set_summary("No clip selected")
+            return
+        ranges = len(clip.real_selects)
+        parts = [clip.path.name, REVIEW_LABELS[clip.review]]
+        if ranges:
+            parts.append(f"{ranges} range" + ("s" if ranges != 1 else ""))
+        shown = sum(1 for row in range(self.table.rowCount())
+                    if not self.table.isRowHidden(row))
+        parts.append(f"{shown} of {len(self.clips)} shown")
+        item = self.table.item(self.table.currentRow(), 0)
+        icon = item.icon() if item is not None else None
+        pixmap = None
+        if icon is not None and not icon.isNull():
+            pixmap = icon.pixmap(self.table.iconSize())
+        self.browser_panel.set_summary(" · ".join(parts), pixmap)
 
     def _keep_selection_visible(self) -> None:
         """Do not leave keyboard actions aimed at a row the filter hid."""
@@ -2760,8 +2921,11 @@ class MainWindow(QMainWindow):
             for member in chosen:
                 # One snapshot per member, so changing the panel afterwards
                 # cannot reach a job that was confirmed under what it showed.
-                # The single preset path shares one settings object across its
-                # jobs; a bundle crosses presets, so each member keeps its own.
+                # A bundle crosses presets, so each member is captured
+                # separately. Jobs no longer share a settings object in any
+                # path: `Job.__post_init__` deep-copies what it is given (#83),
+                # which is what protects the nested values music will add —
+                # `frozen_settings` is a shallow `replace()` and would not.
                 captured = frozen_settings(settings)
                 for planned in member.jobs:
                     concat = None

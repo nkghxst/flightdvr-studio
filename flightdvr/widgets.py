@@ -21,7 +21,7 @@ never the other way round.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QGroupBox, QLabel, QSizePolicy, QTableWidgetItem,
@@ -154,6 +154,16 @@ class PreviewPanel(QGroupBox):
         super().__init__(title)
         self.view: FrameView | None = None
         self.sidebar: QWidget | None = None
+        # An optional ceiling, for when the clip list is worth more than the
+        # last of the picture. None is the shipped behaviour and costs nothing.
+        self._height_cap: int | None = None
+        self._sizing = False
+        # What the group box's title and frame cost, measured while nothing is
+        # capping the height. Remembered rather than re-measured, because once
+        # a cap is on, the picture has shrunk and measuring off it would give a
+        # different floor every time — which made the height settle at two
+        # values depending on which mode it had been in before.
+        self._chrome: int | None = None
 
     def useful_height(self, width: int) -> int:
         """How tall this is worth being at a given width.
@@ -180,6 +190,97 @@ class PreviewPanel(QGroupBox):
         floor = self.sidebar.sizeHint().height()
         return max(picture, floor) + chrome
 
+    def content_floor(self) -> int:
+        """The shortest this can be without clipping one of its own controls.
+
+        `useful_height` already refuses to go below the sidebar, because
+        clipping the buttons off the bottom is a worse trade than a black bar.
+        This is that same floor, named, so a ceiling cannot be set through it.
+        """
+        if self.sidebar is None:
+            return self.minimumHeight()
+        margins = self.contentsMargins()
+        chrome = self._chrome
+        if chrome is None:
+            chrome = margins.top() + margins.bottom()
+        # `sizeHint` alone under-reports: the sidebar's last line wraps, and a
+        # wrapped label's height depends on the width it is given. Capping to
+        # the hint cut "then Space plays" off the bottom, which is the clipping
+        # this floor exists to prevent.
+        needed = self.sidebar.sizeHint().height()
+        needed = max(needed, self.sidebar.minimumSizeHint().height())
+        if self.sidebar.width() > 0:
+            layout = self.sidebar.layout()
+            if layout is not None and layout.hasHeightForWidth():
+                needed = max(needed,
+                             layout.heightForWidth(self.sidebar.width()))
+        return needed + chrome
+
+    def set_height_cap(self, cap: int | None) -> None:
+        """Cap the height, or pass None to go back to what the width earns.
+
+        Applied here rather than waiting for a resize: the left column stops
+        changing width once the splitter is at its minimum, so a cap that only
+        took effect on the next resize would never take effect at all.
+        """
+        cap = None if cap is None else max(1, int(cap))
+        if cap == self._height_cap:
+            return
+        self._height_cap = cap
+        self._apply_height()
+
+    def _wanted_height(self) -> int:
+        wanted = self.useful_height(self.width())
+        # Never at the cost of the clip list disappearing entirely.
+        parent = self.parentWidget()
+        if parent is not None:
+            wanted = min(wanted, max(1, parent.height() - MIN_LIST_HEIGHT))
+        if self._height_cap is not None:
+            # A ceiling, but never through the floor: the controls stay usable
+            # and the picture keeps its aspect by letterboxing, which is the
+            # trade this class already makes at small sizes.
+            wanted = min(wanted, self._height_cap)
+        # The floor is not a rule about caps, it is a rule about this panel:
+        # below it the sidebar's own buttons go under the bottom edge. The
+        # parent clamp above could already push through it on a short window,
+        # and the browser's extra rows made that reachable — In / Out / Reset
+        # were cut in half at 1402x790. Clipping the controls is the worse
+        # trade, and this class already says so about the black bar.
+        return max(wanted, self.content_floor())
+
+    def _apply_height(self) -> None:
+        """One owner for the height, and one place that can change it.
+
+        Guarded because `setFixedHeight` delivers a resize, which arrives back
+        here: without this the two would take turns for as long as the answer
+        kept moving.
+        """
+        if self._sizing:
+            return
+        self._sizing = True
+        try:
+            if (self._height_cap is None and self.view is not None
+                    and self.view.height() > 0):
+                self._chrome = self.height() - self.view.height()
+            wanted = self._wanted_height()
+            if self.height() != wanted:
+                self.setFixedHeight(wanted)
+        finally:
+            self._sizing = False
+
+    def event(self, event) -> bool:
+        """Re-apply the height when the sidebar's own size hint changes.
+
+        A ceiling set while the sidebar wanted 210 px would clip it once the
+        sidebar wanted 230 — the range name field appears, and the buttons go
+        under the bottom edge. A resize is not delivered for that, because the
+        panel's width has not changed; a layout request is.
+        """
+        handled = super().event(event)
+        if event.type() == QEvent.Type.LayoutRequest:
+            self._apply_height()
+        return handled
+
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         """Take the height its width has earned, and no more.
 
@@ -190,13 +291,7 @@ class PreviewPanel(QGroupBox):
         two thirds of the width it could have had.
         """
         super().resizeEvent(event)
-        wanted = self.useful_height(self.width())
-        # Never at the cost of the clip list disappearing entirely.
-        parent = self.parentWidget()
-        if parent is not None:
-            wanted = min(wanted, max(1, parent.height() - MIN_LIST_HEIGHT))
-        if self.height() != wanted:
-            self.setFixedHeight(wanted)
+        self._apply_height()
 class SortItem(QTableWidgetItem):
     """Table cell that sorts on a supplied key rather than on its text."""
 

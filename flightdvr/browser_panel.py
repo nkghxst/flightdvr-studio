@@ -20,11 +20,12 @@ from __future__ import annotations
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
-    QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
-    QTableWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QHeaderView, QLabel,
+    QPushButton, QSizePolicy, QSpinBox, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem, QTableWidget, QVBoxLayout, QWidget,
 )
 
+from .classic_layout import BrowserMode, UNSET, bound_text
 from .session import KEEP, MAYBE, REJECT, UNREVIEWED
 from .thumbs import THUMB_WIDTH
 from .widgets import MIN_THUMB_WIDTH, MIN_VISIBLE_CLIPS, dim
@@ -137,6 +138,8 @@ class BrowserPanel(QWidget):
     selection_changed = Signal()
     filter_changed = Signal(str)
     review_requested = Signal(str)
+    length_filter_changed = Signal()
+    mode_requested = Signal(object)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -169,7 +172,33 @@ class BrowserPanel(QWidget):
             )
             button.clicked.connect(lambda *_, signal=requested: signal.emit())
             header.addWidget(button)
+
+        # The browser's own control. The View menu mirrors it rather than
+        # replacing it: the everyday route should be where the list is.
+        header.addSpacing(8)
+        header.addWidget(QLabel("List:"))
+        self.mode_buttons: dict[BrowserMode, QPushButton] = {}
+        for mode in BrowserMode:
+            button = QPushButton(mode.label)
+            button.setCheckable(True)
+            button.setChecked(mode is BrowserMode.NORMAL)
+            button.setMaximumWidth(78)
+            button.setToolTip({
+                BrowserMode.COLLAPSED:
+                    "Put the list away, keeping the current clip and the "
+                    "filter summary on one line",
+                BrowserMode.NORMAL: "The usual arrangement",
+                BrowserMode.EXPANDED:
+                    "Trade picture size for a taller list. The list scrolls; "
+                    "nothing is left out of it.",
+            }[mode])
+            button.clicked.connect(
+                lambda *_, chosen=mode: self.mode_requested.emit(chosen))
+            header.addWidget(button)
+            self.mode_buttons[mode] = button
         layout.addLayout(header)
+
+        layout.addWidget(self._build_summary_bar())
 
         review = QHBoxLayout()
         review.addWidget(QLabel("Show:"))
@@ -212,6 +241,13 @@ class BrowserPanel(QWidget):
         )
         review.addWidget(self.review_count_label)
         layout.addLayout(review)
+
+        # This row costs the window 6 px of minimum height: 712 at the base
+        # against 718 here, measured with the same clips loaded. Tightening the
+        # gap in front of it does not buy that back, so it is recorded as the
+        # price of the control rather than hidden, and pinned by a test so it
+        # cannot grow quietly.
+        layout.addLayout(self._build_length_row())
 
         self.warning_label = dim(QLabel())
         self.warning_label.hide()
@@ -270,6 +306,153 @@ class BrowserPanel(QWidget):
             )
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             self.review_shortcuts[state] = shortcut
+
+    def _build_summary_bar(self) -> QWidget:
+        """What stands in for the list while it is collapsed.
+
+        The clip you are working on, its review state, what the filters are
+        doing, and an obvious way back. A collapsed list that forgets which
+        clip you were on is not collapsed, it is closed.
+        """
+        bar = self.summary_bar = QWidget()
+        bar.hide()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 0, 0, 0)
+
+        self.reopen_button = QPushButton("Show clips")
+        self.reopen_button.setToolTip("Bring the clip list back")
+        self.reopen_button.clicked.connect(
+            lambda *_: self.mode_requested.emit(BrowserMode.NORMAL))
+        row.addWidget(self.reopen_button)
+
+        self.summary_thumb = QLabel()
+        self.summary_thumb.setFixedSize(MIN_THUMB_WIDTH,
+                                        round(MIN_THUMB_WIDTH * 9 / 16))
+        self.summary_thumb.setScaledContents(True)
+        row.addWidget(self.summary_thumb)
+
+        self.summary_label = QLabel("No clip selected")
+        row.addWidget(self.summary_label)
+        row.addStretch(1)
+        return bar
+
+    def _build_length_row(self) -> QHBoxLayout:
+        """The duration filter from #96, as two bounds and one escape hatch.
+
+        Both bounds are spin boxes whose minimum reads as "off", so there is no
+        sentinel to type and no third tick box to explain. Zero-length and
+        unreadable clips are the same thing to `ClipInfo.duration`, so they get
+        their own visible choice rather than being quietly counted as short.
+        """
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Length:"))
+
+        self.min_length = QSpinBox()
+        self.min_length.setRange(UNSET, 7200)
+        self.min_length.setSuffix(" s")
+        self.min_length.setSpecialValueText("off")
+        self.min_length.setMaximumWidth(88)
+        self.min_length.setToolTip(
+            "Hide clips shorter than this. The bound is inclusive.")
+        row.addWidget(QLabel("at least"))
+        row.addWidget(self.min_length)
+
+        self.max_length = QSpinBox()
+        self.max_length.setRange(UNSET, 7200)
+        self.max_length.setSuffix(" s")
+        self.max_length.setSpecialValueText("off")
+        self.max_length.setMaximumWidth(88)
+        self.max_length.setToolTip(
+            "Hide clips longer than this. The bound is inclusive.")
+        row.addWidget(QLabel("at most"))
+        row.addWidget(self.max_length)
+
+        self.show_unknown = QCheckBox("Show unknown")
+        self.show_unknown.setChecked(True)
+        self.show_unknown.setToolTip(
+            "A clip whose length could not be read shows ? in the Length "
+            "column. Untick to hide those as well."
+        )
+        row.addWidget(self.show_unknown)
+
+        self.reset_length = QPushButton("Reset")
+        self.reset_length.setMaximumWidth(64)
+        self.reset_length.setToolTip("Clear both bounds and show every length")
+        self.reset_length.clicked.connect(lambda *_: self.reset_length_filter())
+        row.addWidget(self.reset_length)
+
+        for control in (self.min_length, self.max_length):
+            control.valueChanged.connect(self._on_length_changed)
+        self.show_unknown.toggled.connect(self._on_length_changed)
+
+        self.length_label = dim(QLabel(""))
+        # Both of these elide rather than widening the row: they describe the
+        # boxes beside them and are not a reason for the window to have a wider
+        # floor. They share the row for the same reason — an extra row above
+        # the preview is height the preview needs at a short window.
+        self.hidden_label = dim(QLabel(""))
+        self.hidden_label.setToolTip(
+            "Filtering hides rows. It never unticks a clip, changes a review "
+            "state, touches a saved range or affects anything already queued."
+        )
+        for spare in (self.length_label, self.hidden_label):
+            spare.setMinimumWidth(0)
+            spare.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                QSizePolicy.Policy.Preferred)
+        row.addWidget(self.length_label)
+        row.addWidget(self.hidden_label, 1)
+        return row
+
+    def _on_length_changed(self, *_args) -> None:
+        """Keep the pair coherent, then tell the window to re-filter.
+
+        Dragging the minimum past an active maximum would otherwise leave two
+        boxes that each look reasonable describing a range nothing can be in.
+        The maximum moves visibly instead.
+        """
+        if (self.max_length.value() != UNSET
+                and self.max_length.value() < self.min_length.value()):
+            blocked = self.max_length.blockSignals(True)
+            self.max_length.setValue(self.min_length.value())
+            self.max_length.blockSignals(blocked)
+        self.length_label.setText(bound_text(
+            self.min_length.value(), self.max_length.value(),
+            self.show_unknown.isChecked()))
+        self.length_filter_changed.emit()
+
+    def reset_length_filter(self) -> None:
+        """Back to the empty filter: every clip, whatever its length."""
+        for control in (self.min_length, self.max_length):
+            blocked = control.blockSignals(True)
+            control.setValue(UNSET)
+            control.blockSignals(blocked)
+        blocked = self.show_unknown.blockSignals(True)
+        self.show_unknown.setChecked(True)
+        self.show_unknown.blockSignals(blocked)
+        self._on_length_changed()
+
+    def show_mode(self, mode: BrowserMode) -> None:
+        """Show the list or the one-line summary, and agree with the menu."""
+        for candidate, button in self.mode_buttons.items():
+            blocked = button.blockSignals(True)
+            button.setChecked(candidate is mode)
+            button.blockSignals(blocked)
+        collapsed = mode is BrowserMode.COLLAPSED
+        self.table.setVisible(not collapsed)
+        self.summary_bar.setVisible(collapsed)
+
+    def set_summary(self, text: str, thumbnail=None) -> None:
+        """The collapsed line's contents, supplied by the window."""
+        self.summary_label.setText(text)
+        if thumbnail is not None and not thumbnail.isNull():
+            self.summary_thumb.setPixmap(thumbnail)
+            self.summary_thumb.show()
+        else:
+            self.summary_thumb.clear()
+            self.summary_thumb.hide()
+
+    def set_hidden_summary(self, text: str) -> None:
+        self.hidden_label.setText(text)
 
     def set_review_progress(self, reviewed: int, total: int) -> None:
         self.review_count_label.setText(f"{reviewed} of {total} reviewed")
