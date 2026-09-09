@@ -26,6 +26,10 @@ from .audio_plan import AudioMode, OutputAudioPlan
 from .media import NO_WINDOW, Tools
 
 
+AUDIO_FRAME_SAMPLES = 1_024
+AUDIO_SAMPLE_TOLERANCE = AUDIO_FRAME_SAMPLES
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as source:
@@ -95,8 +99,10 @@ def audio_filter_args(plan: OutputAudioPlan, *, source_seek_samples: int = 0
         dvr = (
             f"[0:a:0]aresample={plan.output.rate}:async=1:first_pts=0,"
             "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-            f"atrim=end_sample={source_total},apad=whole_len={source_total},"
-            f"atrim=end_sample={source_total},volume={_decimal(plan.dvr_gain)}[dvr]"
+            f"atrim=start_sample={source_seek_samples}:end_sample={source_total},"
+            f"asetpts=PTS-STARTPTS,apad=whole_len={total},"
+            f"atrim=end_sample={total},volume={_decimal(plan.dvr_gain)},"
+            f"asetpts=PTS+{source_seek_samples}/{plan.output.rate}/TB[dvr]"
         )
         chains.append(dvr)
         chains.append(
@@ -109,15 +115,32 @@ def audio_filter_args(plan: OutputAudioPlan, *, source_seek_samples: int = 0
 
 
 def validate_expected_audio(tools: Tools, path: Path,
-                            plan: OutputAudioPlan) -> tuple[bool, str]:
+                            plan: OutputAudioPlan, *, cancelled=lambda: False
+                            ) -> tuple[bool, str]:
     """The existing video validator's audio counterpart before publication."""
-    result = subprocess.run(
-        [str(tools.ffprobe), "-v", "error", "-show_streams", "-of", "json",
-         str(path)], capture_output=True, text=True, timeout=60,
+    command = [
+        str(tools.ffprobe), "-v", "error", "-count_frames", "-show_streams",
+        "-of", "json", str(path),
+    ]
+    proc = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         creationflags=NO_WINDOW,
     )
+    while True:
+        try:
+            stdout, _stderr = proc.communicate(timeout=0.05)
+            break
+        except subprocess.TimeoutExpired:
+            if cancelled():
+                proc.terminate()
+                try:
+                    proc.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate()
+                return False, "Cancelled"
     try:
-        streams = json.loads(result.stdout).get("streams", [])
+        streams = json.loads(stdout).get("streams", [])
     except json.JSONDecodeError:
         streams = []
     audio = [s for s in streams if s.get("codec_type") == "audio"]
@@ -132,4 +155,17 @@ def validate_expected_audio(tools: Tools, path: Path,
         channels = int(audio[0].get("channels") or 0)
         if rate != plan.output.rate or channels != 2:
             return False, f"ffmpeg produced unexpected audio format: {rate} Hz, {channels} channels"
+        try:
+            frames = int(audio[0].get("nb_read_frames") or 0)
+        except (TypeError, ValueError):
+            frames = 0
+        decoded_samples = frames * AUDIO_FRAME_SAMPLES
+        if (frames <= 0
+                or abs(decoded_samples - plan.output.samples)
+                > AUDIO_SAMPLE_TOLERANCE):
+            return False, (
+                "ffmpeg produced the wrong audio extent: "
+                f"{decoded_samples} decoded samples for a "
+                f"{plan.output.samples}-sample plan"
+            )
     return True, ""

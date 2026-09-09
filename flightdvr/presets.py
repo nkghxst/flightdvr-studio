@@ -1081,9 +1081,16 @@ def build_commands(
             elif audio_plan.mode.value == "no_sound":
                 sound_args = ["-an"]
             else:
-                sound_args = _audio_args(
-                    ExportSettings(**{**settings.__dict__, "keep_audio": True}),
-                    clip, "192k")
+                source_total = audio_plan.output.samples + round(
+                    max(0.0, clip.trim_in) * audio_plan.output.rate)
+                sound_args = [
+                    "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+                    "-af", (
+                        f"aresample={audio_plan.output.rate}:async=1:first_pts=0,"
+                        f"apad=whole_len={source_total},"
+                        f"atrim=end_sample={source_total}"
+                    ),
+                ]
         else:
             sound_args = sound("192k", mapped)
         return [

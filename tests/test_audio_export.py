@@ -98,6 +98,31 @@ def _write_tone_blocks(path: Path) -> None:
         target.writeframes(samples.tobytes())
 
 
+def _write_tones(path: Path, rate: int, sections: list[tuple[float, int]]) -> None:
+    samples = array("h")
+    for seconds, frequency in sections:
+        for offset in range(round(seconds * rate)):
+            samples.append(round(12_000 * math.sin(
+                2 * math.pi * frequency * offset / rate)))
+    with wave.open(str(path), "wb") as target:
+        target.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+        target.writeframes(samples.tobytes())
+
+
+def _source_with_audio(tools, tmp_path: Path, name: str, wav: Path) -> ClipInfo:
+    path = tmp_path / f"{name}.mp4"
+    run([
+        str(tools.ffmpeg), "-v", "error", "-y", "-f", "lavfi", "-i",
+        f"testsrc2=size=160x90:rate=30:duration={SOURCE_SECONDS}",
+        "-i", str(wav), "-c:v", "libx264", "-preset", "ultrafast",
+        "-c:a", "aac", str(path),
+    ])
+    clip = ClipInfo(path, path.stat().st_size, datetime.now(), SOURCE_SECONDS,
+                    160, 90, 30, "h264", "aac", "yuv420p", "tv")
+    clip.trim_in, clip.trim_out = TRIM_IN, TRIM_OUT
+    return clip
+
+
 def _probe_streams(tools, path: Path) -> list[dict]:
     result = run([
         str(tools.ffprobe), "-v", "error", "-count_frames", "-show_entries",
@@ -405,6 +430,61 @@ def test_mix_gains_are_measured_against_single_signal_exports(
     assert ratios["mix_dvr"] == pytest.approx(0.5, abs=GAIN_TOLERANCE)
     assert ratios["no_dvr_music"] == pytest.approx(0.6, abs=GAIN_TOLERANCE)
     print("decoded gain ratios:", ratios, "cross-frequency leakage:", leakage)
+
+
+def test_mix_dvr_starts_at_the_selected_source_event(media, tools, tmp_path):
+    wav = tmp_path / "dvr-events.wav"
+    _write_tones(wav, OUTPUT_RATE, [(0.2, 440), (1.0, 660)])
+    clip = _source_with_audio(tools, tmp_path, "dvr-events", wav)
+    mixed = _decode_mono(tools, export(
+        tools, tmp_path, clip,
+        choice(media.asset, AudioMode.MIX, music_level=0, dvr_level=1),
+        name="dvr-events-mix"))
+    assert _magnitude(mixed, 2_400, 660, 2_400) > (
+        10 * _magnitude(mixed, 2_400, 440, 2_400))
+
+
+def test_explicit_original_normalizes_44100_and_pads_short_audio(
+        tools, tmp_path):
+    for name, rate, sections in (
+        ("rate-44100", 44_100, [(SOURCE_SECONDS, 660)]),
+        ("short-audio", OUTPUT_RATE, [(0.3, 660)]),
+    ):
+        wav = tmp_path / f"{name}.wav"
+        _write_tones(wav, rate, sections)
+        clip = _source_with_audio(tools, tmp_path, name, wav)
+        out = export(
+            tools, tmp_path, clip, MusicChoice(mode=AudioMode.ORIGINAL),
+            name=f"{name}-original")
+        measured = _stream_metrics(tools, out)
+        assert (measured["audio_rate"], measured["audio_channels"]) == (
+            OUTPUT_RATE, 2)
+        assert abs(measured["audio_samples"] - OUTPUT_SAMPLES) <= SAMPLE_TOLERANCE
+
+
+def test_cancel_after_audio_validation_cannot_replace_the_target(
+        media, tools, tmp_path, monkeypatch):
+    out = tmp_path / "cancel-validation.mp4"
+    sentinel = b"previous destination"
+    out.write_bytes(sentinel)
+    job = Job([media.source], "master", ExportSettings(master_speed="ultrafast"),
+              out, audio=choice(media.asset, AudioMode.MIX))
+    worker = ExportWorker(tools, [job], tmp_path / "work")
+    import flightdvr.audio_export as audio_export_module
+    actual = audio_export_module.validate_expected_audio
+
+    def cancel_after_real_validation(*args, **kwargs):
+        result = actual(*args, **kwargs)
+        worker.cancel()
+        return result
+
+    monkeypatch.setattr(
+        audio_export_module, "validate_expected_audio",
+        cancel_after_real_validation)
+    ok, message = worker._run_job(0, job)
+    assert not ok and message == "Cancelled"
+    assert out.read_bytes() == sentinel
+    assert not list(tmp_path.glob("*.flightdvr-part*"))
 
 
 def test_corrupt_music_preserves_an_existing_target_and_leaves_no_part(

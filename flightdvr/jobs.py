@@ -379,11 +379,18 @@ class ExportWorker(QThread):
                 from .audio_export import validate_expected_audio
                 try:
                     ok, message = validate_expected_audio(
-                        self.tools, temp_path, audio_plan)
+                        self.tools, temp_path, audio_plan,
+                        cancelled=lambda: self._cancel)
                 except (OSError, subprocess.SubprocessError) as exc:
                     return False, f"Could not check the finished audio: {exc}"
                 if not ok:
                     return False, message
+
+            # Validation is intentionally outside the encode process. A
+            # cancellation can therefore arrive after FFmpeg exits but before
+            # publication; never turn that race into a successful replace.
+            if self._cancel:
+                return False, "Cancelled"
 
             size = temp_path.stat().st_size
             try:
