@@ -25,10 +25,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterable
 
 from .assembly import Item
+from .audio_plan import MusicChoice
 from .presets import PRESETS, ExportSettings
 
 
@@ -67,26 +67,6 @@ class OutputTarget:
     def assembly(cls, items: Iterable[Item]) -> "OutputTarget":
         """Refer to an Assembly by its existing ordered item references."""
         return cls(tuple(items), is_assembly=True)
-
-
-@dataclass(frozen=True)
-class MusicChoice:
-    """The optional music source selected for one output.
-
-    Timing, gain, decoding and persistence belong to later audio integration.
-    Keeping this first value small avoids making prototype controls into a
-    production contract while still establishing per-output ownership.
-    """
-
-    track: Path | None = None
-
-    def __post_init__(self) -> None:
-        if self.track is None:
-            return
-        track = Path(self.track)
-        if not str(track).strip() or str(track) == ".":
-            raise ValueError("a music track path cannot be empty")
-        object.__setattr__(self, "track", track)
 
 
 @dataclass(frozen=True)
