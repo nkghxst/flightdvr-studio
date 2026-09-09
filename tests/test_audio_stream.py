@@ -119,7 +119,6 @@ def wait_for(predicate, message="condition was not reached"):
 
 
 def source_plan(mode, frames, *, source_has_audio=True):
-    dvr_gain = Fraction(1) if mode is AudioMode.ORIGINAL and source_has_audio else Fraction(0)
     return resolve_audio_plan(
         MusicChoice(mode=mode),
         frames,
@@ -266,6 +265,8 @@ def test_four_full_blocks_bound_both_retained_pcm_buffers_to_30720_bytes():
         wait_for(lambda: stream.queued_blocks == QUEUE_CAPACITY)
         assert stream.queued_blocks == 4
         assert stream.queued_pcm_bytes == MAX_QUEUED_PCM_BYTES == 30_720
+        # One worker-rendering block plus reader/decoder caches and Python
+        # object overhead are deliberately outside this exact queue payload.
     finally:
         stop(stream)
 
@@ -330,6 +331,14 @@ def test_stop_request_unblocks_a_cooperative_reader_without_joining_itself():
     assert stream.state in (StreamState.STOPPING, StreamState.STOPPED)
     assert stream.wait_stopped(2)
     assert reader.closed
+    assert stream.state is StreamState.STOPPED
+
+
+def test_stop_before_start_is_immediately_observable_as_stopped():
+    plan = source_plan(AudioMode.NO_SOUND, BLOCK_FRAMES)
+    stream = AudioStream(mapping(plan))
+    stream.request_stop()
+    assert stream.wait_stopped(0)
     assert stream.state is StreamState.STOPPED
 
 

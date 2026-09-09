@@ -54,6 +54,8 @@ BLOCK_FRAMES = 480
 QUEUE_CAPACITY = 4
 FLOAT_BYTES = 4
 # A queued PcmBlock retains both the planned and monitored stereo buffers.
+# This payload bound excludes one block being rendered by the worker, reader or
+# decoder caches owned by adapters, and Python Queue/PcmBlock object overhead.
 MAX_QUEUED_PCM_BYTES = (
     QUEUE_CAPACITY * BLOCK_FRAMES * OUTPUT_CHANNELS * FLOAT_BYTES * 2
 )
@@ -298,7 +300,7 @@ class AudioStream:
 
     @property
     def queued_pcm_bytes(self) -> int:
-        """Exact immutable payload retained by queued planned+monitored PCM."""
+        """Exact queued PCM payload; see ``MAX_QUEUED_PCM_BYTES`` exclusions."""
         with self._lock:
             blocks = self._blocks
         with blocks.mutex:
@@ -403,6 +405,8 @@ class AudioStream:
         """Request cancellation without joining the worker."""
         self._cancel.set()
         with self._changed:
+            if self._worker is None:
+                self._stopped.set()
             self._changed.notify_all()
         seen: set[int] = set()
         for reader in (self._source_reader, self._music_reader):
