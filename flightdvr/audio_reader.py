@@ -48,6 +48,8 @@ MAX_READ_BYTES = MAX_READ_FRAMES * PCM_FRAME_BYTES
 HASH_CHUNK_BYTES = 1024 * 1024
 DECODE_CHUNK_BYTES = 64 * 1024
 STDERR_LINES = 30
+STDERR_LINE_CHARS = 300
+ERROR_MESSAGE_CHARS = 300
 
 
 class AudioReaderError(RuntimeError):
@@ -77,7 +79,7 @@ def _drain_stderr(pipe, log: deque[str]) -> None:
         for raw in pipe:
             text = raw.decode("utf-8", "replace").strip()
             if text:
-                log.append(text)
+                log.append(text[:STDERR_LINE_CHARS])
     except (OSError, ValueError):
         pass
 
@@ -276,7 +278,8 @@ class MusicAssetProbe(QThread):
         except (AudioAssetError, OSError, subprocess.SubprocessError) as exc:
             with self._lock:
                 if not self._cancel.is_set():
-                    self.failed.emit(self.generation, str(exc))
+                    self.failed.emit(
+                        self.generation, str(exc)[:ERROR_MESSAGE_CHARS])
             return
         with self._lock:
             if not self._cancel.is_set():
@@ -340,7 +343,8 @@ class FfmpegPcmReader:
             str(self.tools.ffmpeg), "-hide_banner", "-loglevel", "error",
             "-nostdin", "-i", str(self.path), "-map",
             f"0:a:{self.stream_index}", "-vn", "-sn", "-dn",
-            "-af", filters, "-f", "f32le", "pipe:1",
+            "-af", filters, "-ar", str(OUTPUT_RATE), "-ac",
+            str(OUTPUT_CHANNELS), "-f", "f32le", "pipe:1",
         ]
 
     def read(self, start: int, frames: int,
@@ -416,6 +420,10 @@ class FfmpegPcmReader:
                     raise AudioReaderError(_message(
                         self._stderr, f"ffmpeg stopped (code {code})"))
                 if self.source_timeline:
+                    received = wanted - remaining
+                    if received % PCM_FRAME_BYTES:
+                        raise AudioReaderError(
+                            "FFmpeg returned a truncated stereo frame")
                     chunks.append(bytes(remaining))
                     remaining = 0
                     break

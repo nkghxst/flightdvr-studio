@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
+import threading
 from pathlib import Path
 
 import pytest
@@ -25,7 +26,9 @@ import flightdvr.audio_reader as reader_module
 from flightdvr.audio_plan import AudioAsset
 from flightdvr.audio_reader import (
     AudioAssetError,
+    AudioOperationCancelled,
     AudioReaderError,
+    ERROR_MESSAGE_CHARS,
     FfmpegPcmReader,
     MAX_READ_BYTES,
     MusicAssetProbe,
@@ -91,6 +94,54 @@ class FakeProcess:
         self.returncode = self.code
 
 
+class BlockingPipe(FakePipe):
+    def __init__(self, entered, released):
+        super().__init__()
+        self.entered = entered
+        self.released = released
+
+    def read(self, size=-1):
+        self.entered.set()
+        assert self.released.wait(2), "the reader was not unblocked"
+        return b""
+
+
+class BlockingProcess(FakeProcess):
+    def __init__(self, entered, released):
+        super().__init__()
+        self.stdout = BlockingPipe(entered, released)
+        self.released = released
+
+    def terminate(self):
+        super().terminate()
+        self.released.set()
+
+
+class FakeProbeProcess:
+    def __init__(self, stdout, stderr="", code=0):
+        self.stdout = None
+        self.stderr = None
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = code
+
+    def communicate(self, timeout=None):
+        return self._stdout, self._stderr
+
+    def poll(self):
+        return self.returncode
+
+
+class TimedOutProbeProcess(FakeProcess):
+    def __init__(self, cancelled):
+        super().__init__()
+        self.cancelled = cancelled
+
+    def communicate(self, timeout=None):
+        self.cancelled.set()
+        raise reader_module.subprocess.TimeoutExpired("ffprobe", timeout)
+
+
 def floats(*values):
     return b"".join(struct.pack("<f", value) for value in values)
 
@@ -120,6 +171,8 @@ def test_music_reader_converts_native_extent_once_and_uses_contiguous_clock(tmp_
     assert "aresample=48000:async=0" in filters
     assert "atrim=start_sample=4800" in filters
     assert "apad" not in filters
+    assert command[command.index("-ar") + 1] == "48000"
+    assert command[command.index("-ac") + 1] == "2"
 
 
 def test_source_reader_uses_explicit_timeline_extent_and_clean_padding_filter(tmp_path):
@@ -149,6 +202,21 @@ def test_partial_pipe_reads_assemble_one_exact_bounded_float_block(
             (0.25, -0.5, 0.75, -1.0))
         assert len(commands) == 1
         assert MAX_READ_BYTES == 3_840
+    finally:
+        reader.close()
+
+
+def test_contiguous_pulls_reuse_one_child(monkeypatch, tmp_path):
+    process = FakeProcess(floats(0.1, 0.1, 0.2, 0.2))
+    commands = install_processes(monkeypatch, [process])
+    reader = FfmpegPcmReader.for_music(
+        TOOLS, asset(tmp_path / "music.wav", rate=48_000, samples=2))
+    try:
+        assert tuple(reader.read(0, 1, lambda: False)) == pytest.approx(
+            (0.1, 0.1))
+        assert tuple(reader.read(1, 1, lambda: False)) == pytest.approx(
+            (0.2, 0.2))
+        assert len(commands) == 1
     finally:
         reader.close()
 
@@ -192,6 +260,31 @@ def test_music_short_read_is_an_error_but_clean_source_tail_is_timeline_silence(
         source.close()
 
 
+def test_partial_source_pcm_frame_and_nonzero_exit_are_errors(
+        monkeypatch, tmp_path):
+    failing = FakeProcess(b"", code=7)
+    failing.stderr = FakePipe()
+    install_processes(monkeypatch, [
+        FakeProcess(b"\x00"),
+        failing,
+    ])
+    partial = FfmpegPcmReader.for_source(
+        TOOLS, tmp_path / "partial.mp4", stream_index=0, timeline_frames=1)
+    try:
+        with pytest.raises(AudioReaderError, match="truncated stereo frame"):
+            partial.read(0, 1, lambda: False)
+    finally:
+        partial.close()
+
+    broken = FfmpegPcmReader.for_source(
+        TOOLS, tmp_path / "broken.mp4", stream_index=0, timeline_frames=1)
+    try:
+        with pytest.raises(AudioReaderError, match=r"code 7"):
+            broken.read(0, 1, lambda: False)
+    finally:
+        broken.close()
+
+
 def test_nonfinite_pcm_and_reads_outside_the_bound_fail(monkeypatch, tmp_path):
     install_processes(monkeypatch, [
         FakeProcess(floats(float("nan"), 0.0)),
@@ -220,6 +313,35 @@ def test_request_stop_and_close_are_idempotent(monkeypatch, tmp_path):
     reader.close()
     reader.close()
     assert process.terminated == 1
+
+
+def test_request_stop_unblocks_a_held_read_and_worker_close_settles_it(
+        monkeypatch, tmp_path):
+    entered = threading.Event()
+    released = threading.Event()
+    process = BlockingProcess(entered, released)
+    install_processes(monkeypatch, [process])
+    reader = FfmpegPcmReader.for_music(
+        TOOLS, asset(tmp_path / "music.wav", rate=48_000, samples=1))
+    outcomes = []
+
+    def held_read():
+        try:
+            reader.read(0, 1, lambda: False)
+        except Exception as exc:
+            outcomes.append(exc)
+
+    worker = threading.Thread(target=held_read)
+    worker.start()
+    assert entered.wait(1)
+    reader.request_stop()
+    worker.join(2)
+    assert not worker.is_alive()
+    assert len(outcomes) == 1
+    assert isinstance(outcomes[0], AudioOperationCancelled)
+    reader.close()
+    assert process.terminated == 1
+    assert reader._stderr_thread is None
 
 
 def test_inspection_returns_existing_asset_with_full_hash_and_native_count(
@@ -259,17 +381,117 @@ def test_inspection_rejects_a_file_changed_during_the_operation(
         inspect_music_asset(TOOLS, track)
 
 
-def test_cancelled_probe_emits_no_late_ready_or_failure(monkeypatch, tmp_path):
+def test_each_asset_stage_checks_cancellation_and_settles_its_child(
+        monkeypatch, tmp_path):
     track = tmp_path / "music.wav"
-    made = asset(track)
-    monkeypatch.setattr(reader_module, "inspect_music_asset",
-                        lambda *args, **kwargs: made)
+    track.write_bytes(b"x" * (reader_module.HASH_CHUNK_BYTES + 1))
+
+    probe_cancelled = threading.Event()
+    probe_process = TimedOutProbeProcess(probe_cancelled)
+    install_processes(monkeypatch, [probe_process])
+    registered = []
+    with pytest.raises(AudioOperationCancelled):
+        reader_module._probe_first_audio(
+            TOOLS, track, probe_cancelled.is_set, registered.append)
+    assert registered == [probe_process, None]
+    assert probe_process.terminated == 1
+
+    count_process = FakeProcess(floats(0.0))
+    install_processes(monkeypatch, [count_process])
+    count_checks = iter((False, True))
+    registered = []
+    with pytest.raises(AudioOperationCancelled):
+        reader_module._count_native_samples(
+            TOOLS, track, 48_000, 1, lambda: next(count_checks),
+            registered.append)
+    assert registered == [count_process, None]
+    assert count_process.terminated == 1
+
+    hash_checks = iter((False, True))
+    with pytest.raises(AudioOperationCancelled):
+        reader_module._file_sha256(track, lambda: next(hash_checks))
+
+
+def test_probe_work_runs_off_caller_and_stop_emits_no_late_outcome(
+        monkeypatch, tmp_path):
+    track = tmp_path / "music.wav"
+    entered = threading.Event()
+    released = threading.Event()
+    process = FakeProcess()
+    caller_ident = threading.get_ident()
+    worker_idents = []
+
+    def held_inspection(*args, cancelled, register_process):
+        worker_idents.append(threading.get_ident())
+        register_process(process)
+        entered.set()
+        try:
+            assert released.wait(2)
+            if cancelled():
+                raise AudioOperationCancelled("Cancelled")
+            return asset(track)
+        finally:
+            register_process(None)
+
+    monkeypatch.setattr(reader_module, "inspect_music_asset", held_inspection)
     probe = MusicAssetProbe(TOOLS, track, 7)
     ready = []
     failed = []
     probe.ready.connect(lambda *args: ready.append(args))
     probe.failed.connect(lambda *args: failed.append(args))
+    assert worker_idents == []
+    probe.start()
+    assert entered.wait(1)
     probe.stop()
-    probe.run()
+    released.set()
+    assert probe.wait(2_000)
+    assert len(worker_idents) == 1
+    assert worker_idents[0] != caller_ident
+    assert process.terminated == 1
     assert ready == []
     assert failed == []
+
+
+def test_successful_probe_emits_generation_and_existing_asset_once(
+        monkeypatch, tmp_path):
+    made = asset(tmp_path / "music.wav")
+    monkeypatch.setattr(reader_module, "inspect_music_asset",
+                        lambda *args, **kwargs: made)
+    probe = MusicAssetProbe(TOOLS, made.track, 11)
+    ready = []
+    failed = []
+    probe.ready.connect(lambda *args: ready.append(args))
+    probe.failed.connect(lambda *args: failed.append(args))
+    probe.run()
+    assert ready == [(11, made)]
+    assert failed == []
+
+
+@pytest.mark.parametrize("stdout", [
+    "not json",
+    '{"streams": []}',
+    '{"streams": [{"sample_rate": "0", "channels": 0}]}',
+])
+def test_malformed_or_unusable_first_audio_stream_is_rejected(
+        monkeypatch, tmp_path, stdout):
+    install_processes(monkeypatch, [FakeProbeProcess(stdout)])
+    with pytest.raises(AudioAssetError, match="first audio stream"):
+        reader_module._probe_first_audio(
+            TOOLS, tmp_path / "bad.bin", lambda: False, lambda proc: None)
+
+
+def test_probe_emits_one_bounded_person_readable_failure(monkeypatch, tmp_path):
+    reason = "x" * (ERROR_MESSAGE_CHARS + 50)
+
+    def fail(*args, **kwargs):
+        raise AudioAssetError(reason)
+
+    monkeypatch.setattr(reader_module, "inspect_music_asset", fail)
+    probe = MusicAssetProbe(TOOLS, tmp_path / "bad.wav", 9)
+    ready = []
+    failed = []
+    probe.ready.connect(lambda *args: ready.append(args))
+    probe.failed.connect(lambda *args: failed.append(args))
+    probe.run()
+    assert ready == []
+    assert failed == [(9, "x" * ERROR_MESSAGE_CHARS)]
