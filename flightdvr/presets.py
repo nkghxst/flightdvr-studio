@@ -956,6 +956,7 @@ def build_commands(
     concat_file: Path | None = None,
     total_duration: float = 0.0,
     clips: list[ClipInfo] | None = None,
+    audio_plan=None,
 ) -> list[list[str]]:
     """Full ffmpeg command list. Two entries when a two-pass encode is needed.
 
@@ -985,6 +986,16 @@ def build_commands(
     else:
         head = ([ff, "-hide_banner", "-nostdin", "-y"]
                 + _input_args(sources, None, clip))
+    if audio_plan is not None and audio_plan.mode.value in ("replace", "mix"):
+        from .audio_export import music_input_args
+        # `_input_args` puts the accurate seek and duration after source input.
+        # Additional inputs belong before those output options, or FFmpeg reads
+        # them as input options for the music and advances the track by the DVR
+        # in point.
+        source_i = head.index("-i")
+        after_source = source_i + 2
+        head = (head[:after_source] + music_input_args(audio_plan)
+                + head[after_source:])
 
     def picture(
         pix_fmt: str,
@@ -1060,8 +1071,23 @@ def build_commands(
                 "-c:v", "libx264", "-preset", settings.master_speed,
                 "-crf", str(settings.master_crf), "-profile:v", "high",
             ]
+        if audio_plan is not None:
+            from .audio_export import audio_filter_args
+            if audio_plan.mode.value in ("replace", "mix"):
+                seek = round(max(0.0, clip.trim_in) * audio_plan.output.rate)
+                sound_args = (audio_filter_args(audio_plan,
+                                                 source_seek_samples=seek)
+                              + ["-c:a", "aac", "-b:a", "192k", "-ac", "2"])
+            elif audio_plan.mode.value == "no_sound":
+                sound_args = ["-an"]
+            else:
+                sound_args = _audio_args(
+                    ExportSettings(**{**settings.__dict__, "keep_audio": True}),
+                    clip, "192k")
+        else:
+            sound_args = sound("192k", mapped)
         return [
-            head + filters + video + timing() + sound("192k", mapped)
+            head + filters + video + timing() + sound_args
             + ["-movflags", "+faststart", str(out_path)]
         ]
 

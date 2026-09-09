@@ -36,6 +36,7 @@ from PySide6.QtCore import QThread, Signal
 from .media import (
     NO_WINDOW, TERMINATE_SECONDS, ClipInfo, Tools, request_stop, stop_process,
 )
+from .audio_plan import MusicChoice, OUTPUT_RATE, resolve_audio_plan, round_samples
 from .presets import (
     PRESETS, ExportSettings, build_commands, join_problems, output_runtime,
     slow_problems, vertical_problems,
@@ -120,6 +121,7 @@ class Job:
     settings: ExportSettings
     out_path: Path
     concat_file: Path | None = None
+    audio: MusicChoice = MusicChoice()
 
     # Kept so a queued job can be re-targeted if the output settings change
     # before it runs. Without this, ticking the flight-date box after queueing
@@ -152,6 +154,7 @@ class Job:
         status, cancellation and the existing pending-path retarget rule.
         """
         self.settings = deepcopy(self.settings)
+        self.audio = deepcopy(self.audio)
 
     def retarget(self, flight_date) -> None:
         """Recompute the output path after an output setting changed."""
@@ -295,6 +298,22 @@ class ExportWorker(QThread):
             if problems:
                 return False, "Cannot join these clips: " + "; ".join(problems)
 
+        audio_plan = None
+        if job.audio.configured:
+            try:
+                audio_plan = resolve_audio_plan(
+                    job.audio,
+                    round_samples(job.total_duration * OUTPUT_RATE),
+                    source_has_audio=job.clips[0].has_audio,
+                    preset_key=job.preset_key,
+                    joined=len(job.clips) > 1,
+                    bundle=job.frozen,
+                )
+                from .audio_export import verify_music_asset
+                verify_music_asset(audio_plan)
+            except (OSError, ValueError) as exc:
+                return False, f"Cannot use the submitted audio: {exc}"
+
         try:
             job.out_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -338,6 +357,7 @@ class ExportWorker(QThread):
                 # joined export from clips[0] alone overshot the target by
                 # roughly the number of clips in it.
                 total_duration=job.total_duration,
+                audio_plan=audio_plan,
             )
         except Exception as exc:  # pragma: no cover - defensive
             return False, f"Could not build command: {exc}"
@@ -355,6 +375,15 @@ class ExportWorker(QThread):
             ok, message = self._validate(temp_path)
             if not ok:
                 return False, message
+            if audio_plan is not None:
+                from .audio_export import validate_expected_audio
+                try:
+                    ok, message = validate_expected_audio(
+                        self.tools, temp_path, audio_plan)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    return False, f"Could not check the finished audio: {exc}"
+                if not ok:
+                    return False, message
 
             size = temp_path.stat().st_size
             try:
