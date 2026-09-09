@@ -70,6 +70,39 @@ comparison silently never matches and the test passes for the wrong reason.
 That is exactly how the first CI run caught a test which had only ever run on
 Windows.
 
+## Evidence and recovery
+
+The repository has several checks that prove different things. Keep that
+boundary explicit when recording a result.
+
+- A test run is successful only when pytest exits with code 0 and all
+  test-owned background workers have stopped. Passing assertions followed by a
+  `QThread` or interpreter-shutdown failure is a failure. Hardware and update
+  probes should be isolated by fixtures at the scope of the tests that need
+  them; a leak should identify the worker or fixture before production
+  shutdown is changed.
+- A behavioural oracle must exercise the named failure mode, such as real
+  overflow. `or True` and unexplained tolerance relaxation make a green test
+  non-evidence. After a correction, rerun the named failure and inspect only
+  the correction delta.
+- Issue references describe a relationship, not an outcome. While acceptance
+  is open, write `Related to #96; acceptance remains pending`; a negated
+  `Closes` phrase can still populate GitHub's closing references. Inspect
+  `closingIssuesReferences` before merge and the issue state after merge.
+- The [screenshot helper](../tools/make_screenshots.py) uses `QWidget.grab()`;
+  record that capture method, the Qt platform and the actual window dimensions.
+  An offscreen pixmap is synthetic layout evidence, not proof of native font
+  readability, keyboard or pointer behaviour, or live Studio acceptance.
+- The [build workflow](../.github/workflows/build.yml) ignores docs-only paths,
+  so a docs-only change may have no automatic CI run. Report that as not
+  applicable, not as a pass or failure. A proposed reduction of required checks
+  remains a proposal until the merge policy is changed explicitly.
+- A stopped turn with unfinished work is a checkpoint: record the exact commit,
+  remaining evidence, blocker and next action. Recovery, including a reported
+  Windows Update shutdown, does not prove permanent ownership repair or Studio
+  acceptance. Preserve recovered identities and do not relaunch workers or use
+  Open All without a bounded coordinator floor.
+
 ---
 
 ## Layout

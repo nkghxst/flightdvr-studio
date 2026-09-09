@@ -122,6 +122,12 @@ nothing — which reads exactly like "no open PRs" to anyone skimming. Run
 `gh auth status` first; if it fails, say so in chat and ask, rather than
 concluding that nothing is claimed and starting work on top of somebody.
 
+**Issue references are not closure proof.** If acceptance remains open, use
+neutral wording such as `Related to #96; acceptance remains pending`. A
+negated `Closes` phrase can still create a closing reference, so inspect
+`closingIssuesReferences` before merge and the actual issue state after merge.
+Never infer closure from prose alone.
+
 ### Claiming work
 
 **Open a draft PR on your first commit, before doing the work.** Title it for
@@ -277,6 +283,11 @@ failed. GitHub itself has outages and capacity problems. Check the current run
 and its logs before calling a CI failure a code failure, and say when remote
 verification was unavailable.
 
+A docs-only change may be excluded by `paths-ignore` and therefore have no
+automatic run. Report that check as not applicable, not as passing or failing.
+A proposal to reduce the all-check policy is a separate proposal and does not
+change the merge gate.
+
 **The two machines hold different footage**, so a measurement on real media
 usually cannot be repeated by the other reviewer — the laptop has `D:\movies`,
 the desktop has `F:\FPV clips` and whatever card is in the reader. Identify the
@@ -309,12 +320,28 @@ text widths roughly double the real ones, and no key mapper — so a layout
 "verified" there says nothing about the real window, and a shortcut that does
 not fire there may well fire on a keyboard. Both mistakes have been made.
 
+A screenshot claim names the capture method (for example `QWidget.grab()`),
+Qt platform and actual window dimensions. An offscreen grab is synthetic layout
+evidence only: it does not prove native font readability, keyboard or pointer
+behaviour, or live Studio acceptance. Label the evidence accordingly.
+
 ### Handing over
 
 Nothing special is required if the rules above are followed, because the state
 lives in git and on the issue tracker. If you stop mid-task, push what you have
 to the draft PR and write what is left in its description. An unpushed branch
 on someone's disk is invisible to everyone.
+
+**A stopped turn with unfinished work is a checkpoint, not completion.** Record
+the exact SHA, remaining evidence, blocker and next action in the job/PR, and
+allow one bounded continuation only after idle is verified; do not create an
+ACK loop.
+
+**Recovery is not proof of permanent repair.** If Windows Update is the
+reported cause of a shutdown, record it as reported unless event logs were
+inspected. Preserve recovered identities and sessions; do not relaunch workers,
+use Open All, or change security boundaries without a new bounded floor, and do
+not treat recovery as Studio acceptance.
 
 ---
 
@@ -396,6 +423,15 @@ rather than the behaviour.
   (`-m integration`) run real ffmpeg and inspect the file that comes out. They
   exist because eighteen defects were once found in code where **every**
   argument was correct.
+- A successful test run also requires process exit 0 and stopped test-owned
+  background workers. Passing assertions followed by interpreter or `QThread`
+  shutdown failure is a failure. Hardware and update probes belong behind
+  correctly scoped fixtures for tests that need isolation; diagnose the named
+  leak before changing production shutdown.
+- A behavioural oracle must exercise the named failure mode (for example,
+  actual overflow). Do not use `or True` or unexplained tolerance relaxation.
+  A correction rereview reruns the named failure and inspects only the
+  correction delta.
 
 ### Do not break these
 
