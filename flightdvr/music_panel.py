@@ -121,6 +121,16 @@ class MusicPanel(QWidget):
         self._choice = MusicChoice()
         self._asset: AudioAsset | None = None
         self._supported = True
+        # Samples, kept beside the widgets rather than read back out of them.
+        #
+        # A two-decimal box cannot hold a sample. One sample at 44.1 kHz is
+        # 0.0000227 s, which displays as 0.00 and reads back as zero; 440 999
+        # samples displays as 10.00 and reads back as 441 000. Reading the
+        # widget at capture therefore rewrote values nobody had touched. These
+        # are the values; the boxes show them, and only a real edit moves them.
+        self._fade_in_samples = MusicChoice().fade_in_samples
+        self._fade_out_samples = MusicChoice().fade_out_samples
+        self._passage: SampleSpan | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -226,7 +236,7 @@ class MusicPanel(QWidget):
         self.fade_in.setSuffix(" s")
         self.fade_in.setDecimals(2)
         self.fade_in.setMaximum(3600.0)
-        self.fade_in.valueChanged.connect(self._on_edited)
+        self.fade_in.valueChanged.connect(self._on_fade_changed)
         fades.addWidget(QLabel("Fade in:"))
         fades.addWidget(self.fade_in)
 
@@ -234,7 +244,7 @@ class MusicPanel(QWidget):
         self.fade_out.setSuffix(" s")
         self.fade_out.setDecimals(2)
         self.fade_out.setMaximum(3600.0)
-        self.fade_out.valueChanged.connect(self._on_edited)
+        self.fade_out.valueChanged.connect(self._on_fade_changed)
         fades.addWidget(QLabel("Fade out:"))
         fades.addWidget(self.fade_out)
         fades.addStretch(1)
@@ -282,12 +292,12 @@ class MusicPanel(QWidget):
             track=self._choice.track,
             mode=mode,
             asset=self._asset,
-            passage=self._passage_from_widgets(),
+            passage=self._passage if self._asset is not None else None,
             short_track=self.short_track_combo.currentData(),
             music_level=Fraction(self.music_level.value(), 100),
             dvr_level=Fraction(self.dvr_level.value(), 100),
-            fade_in_samples=samples_of(self.fade_in.value()),
-            fade_out_samples=samples_of(self.fade_out.value()),
+            fade_in_samples=self._fade_in_samples,
+            fade_out_samples=self._fade_out_samples,
         )
 
     def set_asset(self, asset: AudioAsset | None) -> None:
@@ -349,7 +359,11 @@ class MusicPanel(QWidget):
 
 
     def _passage_from_widgets(self) -> SampleSpan | None:
-        """A passage only exists once there is a clock to put it on."""
+        """What the boxes are asking for, read only when somebody edits them.
+
+        Never called on the load path: the boxes cannot express the value they
+        were given, so reading them there would quantise it.
+        """
         if self._asset is None:
             return None
         rate = self._asset.sample_rate
@@ -366,6 +380,17 @@ class MusicPanel(QWidget):
         self._loading = True
         try:
             choice = self._choice
+            # The values, taken from the choice. The boxes below only display
+            # them, and cannot be asked for them back.
+            self._fade_in_samples = choice.fade_in_samples
+            self._fade_out_samples = choice.fade_out_samples
+            self._passage = choice.passage
+            if self._passage is None and self._asset is not None:
+                # A whole track is what the boxes will show, so it is what a
+                # capture should return; anything else would disagree with what
+                # is on screen.
+                self._passage = SampleSpan(0, self._asset.decoded_samples,
+                                           self._asset.sample_rate)
             mode = choice.mode or AudioMode.ORIGINAL
             index = self.mode_combo.findData(mode)
             if index >= 0:
@@ -437,15 +462,31 @@ class MusicPanel(QWidget):
             (m, help_text) for m, _, help_text in MODE_LABELS).get(mode, ""))
         self._on_edited()
 
+    def _on_fade_changed(self, *_args) -> None:
+        """A person moving a fade box sets that fade, and only that one.
+
+        Reading both boxes here would quantise the one nobody touched: its
+        exact sample value is not expressible in two decimals, so it would come
+        back rounded as a side effect of editing its neighbour.
+        """
+        if self._loading:
+            return
+        if self.sender() is self.fade_out:
+            self._fade_out_samples = samples_of(self.fade_out.value())
+        else:
+            self._fade_in_samples = samples_of(self.fade_in.value())
+        self._on_edited()
+
     def _on_passage_changed(self, *_args) -> None:
         if self._loading:
             return
         # One control, two ends: an end at or before the start is not a
         # passage, so the other end moves visibly rather than the value being
         # rejected after the fact.
+        moved_start = self.sender() is self.passage_start
+        nudged = False
         if self.passage_end.value() <= self.passage_start.value():
-            other = (self.passage_end if self.sender() is self.passage_start
-                     else self.passage_start)
+            other = self.passage_end if moved_start else self.passage_start
             was = self._loading
             self._loading = True
             try:
@@ -456,7 +497,31 @@ class MusicPanel(QWidget):
                     other.setValue(max(0.0, self.passage_end.value() - 0.01))
             finally:
                 self._loading = was
+            nudged = True
+        self._passage = self._passage_after_edit(moved_start, nudged)
         self._on_edited()
+
+    def _passage_after_edit(self, moved_start: bool,
+                            nudged: bool) -> SampleSpan | None:
+        """Take the edited end from its box, and keep the other one exact.
+
+        Re-reading both would round the end nobody touched, which is the same
+        defect as the fades: its sample value is not expressible in the two
+        decimals the box has. The other end is only re-read when the pairing
+        above actually moved it.
+        """
+        if self._asset is None:
+            return None
+        rate = self._asset.sample_rate
+        held = self._passage
+        start = (samples_of(self.passage_start.value(), rate)
+                 if moved_start or nudged or held is None else held.start)
+        end = (samples_of(self.passage_end.value(), rate)
+               if not moved_start or nudged or held is None else held.end)
+        end = min(end, self._asset.decoded_samples)
+        if end <= start:
+            return None
+        return SampleSpan(start, end, rate)
 
     def _on_edited(self, *_args) -> None:
         if self._loading:

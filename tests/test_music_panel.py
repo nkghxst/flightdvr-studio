@@ -202,6 +202,65 @@ def test_requested_fades_are_not_re_derived_by_the_panel(panel):
     assert plan.fade_in_samples < asked_in
 
 
+def test_exact_sample_values_survive_the_round_trip(panel):
+    """Samples are the unit; a two-decimal box must not become the storage.
+
+    Found in review. Every value the other round-trip tests used happened to
+    land on a whole centisecond, so the quantisation never showed. One sample
+    at 44.1 kHz is 0.0000227 s, which a two-decimal box displays as 0.00 and
+    reads back as zero; 440 999 samples displays as 10.00 and reads back as
+    441 000. Both ends of the passage moved, and the fades with them.
+    """
+    asset = an_asset(rate=44_100)
+    original = MusicChoice(
+        track=TRACK, mode=AudioMode.REPLACE, asset=asset,
+        passage=SampleSpan(1, 440_999, 44_100),
+        fade_in_samples=1, fade_out_samples=47_999)
+
+    panel.load(original, target="hdz_047.ts · Launch")
+    captured = panel.capture()
+
+    assert captured.passage == original.passage
+    assert captured.fade_in_samples == 1
+    assert captured.fade_out_samples == 47_999
+    assert captured == original
+
+
+def test_editing_one_end_leaves_the_other_end_exact(panel):
+    """Touching one control must not quantise the one beside it."""
+    asset = an_asset(rate=44_100)
+    panel.load(MusicChoice(track=TRACK, mode=AudioMode.REPLACE, asset=asset,
+                           passage=SampleSpan(1, 440_999, 44_100),
+                           fade_in_samples=1, fade_out_samples=47_999),
+               target="A")
+
+    panel.fade_in.setValue(2.0)          # a real edit to one box only
+    captured = panel.capture()
+
+    assert captured.fade_in_samples == samples_of(2.0)
+    assert captured.fade_out_samples == 47_999, "the untouched box was rewritten"
+    assert captured.passage == SampleSpan(1, 440_999, 44_100)
+
+
+def test_editing_one_passage_end_leaves_the_other_exact(panel):
+    """The same trap as the fades, in the control beside them.
+
+    A passage is one span, so the handler is tempted to re-read both boxes.
+    The end nobody touched cannot be expressed in two decimals, so re-reading
+    it rounds it — the reviewed defect, moved one control along.
+    """
+    asset = an_asset(rate=44_100)
+    panel.load(MusicChoice(track=TRACK, mode=AudioMode.REPLACE, asset=asset,
+                           passage=SampleSpan(1, 440_999, 44_100)),
+               target="A")
+
+    panel.passage_start.setValue(2.0)
+    passage = panel.capture().passage
+
+    assert passage.start == samples_of(2.0, 44_100)
+    assert passage.end == 440_999, "the untouched end was rewritten"
+
+
 def test_levels_stay_exact_fractions(panel):
     """A float would drift a value the export multiplies by."""
     panel.load(MusicChoice(track=TRACK, mode=AudioMode.MIX, asset=an_asset()),
