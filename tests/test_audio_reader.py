@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import struct
 import threading
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -119,16 +120,16 @@ class BlockingProcess(FakeProcess):
 
 class FakeProbeProcess:
     def __init__(self, stdout, stderr="", code=0):
-        self.stdout = None
-        self.stderr = None
-        self._stdout = stdout
-        self._stderr = stderr
+        stdout = stdout.encode() if isinstance(stdout, str) else stdout
+        stderr = stderr.encode() if isinstance(stderr, str) else stderr
+        self.stdout = FakePipe(stdout)
+        self.stderr = FakePipe(stderr)
         self.returncode = code
 
-    def communicate(self, timeout=None):
-        return self._stdout, self._stderr
-
     def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
         return self.returncode
 
 
@@ -137,9 +138,53 @@ class TimedOutProbeProcess(FakeProcess):
         super().__init__()
         self.cancelled = cancelled
 
+    def wait(self, timeout=None):
+        if not self.cancelled.is_set():
+            self.cancelled.set()
+            raise reader_module.subprocess.TimeoutExpired("ffprobe", timeout)
+        return super().wait(timeout)
+
+
+class LongDiagnosticPipe:
+    def __init__(self, size):
+        self.remaining = size
+        self.closed = False
+
+    def read(self, size=-1):
+        if not self.remaining:
+            return b""
+        found = self.remaining if size < 0 else min(size, self.remaining)
+        self.remaining -= found
+        return b"x" * found
+
+    def close(self):
+        self.closed = True
+
+    def __iter__(self):
+        if self.remaining:
+            yield self.read(self.remaining) + b"\n"
+
+
+class StreamingProbeProcess(FakeProcess):
+    def __init__(self, stdout, diagnostic_bytes):
+        super().__init__(code=0)
+        self.stdout = FakePipe(stdout)
+        self.stderr = LongDiagnosticPipe(diagnostic_bytes)
+
     def communicate(self, timeout=None):
-        self.cancelled.set()
-        raise reader_module.subprocess.TimeoutExpired("ffprobe", timeout)
+        raise AssertionError("probe capture must not use unbounded communicate()")
+
+
+class WaitingProcess(FakeProcess):
+    def __init__(self, data):
+        super().__init__(data)
+        self.wait_calls = 0
+
+    def wait(self, timeout=None):
+        self.wait_calls += 1
+        if self.returncode is None:
+            raise reader_module.subprocess.TimeoutExpired("ffmpeg", timeout)
+        return self.returncode
 
 
 def floats(*values):
@@ -171,6 +216,7 @@ def test_music_reader_converts_native_extent_once_and_uses_contiguous_clock(tmp_
     assert "aresample=48000:async=0" in filters
     assert "atrim=start_sample=4800" in filters
     assert "apad" not in filters
+    assert "-xerror" in command
     assert command[command.index("-ar") + 1] == "48000"
     assert command[command.index("-ac") + 1] == "2"
 
@@ -188,6 +234,7 @@ def test_source_reader_uses_explicit_timeline_extent_and_clean_padding_filter(tm
     assert "apad=whole_len=9600" in filters
     assert "atrim=end_sample=9600" in filters
     assert "atrim=start_sample=480" in filters
+    assert "-xerror" in command
 
 
 def test_partial_pipe_reads_assemble_one_exact_bounded_float_block(
@@ -285,6 +332,41 @@ def test_partial_source_pcm_frame_and_nonzero_exit_are_errors(
         broken.close()
 
 
+def test_complete_final_block_cannot_hide_a_known_child_failure(
+        monkeypatch, tmp_path):
+    process = FakeProcess(floats(*([0.25, 0.25] * 480)), code=7)
+    process.stderr = FakePipe(b"decoder failed after PCM\n")
+    process.returncode = 7
+    install_processes(monkeypatch, [process])
+    reader = FfmpegPcmReader.for_music(
+        TOOLS, asset(tmp_path / "music.wav", rate=48_000, samples=480))
+    try:
+        with pytest.raises(AudioReaderError, match="decoder failed after PCM"):
+            reader.read(0, 480, lambda: False)
+    finally:
+        reader.close()
+
+
+def test_final_extent_wait_keeps_polling_cancellation(monkeypatch, tmp_path):
+    process = WaitingProcess(floats(0.25, 0.25))
+    install_processes(monkeypatch, [process])
+    reader = FfmpegPcmReader.for_music(
+        TOOLS, asset(tmp_path / "music.wav", rate=48_000, samples=1))
+    checks = 0
+
+    def cancelled():
+        nonlocal checks
+        checks += 1
+        return checks >= 4
+
+    try:
+        with pytest.raises(AudioOperationCancelled):
+            reader.read(0, 1, cancelled)
+        assert process.wait_calls == 1
+    finally:
+        reader.close()
+
+
 def test_nonfinite_pcm_and_reads_outside_the_bound_fail(monkeypatch, tmp_path):
     install_processes(monkeypatch, [
         FakeProcess(floats(float("nan"), 0.0)),
@@ -306,7 +388,7 @@ def test_request_stop_and_close_are_idempotent(monkeypatch, tmp_path):
     process = FakeProcess(floats(0.0, 0.0))
     install_processes(monkeypatch, [process])
     reader = FfmpegPcmReader.for_music(
-        TOOLS, asset(tmp_path / "music.wav", rate=48_000, samples=1))
+        TOOLS, asset(tmp_path / "music.wav", rate=48_000, samples=2))
     reader.read(0, 1, lambda: False)
     reader.request_stop()
     reader.request_stop()
@@ -478,6 +560,41 @@ def test_malformed_or_unusable_first_audio_stream_is_rejected(
     with pytest.raises(AudioAssetError, match="first audio stream"):
         reader_module._probe_first_audio(
             TOOLS, tmp_path / "bad.bin", lambda: False, lambda proc: None)
+
+
+def test_probe_and_diagnostic_drains_are_bounded_before_allocation(
+        monkeypatch, tmp_path):
+    diagnostic_bytes = 2 * 1024 * 1024 + 1
+    pipe = LongDiagnosticPipe(diagnostic_bytes)
+    log = reader_module.deque(maxlen=reader_module.STDERR_LINES)
+    tracemalloc.start()
+    reader_module._drain_stderr(pipe, log)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert sum(map(len, log)) <= reader_module.STDERR_LINE_CHARS
+    assert peak < 256 * 1024
+    print(
+        "diagnostic drain measurement: "
+        f"input={diagnostic_bytes} retained={sum(map(len, log))} peak={peak}"
+    )
+
+    stdout = (b'{"streams":[{"codec_name":"pcm_s16le",'
+              b'"sample_rate":"48000","channels":1}]}')
+    process = StreamingProbeProcess(stdout, diagnostic_bytes)
+    install_processes(monkeypatch, [process])
+    assert reader_module._probe_first_audio(
+        TOOLS, tmp_path / "music.wav", lambda: False,
+        lambda proc: None) == (48_000, 1)
+
+    oversized = StreamingProbeProcess(
+        stdout + b" " * reader_module.PROBE_STDOUT_BYTES,
+        diagnostic_bytes=0,
+    )
+    install_processes(monkeypatch, [oversized])
+    with pytest.raises(AudioAssetError, match="too much stream metadata"):
+        reader_module._probe_first_audio(
+            TOOLS, tmp_path / "music.wav", lambda: False,
+            lambda proc: None)
 
 
 def test_probe_emits_one_bounded_person_readable_failure(monkeypatch, tmp_path):

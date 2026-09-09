@@ -49,6 +49,9 @@ HASH_CHUNK_BYTES = 1024 * 1024
 DECODE_CHUNK_BYTES = 64 * 1024
 STDERR_LINES = 30
 STDERR_LINE_CHARS = 300
+STDERR_READ_BYTES = 4 * 1024
+STDERR_PARTIAL_BYTES = STDERR_LINE_CHARS * 4
+PROBE_STDOUT_BYTES = 64 * 1024
 ERROR_MESSAGE_CHARS = 300
 
 
@@ -75,11 +78,44 @@ def _message(log: Sequence[str], fallback: str) -> str:
 def _drain_stderr(pipe, log: deque[str]) -> None:
     if pipe is None:
         return
+    partial = b""
+
+    def retain(raw: bytes) -> None:
+        text = raw.rstrip(b"\r").decode("utf-8", "replace").strip()
+        if text:
+            log.append(text[-STDERR_LINE_CHARS:])
+
     try:
-        for raw in pipe:
-            text = raw.decode("utf-8", "replace").strip()
-            if text:
-                log.append(text[:STDERR_LINE_CHARS])
+        while True:
+            block = pipe.read(STDERR_READ_BYTES)
+            if not block:
+                break
+            parts = block.split(b"\n")
+            for complete in parts[:-1]:
+                retain(partial + complete)
+                partial = b""
+            partial = (partial + parts[-1])[-STDERR_PARTIAL_BYTES:]
+        if partial:
+            retain(partial)
+    except (OSError, ValueError):
+        pass
+
+
+def _drain_probe_stdout(pipe, output: bytearray,
+                        overflow: threading.Event) -> None:
+    """Drain all probe output while retaining only the bounded JSON prefix."""
+    if pipe is None:
+        return
+    try:
+        while True:
+            block = pipe.read(STDERR_READ_BYTES)
+            if not block:
+                break
+            room = PROBE_STDOUT_BYTES - len(output)
+            if room:
+                output.extend(block[:room])
+            if len(block) > room:
+                overflow.set()
     except (OSError, ValueError):
         pass
 
@@ -110,16 +146,28 @@ def _probe_first_audio(
     try:
         proc = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, creationflags=NO_WINDOW,
+            bufsize=0, creationflags=NO_WINDOW,
         )
     except OSError as exc:
         raise AudioAssetError(f"could not start ffprobe: {exc}") from exc
     register_process(proc)
+    stdout = bytearray()
+    overflow = threading.Event()
+    log: deque[str] = deque(maxlen=STDERR_LINES)
+    drains = (
+        threading.Thread(
+            target=_drain_probe_stdout,
+            args=(proc.stdout, stdout, overflow), daemon=True),
+        threading.Thread(
+            target=_drain_stderr, args=(proc.stderr, log), daemon=True),
+    )
+    for drain in drains:
+        drain.start()
     try:
         while True:
             _check_cancelled(cancelled)
             try:
-                stdout, stderr = proc.communicate(timeout=0.05)
+                code = proc.wait(timeout=0.05)
                 break
             except subprocess.TimeoutExpired:
                 continue
@@ -127,11 +175,24 @@ def _probe_first_audio(
     finally:
         if proc.poll() is None:
             stop_process(proc)
+        for drain in drains:
+            drain.join(timeout=2)
+        for pipe in (proc.stdout, proc.stderr):
+            try:
+                if pipe is not None:
+                    pipe.close()
+            except OSError:
+                pass
+        for drain in drains:
+            drain.join(timeout=2)
         register_process(None)
-    if proc.returncode != 0:
-        raise AudioAssetError(_message(stderr.splitlines(), "ffprobe failed"))
+    if code != 0:
+        raise AudioAssetError(_message(log, f"ffprobe stopped (code {code})"))
+    if overflow.is_set():
+        raise AudioAssetError("ffprobe returned too much stream metadata")
     try:
-        streams = json.loads(stdout).get("streams", [])
+        streams = json.loads(
+            stdout.decode("utf-8", "replace")).get("streams", [])
         stream = streams[0]
         rate = int(stream.get("sample_rate") or 0)
         channels = int(stream.get("channels") or 0)
@@ -151,7 +212,8 @@ def _count_native_samples(
     register_process: Callable[[subprocess.Popen | None], None],
 ) -> int:
     command = [
-        str(tools.ffmpeg), "-hide_banner", "-loglevel", "error", "-nostdin",
+        str(tools.ffmpeg), "-hide_banner", "-loglevel", "error", "-xerror",
+        "-nostdin",
         "-i", str(path), "-map", "0:a:0", "-vn", "-sn", "-dn",
         "-ar", str(rate), "-ac", str(channels), "-f", "f32le", "pipe:1",
     ]
@@ -337,11 +399,12 @@ class FfmpegPcmReader:
         else:
             filters = (
                 f"aresample={OUTPUT_RATE}:async=0,{common},"
-                f"atrim=start_sample={start},asetpts=PTS-STARTPTS"
+                f"atrim=start_sample={start}:end_sample={self.frames},"
+                "asetpts=PTS-STARTPTS"
             )
         return [
             str(self.tools.ffmpeg), "-hide_banner", "-loglevel", "error",
-            "-nostdin", "-i", str(self.path), "-map",
+            "-xerror", "-nostdin", "-i", str(self.path), "-map",
             f"0:a:{self.stream_index}", "-vn", "-sn", "-dn",
             "-af", filters, "-ar", str(OUTPUT_RATE), "-ac",
             str(OUTPUT_CHANNELS), "-f", "f32le", "pipe:1",
@@ -366,6 +429,10 @@ class FfmpegPcmReader:
             if self._process is None or self._cursor != start:
                 self._replace_process(start)
             data = self._read_bytes(frames * PCM_FRAME_BYTES, cancelled)
+            self._check_process_after_read(
+                final_extent=start + frames == self.frames,
+                cancelled=cancelled,
+            )
             values = tuple(item[0] for item in struct.iter_unpack("<f", data))
             if len(values) != frames * OUTPUT_CHANNELS:
                 raise AudioReaderError("FFmpeg returned a truncated stereo block")
@@ -431,6 +498,31 @@ class FfmpegPcmReader:
             chunks.append(block)
             remaining -= len(block)
         return b"".join(chunks)
+
+    def _check_process_after_read(
+        self,
+        *,
+        final_extent: bool,
+        cancelled: Callable[[], bool],
+    ) -> None:
+        """Surface a known failure, and settle success at the promised end."""
+        with self._lock:
+            proc = self._process
+        assert proc is not None
+        code = proc.poll()
+        while final_extent and code is None:
+            if cancelled() or self._stop_requested:
+                raise AudioOperationCancelled("Cancelled")
+            try:
+                code = proc.wait(timeout=0.05)
+            except subprocess.TimeoutExpired:
+                continue
+        if cancelled() or self._stop_requested:
+            raise AudioOperationCancelled("Cancelled")
+        if code is not None and code != 0:
+            self._join_stderr()
+            raise AudioReaderError(_message(
+                self._stderr, f"ffmpeg stopped (code {code})"))
 
     def request_stop(self) -> None:
         """Terminal, nonblocking request which wakes a blocked pipe read."""

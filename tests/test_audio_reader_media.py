@@ -111,6 +111,7 @@ class Media:
     music: Path
     source: Path
     silent: Path
+    partial_pcm: Path
     music_digest: str
     review_ids: dict[str, str]
 
@@ -168,8 +169,13 @@ def media(tmp_path_factory, tools: Tools) -> Media:
     event = root / "source-event.wav"
     source = root / "source-delayed-event.mkv"
     silent = root / "source-no-audio.mkv"
+    partial_pcm = root / "partial-pcm.wav"
     write_music(music)
     write_source_event(event)
+    with wave.open(str(partial_pcm), "wb") as target:
+        target.setparams((1, 2, OUTPUT_RATE, 0, "NONE", "not compressed"))
+        target.writeframes(struct.pack("<h", 12_000) * 2_400)
+    partial_pcm.write_bytes(partial_pcm.read_bytes()[:-1])
     video = "color=c=black:size=64x48:rate=25:duration=0.8"
     run([
         str(tools.ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
@@ -196,10 +202,15 @@ def media(tmp_path_factory, tools: Tools) -> Media:
     assert not [stream for stream in probe_streams(tools, silent)
                 if stream["codec_type"] == "audio"]
 
-    paths = {"music": music, "source": source, "silent": silent}
+    paths = {
+        "music": music,
+        "source": source,
+        "silent": silent,
+        "partial_pcm": partial_pcm,
+    }
     hashes = {name: digest(path) for name, path in paths.items()}
     made = Media(
-        music, source, silent, hashes["music"],
+        music, source, silent, partial_pcm, hashes["music"],
         {name: value[:16] for name, value in hashes.items()},
     )
     print(f"audio reader fixture review IDs: {made.review_ids}")
@@ -318,6 +329,29 @@ def test_absent_declared_audio_fails_instead_of_becoming_silence(
     try:
         with pytest.raises(AudioReaderError):
             reader.read(0, 480, lambda: False)
+    finally:
+        reader.close()
+
+
+def test_recoverable_decoder_error_is_not_accepted_as_asset_or_clean_silence(
+        tools: Tools, media: Media):
+    control = subprocess.run([
+        str(tools.ffmpeg), "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-i", str(media.partial_pcm), "-map", "0:a:0", "-f", "f32le",
+        "pipe:1",
+    ], capture_output=True)
+    assert control.returncode == 0
+    assert len(control.stdout) // 4 == 2_399
+    assert b"Invalid PCM packet" in control.stderr
+
+    with pytest.raises(AudioAssetError, match="Invalid data found"):
+        inspect_music_asset(tools, media.partial_pcm)
+
+    reader = FfmpegPcmReader.for_source(
+        tools, media.partial_pcm, stream_index=0, timeline_frames=2_400)
+    try:
+        with pytest.raises(AudioReaderError, match="Invalid data found"):
+            read_all(reader)
     finally:
         reader.close()
 
