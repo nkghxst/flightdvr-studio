@@ -110,7 +110,7 @@ class StreamFailed(RuntimeError):
 @dataclass(frozen=True)
 class MonitorState:
     level: float = 0.25
-    muted: bool = False
+    muted: bool = True
 
     def __post_init__(self) -> None:
         level = float(self.level)
@@ -232,6 +232,7 @@ class AudioStream:
         self._blocks: queue.Queue[PcmBlock] = queue.Queue(QUEUE_CAPACITY)
         self._cancel = threading.Event()
         self._stopped = threading.Event()
+        self._settled = False
         self._lock = threading.RLock()
         self._changed = threading.Condition(self._lock)
         self._worker: threading.Thread | None = None
@@ -382,19 +383,27 @@ class AudioStream:
     def reprime(self, output_sample: int) -> int:
         """Fence queued/in-flight work and start a new generation at a sample."""
         with self._changed:
+            if self._failure is not None:
+                raise RuntimeError("a failed audio stream cannot be reprimed")
+            if self._cancel.is_set():
+                raise RuntimeError("a stopped audio stream cannot be reprimed")
             output = self._mapping.audio.output
             if type(output_sample) is not int or not output.start <= output_sample < output.end:
                 raise ValueError("reprime position is outside the output interval")
             self._generation += 1
             self._cursor = output_sample - output.start
             self._ended_generation = None
-            self._failure = None
             self._blocks = queue.Queue(QUEUE_CAPACITY)
             self._changed.notify_all()
             return self._generation
 
     def restart(self) -> int:
-        return self.reprime(self._mapping.audio.output.start)
+        with self._lock:
+            self._paused = True
+            if not self._monitor.muted:
+                self._monitor = replace(self._monitor, muted=True)
+                self._monitor_revision += 1
+            return self.reprime(self._mapping.audio.output.start)
 
     def is_current(self, block: PcmBlock) -> bool:
         """Generation fence for a sink immediately before it submits a block."""
@@ -403,10 +412,10 @@ class AudioStream:
 
     def request_stop(self) -> None:
         """Request cancellation without joining the worker."""
-        self._cancel.set()
         with self._changed:
-            if self._worker is None:
-                self._stopped.set()
+            if self._cancel.is_set():
+                return
+            self._cancel.set()
             self._changed.notify_all()
         seen: set[int] = set()
         for reader in (self._source_reader, self._music_reader):
@@ -418,6 +427,8 @@ class AudioStream:
         """Wait for cooperative shutdown; callers must keep this off the UI thread."""
         worker = self._worker
         if worker is None:
+            if self._cancel.is_set():
+                self._settle()
             return True
         worker.join(timeout)
         return not worker.is_alive()
@@ -466,15 +477,31 @@ class AudioStream:
                 with self._lock:
                     self._failure = exc
         finally:
-            seen: set[int] = set()
-            for reader in (self._source_reader, self._music_reader):
-                if reader is not None and id(reader) not in seen:
-                    seen.add(id(reader))
-                    try:
-                        reader.close()
-                    except Exception:
-                        pass
-            self._stopped.set()
+            self._settle()
+
+    def _settle(self) -> None:
+        """Release owned buffers/readers once, on the blocking cleanup side."""
+        with self._lock:
+            if self._settled:
+                return
+            self._settled = True
+            blocks = self._blocks
+        while True:
+            try:
+                blocks.get_nowait()
+            except queue.Empty:
+                break
+            else:
+                blocks.task_done()
+        seen: set[int] = set()
+        for reader in (self._source_reader, self._music_reader):
+            if reader is not None and id(reader) not in seen:
+                seen.add(id(reader))
+                try:
+                    reader.close()
+                except Exception:
+                    pass
+        self._stopped.set()
 
     def _render(
         self,

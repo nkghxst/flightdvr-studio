@@ -67,6 +67,7 @@ class FakeReader:
         self.reads: list[tuple[int, int]] = []
         self.stop_requests = 0
         self.closed = False
+        self.close_requests = 0
 
     def read(self, start, frames, cancelled):
         if cancelled():
@@ -84,6 +85,7 @@ class FakeReader:
         self.stop_requests += 1
 
     def close(self):
+        self.close_requests += 1
         self.closed = True
 
 
@@ -223,7 +225,7 @@ def test_music_loops_from_the_selected_in_point_not_file_zero():
 def test_monitor_changes_rebuild_the_next_pull_even_when_the_block_was_queued():
     plan = source_plan(AudioMode.ORIGINAL, 2 * BLOCK_FRAMES)
     stream = AudioStream(mapping(plan), source_reader=FakeReader(),
-                         monitor=MonitorState(level=0.25))
+                         monitor=MonitorState(level=0.25, muted=False))
     try:
         stream.start()
         wait_for(lambda: stream.queued_blocks == 2)
@@ -291,7 +293,10 @@ def test_pause_eof_and_restart_are_observable_without_conflating_buffering():
         generation = stream.restart()
         assert generation == 1
         wait_for(lambda: stream.queued_blocks == 1)
-        assert stream.state is StreamState.RUNNING
+        assert stream.state is StreamState.PAUSED
+        with pytest.raises(Paused):
+            stream.pull()
+        stream.resume()
         restarted = stream.pull()
         assert restarted.output_start == 0
         assert restarted.generation == 1
@@ -334,12 +339,55 @@ def test_stop_request_unblocks_a_cooperative_reader_without_joining_itself():
     assert stream.state is StreamState.STOPPED
 
 
-def test_stop_before_start_is_immediately_observable_as_stopped():
-    plan = source_plan(AudioMode.NO_SOUND, BLOCK_FRAMES)
-    stream = AudioStream(mapping(plan))
+def test_default_and_restart_require_explicit_resume_and_unmute():
+    plan = source_plan(AudioMode.ORIGINAL, 2 * BLOCK_FRAMES)
+    reader = FakeReader(value=lambda frame, channel: 0.5)
+    stream = AudioStream(mapping(plan), source_reader=reader)
+    try:
+        stream.start()
+        wait_for(lambda: stream.queued_blocks == 2)
+        stream.resume()
+        assert set(stream.pull().monitored) == {0.0}
+
+        stream.set_monitor(level=1, muted=False)
+        generation = stream.restart()
+        assert generation == 1
+        assert stream.state is StreamState.PAUSED
+        with pytest.raises(Paused):
+            stream.pull()
+        wait_for(lambda: stream.queued_blocks == 2)
+        stream.resume()
+        assert set(stream.pull().monitored) == {0.0}
+        stream.set_monitor(muted=False)
+        assert set(stream.pull().monitored) == {0.5}
+    finally:
+        stop(stream)
+
+
+def test_stop_before_start_closes_owned_readers_and_clears_the_queue():
+    plan = source_plan(AudioMode.ORIGINAL, BLOCK_FRAMES)
+    reader = FakeReader()
+    stream = AudioStream(mapping(plan), source_reader=reader)
     stream.request_stop()
     assert stream.wait_stopped(0)
     assert stream.state is StreamState.STOPPED
+    assert reader.stop_requests == 1
+    assert reader.close_requests == 1
+    assert stream.queued_blocks == 0
+    assert stream.queued_pcm_bytes == 0
+
+
+def test_settled_shutdown_releases_every_queued_buffer_and_closes_once():
+    plan = source_plan(AudioMode.ORIGINAL, 10 * BLOCK_FRAMES)
+    reader = FakeReader()
+    stream = AudioStream(mapping(plan), source_reader=reader)
+    stream.start()
+    wait_for(lambda: stream.queued_blocks == QUEUE_CAPACITY)
+    assert stream.queued_pcm_bytes == MAX_QUEUED_PCM_BYTES
+    stop(stream)
+    assert stream.queued_blocks == 0
+    assert stream.queued_pcm_bytes == 0
+    assert reader.close_requests == 1
 
 
 @pytest.mark.parametrize("bad", [[0.0], [math.nan, 0.0]])
@@ -356,6 +404,12 @@ def test_truncated_or_nonfinite_reader_output_fails_loudly(bad):
         wait_for(lambda: stream.state is StreamState.FAILED)
         with pytest.raises(StreamFailed):
             stream.pull()
+        assert stream.wait_stopped(2)
+        with pytest.raises(RuntimeError, match="failed"):
+            stream.reprime(0)
+        with pytest.raises(RuntimeError, match="failed"):
+            stream.restart()
+        assert stream.state is StreamState.FAILED
     finally:
         stop(stream)
 
@@ -381,4 +435,8 @@ def test_one_reader_used_for_both_inputs_gets_one_stop_and_one_close():
     wait_for(lambda: stream.queued_blocks == 1)
     stop(stream)
     assert shared.stop_requests == 1
-    assert shared.closed
+    assert shared.close_requests == 1
+    stream.request_stop()
+    assert stream.wait_stopped(0)
+    assert shared.stop_requests == 1
+    assert shared.close_requests == 1
