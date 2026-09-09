@@ -227,6 +227,46 @@ Clips that already have an export for the current preset are marked
 Widening the window makes the thumbnails bigger rather than leaving an empty
 filename column.
 
+### Length and browser layout in the development build
+
+The controls in this section are in the post-1.5 development tree. They are
+not part of the published 1.5.0 downloads yet; native compact readability and
+the complete acceptance of [issue #96](https://github.com/nkghxst/flightdvr-studio/issues/96)
+remain open.
+
+**Length** filters the list without changing the recordings. **At least** and
+**At most** are whole-second bounds; their starting value is **off**, and an
+active bound includes a clip exactly on its edge. **Show unknown** is checked by
+default. A clip whose duration could not be read is shown as `?` in the Length
+column; untick this box to hide those clips too. **Reset** turns both bounds
+off and shows unknown lengths again.
+
+The length rule and **Show** review filter are combined: a clip must pass both.
+The line beside the controls says how many rows are shown and hidden, and when
+appropriate how much of the hiding is due to length. Filtering only hides rows.
+If you tick a clip and then hide it, it stays ticked and is still included when
+you add the selected clips to the queue; its review state, saved ranges and
+already queued work are not changed.
+
+The **List:** buttons offer **Collapsed**, **Normal** and **Expanded**. The
+same choices are available under **View ▸ Clip list**. Collapsed replaces the
+table with a one-line summary containing the selected clip's thumbnail and
+identity, review/range information, the shown count and a **Show clips** way
+back. Expanded gives the list more height by capping the preview; the complete
+filtered list remains scrollable. It does not cap the list at nine rows.
+
+**View ▸ Export queue** mirrors the queue strip, and **View ▸ Restore default
+layout** returns the browser to Normal, closes the queue and restores the
+default split. These are layout controls, not documented session settings, so
+this page makes no promise that browser modes persist after reopening. There
+is deliberately no Music item and this change does not provide a Flow UI.
+
+Collapsed hides the list but does not enlarge the preview: the current
+preview/list height clamp still reserves room for the list. The existing native
+window size limits remain in force, and native compact readability has not been
+accepted from an offscreen prototype capture. Treat a smaller mock window as a
+design exploration, not as a supported release size.
+
 ## Reviewing a card
 
 A full card is a hundred-odd clips, most of which you will not keep. The
