@@ -26,11 +26,81 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QObject, Signal
 
 from flightdvr.classic_layout import (
     BrowserMode, ClassicLayout, COLLAPSED_LEFT_SHARE, EXPANDED_LEFT_SHARE,
     NORMAL_LEFT_SHARE, split_sizes,
 )
+
+
+# Every window built here would otherwise start a real `HardwareProbe`, which
+# runs test encodes through ffmpeg. These tests are about layout and have no
+# opinion about encoders, and a probe still running when the interpreter exits
+# destroys a live QThread — the assertions all pass and the process then dies,
+# which is exactly what happened: 44 passed, exit 1.
+#
+# So the windows here never start one. Nothing in production changes; the
+# window still owns the same attribute and still stops it on close.
+
+
+class _NoProbe(QObject):
+    """Stands in for `HardwareProbe` without starting a thread."""
+
+    result = Signal(object)
+
+    def __init__(self, tools, parent=None):
+        super().__init__(parent)
+        self.tools = tools
+        self.started = False
+
+    def start(self, *_args) -> None:
+        self.started = True
+
+    def isRunning(self) -> bool:  # noqa: N802 (Qt naming)
+        return False
+
+    def stop(self) -> None:
+        pass
+
+    def wait(self, *_args) -> bool:
+        return True
+
+
+@pytest.fixture(scope="module", autouse=True)
+def no_background_work():
+    """Hermetic: these windows start no threads and touch no network.
+
+    Two of them were being started. The encoder probe runs test encodes, and
+    the update check asks the releases API — neither has any bearing on where
+    a splitter sits, and both were still running when the interpreter exited.
+    That destroys a live QThread, which is why the assertions all passed and
+    the process then died with 44 passed, exit 1.
+
+    The update check is turned off through the gate the window already honours
+    rather than through a stand-in, so this switches a real decision off
+    instead of pretending the class is something else.
+
+    Module-scoped on purpose. As a function-scoped fixture it was still not
+    applied when the module-scoped window was built — pytest sets the wider
+    scope up first — so the very first window in the file started both threads
+    anyway, and the leak came back one run in three.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("flightdvr.ui.HardwareProbe", _NoProbe)
+        patch.setattr("flightdvr.updates.should_check", lambda *a, **k: False)
+        yield
+
+
+def assert_no_threads_left(window) -> None:
+    """Teardown is verified, not assumed.
+
+    A window that leaves a QThread running takes the process down at exit, and
+    it does it after the last assertion has already passed.
+    """
+    from PySide6.QtCore import QThread
+    running = [t for t in window.findChildren(QThread) if t.isRunning()]
+    assert not running, [type(t).__name__ for t in running]
 
 
 # -- the arithmetic, with no window in sight -----------------------------------
@@ -129,6 +199,7 @@ def window(qt_app):
     qt_app.processEvents()
     yield made
     made.close()
+    assert_no_threads_left(made)
 
 
 def settle(qt_app, widget, limit: int = 12) -> int:
@@ -482,6 +553,7 @@ def own_window(qt_app):
     qt_app.processEvents()
     yield made
     made.close()
+    assert_no_threads_left(made)
 
 
 def test_repeated_toggles_settle_rather_than_drifting(own_window, qt_app):
@@ -569,6 +641,7 @@ def test_every_preview_control_stays_inside_the_panel_at_a_short_window(qt_app):
             assert sidebar.height() <= window.preview_box.height(), mode
     finally:
         window.close()
+        assert_no_threads_left(window)
 
 
 # The base at `11c8b288`, measured with five clips loaded, wants 1402x712.
@@ -610,3 +683,4 @@ def test_the_browser_rows_cost_no_more_than_one_row(qt_app):
             smallest.height())
     finally:
         window.close()
+        assert_no_threads_left(window)
