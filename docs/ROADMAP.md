@@ -70,6 +70,31 @@ would cost far more than no guess at all.
 
 ---
 
+## Post-1.5 development — browser workspace
+
+The development tree after 1.5 adds a more useful way to work through a long
+card. The browser has inclusive **at least** and **at most** length bounds,
+`off` reset values, an explicit **Show unknown** choice and a visible shown /
+hidden count. Length composes with the existing review/list filter, so a row
+must pass both. It hides rows only: a hidden tick stays selected for export,
+and review states, saved ranges and queued work are not removed.
+
+The same tree adds **Collapsed**, **Normal** and **Expanded** browser modes,
+local list controls and matching **View** menu actions. Collapsed keeps the
+active clip's identity, thumbnail, review/range summary and a reopen action.
+Expanded gives the list more height by capping the preview and still lets the
+user scroll through the complete filtered list. **View** also mirrors the
+Export queue toggle and offers **Restore default layout**.
+
+This is development work, not a new published release and not a claim that
+the full duration-filter issue is complete. The current preview/list clamp
+means Collapsed does not enlarge the preview, and native compact readability
+has not been accepted from offscreen captures. Browser modes are not promised
+as persisted session settings. Music UI and Flow UI are separate work; neither
+is supplied by this browser change.
+
+---
+
 ## 1.6 — Delivery
 
 *Making something worth posting.*
