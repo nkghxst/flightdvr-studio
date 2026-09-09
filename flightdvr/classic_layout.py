@@ -20,12 +20,15 @@ and the window is left holding widgets rather than arithmetic.
 
 The one thing to understand before changing any of it: **the picture's height
 follows its width**. `widgets.PreviewPanel.resizeEvent` sets its own height to
-`useful_height(width)`, and the clip list above it takes whatever is left. So
-there is no vertical handle to pull and no height to hand the list directly —
-the only lever is the horizontal splitter, and narrowing the left column is
-what makes the picture shorter and the list taller. `docs/DEVELOPMENT.md`
-records two earlier attempts to compute that height somewhere else, both of
-which failed, which is why this module changes widths and never heights.
+`useful_height(width)`, and the clip list above it takes whatever is left.
+
+The obvious lever is therefore the horizontal splitter — and it was measured
+giving nothing. At the sizes this window opens at the left column is already at
+its own minimum width, so there is no width to trade, and on a window wide
+enough for it to work all it would do is widen the export column. So no mode
+moves the split. Expanded asks the preview for a height ceiling instead
+(`PreviewPanel.set_height_cap`), which is the one thing that does buy the list
+room; the shares below exist to record that decision, not to act on it.
 """
 
 from __future__ import annotations

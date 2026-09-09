@@ -239,8 +239,14 @@ class PreviewPanel(QGroupBox):
             # A ceiling, but never through the floor: the controls stay usable
             # and the picture keeps its aspect by letterboxing, which is the
             # trade this class already makes at small sizes.
-            wanted = min(wanted, max(self._height_cap, self.content_floor()))
-        return wanted
+            wanted = min(wanted, self._height_cap)
+        # The floor is not a rule about caps, it is a rule about this panel:
+        # below it the sidebar's own buttons go under the bottom edge. The
+        # parent clamp above could already push through it on a short window,
+        # and the browser's extra rows made that reachable — In / Out / Reset
+        # were cut in half at 1402x790. Clipping the controls is the worse
+        # trade, and this class already says so about the black bar.
+        return max(wanted, self.content_floor())
 
     def _apply_height(self) -> None:
         """One owner for the height, and one place that can change it.

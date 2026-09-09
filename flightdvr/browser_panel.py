@@ -185,7 +185,8 @@ class BrowserPanel(QWidget):
             button.setMaximumWidth(78)
             button.setToolTip({
                 BrowserMode.COLLAPSED:
-                    "Put the list away and give the picture the room",
+                    "Put the list away, keeping the current clip and the "
+                    "filter summary on one line",
                 BrowserMode.NORMAL: "The usual arrangement",
                 BrowserMode.EXPANDED:
                     "Trade picture size for a taller list. The list scrolls; "
@@ -241,16 +242,12 @@ class BrowserPanel(QWidget):
         review.addWidget(self.review_count_label)
         layout.addLayout(review)
 
+        # This row costs the window 6 px of minimum height: 712 at the base
+        # against 718 here, measured with the same clips loaded. Tightening the
+        # gap in front of it does not buy that back, so it is recorded as the
+        # price of the control rather than hidden, and pinned by a test so it
+        # cannot grow quietly.
         layout.addLayout(self._build_length_row())
-        self.hidden_label = dim(QLabel(""))
-        self.hidden_label.setMinimumWidth(0)
-        self.hidden_label.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                        QSizePolicy.Policy.Preferred)
-        self.hidden_label.setToolTip(
-            "Filtering hides rows. It never unticks a clip, changes a review "
-            "state, touches a saved range or affects anything already queued."
-        )
-        layout.addWidget(self.hidden_label)
 
         self.warning_label = dim(QLabel())
         self.warning_label.hide()
@@ -389,12 +386,21 @@ class BrowserPanel(QWidget):
         self.show_unknown.toggled.connect(self._on_length_changed)
 
         self.length_label = dim(QLabel(""))
-        # Elides rather than widening the row: it is a description of the two
-        # boxes beside it, not a reason for the window to have a wider floor.
-        self.length_label.setMinimumWidth(0)
-        self.length_label.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                        QSizePolicy.Policy.Preferred)
-        row.addWidget(self.length_label, 1)
+        # Both of these elide rather than widening the row: they describe the
+        # boxes beside them and are not a reason for the window to have a wider
+        # floor. They share the row for the same reason — an extra row above
+        # the preview is height the preview needs at a short window.
+        self.hidden_label = dim(QLabel(""))
+        self.hidden_label.setToolTip(
+            "Filtering hides rows. It never unticks a clip, changes a review "
+            "state, touches a saved range or affects anything already queued."
+        )
+        for spare in (self.length_label, self.hidden_label):
+            spare.setMinimumWidth(0)
+            spare.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                QSizePolicy.Policy.Preferred)
+        row.addWidget(self.length_label)
+        row.addWidget(self.hidden_label, 1)
         return row
 
     def _on_length_changed(self, *_args) -> None:

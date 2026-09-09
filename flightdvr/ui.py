@@ -132,9 +132,6 @@ class MainWindow(QMainWindow):
         self.settings_store = QSettings(ORG, APP_NAME)
         self.clips: list[ClipInfo] = []
         self._layout_state = ClassicLayout.default()
-        # Where the person last had the splitter while the list was Normal.
-        # The other modes borrow the split; they do not get to keep it.
-        self._user_split: list[int] = []
         self.clip_by_path: dict[str, ClipInfo] = {}
         self.jobs: list[Job] = []
         self.worker: ExportWorker | None = None
@@ -260,7 +257,7 @@ class MainWindow(QMainWindow):
         splitter.setSizes([720, 500])
         # Widening the left column makes the picture usefully taller, so this
         # is the control for trading list height against picture size.
-        splitter.splitterMoved.connect(lambda *_: self._on_splitter_moved())
+        splitter.splitterMoved.connect(lambda *_: self._relayout())
         outer.addWidget(splitter, 1)
 
         # With no frames around them, the gaps are what say the picture and the
@@ -1545,18 +1542,13 @@ class MainWindow(QMainWindow):
     def set_browser_mode(self, mode: BrowserMode) -> None:
         """Show the list large, small or not at all.
 
-        The only lever is the splitter. `widgets.PreviewPanel` sets its own
-        height from its own width, so narrowing the left column is what makes
-        the picture shorter and hands the difference to the list; there is no
-        height to give the list directly, and `docs/DEVELOPMENT.md` records two
-        attempts to find one that failed.
+        Nothing here moves the splitter. Narrowing the left column is the
+        textbook way to shorten the picture, and it was measured buying the
+        list nothing: the column is already at its own minimum width at the
+        sizes this window opens at. Expanded asks the preview for a height
+        ceiling instead, which is the one thing that does hand the list room.
         """
         mode = BrowserMode(mode)
-        if (self.browser_mode is BrowserMode.NORMAL and mode is not
-                BrowserMode.NORMAL and self.splitter is not None):
-            sizes = self.splitter.sizes()
-            if sum(sizes) > 0:
-                self._user_split = list(sizes)
         self._layout_state = self._layout_state.with_browser(mode)
         self.browser_panel.show_mode(mode)
         action = self.browser_mode_actions.get(mode)
@@ -1575,30 +1567,17 @@ class MainWindow(QMainWindow):
         else:
             box.set_height_cap(None)
 
-        if self.splitter is not None:
-            total = sum(self.splitter.sizes())
-            if total > 0:
-                if mode is BrowserMode.NORMAL and self._user_split:
-                    # Whatever the person had dragged the splitter to is their
-                    # Normal, not the share this module would compute. Coming
-                    # back from another mode has to land where they left it.
-                    self.splitter.setSizes(list(self._user_split))
-                else:
-                    self.splitter.setSizes(list(split_sizes(mode, total)))
+        # The splitter is deliberately not touched here. No mode wants a
+        # different split, and re-imposing the computed one moved it by a
+        # pixel: `round(1216 * 0.59)` is 717 where the layout had settled on
+        # 718, so a round trip did not land where it started. Leaving it alone
+        # is what actually preserves a dragged position, on every platform.
         self._relayout()
         self._refresh_browser_summary()
-
-    def _on_splitter_moved(self) -> None:
-        if self.browser_mode is BrowserMode.NORMAL:
-            self._user_split = list(self.splitter.sizes())
-        self._relayout()
 
     def restore_default_layout(self) -> None:
         """Put the list, the queue and the split back the way they open."""
         default = ClassicLayout.default()
-        # The reset is the one thing allowed to forget a dragged split: that
-        # is what "default" means, and the menu item says so.
-        self._user_split = []
         self.set_browser_mode(default.browser)
         if self.splitter is not None:
             total = sum(self.splitter.sizes())

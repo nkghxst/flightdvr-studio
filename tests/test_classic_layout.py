@@ -131,6 +131,22 @@ def window(qt_app):
     made.close()
 
 
+def settle(qt_app, widget, limit: int = 12) -> int:
+    """Let the layout finish, and say when it has.
+
+    A fixed number of `processEvents()` calls is a guess: the panel sets its
+    own height, which delivers a resize, which can change the answer once more.
+    This waits for the height to stop moving instead, and returns it.
+    """
+    last = None
+    for _ in range(limit):
+        qt_app.processEvents()
+        if widget.height() == last:
+            return last
+        last = widget.height()
+    return last
+
+
 def test_the_window_starts_in_normal_with_the_list_showing(window):
     assert window.browser_mode is BrowserMode.NORMAL
     assert not window.browser_panel.table.isHidden()
@@ -153,6 +169,48 @@ def test_collapsing_hides_the_table_and_shows_the_summary(window, qt_app):
         qt_app.processEvents()
 
 
+def test_changing_mode_does_not_call_setSizes_at_all(window, qt_app):
+    """The correction behind the one-pixel CI failure, stated as a rule.
+
+    Comparing sizes was not enough: on Windows the computed split happened to
+    equal the one the layout had settled on, so re-imposing it looked harmless
+    and the drift only appeared on Linux and macOS. The oracle was exact —
+    `round(1216 * 0.59)` is 717, and 717/499 is precisely what CI reported
+    where the layout had 718/498, so it was this code moving the splitter and
+    not Qt rounding or layout timing. A mode has no business calling setSizes,
+    so the test asserts the call is never made rather than that its result
+    happens to match.
+    """
+    calls = []
+    original = window.splitter.setSizes
+    window.splitter.setSizes = lambda sizes: calls.append(list(sizes))
+    try:
+        for mode in (BrowserMode.EXPANDED, BrowserMode.COLLAPSED,
+                     BrowserMode.NORMAL, BrowserMode.NORMAL):
+            window.set_browser_mode(mode)
+            qt_app.processEvents()
+    finally:
+        window.splitter.setSizes = original
+    assert calls == []
+
+
+def test_a_dragged_split_survives_every_mode(window, qt_app):
+    """Preserved by not being touched, which is why it holds to the pixel."""
+    window.set_browser_mode(BrowserMode.NORMAL)
+    qt_app.processEvents()
+    total = sum(window.splitter.sizes())
+    dragged = [total - 460, 460]
+    window.splitter.setSizes(dragged)
+    qt_app.processEvents()
+    settled = window.splitter.sizes()
+
+    for mode in (BrowserMode.EXPANDED, BrowserMode.COLLAPSED,
+                 BrowserMode.NORMAL):
+        window.set_browser_mode(mode)
+        qt_app.processEvents()
+        assert window.splitter.sizes() == settled, mode
+
+
 def test_collapsing_does_not_disturb_the_split(window, qt_app):
     """Putting the list away is not an excuse to squeeze the export column."""
     window.set_browser_mode(BrowserMode.NORMAL)
@@ -167,14 +225,69 @@ def test_collapsing_does_not_disturb_the_split(window, qt_app):
     qt_app.processEvents()
 
 
-def test_the_list_scrolls_rather_than_capping_what_it_will_show(window):
-    """Expanded shows the whole filtered list. A fixed item cap was a mock
-    artefact and would be a defect here."""
-    from PySide6.QtWidgets import QAbstractScrollArea
+def test_an_overflowing_list_scrolls_to_its_last_filtered_row(own_window,
+                                                              qt_app):
+    """The whole filtered list is reachable, not the first screenful of it.
+
+    The previous version of this test asserted `verticalScrollBarPolicy() != 0
+    or True`, which is true whatever the widget does, over three rows that
+    never overflowed. This loads enough rows to overflow, checks the scrollbar
+    genuinely has somewhere to go, and then checks the last row that survives
+    the filter can actually be brought into view.
+    """
+    window = own_window
+    for index in range(40):
+        window._add_clip(window._scan_generation,
+                         a_clip(f"hdz_{index:03d}.ts", 60.0 + index))
+    window.set_browser_mode(BrowserMode.EXPANDED)
+    qt_app.processEvents()
     table = window.browser_panel.table
-    assert table.verticalScrollBarPolicy() != 0 or True
-    assert isinstance(table, QAbstractScrollArea)
-    assert table.rowCount() == len(window.clips)
+
+    bar = table.verticalScrollBar()
+    assert bar.maximum() > bar.minimum(), "the list did not overflow"
+
+    window.browser_panel.min_length.setValue(80)
+    qt_app.processEvents()
+    shown = [row for row in range(table.rowCount())
+             if not table.isRowHidden(row)]
+    assert shown, "the filter hid everything, so this proves nothing"
+    assert len(shown) < table.rowCount(), "the filter hid nothing"
+
+    last = shown[-1]
+    table.scrollToItem(table.item(last, 0))
+    qt_app.processEvents()
+    viewport = table.viewport().rect()
+    assert viewport.intersects(table.visualItemRect(table.item(last, 0)))
+
+    window.browser_panel.reset_length_filter()
+    qt_app.processEvents()
+
+
+def test_a_collapsed_summary_keeps_the_active_clip_thumbnail(own_window,
+                                                             qt_app):
+    """The collapsed line promises the clip's thumbnail, so prove it carries
+    one when the row has one. The real icon arrives from a worker thread; this
+    supplies the icon the worker would have set and checks the summary keeps
+    it rather than waiting on that thread."""
+    from PySide6.QtGui import QColor, QIcon, QPixmap
+
+    window = own_window
+    table = window.browser_panel.table
+    pixmap = QPixmap(table.iconSize())
+    pixmap.fill(QColor("#3366cc"))
+    table.item(0, 0).setIcon(QIcon(pixmap))
+    table.setCurrentCell(0, 0)
+    qt_app.processEvents()
+
+    window.set_browser_mode(BrowserMode.COLLAPSED)
+    qt_app.processEvents()
+    try:
+        shown = window.browser_panel.summary_thumb.pixmap()
+        assert not shown.isNull()
+        assert not window.browser_panel.summary_thumb.isHidden()
+    finally:
+        window.set_browser_mode(BrowserMode.NORMAL)
+        qt_app.processEvents()
 
 
 def test_a_mode_round_trip_keeps_selection_ticks_and_geometry(window, qt_app):
@@ -331,27 +444,50 @@ def test_expanding_buys_list_height_from_the_picture(window, qt_app):
     assert window.splitter.sizes()[1] == sidebar_width
 
 
-def test_resizing_while_expanded_gives_the_new_height_to_the_list(window, qt_app):
+def test_resizing_while_expanded_gives_the_new_height_to_the_list(own_window,
+                                                                  qt_app):
+    """A taller window while expanded is list, not picture.
+
+    Its own window, and settled rather than counted: the shared one carries the
+    splitter drag and selection the tests before it leave behind, and the panel
+    sets its own height, which delivers a resize that can move the answer once
+    more.
+    """
+    window = own_window
     window.set_browser_mode(BrowserMode.EXPANDED)
-    qt_app.processEvents()
-    picture = window.preview_box.height()
+    picture = settle(qt_app, window.preview_box)
     listed = window.browser_panel.table.height()
 
     window.resize(window.width(), window.height() + 150)
-    qt_app.processEvents()
-    qt_app.processEvents()
-    try:
-        assert window.preview_box.height() == picture
-        assert window.browser_panel.table.height() > listed
-    finally:
-        window.resize(window.width(), window.height() - 150)
-        window.set_browser_mode(BrowserMode.NORMAL)
-        qt_app.processEvents()
+    assert settle(qt_app, window.preview_box) == picture
+    assert window.browser_panel.table.height() > listed
 
 
-def test_repeated_toggles_settle_rather_than_drifting(window, qt_app):
+@pytest.fixture
+def own_window(qt_app):
+    """A window of its own, for the questions that measure a settled state.
+
+    The module-scoped window is shared, and the tests before this one drag the
+    splitter, resize and select clips. All three legitimately move the preview
+    floor, so a value read from it is not evidence about oscillation.
+    """
+    from flightdvr.media import find_tools
+    from flightdvr.ui import MainWindow
+    made = MainWindow(find_tools())
+    made.resize(1240, 900)
+    made.show()
+    qt_app.processEvents()
+    for index, name in enumerate(("hdz_001.ts", "hdz_002.ts", "hdz_003.ts")):
+        made._add_clip(made._scan_generation, a_clip(name, 100.0 + index))
+    qt_app.processEvents()
+    yield made
+    made.close()
+
+
+def test_repeated_toggles_settle_rather_than_drifting(own_window, qt_app):
     """`setFixedHeight` delivers a resize that arrives back at the same
     handler, so the two could otherwise take turns."""
+    window = own_window
     # Settle to the first answer each mode gives in this window, rather than
     # to a number written here: the floor follows the sidebar's own size hint,
     # which is allowed to differ between windows and after a resize. What must
@@ -391,3 +527,86 @@ def test_the_cap_does_not_raise_the_window_minimum(window, qt_app):
 
     window.set_browser_mode(BrowserMode.NORMAL)
     qt_app.processEvents()
+
+
+def test_every_preview_control_stays_inside_the_panel_at_a_short_window(qt_app):
+    """The browser's extra rows must not push the preview's controls out.
+
+    Asserted rather than eyeballed. A review of the first captures read the
+    In / Out / Reset row as clipped at the compact size; in the same run the
+    geometry put its lowest edge 97 px inside the sidebar, and the same image
+    also cut the export panel's right edge, which nothing in this change can
+    reach. The grab was rendering a frame the layout had already moved past.
+    Geometry is the evidence; this keeps it honest whichever way a capture
+    happens to land.
+    """
+    from PySide6.QtWidgets import QPushButton
+    from flightdvr.media import find_tools
+    from flightdvr.ui import MainWindow
+
+    window = MainWindow(find_tools())
+    window.resize(1402, 706)          # the window's own minimum height
+    window.show()
+    qt_app.processEvents()
+    try:
+        for index, seconds in enumerate((8.0, 191.0, 184.0, 0.0, 212.0)):
+            window._add_clip(window._scan_generation,
+                             a_clip(f"hdz_{index:03d}.ts", seconds))
+        window.browser_panel.min_length.setValue(30)
+        window.browser_panel.table.setCurrentCell(1, 0)
+        window._load_selected_clip()
+        settle(qt_app, window.preview_box)
+
+        for mode in BrowserMode:
+            window.set_browser_mode(mode)
+            settle(qt_app, window.preview_box)
+            sidebar = window.preview_box.sidebar
+            buttons = [b for b in sidebar.findChildren(QPushButton)
+                       if b.isVisible()]
+            assert buttons, mode
+            lowest = max(b.geometry().bottom() for b in buttons)
+            assert lowest <= sidebar.height(), (mode, lowest, sidebar.height())
+            assert sidebar.height() <= window.preview_box.height(), mode
+    finally:
+        window.close()
+
+
+# The base at `11c8b288`, measured with five clips loaded, wants 1402x712.
+# The width is unchanged here. The height is not: the length filter is a real
+# row and a real row costs real pixels.
+#
+# The bound is one clip row rather than an exact number. An exact number is
+# what made the splitter assertions fail CI by a pixel on two platforms — a
+# figure that precise is measuring the style's metrics, not this change. One
+# row of the list is the largest cost that can honestly be called "a row", and
+# it is small enough that a second row appearing would fail.
+BASE_MINIMUM = (1402, 712)
+ONE_CLIP_ROW = 24
+
+
+def test_the_browser_rows_cost_no_more_than_one_row(qt_app):
+    """A new control may cost height. It may not cost width, or a second row.
+
+    Tightening the gap in front of the row was tried and bought nothing back,
+    so the cost is the row itself rather than spacing. Measured between 6 and
+    12 px depending on what is loaded, which is why the bound is a row rather
+    than a number.
+    """
+    from flightdvr.media import find_tools
+    from flightdvr.ui import MainWindow
+
+    window = MainWindow(find_tools())
+    window.resize(*BASE_MINIMUM)
+    window.show()
+    qt_app.processEvents()
+    try:
+        for index, seconds in enumerate((8.0, 191.0, 184.0, 0.0, 212.0)):
+            window._add_clip(window._scan_generation,
+                             a_clip(f"hdz_{index:03d}.ts", seconds))
+        qt_app.processEvents()
+        smallest = window.minimumSizeHint()
+        assert smallest.width() <= BASE_MINIMUM[0], smallest.width()
+        assert smallest.height() <= BASE_MINIMUM[1] + ONE_CLIP_ROW, (
+            smallest.height())
+    finally:
+        window.close()
