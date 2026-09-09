@@ -56,20 +56,36 @@ class BrowserMode(str, Enum):
 # the direction the mode is asking for, because width is the only thing that
 # changes the picture's height.
 NORMAL_LEFT_SHARE = 0.59
-# Narrower, so the picture earns less height and the list keeps the rest. The
-# list gives up some width for it; thumbnails shrink to MIN_THUMB_WIDTH before
-# the clip's name does, which is the trade `widgets.py` already chose.
-EXPANDED_LEFT_SHARE = 0.44
-# Wider: with the list hidden there is nothing to feed, so the picture may as
-# well have the width it can use.
-COLLAPSED_LEFT_SHARE = 0.72
+# Also the same as Normal. Narrowing the left column is the textbook way to
+# make the picture shorter, and it was measured giving nothing: at the sizes
+# this window opens at, the left column is already at its own minimum width, so
+# `setSizes` has nothing to take. On a window wide enough for it to work, all
+# it would do is widen the export column, which is simulating an expansion
+# rather than performing one. `PreviewPanel`'s height cap is what actually
+# buys the list its height.
+EXPANDED_LEFT_SHARE = 0.59
+# The same as Normal, deliberately. Widening the left column here does make the
+# picture bigger, but the width comes out of the export column, and at 386 px
+# its help text starts being cut off rather than wrapping. Collapsing the list
+# is not worth truncating the panel that explains the preset.
+#
+# The height the list gives up is not recoverable either: `PreviewPanel`'s
+# clamp reserves `MIN_LIST_HEIGHT` for a list that is no longer on screen. That
+# clamp is out of scope here, so Collapsed's benefit is that the list is out of
+# the way, and the reclaimed height is recorded as a known limitation rather
+# than quietly taken from somewhere it hurts.
+COLLAPSED_LEFT_SHARE = 0.59
 
 DEFAULT_MODE = BrowserMode.NORMAL
 
 
 def split_sizes(mode: BrowserMode, total: int, minimum_right: int = 330,
                 minimum_left: int = 360) -> tuple[int, int]:
-    """Splitter sizes for a mode, never starving either column.
+    """Splitter sizes for a mode: today, the same split for all three.
+
+    Kept as a function rather than deleted because it is the place the decision
+    is recorded — no mode is allowed to move the split, so none of them can pay
+    for itself out of the export column.
 
     `minimum_right` is the export panel's own minimum width, which it sets on
     itself; passing it in keeps this module free of that import. A total too

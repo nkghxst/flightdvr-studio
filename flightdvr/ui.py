@@ -1564,6 +1564,17 @@ class MainWindow(QMainWindow):
             blocked = action.blockSignals(True)
             action.setChecked(True)
             action.blockSignals(blocked)
+        # Expanded buys list height from the picture, because at the sizes
+        # this window actually opens at the splitter has nothing left to give:
+        # the left column is already at its own minimum width. The cap never
+        # goes through the preview's content floor, so every control it holds
+        # stays usable and the picture letterboxes rather than distorting.
+        box = self.preview_box
+        if mode is BrowserMode.EXPANDED:
+            box.set_height_cap(box.content_floor())
+        else:
+            box.set_height_cap(None)
+
         if self.splitter is not None:
             total = sum(self.splitter.sizes())
             if total > 0:

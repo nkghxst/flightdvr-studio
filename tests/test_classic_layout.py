@@ -36,18 +36,17 @@ from flightdvr.classic_layout import (
 # -- the arithmetic, with no window in sight -----------------------------------
 
 
-def test_the_left_column_narrows_for_expanded_and_widens_for_collapsed():
-    """The picture's height follows its width, so width is the only lever.
-
-    Expanded wants a taller list, which means a shorter picture, which means a
-    narrower left column. Collapsed has no list to feed.
-    """
+def test_no_mode_takes_width_from_the_export_column():
+    """Collapsing used to widen the left column, which does make the picture
+    bigger — and cut the export panel's help text off at 386 px. The picture
+    is not worth the explanation of the preset being truncated."""
     total = 1220
-    collapsed, _ = split_sizes(BrowserMode.COLLAPSED, total)
-    normal, _ = split_sizes(BrowserMode.NORMAL, total)
-    expanded, _ = split_sizes(BrowserMode.EXPANDED, total)
+    collapsed, collapsed_right = split_sizes(BrowserMode.COLLAPSED, total)
+    normal, normal_right = split_sizes(BrowserMode.NORMAL, total)
+    expanded, expanded_right = split_sizes(BrowserMode.EXPANDED, total)
 
-    assert expanded < normal < collapsed
+    assert collapsed == normal == expanded
+    assert collapsed_right == normal_right == expanded_right
 
 
 def test_normal_is_the_split_the_window_already_opened_at():
@@ -74,8 +73,9 @@ def test_a_window_too_small_for_both_minimums_still_adds_up():
     assert left + right == 200
 
 
-def test_shares_are_ordered_the_way_the_modes_read():
-    assert EXPANDED_LEFT_SHARE < NORMAL_LEFT_SHARE < COLLAPSED_LEFT_SHARE
+def test_no_mode_moves_the_split():
+    """Expanded buys its height from the picture, not from the export column."""
+    assert EXPANDED_LEFT_SHARE == NORMAL_LEFT_SHARE == COLLAPSED_LEFT_SHARE
 
 
 def test_the_layout_value_is_immutable_and_restores_to_its_default():
@@ -153,28 +153,18 @@ def test_collapsing_hides_the_table_and_shows_the_summary(window, qt_app):
         qt_app.processEvents()
 
 
-def test_collapsing_gives_the_picture_the_room_the_list_gave_up(window, qt_app):
-    """The reallocation actually happens, and it happens by width.
-
-    `widgets.PreviewPanel` takes its height from its own width, so the only
-    lever is the splitter. Collapsing widens the left column, which is what
-    makes the picture taller; nothing here sets a height directly.
-    """
+def test_collapsing_does_not_disturb_the_split(window, qt_app):
+    """Putting the list away is not an excuse to squeeze the export column."""
     window.set_browser_mode(BrowserMode.NORMAL)
     qt_app.processEvents()
-    normal_left = window.splitter.sizes()[0]
-    normal_picture = window.preview_box.height()
+    before = window.splitter.sizes()
 
     window.set_browser_mode(BrowserMode.COLLAPSED)
     qt_app.processEvents()
-    collapsed_left = window.splitter.sizes()[0]
-    collapsed_picture = window.preview_box.height()
+    assert window.splitter.sizes() == before
 
     window.set_browser_mode(BrowserMode.NORMAL)
     qt_app.processEvents()
-
-    assert collapsed_left > normal_left
-    assert collapsed_picture >= normal_picture
 
 
 def test_the_list_scrolls_rather_than_capping_what_it_will_show(window):
@@ -256,3 +246,148 @@ def test_the_view_menu_follows_the_mode_chosen_in_the_browser(window, qt_app):
     window.set_browser_mode(BrowserMode.NORMAL)
     qt_app.processEvents()
     assert any("Expanded" in text for text in checked)
+
+
+# -- the preview height cap ----------------------------------------------------
+#
+# Authorized as a bounded delta to `widgets.PreviewPanel` after the splitter
+# alone was measured giving Expanded nothing: at the sizes this window opens
+# at, the left column is already at its own minimum width.
+
+
+def test_no_cap_is_exactly_todays_sizing(window, qt_app):
+    """The default has to cost nothing, or every other window changes too."""
+    window.set_browser_mode(BrowserMode.NORMAL)
+    qt_app.processEvents()
+    box = window.preview_box
+    assert box._height_cap is None
+    assert box.height() == box.useful_height(box.width())
+
+
+def test_the_cap_applies_without_waiting_for_a_width_change(window, qt_app):
+    """The reason the cap exists at all.
+
+    Once the splitter is at its minimum the left column stops changing width,
+    so a cap that only took effect on the next resize would never take effect.
+    """
+    box = window.preview_box
+    width_before = box.width()
+    tall = box.height()
+
+    box.set_height_cap(box.content_floor())
+    qt_app.processEvents()
+
+    assert box.width() == width_before
+    assert box.height() < tall
+    box.set_height_cap(None)
+    qt_app.processEvents()
+
+
+def test_releasing_the_cap_returns_the_exact_height(window, qt_app):
+    box = window.preview_box
+    before = box.height()
+    box.set_height_cap(box.content_floor())
+    qt_app.processEvents()
+    box.set_height_cap(None)
+    qt_app.processEvents()
+    assert box.height() == before
+
+
+def test_the_cap_never_goes_through_the_content_floor(window, qt_app):
+    """A ceiling must not clip the buttons it is sitting above."""
+    box = window.preview_box
+    box.set_height_cap(1)
+    qt_app.processEvents()
+    try:
+        assert box.height() >= box.content_floor()
+        assert box.sidebar.height() >= box.sidebar.sizeHint().height()
+        assert box.sidebar.isVisible()
+        assert window.still_button.isVisible()
+    finally:
+        box.set_height_cap(None)
+        qt_app.processEvents()
+
+
+def test_expanding_buys_list_height_from_the_picture(window, qt_app):
+    """The measurable claim, at the size the window actually opens at."""
+    window.set_browser_mode(BrowserMode.NORMAL)
+    qt_app.processEvents()
+    normal_list = window.browser_panel.table.height()
+    normal_picture = window.preview_box.height()
+    sidebar_width = window.splitter.sizes()[1]
+
+    window.set_browser_mode(BrowserMode.EXPANDED)
+    qt_app.processEvents()
+    expanded_list = window.browser_panel.table.height()
+    expanded_picture = window.preview_box.height()
+
+    window.set_browser_mode(BrowserMode.NORMAL)
+    qt_app.processEvents()
+
+    assert expanded_list > normal_list
+    assert expanded_picture < normal_picture
+    # Not by quietly widening the export column, which would be simulating an
+    # expansion rather than performing one.
+    assert window.splitter.sizes()[1] == sidebar_width
+
+
+def test_resizing_while_expanded_gives_the_new_height_to_the_list(window, qt_app):
+    window.set_browser_mode(BrowserMode.EXPANDED)
+    qt_app.processEvents()
+    picture = window.preview_box.height()
+    listed = window.browser_panel.table.height()
+
+    window.resize(window.width(), window.height() + 150)
+    qt_app.processEvents()
+    qt_app.processEvents()
+    try:
+        assert window.preview_box.height() == picture
+        assert window.browser_panel.table.height() > listed
+    finally:
+        window.resize(window.width(), window.height() - 150)
+        window.set_browser_mode(BrowserMode.NORMAL)
+        qt_app.processEvents()
+
+
+def test_repeated_toggles_settle_rather_than_drifting(window, qt_app):
+    """`setFixedHeight` delivers a resize that arrives back at the same
+    handler, so the two could otherwise take turns."""
+    # Settle to the first answer each mode gives in this window, rather than
+    # to a number written here: the floor follows the sidebar's own size hint,
+    # which is allowed to differ between windows and after a resize. What must
+    # not happen is the height moving while nothing else does.
+    window.set_browser_mode(BrowserMode.EXPANDED)
+    qt_app.processEvents()
+    qt_app.processEvents()
+    settled_expanded = window.preview_box.height()
+    window.set_browser_mode(BrowserMode.NORMAL)
+    qt_app.processEvents()
+    qt_app.processEvents()
+    settled_normal = window.preview_box.height()
+
+    for _ in range(4):
+        window.set_browser_mode(BrowserMode.EXPANDED)
+        qt_app.processEvents()
+        qt_app.processEvents()
+        assert window.preview_box.height() == settled_expanded
+        window.set_browser_mode(BrowserMode.NORMAL)
+        qt_app.processEvents()
+        qt_app.processEvents()
+        assert window.preview_box.height() == settled_normal
+
+    assert settled_expanded < settled_normal
+    assert settled_expanded >= window.preview_box.content_floor()
+
+
+def test_the_cap_does_not_raise_the_window_minimum(window, qt_app):
+    """A mode is not allowed to make the window harder to fit on a screen."""
+    window.set_browser_mode(BrowserMode.NORMAL)
+    qt_app.processEvents()
+    normal_minimum = window.minimumSizeHint().width()
+
+    window.set_browser_mode(BrowserMode.EXPANDED)
+    qt_app.processEvents()
+    assert window.minimumSizeHint().width() <= normal_minimum
+
+    window.set_browser_mode(BrowserMode.NORMAL)
+    qt_app.processEvents()
