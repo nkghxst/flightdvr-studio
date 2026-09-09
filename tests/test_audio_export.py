@@ -362,12 +362,14 @@ def test_play_once_fades_once_then_is_silent_to_the_video_end(
 
 def test_mix_gains_are_measured_against_single_signal_exports(
         media, tools, tmp_path):
-    original = _decode_mono(tools, export(
-        tools, tmp_path, media.source, MusicChoice(mode=AudioMode.ORIGINAL),
-        name="gain-original"))
-    replace = _decode_mono(tools, export(
-        tools, tmp_path, media.source, choice(media.asset, AudioMode.REPLACE),
-        name="gain-replace"))
+    dvr_only = _decode_mono(tools, export(
+        tools, tmp_path, media.source,
+        choice(media.asset, AudioMode.MIX, music_level=0, dvr_level=1),
+        name="gain-dvr-reference"))
+    music_only = _decode_mono(tools, export(
+        tools, tmp_path, media.silent,
+        choice(media.asset, AudioMode.MIX, music_level=1, dvr_level=1),
+        name="gain-music-reference"))
     mixed = _decode_mono(tools, export(
         tools, tmp_path, media.source,
         choice(media.asset, AudioMode.MIX, music_level=1, dvr_level=1),
@@ -378,18 +380,31 @@ def test_mix_gains_are_measured_against_single_signal_exports(
         name="gain-mix-no-dvr"))
 
     center = 2_400
+    # 1,200 samples contain exactly 11 cycles of 440 Hz and 22 cycles of
+    # 880 Hz. The old 512-sample rectangular window contained 4.69 and 9.39
+    # cycles, so the strong music tone leaked into only the mixed output's DVR
+    # estimate and raised its apparent 0.5 gain above tolerance on FFmpeg 4.4.
+    width = 1_200
     ratios = {
-        "mix_music": (_magnitude(mixed, center, 880)
-                      / _magnitude(replace, center, 880)),
-        "mix_dvr": (_magnitude(mixed, center, 440)
-                    / _magnitude(original, center, 440)),
-        "no_dvr_music": (_magnitude(no_dvr, center, 880)
-                         / _magnitude(replace, center, 880)),
+        "mix_music": (_magnitude(mixed, center, 880, width)
+                      / _magnitude(music_only, center, 880, width)),
+        "mix_dvr": (_magnitude(mixed, center, 440, width)
+                    / _magnitude(dvr_only, center, 440, width)),
+        "no_dvr_music": (_magnitude(no_dvr, center, 880, width)
+                         / _magnitude(music_only, center, 880, width)),
     }
+    leakage = {
+        "old_512": (_magnitude(music_only, center, 440, 512)
+                    / _magnitude(dvr_only, center, 440, 512)),
+        "orthogonal_1200": (_magnitude(music_only, center, 440, width)
+                           / _magnitude(dvr_only, center, 440, width)),
+    }
+    assert leakage["old_512"] > 0.1
+    assert leakage["orthogonal_1200"] < 0.01
     assert ratios["mix_music"] == pytest.approx(0.5, abs=GAIN_TOLERANCE)
     assert ratios["mix_dvr"] == pytest.approx(0.5, abs=GAIN_TOLERANCE)
     assert ratios["no_dvr_music"] == pytest.approx(0.6, abs=GAIN_TOLERANCE)
-    print("decoded gain ratios:", ratios)
+    print("decoded gain ratios:", ratios, "cross-frequency leakage:", leakage)
 
 
 def test_corrupt_music_preserves_an_existing_target_and_leaves_no_part(
