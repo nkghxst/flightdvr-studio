@@ -187,6 +187,152 @@ def test_cleared_thumbnail_results_cannot_finish_a_new_generation(
     assert (loader._generation, str(new.path)) in loader._pending
 
 
+def test_cancelling_a_blocked_thumbnail_owns_cleanup_and_publishes_nothing(
+        qt_app, monkeypatch, tmp_path):
+    """Leaving a folder must not wait for ffmpeg or cache its partial JPEG."""
+    import subprocess
+    import threading
+    import time
+
+    from flightdvr import thumbs
+
+    started = threading.Event()
+    stop_requested = threading.Event()
+    cleanup_started = threading.Event()
+    allow_cleanup = threading.Event()
+    legacy_release = threading.Event()
+    exited = threading.Event()
+    target = tmp_path / "thumb.jpg"
+
+    class BlockedProcess:
+        returncode = None
+
+        def __init__(self, command):
+            self.command = command
+            Path(command[-1]).write_bytes(b"partial jpeg")
+            started.set()
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            if not exited.wait(timeout):
+                raise subprocess.TimeoutExpired(self.command, timeout)
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            self.wait(timeout)
+            return b"", b""
+
+        def terminate(self):
+            stop_requested.set()
+
+        def kill(self):
+            self.returncode = -9
+            exited.set()
+
+    def legacy_run(command, **_kwargs):
+        Path(command[-1]).write_bytes(b"partial jpeg")
+        started.set()
+        legacy_release.wait(2)
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    def finish_in_the_owner(process, *_args, **_kwargs):
+        cleanup_started.set()
+        allow_cleanup.wait(2)
+        process.kill()
+
+    monkeypatch.setattr(thumbs, "thumbnail_path", lambda _clip: target)
+    monkeypatch.setattr(thumbs.subprocess, "run", legacy_run)
+    monkeypatch.setattr(
+        thumbs.subprocess, "Popen",
+        lambda command, **_kwargs: BlockedProcess(command),
+    )
+    monkeypatch.setattr(
+        thumbs, "stop_process", finish_in_the_owner, raising=False)
+
+    loader = thumbs.ThumbnailLoader(TOOLS)
+    tasks = []
+    monkeypatch.setattr(loader._pool, "start", tasks.append)
+    ready = []
+    loader.ready.connect(lambda *args: ready.append(args))
+    loader.request(clip("hdz_blocked.ts"))
+
+    thread = threading.Thread(target=tasks[0].run)
+    thread.start()
+    assert started.wait(1), "the controlled child never started"
+
+    began = time.monotonic()
+    loader.clear()
+    request_seconds = time.monotonic() - began
+    requested = stop_requested.wait(0.2)
+    escalated = cleanup_started.wait(1) if requested else False
+    retained = len(getattr(loader, "_tasks", {})) == 1
+    exited_during_request = exited.is_set()
+
+    allow_cleanup.set()
+    legacy_release.set()
+    thread.join(2)
+    qt_app.processEvents()
+    tasks_after_finished = getattr(loader, "_tasks", {})
+    loader.shutdown()
+
+    assert request_seconds < 0.05
+    assert requested, "clearing the loader did not ask its running child to stop"
+    assert not exited_during_request, "the UI-side request waited for child exit"
+    assert escalated, "the task that owned the child did not finish cleanup"
+    assert retained, "the running task was released before it finished"
+    assert not thread.is_alive(), "the controlled task outlived its cleanup"
+    assert tasks_after_finished == {}
+    assert ready == [], "a cancelled thumbnail was published"
+    assert not target.exists(), "a partial thumbnail became a cache hit"
+
+
+def test_thumbnail_ready_rejects_an_old_identity_at_the_same_path(
+        qt_app, tmp_path):
+    """A rewritten card can reuse a path without reusing its pixels."""
+    from types import SimpleNamespace
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QPixmap
+    from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
+
+    from flightdvr.ui import MainWindow
+
+    old = clip("hdz_same.ts")
+    current = clip(
+        "hdz_same.ts", size=old.size + 1,
+        modified=old.modified + timedelta(seconds=1),
+    )
+    assert old.fingerprint != current.fingerprint
+
+    table = QTableWidget(1, 1)
+    item = QTableWidgetItem(current.path.name)
+    item.setData(Qt.ItemDataRole.UserRole, str(current.path))
+    table.setItem(0, 0, item)
+    owner = SimpleNamespace(
+        table=table,
+        thumbs=SimpleNamespace(generation=7),
+        clip_by_path={str(current.path): current},
+    )
+    image = QPixmap(2, 2)
+    image.fill(QColor("red"))
+    thumb = tmp_path / "old.jpg"
+    assert image.save(str(thumb))
+
+    MainWindow._thumb_ready(
+        owner, 6, old.fingerprint, str(old.path), str(thumb))
+    assert item.icon().isNull(), "an old generation painted the current row"
+
+    MainWindow._thumb_ready(
+        owner, 7, old.fingerprint, str(old.path), str(thumb))
+    assert item.icon().isNull(), "an old fingerprint painted the current row"
+
+    MainWindow._thumb_ready(
+        owner, 7, current.fingerprint, str(current.path), str(thumb))
+    assert not item.icon().isNull(), "the current thumbnail was rejected"
+
+
 # -- the clock problem --------------------------------------------------------
 
 def test_clustered_timestamps_are_reported_as_unreliable():
