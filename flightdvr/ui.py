@@ -102,6 +102,10 @@ APP_TAGLINE = "Browse, trim and convert HDZero goggle DVR footage"
 ORG = "FlightDVR Studio"
 COPYRIGHT_HOLDER = "Isadu Nkemi"
 
+# Said whenever a decision is refused because the list is still being built.
+SCAN_IN_PROGRESS = ("Still listing this folder — decisions can be made once "
+                    "the scan finishes")
+
 # The name item already uses UserRole for its path, and SortItem uses the next
 # role for ordering. This one records the current-settings export marker so the
 # Exported filter reads the same answer the row displays.
@@ -180,6 +184,16 @@ class MainWindow(QMainWindow):
         # A session opened by name, waiting for the scan of its folder to
         # finish so there are clips to put it onto.
         self._pending_session: Session | None = None
+        # Which scan's clips the session on screen has actually been put back
+        # onto. Between pressing Scan and that scan finishing, the list is
+        # rebuilt from nothing and no clip carries its history yet, so reading
+        # the list would record "nothing was decided" over real marks.
+        self._adopted_generation = -1
+        self._pending_generation = -1
+        # The folder the running scan is reading. The source box can be changed
+        # while a scan runs, so the folder a result belongs to is the one that
+        # was read, not whatever the box says by the time it finishes.
+        self._scan_source: Path | None = None
         # Trims arrive continuously while a filmstrip handle is dragged. The
         # session is written after the dragging stops rather than during it,
         # which is the difference between one write and several hundred.
@@ -909,6 +923,11 @@ class MainWindow(QMainWindow):
 
         self.session = found
         self._pending_session = None
+        self._pending_generation = -1
+        # The clips on screen carry this session's decisions from here, so
+        # reading them back is meaningful again.
+        self._adopted_generation = self._scan_generation
+        self._apply_decision_availability()
         # Only once there is a file. A folder opened for the first time has a
         # session with a path and nothing written at it yet, and listing that
         # under "recent" offers a door that opens onto nothing.
@@ -956,16 +975,49 @@ class MainWindow(QMainWindow):
             return
         self.setWindowTitle(f"{self.session.title or 'Session'} — {APP_NAME}")
 
+    def _decisions_editable(self) -> bool:
+        """Whether a decision made now would be about the clips on screen.
+
+        False from pressing Scan until the session has been put back onto the
+        rebuilt list. In that window rows arrive one at a time with no history
+        attached, so a decision has nothing coherent to attach to and a write
+        would record emptiness over marks that are perfectly good.
+        """
+        return (self.session is not None
+                and self._adopted_generation == self._scan_generation)
+
+    def _apply_decision_availability(self) -> None:
+        """Show the rule, rather than taking the edit and discarding it."""
+        self.preview_view.trim_band.setEnabled(self._decisions_editable())
+
+    def _say_the_scan_is_not_finished(self) -> None:
+        self.statusBar().showMessage(SCAN_IN_PROGRESS, 4000)
+
     def _touch_session(self) -> None:
         """Something was decided. Write it, once the deciding has stopped."""
-        if self.session is not None:
-            self._session_timer.start()
+        if self.session is None:
+            return
+        if not self._decisions_editable():
+            # Refused rather than queued. The scan now running ends by putting
+            # the stored decisions back onto the rebuilt list, which would
+            # discard this one anyway; saying so is the difference between a
+            # rule and a silent loss.
+            self._say_the_scan_is_not_finished()
+            return
+        self._session_timer.start()
 
     def _write_session(self) -> None:
         if self.session is None:
             return
-        capture_from(self.session, self.clips)
-        capture_settings(self.session, self.export_panel, self.clips)
+        if self._decisions_editable():
+            capture_from(self.session, self.clips)
+            capture_settings(self.session, self.export_panel, self.clips)
+        # Otherwise this is a rescan still in progress. Its clips carry no
+        # decisions yet, and `capture_from` reads a clip with no ranges and no
+        # review as one whose marks were deliberately cleared — so reading the
+        # list here erased the stored decisions of every clip that had already
+        # been rediscovered. What was flushed before the scan started is
+        # written again unchanged instead.
         try:
             self.session.save()
         except OSError as problem:
@@ -1250,6 +1302,13 @@ class MainWindow(QMainWindow):
         # old one is left to finish in its own time and simply ignored. Keeping
         # a reference stops Python collecting a running QThread.
         self._scan_generation += 1
+        # From here until _adopt_session runs, the clips on screen are a
+        # half-built list with no decisions on them. Both the folder being read
+        # and any session opened by name belong to this generation.
+        self._scan_source = folder
+        self._pending_generation = (
+            self._scan_generation if self._pending_session is not None else -1)
+        self._apply_decision_availability()
         if self.scan_worker and self.scan_worker.isRunning():
             self._retired_scans.append(self.scan_worker)
         self._retired_scans = [w for w in self._retired_scans if w.isRunning()]
@@ -1296,9 +1355,12 @@ class MainWindow(QMainWindow):
 
         # After the clips exist, because a session is only meaningful applied
         # to them — and after sorting, so the rows it marks are the final ones.
-        source = self._source_path()
+        source = self._scan_source or self._source_path()
         if source is not None:
-            opened, self._pending_session = self._pending_session, None
+            opened = None
+            if self._pending_generation == generation:
+                opened, self._pending_session = self._pending_session, None
+                self._pending_generation = -1
             if opened is None and self._is_open_for(source):
                 # Scanning the same folder again keeps the session already
                 # open. Without this, pressing Scan after opening a session by
@@ -1414,6 +1476,11 @@ class MainWindow(QMainWindow):
         row = self.table.currentRow()
         if row < 0:
             self.statusBar().showMessage("Click a clip before marking it", 3000)
+            return
+        if not self._decisions_editable():
+            # Before the clip is touched: this one writes the state onto the
+            # clip and into the table before the session hears about it.
+            self._say_the_scan_is_not_finished()
             return
         name = self.table.item(row, 0)
         if name is None:
