@@ -606,13 +606,20 @@ def test_a_machine_with_no_audio_output_says_so_and_stays_quiet():
 
 def test_a_stream_that_refuses_to_start_is_reported_not_ignored():
     stream = FakeStream(refuse_start=True)
-    live = LivePreview(stream_factory=lambda _t: stream, output=FakeOutput())
+    live = LivePreview(stream_factory=lambda _t, _l: stream,
+                       output=FakeOutput())
     live.set_target("hdz_001.ts")
+    # The target was taken: this has to fail at `start`, not before it. A
+    # factory with the wrong arity used to raise `TypeError` here, which
+    # `set_target` catches — so the assertions below passed while `start` was
+    # never reached at all.
+    assert live.status.available, live.status.reason
 
     live.play()
 
     assert not live.status.playing
     assert "cannot be monitored" in live.status.reason
+    assert "cannot be started" in live.status.reason
 
 
 def test_choosing_source_only_rebuilds_rather_than_being_remembered():
@@ -789,3 +796,148 @@ def test_the_window_passes_the_listening_choice_through_to_the_plan(window):
 
     assert Listening.SOURCE in asked, (
         "the control changed nothing the factory could see")
+
+
+# -- the real AudioStream, not a stand-in --------------------------------------
+
+class CountingReader:
+    """A real `PcmReader`, so the real producer has something to read.
+
+    Silence, because what is under test is the lifecycle rather than the
+    sound: does the producer actually run, does it stop when asked, and is the
+    reader closed by the worker rather than by whoever asked.
+    """
+
+    def __init__(self, frames: int = 48_000):
+        self._frames = frames
+        self.closed = False
+        self.stopped = False
+        self.reads = 0
+
+    @property
+    def frames(self) -> int:
+        return self._frames
+
+    def read(self, start: int, frames: int, cancelled) -> list[float]:
+        self.reads += 1
+        return [0.0] * (frames * OUTPUT_CHANNELS)
+
+    def request_stop(self) -> None:
+        self.stopped = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def a_real_stream(frames: int = 48_000):
+    """One genuine `AudioStream` over silent readers."""
+    from flightdvr.audio_plan import (
+        AudioMode, OutputAudioPlan, SampleSpan,
+    )
+    from flightdvr.audio_stream import AudioStream, LiveAudioMapping
+
+    span = SampleSpan(0, frames, OUTPUT_RATE)
+    plan = OutputAudioPlan(mode=AudioMode.ORIGINAL, output=span,
+                           source_has_audio=True, dvr_gain=1)
+    mapping = LiveAudioMapping(audio=plan, source=span)
+    reader = CountingReader(frames)
+    return AudioStream(mapping, source_reader=reader), reader
+
+
+def test_the_real_producer_runs_and_then_stops_when_asked():
+    """The lifecycle the stand-ins model, checked against the real thing once.
+
+    A stand-in agrees with whatever I believed when I wrote it. This is the
+    test that would have caught `resume` before `start` without anybody
+    reviewing it.
+    """
+    from flightdvr.audio_stream import StreamState
+
+    stream, reader = a_real_stream()
+    assert stream.state is StreamState.READY
+
+    stream.start()
+    stream.resume()
+    assert stream.state is StreamState.RUNNING
+
+    stream.request_stop()
+    assert stream.wait_stopped(5.0), "the producer never settled"
+    assert reader.closed, "the worker did not close its reader"
+    assert stream.state in (StreamState.STOPPED, StreamState.FAILED)
+
+
+def test_the_real_producer_refuses_to_resume_before_it_is_started():
+    """The contract the transport has to honour, stated by the producer."""
+    stream, _reader = a_real_stream()
+    with pytest.raises(RuntimeError):
+        stream.resume()
+    stream.request_stop()
+    stream.wait_stopped(5.0)
+
+
+def test_the_transport_drives_a_real_producer_from_play_to_close():
+    """End to end on the real stream: started, fed, and let go."""
+    stream, reader = a_real_stream()
+    output = FakeOutput()
+    live = LivePreview(stream_factory=lambda _t, _l: stream, output=output)
+    live.set_target("hdz_001.ts")
+
+    live.play()
+    assert live.status.playing, live.status.reason
+    for _ in range(20):
+        live.tick(0)
+        if output.presented:
+            break
+    assert output.presented, "the real producer handed over nothing"
+
+    live.close()
+    for waiter in live._reapers:
+        waiter.join(5.0)
+    assert reader.closed, "the reader outlived the window"
+
+
+# -- the picture and the sound are one transport --------------------------------
+
+def test_the_pictures_play_button_starts_the_sound_when_listening(window):
+    """Play belongs to the picture. Leaving them uncoupled meant pressing play
+    started the picture in silence with Listen already ticked."""
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    started = []
+    window.live_preview.play = lambda: started.append(True)
+    window.live_preview.pause = lambda: started.append(False)
+    window.preview_view.listen_check.setChecked(True)
+
+    window._preview_state_changed(True)
+    assert started and started[-1] is True
+
+    window._preview_state_changed(False)
+    assert started[-1] is False
+
+
+def test_the_pictures_play_button_stays_silent_when_not_listening(window):
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    played = []
+    window.live_preview.play = lambda: played.append(True)
+    assert not window.preview_view.listen_check.isChecked()
+
+    window._preview_state_changed(True)
+
+    assert played == [], "the sound started without being asked for"
+
+
+def test_start_from_the_beginning_moves_the_picture_as_well(window):
+    """Moving the sound alone is the drift the transport would then refuse."""
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    window.music_band.setChecked(True)          # the band a person opened
+    restarted = []
+    moved = []
+    window.live_preview.restart = lambda: restarted.append(True)
+    window._on_playhead = lambda seconds: moved.append(seconds)
+
+    window.preview_view.restart_button.click()
+
+    assert restarted, "the sound was not restarted"
+    assert moved, "the picture stayed where it was"

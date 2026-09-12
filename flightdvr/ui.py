@@ -1123,8 +1123,11 @@ class MainWindow(QMainWindow):
 
     def _show_monitoring(self) -> None:
         status = self.live_preview.status
-        self.preview_view.show_monitoring(
-            status.playing and not status.muted, status.reason)
+        # What was *asked for*, not what is flowing. Reflecting the second
+        # made the box untick itself the moment it was ticked, because the
+        # picture was not playing yet — so asking to listen looked like it had
+        # been refused.
+        self.preview_view.show_monitoring(not status.muted, status.reason)
 
     def _on_listen_toggled(self, listening: bool) -> None:
         if listening:
