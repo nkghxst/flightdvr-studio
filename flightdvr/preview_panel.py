@@ -438,8 +438,13 @@ class PreviewView(QObject):
         band = QGroupBox("Music")
         band.setCheckable(True)
         band.setChecked(False)
+        # Flat, and with no padding of its own. Collapsed, this band is one
+        # line the person can turn on; a framed box with margins around
+        # nothing costs height the picture needs and buys no clarity. The
+        # frame comes back with the contents.
+        band.setFlat(True)
         layout = QVBoxLayout(band)
-        layout.setContentsMargins(INNER, TIGHT, INNER, INNER)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         self.music_content = QWidget()
         body = QVBoxLayout(self.music_content)
@@ -490,6 +495,10 @@ class PreviewView(QObject):
         layout.addWidget(self.music_body)
         self.music_body.setVisible(False)
         band.toggled.connect(self.music_body.setVisible)
+        band.toggled.connect(
+            lambda on: layout.setContentsMargins(
+                0, TIGHT, 0, INNER) if on else layout.setContentsMargins(
+                    0, 0, 0, 0))
         return band
 
     def show_track_status(self, text: str) -> None:
