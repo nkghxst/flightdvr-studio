@@ -58,10 +58,32 @@ def flatten(command) -> str:
 
 # -- the constraint that shaped the whole design -------------------------------
 
+# The one production module allowed to name QtMultimedia, and the only three
+# names it may take. Everything else — players, decoders, capture — stays
+# forbidden, which is what the rule was always about: Media Foundation cannot
+# decode HEVC in MPEG-TS. QAudioSink decodes nothing.
+PCM_ADAPTER = "audio_device.py"
+ALLOWED_MULTIMEDIA = {"QAudioFormat", "QAudioSink", "QMediaDevices"}
+
+
+def multimedia_names(statement: str) -> set[str]:
+    """What one `from PySide6.QtMultimedia import ...` line actually takes."""
+    if " import " not in statement:
+        return set()
+    imported = statement.split(" import ", 1)[1]
+    return {name.strip().split(" as ")[0].strip()
+            for name in imported.split(",") if name.strip()}
+
+
 def test_nothing_reaches_for_qt_multimedia():
     """Its Windows backend is Media Foundation, which cannot decode HEVC in an
     MPEG-TS — the only format this app exists for. It would pass every test on
     synthetic footage and fail on every real recording.
+
+    The one exception is the PCM output adapter, which decodes nothing: it
+    hands already-decoded samples to a device. It is named here rather than
+    waved through, and it is held to an exact list, so widening it means
+    editing this test and saying why.
 
     Checks import lines rather than the whole file, because explaining why we
     avoid something necessarily means naming it.
@@ -69,8 +91,45 @@ def test_nothing_reaches_for_qt_multimedia():
     for path in (ROOT / "flightdvr").glob("*.py"):
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             statement = line.strip()
-            if statement.startswith(("import ", "from ")):
-                assert "QtMultimedia" not in statement, f"{path.name}:{number}"
+            if not statement.startswith(("import ", "from ")):
+                continue
+            if "QtMultimedia" not in statement:
+                continue
+            assert path.name == PCM_ADAPTER, f"{path.name}:{number}"
+            taken = multimedia_names(statement)
+            assert taken and taken <= ALLOWED_MULTIMEDIA, (
+                f"{path.name}:{number} takes {sorted(taken - ALLOWED_MULTIMEDIA)}")
+
+
+def test_the_guard_would_still_catch_a_player_or_a_decoder():
+    """The guard is the rule. A guard that only ever passes proves nothing.
+
+    Checked on the parsing the real guard uses, rather than by writing a
+    forbidden import into the tree and hoping to remember to remove it.
+    """
+    forbidden = (
+        "from PySide6.QtMultimedia import QMediaPlayer",
+        "from PySide6.QtMultimedia import QAudioDecoder",
+        "from PySide6.QtMultimedia import QMediaCaptureSession",
+        "from PySide6.QtMultimedia import QAudioSink, QMediaPlayer",
+    )
+    for statement in forbidden:
+        taken = multimedia_names(statement)
+        assert not taken <= ALLOWED_MULTIMEDIA, statement
+
+    allowed = "from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices"
+    assert multimedia_names(allowed) == ALLOWED_MULTIMEDIA
+
+
+def test_only_the_adapter_carries_the_exception():
+    """Named files, so a second module cannot quietly join the exception."""
+    naming = {
+        path.name
+        for path in (ROOT / "flightdvr").glob("*.py")
+        if any("QtMultimedia" in line and line.strip().startswith(("import ", "from "))
+               for line in path.read_text(encoding="utf-8").splitlines())
+    }
+    assert naming == {PCM_ADAPTER}, sorted(naming)
 
 
 # -- choosing a frame size -----------------------------------------------------
