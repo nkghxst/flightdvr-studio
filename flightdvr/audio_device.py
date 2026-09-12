@@ -53,6 +53,18 @@ FRAME_BYTES = SAMPLE_BYTES * OUTPUT_CHANNELS
 MAX_QUEUED_BYTES = FRAME_BYTES * OUTPUT_RATE // 5
 
 
+# What the backend says its own state is. Kept as plain strings so the fake
+# seam needs no Qt, and so an unrecognised state stays reportable instead of
+# being forced into one we happen to know.
+ACTIVE, IDLE, SUSPENDED, STOPPED, UNKNOWN = (
+    "active", "idle", "suspended", "stopped", "unknown")
+
+# `bytesFree` means something only while the device is actually consuming.
+# Qt returns zero in the other states, and zero there means "not applicable",
+# not "the buffer is full" — reading it as fullness would invert the signal.
+BYTES_FREE_STATES = (ACTIVE, IDLE)
+
+
 class Sink(Protocol):
     """What this adapter needs from `QAudioSink`, and no more."""
 
@@ -62,6 +74,40 @@ class Sink(Protocol):
     def reset(self) -> None: ...
     def stop(self) -> None: ...
     def setVolume(self, volume: float) -> None: ...  # noqa: N802 (Qt naming)
+    def state(self) -> str: ...
+    def error(self) -> str: ...
+    def bytesFree(self) -> int: ...                  # noqa: N802 (Qt naming)
+    def bufferSize(self) -> int: ...                 # noqa: N802 (Qt naming)
+    def processedUSecs(self) -> int: ...             # noqa: N802 (Qt naming)
+
+
+@dataclass(frozen=True)
+class DeviceReport:
+    """What the backend says about itself, and nothing inferred from it.
+
+    Every field is the backend's own account. `processed_usecs` in particular
+    is **audio data the backend says it has processed since the sink started**
+    — not sound calibrated as having left a speaker. Between the two sit a
+    device buffer, a driver and whatever the hardware does with it, none of
+    which this reports. A transport may schedule against this and must not
+    call it heard time.
+    """
+
+    state: str = UNKNOWN
+    error: str = ""
+    processed_usecs: int | None = None
+    bytes_free: int | None = None
+    buffer_size: int | None = None
+
+    @property
+    def usable(self) -> bool:
+        """Whether the backend answered at all this time."""
+        return self.state != UNKNOWN
+
+    @property
+    def room_known(self) -> bool:
+        """Whether `bytes_free` means anything in the state reported."""
+        return self.bytes_free is not None and self.state in BYTES_FREE_STATES
 
 
 @dataclass(frozen=True)
@@ -105,6 +151,32 @@ def qt_sink_factory(fmt: DeviceFormat = DeviceFormat()) -> Sink:
     return QAudioSink(device, wanted)
 
 
+def _non_negative(value) -> int | None:
+    """An integer the backend reported, or None when it did not answer."""
+    if value is None:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def qt_state_name(state) -> str:
+    """One of our plain names for a `QAudio.State`, or `UNKNOWN`.
+
+    Matched on the enum's own name rather than its value, because the numbers
+    are not part of the documented contract and an unrecognised state has to
+    stay reportable rather than be forced into one of ours.
+    """
+    name = getattr(state, "name", None) or str(state)
+    lowered = str(name).lower()
+    for known in (ACTIVE, IDLE, SUSPENDED, STOPPED):
+        if known in lowered:
+            return known
+    return UNKNOWN
+
+
 def block_bytes(block: PcmBlock) -> bytes:
     """The monitored rendering of one block, as the device wants it.
 
@@ -131,6 +203,12 @@ class AudioOutput:
         self._generation = 0
         self._paused = True
         self._failure: str = ""
+        # Bytes handed to the device since the last anchor. `processedUSecs`
+        # counts from the sink's own start, so both are re-anchored together
+        # by start and by every fence — comparing a fresh backend count with
+        # a submitted total from before a reset invents a gap that never
+        # existed, and can make it negative.
+        self._submitted = 0
 
     # -- state -----------------------------------------------------------------
 
@@ -184,6 +262,7 @@ class AudioOutput:
         self._device = device
         self._paused = True
         self._failure = ""
+        self._submitted = 0
 
     def resume(self) -> None:
         if self._sink is None or self._failure:
@@ -211,13 +290,126 @@ class AudioOutput:
             sink.suspend()
 
     def stop(self) -> None:
-        """Release the sink. Safe to call twice, and safe after a failure."""
+        """Release the sink, quietly and without waiting.
+
+        `reset()` first, deliberately. Qt documents that `stop()` may play out
+        what the backend still holds before returning, and on Linux and macOS
+        that drain happens synchronously — on the UI thread, that is a window
+        that will not close while half a second of music finishes. Dropping
+        the buffer first makes the stop immediate and silent, which is what
+        closing a window means.
+        """
         sink, self._sink = self._sink, None
         self._device = None
         self._pending.clear()
+        self._submitted = 0
         self._paused = True
-        if sink is not None:
+        if sink is None:
+            return
+        try:
+            sink.reset()
+        except Exception:
+            # Nothing to salvage: we are closing either way, and a backend
+            # that cannot drop its buffer must not stop us releasing it.
+            pass
+        try:
             sink.stop()
+        except Exception:
+            pass
+
+    # -- what the backend says about itself ------------------------------------
+
+    @property
+    def submitted_bytes(self) -> int:
+        """Bytes the device accepted since the last anchor.
+
+        What was *handed over*. Not what was played, and not what was heard.
+        """
+        return self._submitted
+
+    def observe(self) -> DeviceReport:
+        """Ask the backend how it is doing. Never raises at the caller.
+
+        A backend that cannot answer gives `UNKNOWN`, which is a state a
+        transport can act on — pausing and saying so — rather than a crash in
+        the middle of playback. Reporting failure is itself a thing that can
+        happen, so it is a value here and not an exception.
+        """
+        sink = self._sink
+        if sink is None:
+            return DeviceReport(state=STOPPED)
+        try:
+            state = qt_state_name(sink.state())
+            error = sink.error()
+            report = DeviceReport(
+                state=state,
+                error="" if error is None else str(error),
+                processed_usecs=_non_negative(sink.processedUSecs()),
+                bytes_free=_non_negative(sink.bytesFree()),
+                buffer_size=_non_negative(sink.bufferSize()),
+            )
+        except Exception:
+            return DeviceReport(state=UNKNOWN)
+        return report
+
+    def processed_bytes(self, report: DeviceReport | None = None) -> int | None:
+        """The backend's processed count, in bytes of this format.
+
+        `None` when the backend did not answer. Derived from its own microsecond
+        count, so it inherits exactly the same limit: this is data the backend
+        says it has worked through, not sound anybody has heard.
+        """
+        report = self.observe() if report is None else report
+        if report.processed_usecs is None:
+            return None
+        frames = report.processed_usecs * self._fmt.rate // 1_000_000
+        return frames * FRAME_BYTES
+
+    def unplayed_bytes(self, report: DeviceReport | None = None) -> int | None:
+        """Submitted but not yet processed, as the backend accounts for it.
+
+        Clamped at zero rather than allowed to go negative. The two counts come
+        from different places and are re-anchored together, but a backend that
+        rounds its microseconds up can still report having processed a shade
+        more than we handed it; a negative gap there is an artefact, not sound
+        arriving before it was sent.
+        """
+        processed = self.processed_bytes(report)
+        if processed is None:
+            return None
+        return max(0, self._submitted - processed)
+
+    def starvation(self, report: DeviceReport | None = None) -> str:
+        """Why the device has nothing to play, told apart rather than guessed.
+
+        Three different things look alike from a distance and mean different
+        work:
+
+        - `"ended"` — the backend went idle with nothing left unplayed. The
+          material finished. Nobody is late.
+        - `"starved"` — the backend has room and is out of material while we
+          are still meant to be feeding it, and our own queue is empty too.
+          That is us being late.
+        - `"backend"` — the backend reports an error of its own, which is
+          neither of the above and is not fixed by feeding it faster.
+
+        Empty when none of them applies, including when the backend did not
+        answer — an unknown state is reported through `observe`, and guessing a
+        cause from a non-answer is how a transport ends up blaming the wrong
+        thing.
+        """
+        report = self.observe() if report is None else report
+        if report.error:
+            return "backend"
+        if not report.usable:
+            return ""
+        unplayed = self.unplayed_bytes(report)
+        if report.state == IDLE and not self._pending:
+            return "ended" if unplayed == 0 else "starved"
+        if (self.running and not self._pending and report.room_known
+                and report.bytes_free > 0 and unplayed == 0):
+            return "starved"
+        return ""
 
     # -- sound -----------------------------------------------------------------
 
@@ -289,6 +481,7 @@ class AudioOutput:
         # duplication that breaks it, not the offset.
         if written:
             del self._pending[:written]
+            self._submitted += written
         return written
 
     def _fence(self) -> None:
@@ -301,6 +494,7 @@ class AudioOutput:
         ordinary write.
         """
         self._pending.clear()
+        self._submitted = 0
         sink = self._sink
         if sink is None:
             return
