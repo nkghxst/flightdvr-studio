@@ -59,6 +59,7 @@ class Sink(Protocol):
     def start(self): ...
     def suspend(self) -> None: ...
     def resume(self) -> None: ...
+    def reset(self) -> None: ...
     def stop(self) -> None: ...
     def setVolume(self, volume: float) -> None: ...  # noqa: N802 (Qt naming)
 
@@ -191,16 +192,17 @@ class AudioOutput:
         self._sink.resume()
 
     def pause(self) -> None:
-        """Stop consuming, and drop what has not been handed over yet.
+        """Stop consuming, and fence everything already sent.
 
-        The queue goes because it is stale the moment the person stops
-        listening: resuming should continue from where the transport is, not
-        replay a fifth of a second recorded before the pause.
+        Clearing the queue is not enough. `QAudioSink.suspend()` keeps the
+        audio it has already been handed and plays it on resume, so dropping
+        only what this adapter still holds leaves a fifth of a second of sound
+        from before the pause waiting to be heard after it.
         """
         if self._sink is None:
             return
         self._paused = True
-        self._pending.clear()
+        self._fence()
         self._sink.suspend()
 
     def stop(self) -> None:
@@ -224,7 +226,7 @@ class AudioOutput:
         if type(generation) is not int or generation < 0:
             raise ValueError("a generation is a non-negative integer")
         self._generation = generation
-        self._pending.clear()
+        self._fence()
 
     def present(self, block: PcmBlock) -> int:
         """Queue one block's monitored rendering. Returns the bytes taken.
@@ -270,12 +272,38 @@ class AudioOutput:
             self._fail("the audio device refused the buffer")
             return 0
         written = min(int(written), len(self._pending))
-        # Whole frames only. Half a frame left at the front would swap the
-        # channels for everything after it.
-        written -= written % FRAME_BYTES
+        # Exactly what the device took, whether or not that lands on a frame
+        # boundary. Rounding down to a whole frame and dropping only that much
+        # left the rounded-away tail still queued — and the device already had
+        # it, so the next write sent those bytes a second time and the sound
+        # gained a few duplicated samples at every short write.
+        #
+        # Alignment survives because a QIODevice is a byte stream: continuing
+        # from exactly where it stopped hands over a continuous sequence, and
+        # the frame boundaries are wherever they always were. It is the
+        # duplication that breaks it, not the offset.
         if written:
             del self._pending[:written]
         return written
+
+    def _fence(self) -> None:
+        """Drop queued sound here *and* whatever the device is still holding.
+
+        `reset()` is the only thing that discards a sink's own buffer, and it
+        leaves the sink stopped, so the device handle has to be taken again
+        afterwards. That is a real cost, which is why this is called when the
+        sound is genuinely stale — a pause or a new generation — and not on an
+        ordinary write.
+        """
+        self._pending.clear()
+        sink = self._sink
+        if sink is None:
+            return
+        try:
+            sink.reset()
+            self._device = sink.start()
+        except Exception as exc:
+            self._fail(f"audio output failed while clearing: {exc}")
 
     def _fail(self, why: str) -> None:
         """Go quiet and remember why. A caller polls `failure`; nothing raises

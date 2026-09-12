@@ -82,6 +82,16 @@ class FakeSink:
     def resume(self) -> None:
         self.calls.append("resume")
 
+    def reset(self) -> None:
+        """What `QAudioSink.reset()` does: drop the buffer, and stop.
+
+        Modelled rather than ignored, because the finding was precisely that
+        `suspend()` keeps this and only `reset()` drops it. A fake that kept
+        the bytes would agree with the bug.
+        """
+        self.calls.append("reset")
+        self.written.clear()
+
     def stop(self) -> None:
         self.calls.append("stop")
 
@@ -203,14 +213,28 @@ def test_a_short_write_keeps_the_rest_instead_of_dropping_it():
     out.stop()
 
 
-def test_a_partial_frame_is_never_left_at_the_front():
-    """Half a frame at the head would swap the channels for everything after."""
+def test_a_short_write_that_stops_mid_frame_sends_each_byte_once():
+    """The finding (#119 review), and the model this test used to have wrong.
+
+    A device may accept a count that does not land on a frame boundary. The
+    first version rounded down and dropped only the whole frames — but the
+    device already held the rounded-away tail, so the next write sent those
+    bytes a second time and the sound gained duplicated samples at every short
+    write. Alignment is kept by continuing from exactly where the device
+    stopped, not by rounding: a QIODevice is a byte stream.
+    """
     out, sink = started(accept=FRAME_BYTES + 3)
     out.resume()
-    out.present(a_block(frames=4))
-    written = out.pump()
-    assert written % FRAME_BYTES == 0
-    assert out.queued_bytes % FRAME_BYTES == 0
+    block = a_block(frames=4)
+    out.present(block)
+    while out.queued_bytes and not out.failure:
+        if out.pump() == 0:
+            break
+
+    expected = block_bytes(block)
+    assert len(sink.written) == len(expected), (
+        f"{len(expected)} bytes of sound arrived as {len(sink.written)}")
+    assert bytes(sink.written) == expected, "the byte stream was not continuous"
     out.stop()
 
 
@@ -358,3 +382,74 @@ def test_what_a_real_device_still_has_to_tell_us():
         assert not any(absent in name.lower() for name in surface), (
             f"{absent} appears in the adapter's surface; this module does not "
             "measure it and must not look as though it does")
+
+def test_pausing_fences_sound_the_device_is_already_holding():
+    """The second finding (#119 review).
+
+    `QAudioSink.suspend()` keeps what it has already been handed and plays it
+    on resume. Clearing only this adapter's queue therefore left a fifth of a
+    second of sound from before the pause waiting to be heard after it.
+    """
+    out, sink = started()
+    out.resume()
+    out.present(a_block(frames=6))
+    out.pump()
+    assert sink.written, "nothing reached the device to begin with"
+
+    out.pause()
+
+    assert "reset" in sink.calls, "the device kept its buffered sound"
+    assert sink.written == b"", "sound from before the pause survived it"
+    assert out.queued_bytes == 0
+    out.stop()
+
+
+def test_a_reset_fences_sound_the_device_is_already_holding():
+    """Same fence, for a seek. Old sound after the seek point is the defect."""
+    out, sink = started()
+    out.resume()
+    out.present(a_block(frames=6))
+    out.pump()
+    assert sink.written
+
+    out.reset(1)
+
+    assert "reset" in sink.calls
+    assert sink.written == b"", "sound from before the seek survived it"
+    out.stop()
+
+
+def test_the_device_handle_is_usable_again_after_a_fence():
+    """`reset()` leaves a sink stopped, so the handle has to be retaken.
+
+    Without that, everything after the first pause or seek would queue and
+    never be written, which is silence that looks like a working transport.
+    """
+    out, sink = started()
+    out.resume()
+    out.present(a_block(frames=4))
+    out.pump()
+    out.reset(1)
+    out.resume()
+
+    out.present(a_block(generation=1, frames=4))
+    assert out.pump() > 0, "nothing could be written after the fence"
+    assert sink.written, "the device handle was not usable again"
+    out.stop()
+
+
+def test_a_sink_that_fails_while_clearing_goes_quiet_and_says_so():
+    sink = FakeSink()
+
+    def explode() -> None:
+        raise OSError("the device went away")
+
+    out = AudioOutput(sink_factory=lambda: sink)
+    out.start()
+    out.resume()
+    out.present(a_block())
+    sink.reset = explode
+    out.reset(1)
+
+    assert out.failure and "clearing" in out.failure
+    assert out.paused
