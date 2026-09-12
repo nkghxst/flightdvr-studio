@@ -957,8 +957,16 @@ class MainWindow(QMainWindow):
         self._music_probe = None
         self._music_probe_target = None
         choice = self._planned_music(target)
+        passage = choice.passage
+        if passage is None:
+            # The panel displays this exact whole-track selection as soon as
+            # the asset arrives. Store it on the bound target too: panel load
+            # is deliberately quiet, so waiting for a later widget edit left
+            # OutputPlan at ``None`` while the screen promised the full track.
+            passage = SampleSpan(
+                0, asset.decoded_samples, asset.sample_rate)
         self._store_music(target, replace(choice, track=asset.track,
-                                          asset=asset, passage=None))
+                                          asset=asset, passage=passage))
         if target == self._music_target:
             self._sync_music_panel()
         self._refresh_export_markers()
@@ -1006,10 +1014,17 @@ class MainWindow(QMainWindow):
             reason = MusicPanel._refusal(self._preset_key(), joined, bundle)
             if reason:
                 return f"{piece.path.name}: {reason}"
-            if choice.mode in (AudioMode.REPLACE, AudioMode.MIX) and (
-                    choice.asset is None):
-                return (f"{piece.path.name}: its music track has not been "
-                        "read yet. Choose the track again.")
+            if choice.mode in (AudioMode.REPLACE, AudioMode.MIX):
+                if choice.asset is None:
+                    return (f"{piece.path.name}: its music track has not been "
+                            "read yet. Choose the track again.")
+                if choice.passage is None:
+                    # The worker keeps the same validation because jobs can
+                    # arrive by another route. Here, before names or jobs are
+                    # created, the person can still correct the visible choice.
+                    return (f"{piece.path.name}: its music track has no selected "
+                            "passage. Choose the track again, or select the "
+                            "passage to use.")
         return ""
 
     def _music_for(self, piece) -> MusicChoice:
