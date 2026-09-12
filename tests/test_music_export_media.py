@@ -435,6 +435,12 @@ def test_ui_replace_music_survives_real_export_and_decodes_as_the_known_tone(
     window.queue_panel.start_button.click()
 
     def export_finished() -> bool:
+        # The completion signal settles Job.status before the worker thread's
+        # final event-loop turn returns.  Accept DONE first, then assert the
+        # worker has settled below; checking isRunning() before DONE creates a
+        # false failure after a successful publication.
+        if job.status is JobStatus.DONE:
+            return True
         if job.status in (JobStatus.FAILED, JobStatus.CANCELLED):
             raise AssertionError(
                 f"the real Master export ended as {job.status}: {job.message}")
@@ -442,7 +448,7 @@ def test_ui_replace_music_survives_real_export_and_decodes_as_the_known_tone(
             raise AssertionError(
                 f"the export worker stopped before completion: {job.status}, "
                 f"{job.message}")
-        return job.status is JobStatus.DONE
+        return False
 
     _wait_for(qt_app, export_finished,
               "the real Master export", timeout=180.0)
