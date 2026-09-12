@@ -26,7 +26,7 @@ and that trim_in still means what it always meant.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -246,6 +246,48 @@ def test_the_queue_writes_one_preset_suffix_not_two(window):
     jobs = queue_up(window, [clip("hdz_047.ts")])
     assert len(jobs) == 1
     assert jobs[0].out_path.name == "hdz_047_master.mp4", jobs[0].out_path.name
+
+
+def test_pending_named_ranges_follow_destination_template_and_date_edits(
+        window, tmp_path):
+    """Panel edits must re-render queued names from their original inputs.
+
+    Retargeting the already-rendered stem with ``output_path`` keeps the old
+    destination and template, then adds the newly chosen date and preset a
+    second time.  This goes through the same panel signals a person edits.
+    """
+    first = tmp_path / "first"
+    changed = tmp_path / "changed"
+    window.export_panel.out_edit.setCurrentText(str(first))
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    flight = clip("hdz_047.ts")
+    flight.selects = [
+        Select(10, 40, "Launch"),
+        Select(90, 120, "Tree dive"),
+    ]
+
+    jobs = queue_up(window, [flight])
+    assert [job.out_path for job in jobs] == [
+        first / "Master" / "hdz_047_1_Launch_master.mp4",
+        first / "Master" / "hdz_047_2_Tree-dive_master.mp4",
+    ]
+
+    window.export_panel.out_edit.setEditText(str(changed))
+    template = "review-{date}_{clip}_{range_number}_{range}_{preset}"
+    window.export_panel.template_edit.setText(template)
+    window.export_panel.template_edit.textEdited.emit(template)
+    window.export_panel.set_flight_date(date(2026, 9, 12))
+
+    expected = [
+        changed / "Master" /
+        "review-2026-09-12_hdz_047_1_Launch_master.mp4",
+        changed / "Master" /
+        "review-2026-09-12_hdz_047_2_Tree-dive_master.mp4",
+    ]
+    assert [job.out_path for job in jobs] == expected
+    for target in (job.out_path for job in jobs):
+        assert target.name.count("2026-09-12") == 1, target
+        assert target.stem.count("master") == 1, target
 
 
 def test_a_joined_export_keeps_the_name_it_always_had(window):
