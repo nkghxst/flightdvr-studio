@@ -32,9 +32,10 @@ import pytest
 
 from flightdvr.audio_device import (
     ACTIVE, FRAME_BYTES, IDLE, UNKNOWN, AudioOutput, DeviceReport,
+    DeviceUnavailable,
 )
 from flightdvr.audio_plan import OUTPUT_CHANNELS, OUTPUT_RATE
-from flightdvr.audio_stream import Buffering, PcmBlock
+from flightdvr.audio_stream import Buffering, PcmBlock, StreamFailed
 from flightdvr.live_preview import (
     DRIFT_LIMIT_SAMPLES, STARVED_LIMIT, Listening, LivePreview,
 )
@@ -50,12 +51,28 @@ def a_block(generation: int = 0, frames: int = 4) -> PcmBlock:
 class FakeStream:
     """A stream that can refuse, end, and be superseded."""
 
-    def __init__(self, *, blocks: int = 4, generation: int = 0):
+    def __init__(self, *, blocks: int = 4, generation: int = 0,
+                 refuse_start: bool = False):
         self.generation = generation
         self.remaining = blocks
         self.calls = []
         self.monitor = None
         self.raises = None
+        self.started = False
+        self.stopped = False
+        self.waited = None
+        self._refuse_start = refuse_start
+
+    def start(self) -> None:
+        """Refuses twice over, as the real one does."""
+        if self._refuse_start:
+            raise RuntimeError("a stopped audio stream cannot be started")
+        self.calls.append("start")
+        self.started = True
+
+    def wait_stopped(self, timeout=None) -> bool:
+        self.waited = timeout
+        return True
 
     def pull(self):
         if self.raises is not None:
@@ -66,6 +83,10 @@ class FakeStream:
         return a_block(self.generation)
 
     def resume(self) -> None:
+        # The real stream refuses this before `start`, which is exactly the
+        # thing a stand-in that shrugged would hide.
+        if not self.started:
+            raise RuntimeError("start the audio stream before resuming it")
         self.calls.append("resume")
 
     def pause(self) -> None:
@@ -73,6 +94,7 @@ class FakeStream:
 
     def request_stop(self) -> None:
         self.calls.append("request_stop")
+        self.stopped = True
 
     def restart(self) -> int:
         self.calls.append("restart")
@@ -94,9 +116,11 @@ class FakeStream:
 class FakeOutput:
     """An `AudioOutput` that holds what it is given and reports on itself."""
 
-    def __init__(self):
+    def __init__(self, *, no_device: bool = False):
         self.presented = []
         self.calls = []
+        self.opened = False
+        self._no_device = no_device
         self.generation = 0
         self.failure = ""
         self.report = DeviceReport(state=ACTIVE, processed_usecs=0,
@@ -114,6 +138,12 @@ class FakeOutput:
         self.calls.append("pump")
         return 0
 
+    def start(self) -> None:
+        if self._no_device:
+            raise DeviceUnavailable("this machine has no audio output")
+        self.calls.append("start")
+        self.opened = True
+
     def resume(self) -> None:
         self.calls.append("resume")
 
@@ -122,6 +152,7 @@ class FakeOutput:
 
     def stop(self) -> None:
         self.calls.append("stop")
+        self.opened = False
 
     def reset(self, generation: int) -> None:
         self.calls.append(f"reset:{generation}")
@@ -544,3 +575,138 @@ def test_monitoring_never_reaches_a_job_or_the_session(window):
         assert not any(absent in name.lower() for name in dir(settings)
                        if not name.startswith("_"))
     assert window.jobs == []
+
+
+# -- what the review found (#121) -----------------------------------------------
+
+def test_playing_starts_both_sides_rather_than_resuming_a_stream_that_never_ran():
+    """`AudioStream.resume()` refuses before `start()`, and the output has no
+    sink until it is started. Neither begins by itself, so the first play is
+    where both are opened — and nothing here was opening them."""
+    live, stream, output = transport()
+    live.play()
+
+    assert stream.started, "the producer was never started"
+    assert output.opened, "the sink was never opened"
+    assert live.status.playing
+    assert "resume" in stream.calls
+
+
+def test_a_machine_with_no_audio_output_says_so_and_stays_quiet():
+    stream = FakeStream()
+    output = FakeOutput(no_device=True)
+    live = LivePreview(stream_factory=lambda _t: stream, output=output)
+    live.set_target("hdz_001.ts")
+
+    live.play()
+
+    assert not live.status.playing
+    assert "nothing to listen on" in live.status.reason
+
+
+def test_a_stream_that_refuses_to_start_is_reported_not_ignored():
+    stream = FakeStream(refuse_start=True)
+    live = LivePreview(stream_factory=lambda _t: stream, output=FakeOutput())
+    live.set_target("hdz_001.ts")
+
+    live.play()
+
+    assert not live.status.playing
+    assert "cannot be monitored" in live.status.reason
+
+
+def test_choosing_source_only_rebuilds_rather_than_being_remembered():
+    """A different thing to listen to is a different plan. Recording the
+    choice and carrying on left the control looking as though it did
+    something."""
+    built = []
+
+    def factory(target):
+        stream = FakeStream()
+        built.append(stream)
+        return stream
+
+    live = LivePreview(stream_factory=factory, output=FakeOutput())
+    live.set_target("hdz_001.ts")
+    assert len(built) == 1
+
+    live.set_listening(Listening.SOURCE)
+
+    assert len(built) == 2, "the mix was not rebuilt for a different choice"
+    assert built[0].stopped, "the old mix was left running"
+
+
+def test_choosing_the_same_thing_again_rebuilds_nothing():
+    built = []
+
+    def factory(target):
+        built.append(FakeStream())
+        return built[-1]
+
+    live = LivePreview(stream_factory=factory, output=FakeOutput())
+    live.set_target("hdz_001.ts")
+    live.set_listening(Listening.MIX)
+    assert len(built) == 1
+
+
+def test_changing_what_is_heard_while_playing_keeps_playing():
+    built = []
+
+    def factory(target):
+        built.append(FakeStream())
+        return built[-1]
+
+    live = LivePreview(stream_factory=factory, output=FakeOutput())
+    live.set_target("hdz_001.ts")
+    live.play()
+    live.set_listening(Listening.SOURCE)
+
+    assert live.status.playing
+    assert built[-1].started
+
+
+def test_a_producer_that_fails_stops_monitoring_instead_of_being_swallowed():
+    """It used to say it was playing while the producer had given up behind
+    it — silence that looks like a working transport."""
+    live, stream, _output = transport()
+    live.play()
+    stream.raises = StreamFailed("the reader died")
+
+    live.tick(0)
+
+    assert not live.status.playing
+    assert "could not be produced" in live.status.reason
+    assert "the reader died" in live.status.reason
+
+
+def test_a_stopped_stream_is_waited_for_somewhere_other_than_here():
+    """`wait_stopped` joins a plain thread and its own docstring says keep that
+    off the UI thread. Asking and never waiting leaks the producer; waiting
+    here would hold the window."""
+    live, stream, _output = transport()
+    live.play()
+
+    live.close()
+
+    assert stream.stopped
+    for waiter in live._reapers:
+        waiter.join(2.0)
+        assert not waiter.is_alive()
+    assert stream.waited is not None, "nobody ever waited for the producer"
+
+
+def test_switching_target_reaps_the_stream_it_leaves():
+    first = FakeStream(generation=0)
+    second = FakeStream(generation=5)
+    streams = iter((first, second))
+    live = LivePreview(stream_factory=lambda _t: next(streams),
+                       output=FakeOutput())
+    live.set_target("one")
+    live.play()
+
+    live.set_target("two")
+
+    assert first.stopped
+    for waiter in live._reapers:
+        waiter.join(2.0)
+    assert first.waited is not None, "the old producer was never waited for"

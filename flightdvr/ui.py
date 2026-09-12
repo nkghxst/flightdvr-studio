@@ -1111,14 +1111,38 @@ class MainWindow(QMainWindow):
     def _on_listen_toggled(self, listening: bool) -> None:
         if listening:
             self.live_preview.set_muted(False)
-            self.live_preview.play()
+            if self.player.is_playing:
+                self.live_preview.play()
         else:
             self.live_preview.set_muted(True)
             self.live_preview.pause()
         self._show_monitoring()
 
     def _on_monitor_restart(self) -> None:
+        """Both back to the start, because there is one transport.
+
+        Restarting the sound and leaving the picture where it was is the
+        drift the transport would then refuse to play, so this moves both.
+        """
         self.live_preview.restart()
+        if self._trim_clip is not None:
+            self._on_playhead(self.trim_bar.in_point)
+        self._show_monitoring()
+
+    def _follow_picture_state(self, playing: bool) -> None:
+        """Play and Pause belong to the picture; the sound follows them.
+
+        Wiring the sound to its own button would be the second transport this
+        slice exists to avoid — and leaving them uncoupled meant pressing play
+        started the picture in silence with Listen already ticked.
+        """
+        if self.live_preview is None:
+            return
+        if playing and self.preview_view.listen_check.isChecked():
+            self.live_preview.set_muted(False)
+            self.live_preview.play()
+        elif not playing:
+            self.live_preview.pause()
         self._show_monitoring()
 
     def _drive_monitoring(self, seconds: float) -> None:
@@ -2585,6 +2609,7 @@ class MainWindow(QMainWindow):
         self._update_trim_labels()
 
     def _preview_state_changed(self, playing: bool) -> None:
+        self._follow_picture_state(playing)
         if playing:
             self._clear_precise_frame()
         elif self._trim_clip is not None:

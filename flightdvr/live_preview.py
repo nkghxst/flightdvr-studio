@@ -33,11 +33,13 @@ monitoring and says why** rather than playing something it cannot vouch for.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from enum import Enum
 
-from .audio_device import AudioOutput
+from .audio_device import AudioOutput, DeviceUnavailable
 from .audio_plan import OUTPUT_RATE
+from .audio_stream import Buffering, StreamFailed
 
 # How far the backend's processed count may sit from where the picture is
 # before monitoring stops. A fifth of a second is past the point where a person
@@ -88,6 +90,10 @@ class LivePreview:
         self._playing = False
         self._speed = 1.0
         self._reason = ""
+        self._target_reason = ""
+        self._reap_timeout = 5.0
+        self._reapers: list[threading.Thread] = []
+        self._target_reason = ""
         self._starved = 0
 
     # -- what is on offer ------------------------------------------------------
@@ -125,6 +131,7 @@ class LivePreview:
         """
         self._silence()
         self._target = target
+        self._target_reason = reason
         self._reason = reason
         self._stream = None
         if target is None or reason:
@@ -169,8 +176,26 @@ class LivePreview:
     # -- the controls ----------------------------------------------------------
 
     def play(self) -> None:
+        """Start both sides, then let them run.
+
+        `AudioStream.resume()` refuses before `start()`, and `AudioOutput` has
+        no sink until it is started. Neither begins by itself, because both
+        begin paused and silent on purpose — so the first play is where they
+        are opened, and where a machine with no audio output says so.
+        """
         if not self.status.available:
             return
+        try:
+            self._stream.start()
+        except RuntimeError as exc:
+            self._stop_with(f"this output cannot be monitored: {exc}")
+            return
+        if self._output is not None:
+            try:
+                self._output.start()
+            except DeviceUnavailable as exc:
+                self._stop_with(f"there is nothing to listen on: {exc}")
+                return
         self._playing = True
         self._starved = 0
         self._stream.resume()
@@ -216,7 +241,21 @@ class LivePreview:
         self._apply_monitor()
 
     def set_listening(self, listening: Listening) -> None:
-        self._listening = Listening(listening)
+        """Source alone, or the finished mix.
+
+        A different thing to listen to is a different plan, so the stream is
+        rebuilt rather than the choice merely remembered — recording it and
+        carrying on would leave the control looking as though it did something.
+        """
+        chosen = Listening(listening)
+        if chosen is self._listening:
+            return
+        self._listening = chosen
+        if self._target is not None:
+            was_playing = self._playing
+            self.set_target(self._target, reason=self._target_reason)
+            if was_playing:
+                self.play()
 
     def _apply_monitor(self) -> None:
         if self._stream is not None:
@@ -255,10 +294,17 @@ class LivePreview:
         while True:
             try:
                 block = self._stream.pull()
-            except Exception:
-                # Buffering and Paused are ordinary, and anything else is
-                # caught by the failure check in `tick`. Either way there is
-                # nothing more to hand over this time.
+            except Buffering:
+                # Ordinary: nothing ready this tick, including while paused.
+                break
+            except StreamFailed as exc:
+                # Not ordinary, and it used to be swallowed here — the
+                # transport went on saying it was playing while the producer
+                # had given up behind it.
+                self._stop_with(f"the sound could not be produced: {exc}")
+                break
+            except Exception as exc:
+                self._stop_with(f"the sound could not be produced: {exc}")
                 break
             if block is None:
                 break
@@ -309,10 +355,26 @@ class LivePreview:
         self._reason = ""
         if self._stream is not None:
             self._stream.pause()
-            self._stream.request_stop()
+            self._reap(self._stream)
         if self._output is not None:
             self._output.reset(self._output.generation)
             self._output.pause()
+
+    def _reap(self, stream) -> None:
+        """Ask a stream to stop, and wait for it somewhere else.
+
+        `wait_stopped` joins a plain `threading.Thread`, and its own docstring
+        says callers must keep that off the UI thread. Asking here and waiting
+        on a daemon of our own means a window closes at once while the
+        producer finishes settling its readers in its own time.
+        """
+        stream.request_stop()
+        waiter = threading.Thread(
+            target=stream.wait_stopped, args=(self._reap_timeout,),
+            name="flightdvr-live-preview-reaper", daemon=True)
+        waiter.start()
+        self._reapers.append(waiter)
+        self._reapers = [t for t in self._reapers if t.is_alive()]
 
     def close(self) -> None:
         """Let go of everything, without waiting on this thread.
@@ -324,6 +386,6 @@ class LivePreview:
         stream, self._stream = self._stream, None
         self._playing = False
         if stream is not None:
-            stream.request_stop()
+            self._reap(stream)
         if self._output is not None:
             self._output.stop()
