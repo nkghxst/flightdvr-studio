@@ -136,6 +136,18 @@ fixtures have the intended shape. For real media, identify both the filename
 and the first 16 lowercase characters of the full-file SHA-256. Report what was
 not checked.
 
+Run each required check once for the relevant head. Repeat or broaden checks
+only for a relevant change, a failure or a named evidence gap; after two
+same-cause failures, reassess the external state instead of retrying blindly.
+Do not claim the whole local suite is hermetic from one isolated fixture:
+require isolation where the test needs it. Retain meaningful regression
+oracles, but do not make mutation testing a ritual for unrelated changes.
+
+Preserve applicable CI and packaging gates, decoded-media evidence for output
+claims, native acceptance for interaction claims and independent
+correction-delta review. These answer different questions and cannot be
+substituted for one another.
+
 Map CI results to the exact head and wait for all applicable jobs. A docs-only
 change excluded by the workflow's `paths-ignore` is `NOT APPLICABLE`, not a
 pass. A proposal to reduce required checks is not a policy change. Anything
