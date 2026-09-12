@@ -184,11 +184,11 @@ class MainWindow(QMainWindow):
         # A session opened by name, waiting for the scan of its folder to
         # finish so there are clips to put it onto.
         self._pending_session: Session | None = None
-        # Which scan's clips the session on screen has actually been put back
-        # onto. Between pressing Scan and that scan finishing, the list is
-        # rebuilt from nothing and no clip carries its history yet, so reading
-        # the list would record "nothing was decided" over real marks.
-        self._adopted_generation = -1
+        # True between pressing Scan and that scan's results being adopted. The
+        # list is rebuilt from nothing in that window and no clip carries its
+        # history yet, so reading it back would record "nothing was decided"
+        # over marks that are perfectly good.
+        self._scan_rebuilding = False
         self._pending_generation = -1
         # The folder the running scan is reading. The source box can be changed
         # while a scan runs, so the folder a result belongs to is the one that
@@ -926,7 +926,7 @@ class MainWindow(QMainWindow):
         self._pending_generation = -1
         # The clips on screen carry this session's decisions from here, so
         # reading them back is meaningful again.
-        self._adopted_generation = self._scan_generation
+        self._scan_rebuilding = False
         self._apply_decision_availability()
         # Only once there is a file. A folder opened for the first time has a
         # session with a path and nothing written at it yet, and listing that
@@ -982,9 +982,12 @@ class MainWindow(QMainWindow):
         rebuilt list. In that window rows arrive one at a time with no history
         attached, so a decision has nothing coherent to attach to and a write
         would record emptiness over marks that are perfectly good.
+
+        Not a question about whether a session exists. A folder nobody has
+        marked yet has no session to write to, and marking a clip there is
+        still an ordinary thing to do.
         """
-        return (self.session is not None
-                and self._adopted_generation == self._scan_generation)
+        return not self._scan_rebuilding
 
     def _apply_decision_availability(self) -> None:
         """Show the rule, rather than taking the edit and discarding it."""
@@ -1306,6 +1309,7 @@ class MainWindow(QMainWindow):
         # half-built list with no decisions on them. Both the folder being read
         # and any session opened by name belong to this generation.
         self._scan_source = folder
+        self._scan_rebuilding = True
         self._pending_generation = (
             self._scan_generation if self._pending_session is not None else -1)
         self._apply_decision_availability()
@@ -1367,6 +1371,12 @@ class MainWindow(QMainWindow):
                 # name quietly swapped it for the folder's own autosave.
                 opened = self.session
             self._adopt_session(opened or for_source(source))
+
+        # Cleared even when there was no source to adopt for: a rebuild that
+        # ends without a session still ends, and leaving this set would lock
+        # decisions out for good.
+        self._scan_rebuilding = False
+        self._apply_decision_availability()
 
         self._flight_scan_ready = True
         self.thumbs.resume()
