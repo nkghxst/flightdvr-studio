@@ -146,13 +146,19 @@ class Job:
     def __post_init__(self) -> None:
         """Own the export choices that were submitted with this job.
 
+        A whole recording has no ranges to split, so ``ClipInfo.for_export``
+        returns the browser's object itself.  Keeping that reference let a
+        later trim silently change a waiting 0-to-end export.  ClipInfo holds
+        metadata, not footage, so owning a deep copy here makes the same
+        commit-to-render boundary apply to both whole clips and range copies.
+
         The UI currently constructs fresh scalar-only settings for each queue
-        action, so no presentation-to-queue alias defect has been observed.
-        Deep copying here establishes the commit-to-render boundary before
-        music adds nested values: later plan edits cannot alter a waiting or
-        running job. The Job itself intentionally remains mutable for progress,
-        status, cancellation and the existing pending-path retarget rule.
+        action, but deep copying them establishes the boundary before music
+        adds nested values.  The Job itself intentionally remains mutable for
+        progress, status, cancellation and the existing pending-path retarget
+        rule.
         """
+        self.clips = deepcopy(self.clips)
         self.settings = deepcopy(self.settings)
         self.audio = deepcopy(self.audio)
 

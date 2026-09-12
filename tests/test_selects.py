@@ -395,6 +395,62 @@ def test_a_clip_with_one_select_queues_exactly_as_it_always_did(window):
     assert (jobs[0].clips[0].trim_in, jobs[0].clips[0].out_point) == (30.0, 90.0)
 
 
+@pytest.mark.parametrize("cleared_placeholder", [False, True],
+                         ids=["empty", "cleared-placeholder"])
+def test_a_queued_whole_clip_keeps_the_submitted_footage(
+        window, tmp_path, cleared_placeholder):
+    """Editing the browser later must not turn a queued whole clip into a trim.
+
+    This goes through the ordinary queue button because ``for_export`` returns
+    the browser's own ClipInfo for a whole recording.  A direct Job fixture
+    would miss that alias at the hand-off boundary.
+    """
+    from flightdvr.presets import build_commands
+
+    flight = clip(duration=240.0)
+    if cleared_placeholder:
+        flight.trim_in, flight.trim_out = 5.0, 10.0
+        flight.trim_in, flight.trim_out = 0.0, 0.0
+        assert len(flight.selects) == 1 and not flight.real_selects
+
+    queued, = queue_up(window, [flight])
+
+    # What continued browser editing does after the submit: create several
+    # ranges, move the current row, and adjust the range being edited.
+    flight.selects = [Select(12.0, 30.0, "first"),
+                      Select(60.0, 90.0, "second")]
+    flight.current = 1
+    flight.trim_in, flight.trim_out = 65.0, 95.0
+
+    submitted = queued.clips[0]
+    assert submitted is not flight
+    assert (submitted.trim_in, submitted.out_point) == (0.0, 240.0)
+    assert queued.total_duration == 240.0
+
+    command = build_commands(
+        window.tools, submitted, queued.preset_key, queued.settings,
+        queued.out_path, tmp_path,
+    )[0]
+    assert "-ss" not in command and "-t" not in command, command
+
+
+def test_already_trimmed_queue_fanout_owns_independent_siblings(window):
+    """Each submitted range keeps its own metadata after later range edits."""
+    flight = clip(duration=240.0)
+    flight.selects = [Select(12.0, 30.0, "first"),
+                      Select(60.0, 90.0, "second")]
+
+    first, second = queue_up(window, [flight])
+    flight.selects[0].start = 15.0
+    flight.selects[1].end = 95.0
+    flight.current = 1
+
+    assert [(job.clips[0].trim_in, job.clips[0].out_point)
+            for job in (first, second)] == [(12.0, 30.0), (60.0, 90.0)]
+    first.clips[0].selects[0].start = 20.0
+    assert (second.clips[0].trim_in, second.clips[0].out_point) == (60.0, 90.0)
+
+
 def test_joined_selects_become_one_job_holding_them_in_order(window):
     flight = clip()
     flight.selects = [Select(200, 230, "Landing"), Select(10, 40, "Launch"),
