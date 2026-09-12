@@ -65,7 +65,13 @@ from .format import (
 from .help_content import naming_help_html, release_links
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
 from .media import ClipInfo, Select, Tools, available_encoders
+from dataclasses import replace
+
+from .audio_plan import AudioMode, MusicChoice
+from .audio_reader import MusicAssetProbe
+from .music_panel import MusicPanel
 from .output_naming import naming_inputs, resolve_output
+from .output_plan import OutputPlan, OutputTarget
 from .presets import (
     PRESET_ORDER, PRESETS, ExportSettings, describe_join_problems,
     estimate_output_size,
@@ -175,6 +181,19 @@ class MainWindow(QMainWindow):
         # over marks that are perfectly good.
         self._scan_rebuilding = False
         self._pending_generation = -1
+        # One plan, keyed by the identity the session and Assembly already use.
+        self.output_plan = OutputPlan()
+        self._music_target: OutputTarget | None = None
+        # Acquisition is bound to the pair, not the counter alone: a late
+        # success must reach the target it was started for and no other.
+        self._music_generation = 0
+        self._music_probe: MusicAssetProbe | None = None
+        self._music_probe_target: OutputTarget | None = None
+        self._music_probe_track: Path | None = None
+        # What each target's acquisition is doing. A target is never left
+        # reading with nothing that can be done about it.
+        self._music_reading: dict[OutputTarget, Path] = {}
+        self._music_trouble: dict[OutputTarget, str] = {}
         # The folder the running scan is reading. The source box can be changed
         # while a scan runs, so the folder a result belongs to is the one that
         # was read, not whatever the box says by the time it finishes.
@@ -263,6 +282,7 @@ class MainWindow(QMainWindow):
         # filmstrip are one thing and the queue is another. Tight above the
         # filmstrip, loose above the queue.
         outer.addWidget(self._build_trim_band())
+        outer.addWidget(self._build_music_band())
         outer.addSpacing(GAP - INNER)
         outer.addWidget(self._build_queue())
         self._install_shortcuts()
@@ -732,6 +752,261 @@ class MainWindow(QMainWindow):
     def _build_trim_band(self) -> QWidget:
         return self.preview_view.trim_band
 
+    def _build_music_band(self) -> QWidget:
+        view = self.preview_view
+        view.track_requested.connect(self._choose_music_track)
+        view.music_changed.connect(self._on_music_changed)
+        view.music_band.toggled.connect(lambda *_: self._relayout())
+        return view.music_band
+
+    @property
+    def music_panel(self) -> QWidget:
+        return self.preview_view.music_panel
+
+    @property
+    def music_band(self) -> QWidget:
+        return self.preview_view.music_band
+
+    # -- music ----------------------------------------------------------------
+
+    def _music_target_for(self, clip) -> OutputTarget | None:
+        """The plan identity of the range now in focus.
+
+        Fingerprint plus the range's stable id, which is what `OutputTarget`
+        already means and what lets a rescanned card find the same output.
+        """
+        if clip is None:
+            return None
+        # The bundle path hands `bundle.Piece`, which carries the recording in
+        # `.clip`; every other route hands the recording itself. One identity
+        # either way, or the same output would be keyed two ways.
+        clip = getattr(clip, "clip", clip)
+        ranges = clip.real_selects
+        sid = ""
+        if ranges:
+            index = min(clip.current, len(ranges) - 1)
+            sid = ranges[index].sid
+        return OutputTarget.clip_or_range(clip.fingerprint, sid)
+
+    def _music_context(self) -> tuple[str, str, bool, bool]:
+        """Target name, and the same triple `_run_job` resolves music under."""
+        clip = self._trim_clip
+        name = clip.path.name if clip is not None else ""
+        ranges = clip.real_selects if clip is not None else []
+        if ranges and clip is not None:
+            chosen = ranges[min(clip.current, len(ranges) - 1)]
+            name = f"{name} · {chosen.name or 'range'}"
+        return name, self._preset_key(), self.export_panel.join_enabled(), False
+
+    def _planned_music(self, target: OutputTarget) -> MusicChoice:
+        try:
+            return self.output_plan.get(target).music
+        except KeyError:
+            return MusicChoice()
+
+    def _store_music(self, target: OutputTarget, choice: MusicChoice) -> None:
+        self.output_plan.set_choices(
+            target, self._preset_key(), self.current_settings(), choice)
+
+    def _sync_music_panel(self) -> None:
+        """Show the focused range's music, without claiming it was chosen."""
+        target = self._music_target_for(self._trim_clip)
+        self._music_target = target
+        if target is None:
+            self.preview_view.show_track_status("")
+            self.export_panel.set_music_summary("")
+            return
+        if target not in self.output_plan.targets:
+            self._store_music(target, MusicChoice())
+        self.output_plan.select(target)
+        choice = self._planned_music(target)
+        name, preset_key, joined, bundle = self._music_context()
+        self.music_panel.load(choice, target=name, preset_key=preset_key,
+                              joined=joined, bundle=bundle)
+        self.music_panel.set_asset(choice.asset)
+        self._show_music_state(target)
+
+    def _show_music_state(self, target: OutputTarget) -> None:
+        """One line about acquisition, and one about what the export will do."""
+        if target in self._music_reading:
+            self.preview_view.show_track_status(
+                f"Reading {self._music_reading[target].name}…")
+        elif target in self._music_trouble:
+            self.preview_view.show_track_status(self._music_trouble[target])
+        else:
+            choice = self._planned_music(target)
+            track = choice.track
+            self.preview_view.show_track_status(
+                track.name if track is not None else "No track chosen")
+        self._show_music_summary(target)
+
+    def _show_music_summary(self, target: OutputTarget) -> None:
+        choice = self._planned_music(target)
+        mode = choice.mode
+        if mode is None or mode is AudioMode.ORIGINAL:
+            self.export_panel.set_music_summary("")
+            self.export_panel.set_audio_track_editable(True)
+            return
+        name, _key, _joined, _bundle = self._music_context()
+        if mode is AudioMode.NO_SOUND:
+            said = "No sound"
+        else:
+            track = choice.track.name if choice.track else "a track"
+            said = f"{str(mode.value).title()} with {track}"
+        self.export_panel.set_music_summary(f"Music for {name}: {said}")
+        # Replace and No sound decide the finished audio themselves. The
+        # checkbox keeps its stored value; it simply has nothing left to pick.
+        self.export_panel.set_audio_track_editable(
+            False, "The music choice for this output decides its audio.")
+
+    def _on_music_changed(self) -> None:
+        """A real edit in the band. Refused while the list is being rebuilt."""
+        target = self._music_target
+        if target is None:
+            return
+        if self._refuse_while_rebuilding():
+            self._sync_music_panel()
+            return
+        self._store_music(target, self.music_panel.capture())
+        self._show_music_state(target)
+        self._refresh_export_markers()
+
+    def _choose_music_track(self) -> None:
+        target = self._music_target
+        if target is None:
+            self.statusBar().showMessage("Click a clip in the list first", 4000)
+            return
+        if self._refuse_while_rebuilding():
+            return
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Choose a music track", str(Path.home()),
+            "Audio files (*.mp3 *.m4a *.aac *.wav *.flac *.ogg *.opus);;"
+            "All files (*)")
+        if not chosen:
+            return
+        track = Path(chosen)
+        self._store_music(
+            target, replace(self._planned_music(target), track=track,
+                            mode=AudioMode.REPLACE, asset=None, passage=None))
+        self._start_music_probe(target, track)
+
+    def _start_music_probe(self, target: OutputTarget, track: Path) -> None:
+        """Read the file away from this thread, bound to target and generation."""
+        self._stop_music_probe()
+        self._music_generation += 1
+        self._music_reading[target] = track
+        self._music_trouble.pop(target, None)
+        probe = MusicAssetProbe(self.tools, track, self._music_generation, self)
+        probe.ready.connect(self._music_ready)
+        probe.failed.connect(self._music_failed)
+        self._music_probe = probe
+        self._music_probe_target = target
+        probe.start()
+        self._show_music_state(self._music_target or target)
+
+    def _stop_music_probe(self, trouble: str = "") -> None:
+        """Ask the reader to stop, and never leave its target simply reading.
+
+        A stopped probe emits neither `ready` nor `failed`, so the target it
+        was reading would otherwise sit at "Reading…" with nothing a person
+        could do about it. `trouble` is what they can act on instead.
+        """
+        probe, target = self._music_probe, self._music_probe_target
+        self._music_probe = None
+        self._music_probe_target = None
+        if target is not None:
+            self._music_reading.pop(target, None)
+            if trouble:
+                self._music_trouble[target] = trouble
+        if probe is not None:
+            # Retain before stopping, exactly as the scan and hardware probes
+            # do: worker-side cleanup may outlive this window, and the UI
+            # never waits on it.
+            if probe.isRunning():
+                self._retain_probe_thread(probe)
+            probe.stop()
+        # Say it, rather than leaving the line reading. The worker emits
+        # nothing once stopped, so this is the only thing that can.
+        if target is not None and target == self._music_target:
+            self._show_music_state(target)
+
+    def _current_music_result(self, generation: int) -> OutputTarget | None:
+        """The target a result belongs to, or None if it has been superseded."""
+        if generation != self._music_generation:
+            return None
+        return self._music_probe_target
+
+    def _music_ready(self, generation: int, asset) -> None:
+        target = self._current_music_result(generation)
+        if target is None:
+            return
+        self._music_reading.pop(target, None)
+        self._music_trouble.pop(target, None)
+        self._music_probe = None
+        self._music_probe_target = None
+        choice = self._planned_music(target)
+        self._store_music(target, replace(choice, track=asset.track,
+                                          asset=asset, passage=None))
+        if target == self._music_target:
+            self._sync_music_panel()
+        self._refresh_export_markers()
+
+    def _music_failed(self, generation: int, reason: str) -> None:
+        target = self._current_music_result(generation)
+        if target is None:
+            return
+        self._music_reading.pop(target, None)
+        self._music_probe = None
+        self._music_probe_target = None
+        self._music_trouble[target] = (
+            f"That track could not be read: {reason}. Choose another.")
+        if target == self._music_target:
+            self._show_music_state(target)
+
+    def _music_refusal(self, pieces, *, joined: bool | None = None,
+                       bundle: bool = False) -> str:
+        """Why this action cannot be queued, asked before anything is queued.
+
+        Configured music that cannot be exported refuses the whole action. It
+        is never quietly replaced with an unconfigured choice: the person asked
+        for music and would otherwise get a silent file and no explanation.
+
+        Every route that queues has to ask. A delivery bundle is the one that
+        was missed: its members are frozen at a name the person has already
+        agreed to, `resolve_audio_plan` refuses music for one, and without this
+        the choice was dropped on the way in with nothing said.
+        """
+        if joined is None:
+            joined = len(pieces) > 1 and self.export_panel.join_enabled()
+        for piece in pieces:
+            target = self._music_target_for(piece)
+            if target is None:
+                continue
+            piece = getattr(piece, "clip", piece)
+            choice = self._planned_music(target)
+            if not choice.configured:
+                continue
+            if target in self._music_reading:
+                return (f"{piece.path.name}: its music track is still being "
+                        "read. Wait for it to finish, or clear the choice.")
+            if target in self._music_trouble:
+                return f"{piece.path.name}: {self._music_trouble[target]}"
+            reason = MusicPanel._refusal(self._preset_key(), joined, bundle)
+            if reason:
+                return f"{piece.path.name}: {reason}"
+            if choice.mode in (AudioMode.REPLACE, AudioMode.MIX) and (
+                    choice.asset is None):
+                return (f"{piece.path.name}: its music track has not been "
+                        "read yet. Choose the track again.")
+        return ""
+
+    def _music_for(self, piece) -> MusicChoice:
+        """The immutable choice this piece is queued with."""
+        target = self._music_target_for(piece)
+        if target is None:
+            return MusicChoice()
+        return self._planned_music(target)
+
     def _build_export_panel(self) -> QWidget:
         panel = self.export_panel = ExportPanel(self)
         panel.preset_changed.connect(self._on_preset_changed)
@@ -1184,6 +1459,7 @@ class MainWindow(QMainWindow):
         # is exactly when someone expects their work to have been kept.
         self._flush_session()
         self._retire_still_capture()
+        self._stop_music_probe()
         # First, because it is the one holding a decoder open on the card.
         self.player.shutdown()
         self._flight_scan_ready = False
@@ -1366,6 +1642,9 @@ class MainWindow(QMainWindow):
         # and any session opened by name belong to this generation.
         self._scan_source = folder
         self._scan_rebuilding = True
+        self._stop_music_probe(
+            "Reading the track stopped when this folder was listed again. "
+            "Choose the track again.")
         self._pending_generation = (
             self._scan_generation if self._pending_session is not None else -1)
         self._apply_decision_availability()
@@ -1825,6 +2104,7 @@ class MainWindow(QMainWindow):
         self._retire_still_capture()
 
         self._trim_clip = clip
+        self._sync_music_panel()
         self._clear_precise_frame()
         # Static for as long as this clip is the one loaded, so it is written
         # here rather than alongside the playhead.
@@ -2368,6 +2648,7 @@ class MainWindow(QMainWindow):
         if clip is None or not 0 <= index < len(clip.selects):
             return
         clip.current = index
+        self._sync_music_panel()
         chosen = clip.selects[index]
         self.trim_bar.in_point = chosen.start
         self.trim_bar.out_point = chosen.end or clip.duration
@@ -2875,6 +3156,18 @@ class MainWindow(QMainWindow):
                 )
                 return
 
+        # After the source itself has been judged, and still before a
+        # single job exists. Music that cannot be exported refuses the
+        # whole action rather than being dropped: the person asked for it,
+        # and a silent file with no explanation is the worst of both.
+        refusal = self._music_refusal(pieces)
+        if refusal:
+            QMessageBox.warning(
+                self, "That music cannot be exported yet",
+                "Nothing has been queued.\n\n" + refusal,
+            )
+            return
+
         if assembling:
             # Already resolved, in the order the list shows. The pieces that
             # were validated above are the pieces that get joined.
@@ -3015,7 +3308,8 @@ class MainWindow(QMainWindow):
                 self.jobs.append(Job([piece], key, settings, target,
                                      out_dir=out_dir, stem=stem,
                                      subfolders=subfolders, naming=naming,
-                                     template=template))
+                                     template=template,
+                                     audio=self._music_for(piece)))
 
         added = len(self.jobs) - before
         skipped = (
@@ -3082,6 +3376,18 @@ class MainWindow(QMainWindow):
         pieces, joined, problem = self._bundle_material()
         if problem:
             QMessageBox.warning(self, "Nothing to deliver", problem)
+            return
+
+        # Before the confirmation, never mind the queue. A bundle member is
+        # frozen at the name it was agreed under, and music is not exported
+        # for one — so a configured choice has to refuse here rather than be
+        # dropped on the way past.
+        refusal = self._music_refusal(pieces, joined=joined, bundle=True)
+        if refusal:
+            QMessageBox.warning(
+                self, "That music cannot be exported yet",
+                "Nothing has been queued.\n\n" + refusal,
+            )
             return
 
         out_dir = Path(self.export_panel.output_text().strip())

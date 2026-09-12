@@ -19,13 +19,18 @@ from __future__ import annotations
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout,
-    QWidget,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
+    QVBoxLayout, QWidget,
 )
 
+from .music_panel import MusicPanel
 from .player import FrameView
 from .trim import TrimBar
 from .widgets import INNER, TIGHT, PreviewPanel as AspectPreviewBox, dim
+
+# Enough of the band to work in without the window demanding a screen it may
+# not have. The rest scrolls; nothing is removed.
+MUSIC_BAND_MINIMUM = 220
 
 
 # What the sidebar says about where the keys are going.
@@ -94,6 +99,8 @@ class PreviewView(QObject):
     select_removed = Signal()
     select_renamed = Signal(str)
     activity_accepted = Signal()
+    track_requested = Signal()
+    music_changed = Signal()
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -103,6 +110,7 @@ class PreviewView(QObject):
         self._committed_name = ""
         self.preview_box = self._build_preview_box()
         self.trim_band = self._build_trim_band()
+        self.music_band = self._build_music_band()
 
     def _build_preview_box(self) -> QWidget:
         """The video and its transport, permanently visible."""
@@ -419,6 +427,83 @@ class PreviewView(QObject):
             # attempt" — seen in the native shots, and worse now that a lone
             # range can carry a name nobody chose to abbreviate.
             self.select_name.setCursorPosition(0)
+
+    def _build_music_band(self) -> QWidget:
+        """The approved music band, under the filmstrip and collapsed by default.
+
+        Collapsed means the body is hidden rather than merely disabled: the
+        point of the toggle is the vertical space it gives back to the picture,
+        and a disabled body still occupies its full height.
+        """
+        band = QGroupBox("Music")
+        band.setCheckable(True)
+        band.setChecked(False)
+        # Flat, and with no padding of its own. Collapsed, this band is one
+        # line the person can turn on; a framed box with margins around
+        # nothing costs height the picture needs and buys no clarity. The
+        # frame comes back with the contents.
+        band.setFlat(True)
+        layout = QVBoxLayout(band)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.music_content = QWidget()
+        body = QVBoxLayout(self.music_content)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(INNER)
+
+        chooser = QHBoxLayout()
+        chooser.setSpacing(TIGHT)
+        self.track_button = QPushButton("Choose track…")
+        self.track_button.setToolTip(
+            "Pick an audio file. It is read in the background; the passage and "
+            "levels below can be set once it has been read."
+        )
+        self.track_button.clicked.connect(lambda: self.track_requested.emit())
+        chooser.addWidget(self.track_button)
+        self.track_status = dim(QLabel(""))
+        self.track_status.setWordWrap(True)
+        chooser.addWidget(self.track_status, 1)
+        body.addLayout(chooser)
+
+        # Said plainly rather than left to be discovered by pressing play. The
+        # preview is the source picture and has no sound at all, so silence
+        # here is not a fault in the music that was just chosen.
+        self.music_silence_note = dim(QLabel(
+            "The preview above is the source picture and has no sound. Music "
+            "is heard in the finished file."
+        ))
+        self.music_silence_note.setWordWrap(True)
+        body.addWidget(self.music_silence_note)
+
+        self.music_panel = MusicPanel()
+        self.music_panel.changed.connect(lambda: self.music_changed.emit())
+        body.addWidget(self.music_panel)
+
+        # Measured before it was built this way: the controls stack to a 625px
+        # minimum, which made the whole window refuse to be shorter than
+        # 1419px — taller than the 900px it opens at, so the picture could
+        # never give the band its room. Scrolling bounds that without moving a
+        # control or dropping a line of the explanatory text: the band still
+        # expands downward as approved, and gives way when there is no room.
+        self.music_body = QScrollArea()
+        self.music_body.setWidget(self.music_content)
+        self.music_body.setWidgetResizable(True)
+        self.music_body.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.music_body.setMinimumHeight(MUSIC_BAND_MINIMUM)
+        self.music_body.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout.addWidget(self.music_body)
+        self.music_body.setVisible(False)
+        band.toggled.connect(self.music_body.setVisible)
+        band.toggled.connect(
+            lambda on: layout.setContentsMargins(
+                0, TIGHT, 0, INNER) if on else layout.setContentsMargins(
+                    0, 0, 0, 0))
+        return band
+
+    def show_track_status(self, text: str) -> None:
+        """What the acquisition is doing, in words a person can act on."""
+        self.track_status.setText(text)
 
     def _build_trim_band(self) -> QWidget:
         """The full-width filmstrip directly under the preview it scrubs."""
