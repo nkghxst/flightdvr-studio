@@ -362,9 +362,21 @@ def test_ui_replace_music_survives_real_export_and_decodes_as_the_known_tone(
     window.music_band.setChecked(True)
     qt_app.processEvents()
     window.preview_view.track_button.click()
+
+    assert window._music_target is not None
+    assert window._music_probe is not None, {
+        "track_status": window.preview_view.track_status.text(),
+        "music_target": window._music_target,
+    }
+
+    def music_ready() -> bool:
+        if window._music_trouble:
+            raise AssertionError(window._music_trouble)
+        return window.music_panel.capture().asset is not None
+
     _wait_for(
         qt_app,
-        lambda: window.music_panel.capture().asset is not None,
+        music_ready,
         "the real music probe",
     )
 
@@ -421,7 +433,18 @@ def test_ui_replace_music_survives_real_export_and_decodes_as_the_known_tone(
 
     # This is the actual UI queue action, not a direct ExportWorker call.
     window.queue_panel.start_button.click()
-    _wait_for(qt_app, lambda: job.status is JobStatus.DONE,
+
+    def export_finished() -> bool:
+        if job.status in (JobStatus.FAILED, JobStatus.CANCELLED):
+            raise AssertionError(
+                f"the real Master export ended as {job.status}: {job.message}")
+        if window.worker is not None and not window.worker.isRunning():
+            raise AssertionError(
+                f"the export worker stopped before completion: {job.status}, "
+                f"{job.message}")
+        return job.status is JobStatus.DONE
+
+    _wait_for(qt_app, export_finished,
               "the real Master export", timeout=180.0)
     assert not window.worker.isRunning()
     assert job.out_path.exists() and job.out_path.stat().st_size > 0
