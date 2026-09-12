@@ -203,7 +203,12 @@ class AudioOutput:
             return
         self._paused = True
         self._fence()
-        self._sink.suspend()
+        # Read again: a sink that failed while clearing has already been
+        # released by `_fence`, and suspending what is no longer there turns a
+        # device fault into an AttributeError out of an ordinary pause.
+        sink = self._sink
+        if sink is not None:
+            sink.suspend()
 
     def stop(self) -> None:
         """Release the sink. Safe to call twice, and safe after a failure."""

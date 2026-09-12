@@ -453,3 +453,52 @@ def test_a_sink_that_fails_while_clearing_goes_quiet_and_says_so():
 
     assert out.failure and "clearing" in out.failure
     assert out.paused
+
+
+def test_a_pause_survives_a_sink_that_fails_while_clearing():
+    """The correction-induced finding (#119 rereview).
+
+    `_fence` releases the sink when it fails, so pausing had nothing left to
+    suspend and raised `AttributeError` out of an ordinary pause — a device
+    fault turned into a crash. The earlier failure test exercised `reset()`
+    and never reached this path.
+    """
+    sink = FakeSink()
+
+    def explode() -> None:
+        raise OSError("the device went away")
+
+    out = AudioOutput(sink_factory=lambda: sink)
+    out.start()
+    out.resume()
+    out.present(a_block())
+    sink.reset = explode
+
+    out.pause()                      # must not raise
+
+    assert out.failure and "clearing" in out.failure
+    assert out.paused and not out.running
+    assert out.queued_bytes == 0
+    out.stop()                       # and stopping afterwards is still safe
+
+
+def test_every_control_is_safe_after_a_failure():
+    """Whatever order the transport calls them in, none of them raises."""
+    sink = FakeSink()
+
+    def explode() -> None:
+        raise OSError("the device went away")
+
+    out = AudioOutput(sink_factory=lambda: sink)
+    out.start()
+    out.resume()
+    sink.reset = explode
+    out.pause()
+
+    out.resume()
+    out.pause()
+    out.reset(2)
+    assert out.present(a_block(generation=2)) == 0
+    assert out.pump() == 0
+    out.stop()
+    assert out.paused and not out.running
