@@ -102,6 +102,10 @@ APP_TAGLINE = "Browse, trim and convert HDZero goggle DVR footage"
 ORG = "FlightDVR Studio"
 COPYRIGHT_HOLDER = "Isadu Nkemi"
 
+# Said whenever a decision is refused because the list is still being built.
+SCAN_IN_PROGRESS = ("Still listing this folder — decisions can be made once "
+                    "the scan finishes")
+
 # The name item already uses UserRole for its path, and SortItem uses the next
 # role for ordering. This one records the current-settings export marker so the
 # Exported filter reads the same answer the row displays.
@@ -180,6 +184,16 @@ class MainWindow(QMainWindow):
         # A session opened by name, waiting for the scan of its folder to
         # finish so there are clips to put it onto.
         self._pending_session: Session | None = None
+        # True between pressing Scan and that scan's results being adopted. The
+        # list is rebuilt from nothing in that window and no clip carries its
+        # history yet, so reading it back would record "nothing was decided"
+        # over marks that are perfectly good.
+        self._scan_rebuilding = False
+        self._pending_generation = -1
+        # The folder the running scan is reading. The source box can be changed
+        # while a scan runs, so the folder a result belongs to is the one that
+        # was read, not whatever the box says by the time it finishes.
+        self._scan_source: Path | None = None
         # Trims arrive continuously while a filmstrip handle is dragged. The
         # session is written after the dragging stops rather than during it,
         # which is the difference between one write and several hundred.
@@ -909,6 +923,11 @@ class MainWindow(QMainWindow):
 
         self.session = found
         self._pending_session = None
+        self._pending_generation = -1
+        # The clips on screen carry this session's decisions from here, so
+        # reading them back is meaningful again.
+        self._scan_rebuilding = False
+        self._apply_decision_availability()
         # Only once there is a file. A folder opened for the first time has a
         # session with a path and nothing written at it yet, and listing that
         # under "recent" offers a door that opens onto nothing.
@@ -956,16 +975,68 @@ class MainWindow(QMainWindow):
             return
         self.setWindowTitle(f"{self.session.title or 'Session'} — {APP_NAME}")
 
+    def _decisions_editable(self) -> bool:
+        """Whether a decision made now would be about the clips on screen.
+
+        False from pressing Scan until the session has been put back onto the
+        rebuilt list. In that window rows arrive one at a time with no history
+        attached, so a decision has nothing coherent to attach to and a write
+        would record emptiness over marks that are perfectly good.
+
+        Not a question about whether a session exists. A folder nobody has
+        marked yet has no session to write to, and marking a clip there is
+        still an ordinary thing to do.
+        """
+        return not self._scan_rebuilding
+
+    def _apply_decision_availability(self) -> None:
+        """Show the rule, rather than taking the edit and discarding it."""
+        self.preview_view.trim_band.setEnabled(self._decisions_editable())
+
+    def _say_the_scan_is_not_finished(self) -> None:
+        self.statusBar().showMessage(SCAN_IN_PROGRESS, 4000)
+
+    def _refuse_while_rebuilding(self) -> bool:
+        """True when an edit must not be accepted yet, having said so.
+
+        Every route that changes a clip asks this before it changes anything.
+        Disabling the trim band is the visible half of the rule and not the
+        enforcement: the picture owns the I, N and O shortcuts and is not
+        inside that band, so those handlers stay reachable while it is
+        disabled — and each of them writes to the clip before the session is
+        asked about it. A refusal that happens after the write is the
+        accept-then-discard this was supposed to end.
+        """
+        if self._decisions_editable():
+            return False
+        self._say_the_scan_is_not_finished()
+        return True
+
     def _touch_session(self) -> None:
         """Something was decided. Write it, once the deciding has stopped."""
-        if self.session is not None:
-            self._session_timer.start()
+        if self.session is None:
+            return
+        if not self._decisions_editable():
+            # Refused rather than queued. The scan now running ends by putting
+            # the stored decisions back onto the rebuilt list, which would
+            # discard this one anyway; saying so is the difference between a
+            # rule and a silent loss.
+            self._say_the_scan_is_not_finished()
+            return
+        self._session_timer.start()
 
     def _write_session(self) -> None:
         if self.session is None:
             return
-        capture_from(self.session, self.clips)
-        capture_settings(self.session, self.export_panel, self.clips)
+        if self._decisions_editable():
+            capture_from(self.session, self.clips)
+            capture_settings(self.session, self.export_panel, self.clips)
+        # Otherwise this is a rescan still in progress. Its clips carry no
+        # decisions yet, and `capture_from` reads a clip with no ranges and no
+        # review as one whose marks were deliberately cleared — so reading the
+        # list here erased the stored decisions of every clip that had already
+        # been rediscovered. What was flushed before the scan started is
+        # written again unchanged instead.
         try:
             self.session.save()
         except OSError as problem:
@@ -1250,6 +1321,14 @@ class MainWindow(QMainWindow):
         # old one is left to finish in its own time and simply ignored. Keeping
         # a reference stops Python collecting a running QThread.
         self._scan_generation += 1
+        # From here until _adopt_session runs, the clips on screen are a
+        # half-built list with no decisions on them. Both the folder being read
+        # and any session opened by name belong to this generation.
+        self._scan_source = folder
+        self._scan_rebuilding = True
+        self._pending_generation = (
+            self._scan_generation if self._pending_session is not None else -1)
+        self._apply_decision_availability()
         if self.scan_worker and self.scan_worker.isRunning():
             self._retired_scans.append(self.scan_worker)
         self._retired_scans = [w for w in self._retired_scans if w.isRunning()]
@@ -1296,15 +1375,24 @@ class MainWindow(QMainWindow):
 
         # After the clips exist, because a session is only meaningful applied
         # to them — and after sorting, so the rows it marks are the final ones.
-        source = self._source_path()
+        source = self._scan_source or self._source_path()
         if source is not None:
-            opened, self._pending_session = self._pending_session, None
+            opened = None
+            if self._pending_generation == generation:
+                opened, self._pending_session = self._pending_session, None
+                self._pending_generation = -1
             if opened is None and self._is_open_for(source):
                 # Scanning the same folder again keeps the session already
                 # open. Without this, pressing Scan after opening a session by
                 # name quietly swapped it for the folder's own autosave.
                 opened = self.session
             self._adopt_session(opened or for_source(source))
+
+        # Cleared even when there was no source to adopt for: a rebuild that
+        # ends without a session still ends, and leaving this set would lock
+        # decisions out for good.
+        self._scan_rebuilding = False
+        self._apply_decision_availability()
 
         self._flight_scan_ready = True
         self.thumbs.resume()
@@ -1414,6 +1502,10 @@ class MainWindow(QMainWindow):
         row = self.table.currentRow()
         if row < 0:
             self.statusBar().showMessage("Click a clip before marking it", 3000)
+            return
+        # Before the clip is touched: this writes the state onto the clip and
+        # into the table before the session hears about it.
+        if self._refuse_while_rebuilding():
             return
         name = self.table.item(row, 0)
         if name is None:
@@ -2040,6 +2132,11 @@ class MainWindow(QMainWindow):
         clip = self._trim_clip
         if clip is None:
             return
+        # Silently, unlike the others: this arrives continuously while a
+        # handle is dragged, and one status message per frame is not a rule,
+        # it is noise. The gestures that reach it have already said so.
+        if not self._decisions_editable():
+            return
         if len(clip.selects) > 1:
             # One range of several that happens to span the whole recording is
             # still a range. Normalising it to zero the way a lone trim is
@@ -2247,6 +2344,8 @@ class MainWindow(QMainWindow):
         Two seconds long rather than empty, because a zero-length select is
         not a range and would be dropped the moment it was written.
         """
+        if self._refuse_while_rebuilding():
+            return
         clip = self._trim_clip
         if clip is None:
             self.statusBar().showMessage("Click a clip in the list first", 4000)
@@ -2260,6 +2359,8 @@ class MainWindow(QMainWindow):
         self._touch_session()
 
     def _remove_select(self) -> None:
+        if self._refuse_while_rebuilding():
+            return
         clip = self._trim_clip
         if clip is None or len(clip.selects) < 2:
             return
@@ -2271,6 +2372,8 @@ class MainWindow(QMainWindow):
         self._touch_session()
 
     def _rename_select(self, name: str) -> None:
+        if self._refuse_while_rebuilding():
+            return
         clip = self._trim_clip
         if clip is None or not clip.selects:
             return
@@ -2278,7 +2381,7 @@ class MainWindow(QMainWindow):
         self._touch_session()
 
     def _set_in(self) -> None:
-        if self._trim_clip is None:
+        if self._trim_clip is None or self._refuse_while_rebuilding():
             return
         self.trim_bar.in_point = min(self.trim_bar.playhead,
                                      self.trim_bar.out_point - 0.5)
@@ -2286,7 +2389,7 @@ class MainWindow(QMainWindow):
         self._on_trim_changed(self.trim_bar.in_point, self.trim_bar.out_point)
 
     def _set_out(self) -> None:
-        if self._trim_clip is None:
+        if self._trim_clip is None or self._refuse_while_rebuilding():
             return
         self.trim_bar.out_point = max(self.trim_bar.playhead,
                                       self.trim_bar.in_point + 0.5)
@@ -2294,6 +2397,8 @@ class MainWindow(QMainWindow):
         self._on_trim_changed(self.trim_bar.in_point, self.trim_bar.out_point)
 
     def _reset_trim(self) -> None:
+        if self._refuse_while_rebuilding():
+            return
         clip = self._trim_clip
         if clip is None:
             return

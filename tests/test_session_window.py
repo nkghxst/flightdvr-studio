@@ -32,10 +32,11 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from flightdvr import session as session_module
-from flightdvr.media import ClipInfo
+from flightdvr.media import ClipInfo, Select
 
 
 def a_clip(name: str, size: int = 599_189_652) -> ClipInfo:
@@ -717,4 +718,345 @@ def test_an_unrelated_narrow_clip_cannot_refuse_a_valid_assembly(
     assert len(window.jobs) == 1, [j.out_path.name for j in window.jobs]
     assert [c.path.name for c in window.jobs[0].clips] == [
         "hdz_001.ts", "hdz_002.ts"]
+    close(window)
+
+
+# -- decisions during a partial rescan (#108) ---------------------------------
+#
+# Scanning flushes the session and empties the list, then rebuilds it one clip
+# at a time. The stored decisions only come back at `_scan_done`, so between
+# those two moments every clip on screen looks like a clip nobody has decided
+# anything about — and `capture_from` reads exactly that shape as "cleared".
+# Saving in that window therefore wrote emptiness over the real marks.
+
+
+class _NoScan(QObject):
+    """A ScanWorker that starts no thread, so a test can drive a partial scan.
+
+    The real `_scan` is what is under test here: the flush, the clearing of the
+    list and the generation bump are the behaviour, and a stub worker lets a
+    test stop partway through instead of racing a real one.
+    """
+
+    counted = Signal(int, int)
+    found = Signal(int, object)
+    done = Signal(int, int)
+
+    def __init__(self, tools, folder, recursive, generation, parent=None):
+        super().__init__(parent)
+        self.generation = generation
+        self.started = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def isRunning(self) -> bool:                      # noqa: N802 (Qt naming)
+        return False
+
+    def stop(self) -> None:
+        pass
+
+    def wait(self, *_args) -> bool:
+        return True
+
+
+@pytest.fixture
+def no_scan_worker(monkeypatch):
+    monkeypatch.setattr("flightdvr.ui.ScanWorker", _NoScan)
+
+
+def real_clip(folder: Path, name: str, payload: bytes = b"\0" * 4096) -> ClipInfo:
+    """A clip backed by a real file, so its fingerprint is a real identity.
+
+    `ClipInfo.fingerprint` hashes the canonical path, the size and the
+    modification time. Deriving all three from a file on disk means the
+    identity in these tests is the one the app would compute for that file,
+    rather than a value invented to make the test pass.
+    """
+    path = folder / name
+    if not path.exists():
+        # Written once. Rewriting it would move the modification time, and the
+        # fingerprint folds that in — so a "rediscovered" clip would quietly be
+        # a different recording and every test here would pass for the wrong
+        # reason. Calling this again is how a rescan finds the same file.
+        path.write_bytes(payload)
+    stat = path.stat()
+    return ClipInfo(
+        path=path, size=stat.st_size,
+        modified=datetime.fromtimestamp(stat.st_mtime),
+        duration=212.7, width=1280, height=720, fps=60.0,
+        video_codec="hevc", audio_codec="aac",
+        pix_fmt="yuvj420p", color_range="pc",
+    )
+
+
+def decide(window, index: int, *, start: float, end: float, sid: str,
+           name: str, review: str) -> None:
+    """Give a clip one literal named range and a review state."""
+    clip = window.clips[index]
+    clip.selects = [Select(start, end, name, sid=sid)]
+    clip.current = 0
+    clip.review = review
+    window._touch_session()
+
+
+def stored(card: Path) -> dict:
+    """The session as it actually is on disk, read back through the loader."""
+    found = session_module.for_source(card)
+    return {f: m for f, m in found.clips.items()}
+
+
+def both_decisions_intact(card: Path, first: ClipInfo, second: ClipInfo) -> None:
+    marks = stored(card)
+    for clip, sid, start, end, name, review in (
+        (first, "r-one", 12.0, 30.0, "run in", session_module.KEEP),
+        (second, "r-two", 44.5, 61.25, "the gap", session_module.REJECT),
+    ):
+        got = marks.get(clip.fingerprint)
+        assert got is not None, f"{clip.path.name} lost its record entirely"
+        assert got.review == review, f"{clip.path.name} review: {got.review!r}"
+        assert [(s.sid, s.start, s.end, s.name) for s in got.selects] == [
+            (sid, start, end, name)], f"{clip.path.name} ranges: {got.selects}"
+
+
+def marked_window(app, card, sessions_home):
+    """A window whose two clips each carry a literal saved decision."""
+    one = real_clip(card, "hdz_001.ts")
+    two = real_clip(card, "hdz_002.ts", b"\1" * 8192)
+    window = open_window(app, card, [one, two])
+    decide(window, 0, start=12.0, end=30.0, sid="r-one", name="run in",
+           review=session_module.KEEP)
+    decide(window, 1, start=44.5, end=61.25, sid="r-two", name="the gap",
+           review=session_module.REJECT)
+    close(window)
+    both_decisions_intact(card, one, two)
+    return one, two
+
+
+def test_saving_during_a_partial_rescan_keeps_the_decisions(
+        app, sessions_home, card, no_scan_worker):
+    """The defect. One clip comes back, the window is closed before the scan
+    finishes, and both clips' decisions have to still be there."""
+    one, two = marked_window(app, card, sessions_home)
+
+    window = open_window(app, card, [one, two])
+    window._scan()                       # flushes, empties the list, new generation
+    again = real_clip(card, "hdz_001.ts")
+    assert again.fingerprint == one.fingerprint, (
+        "the rescan has to rediscover the same recording, or this tests nothing")
+    window._add_clip(window._scan_generation, again)
+    close(window)                        # saves before _scan_done ever runs
+
+    both_decisions_intact(card, one, two)
+
+
+def test_save_as_during_a_partial_rescan_keeps_the_decisions(
+        app, sessions_home, card, no_scan_worker, tmp_path, monkeypatch):
+    """Save As flushes first, which is the same trap by a different door."""
+    one, two = marked_window(app, card, sessions_home)
+    target = tmp_path / "named.fdvr"
+
+    window = open_window(app, card, [one, two])
+    window._scan()
+    window._add_clip(window._scan_generation, real_clip(card, "hdz_001.ts"))
+    monkeypatch.setattr(
+        "flightdvr.ui.QFileDialog.getSaveFileName",
+        staticmethod(lambda *a, **k: (str(target), "")))
+    window._save_session_as()
+    close(window)
+
+    both_decisions_intact(card, one, two)
+    saved = session_module.Session.load(target)
+    assert saved.clips[one.fingerprint].selects, "the named copy lost the marks"
+    assert saved.clips[two.fingerprint].review == session_module.REJECT
+
+
+def test_repeated_scans_before_any_finishes_keep_the_decisions(
+        app, sessions_home, card, no_scan_worker):
+    """Pressing Scan again while one is running is ordinary impatience."""
+    one, two = marked_window(app, card, sessions_home)
+
+    window = open_window(app, card, [one, two])
+    window._scan()
+    window._add_clip(window._scan_generation, real_clip(card, "hdz_001.ts"))
+    window._scan()                                   # and again
+    window._add_clip(window._scan_generation, real_clip(card, "hdz_001.ts"))
+    close(window)
+
+    both_decisions_intact(card, one, two)
+
+
+def test_an_empty_or_failed_scan_keeps_the_decisions(
+        app, sessions_home, card, no_scan_worker):
+    """A scan that finds nothing must not be read as "nothing was decided"."""
+    one, two = marked_window(app, card, sessions_home)
+
+    window = open_window(app, card, [one, two])
+    window._scan()                                   # no clip is ever delivered
+    close(window)
+
+    both_decisions_intact(card, one, two)
+
+
+def test_a_clip_from_a_previous_scan_is_ignored(
+        app, sessions_home, card, no_scan_worker):
+    """A retired worker still finishing probes must not reach this list."""
+    one, two = marked_window(app, card, sessions_home)
+
+    window = open_window(app, card, [one, two])
+    stale = window._scan_generation
+    window._scan()
+    window._add_clip(stale, real_clip(card, "hdz_001.ts"))
+    assert window.clips == [], "a clip from the previous scan was listed"
+    close(window)
+
+    both_decisions_intact(card, one, two)
+
+
+def test_a_completed_rescan_restores_and_then_keeps_the_decisions(
+        app, sessions_home, card, no_scan_worker):
+    """The ordinary path still has to work: finish the scan, get them back."""
+    one, two = marked_window(app, card, sessions_home)
+
+    window = open_window(app, card, [one, two])
+    window._scan()
+    window._add_clip(window._scan_generation, real_clip(card, "hdz_001.ts"))
+    window._add_clip(window._scan_generation, real_clip(card, "hdz_002.ts",
+                                                        b"\1" * 8192))
+    window._scan_done(window._scan_generation, 2)
+    app.processEvents()
+
+    restored = {c.path.name: c for c in window.clips}
+    assert [s.sid for s in restored["hdz_001.ts"].selects] == ["r-one"]
+    assert restored["hdz_002.ts"].review == session_module.REJECT
+    close(window)
+    both_decisions_intact(card, one, two)
+
+
+def test_clearing_a_clip_after_adoption_still_clears_it(
+        app, sessions_home, card, no_scan_worker):
+    """The guard must not turn into "decisions can never be removed"."""
+    one, two = marked_window(app, card, sessions_home)
+
+    window = open_window(app, card, [one, two])
+    window.clips[0].selects = []
+    window.clips[0].review = session_module.UNREVIEWED
+    window._touch_session()
+    close(window)
+
+    marks = stored(card)
+    # Nothing decided is stored as no record at all: `Session.as_dict` drops an
+    # empty ClipMarks rather than writing 122 empty rows for a full card.
+    assert one.fingerprint not in marks, marks.get(one.fingerprint)
+    assert marks[two.fingerprint].review == session_module.REJECT, (
+        "clearing one clip disturbed another")
+
+
+def test_a_session_opened_by_name_survives_the_scan_it_triggers(
+        app, sessions_home, card, no_scan_worker, tmp_path, monkeypatch):
+    """The pending session belongs to the scan it started, not to this list.
+
+    Opening a session made from another folder offers to scan there. The scan
+    that follows is what puts the session onto clips, so saving before it
+    finishes must not write the half-built list over the file just opened.
+    """
+    one, two = marked_window(app, card, sessions_home)
+    named = tmp_path / "by-name.fdvr"
+    session_module.for_source(card).save(named)
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    window = open_window(app, elsewhere, [])
+    monkeypatch.setattr(
+        "flightdvr.ui.QFileDialog.getOpenFileName",
+        staticmethod(lambda *a, **k: (str(named), "")))
+    monkeypatch.setattr(
+        "flightdvr.ui.QMessageBox.question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+
+    window._open_session()                       # says yes, and starts the scan
+    assert window._pending_session is not None
+    assert window._pending_generation == window._scan_generation
+    window._add_clip(window._scan_generation, real_clip(card, "hdz_001.ts"))
+    close(window)                                # before _scan_done
+
+    kept = session_module.Session.load(named)
+    assert kept.clips[one.fingerprint].selects, "the opened session was emptied"
+    assert kept.clips[two.fingerprint].review == session_module.REJECT
+
+
+def test_the_window_says_decisions_are_not_editable_during_a_scan(
+        app, sessions_home, card, no_scan_worker):
+    """The editability rule, asserted where a person would see it.
+
+    Decisions are not accepted while the list is being rebuilt, because the
+    clips on screen have not had their history put back yet. Saying so is the
+    difference between a rule and a silent discard.
+    """
+    one, two = marked_window(app, card, sessions_home)
+
+    window = open_window(app, card, [one, two])
+    assert window._decisions_editable()
+    window._scan()
+    assert not window._decisions_editable()
+    window._add_clip(window._scan_generation, real_clip(card, "hdz_001.ts"))
+    assert not window.preview_view.trim_band.isEnabled()
+    window._scan_done(window._scan_generation, 1)
+    app.processEvents()
+    assert window._decisions_editable()
+    assert window.preview_view.trim_band.isEnabled()
+    close(window)
+
+
+def test_no_trim_route_can_change_a_partial_clip_during_a_scan(
+        app, sessions_home, card, no_scan_worker):
+    """The picture's shortcuts are not inside the trim band (#111 review).
+
+    `I`, `N` and `O` are owned by the frame view, so disabling the band leaves
+    their handlers reachable — and each writes to the clip before the session
+    is asked anything. Disabling the band is the visible half of the rule; this
+    is the half that enforces it. Handler-level state, not a physical keypress.
+    """
+    one, two = marked_window(app, card, sessions_home)
+
+    window = open_window(app, card, [one, two])
+    window._scan()
+    partial = real_clip(card, "hdz_001.ts")
+    window._add_clip(window._scan_generation, partial)
+    window._trim_clip = partial
+    window.trim_bar.set_clip(partial.duration, 0.0, partial.duration)
+    window.trim_bar.playhead = 12.0
+    assert not window._decisions_editable()
+    assert not window.preview_view.trim_band.isEnabled()
+
+    untouched = ([(s.start, s.end, s.name, s.sid) for s in partial.selects],
+                 partial.trim_in, partial.trim_out, partial.review)
+    for route in (window._set_in, window._set_out, window._add_select,
+                  window._remove_select, window._reset_trim,
+                  lambda: window._rename_select("renamed"),
+                  lambda: window._on_trim_changed(12.0, 30.0)):
+        route()
+        assert ([(s.start, s.end, s.name, s.sid) for s in partial.selects],
+                partial.trim_in, partial.trim_out,
+                partial.review) == untouched, f"{route} edited a partial clip"
+
+    window._scan_done(window._scan_generation, 1)
+    app.processEvents()
+    close(window)
+    both_decisions_intact(card, one, two)
+
+
+def test_the_trim_routes_work_again_once_the_scan_has_finished(
+        app, sessions_home, card, no_scan_worker):
+    """The guard must not become "trims can never be set again"."""
+    one, two = marked_window(app, card, sessions_home)
+
+    window = open_window(app, card, [one, two])
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    clip = window._trim_clip
+    assert clip is not None
+    window.trim_bar.playhead = 5.0
+    window._add_select()
+    assert len(clip.selects) == 2, "adding a range after the scan was refused"
     close(window)
