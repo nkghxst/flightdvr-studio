@@ -28,6 +28,8 @@ speaker.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from flightdvr.audio_device import (
@@ -884,10 +886,14 @@ def test_the_transport_drives_a_real_producer_from_play_to_close():
 
     live.play()
     assert live.status.playing, live.status.reason
-    for _ in range(20):
+    # Waited for, not spun for. The producer is a real thread on a machine
+    # that may be busy; twenty immediate ticks is a guess about scheduling,
+    # and it is the kind of guess that passes here and fails on a loaded CI
+    # runner — which is exactly what it did.
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and not output.presented:
         live.tick(0)
-        if output.presented:
-            break
+        time.sleep(0.01)
     assert output.presented, "the real producer handed over nothing"
 
     live.close()
