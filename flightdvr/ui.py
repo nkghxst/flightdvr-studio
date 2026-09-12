@@ -2658,11 +2658,6 @@ class MainWindow(QMainWindow):
         planned = []
         occupied: dict[str, list[str]] = {}
         for job in self.jobs:
-            if job.status is JobStatus.RUNNING or (
-                    job.status is JobStatus.PENDING and job.frozen):
-                occupied.setdefault(output_key(job.out_path), []).append(
-                    f"{job.name} ({job.status.value})")
-                continue
             try:
                 resolved = job.proposed_retarget(
                     stamp, out_dir=out_dir, template=template,
@@ -2675,6 +2670,12 @@ class MainWindow(QMainWindow):
                 )
                 return
             if resolved is None:
+                # A path does not stop being owned when its job stops moving.
+                # In particular, DONE is the state most likely to name a real
+                # file: omitting it lets a panel edit retarget a waiting job
+                # onto a completed export before the queue starts again.
+                occupied.setdefault(output_key(job.out_path), []).append(
+                    f"{job.name} ({job.status.value})")
                 continue
             identity = output_key(resolved.target)
             owners = occupied.setdefault(identity, [])
@@ -2693,7 +2694,8 @@ class MainWindow(QMainWindow):
                 )
             QMessageBox.warning(
                 self, "Queued outputs cannot be renamed",
-                "Nothing in the queue was renamed. These queued or running "
+                "Nothing in the queue was renamed. These queued, running, or "
+                "finished "
                 "exports would write to the same file:\n\n"
                 + "\n".join(lines),
             )

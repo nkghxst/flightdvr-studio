@@ -328,6 +328,45 @@ def test_a_retarget_collision_with_a_running_job_changes_nothing(
     assert "Encoding" in warned[0]
 
 
+def test_a_retarget_collision_with_a_finished_export_changes_nothing(
+        window, tmp_path, monkeypatch):
+    """A completed file still owns its path when pending names are edited."""
+    from PySide6.QtWidgets import QMessageBox
+
+    from flightdvr.jobs import Job, JobStatus
+    from flightdvr.presets import ExportSettings
+
+    pending = list(queue_up(window, [clip("hdz_047.ts")]))
+    before = pending[0].out_path
+    occupied = (
+        Path(window.export_panel.output_text()) /
+        "Master" / "shared_master.mp4"
+    )
+    occupied.parent.mkdir(parents=True, exist_ok=True)
+    occupied.write_bytes(b"completed export")
+    finished = Job(
+        [clip("hdz_049.ts")], "master", ExportSettings(), occupied,
+        status=JobStatus.DONE,
+    )
+    window.jobs.append(finished)
+    warned = []
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        lambda *args, **kwargs: warned.append(args[2]),
+    )
+
+    window.export_panel.template_edit.setText("shared_{preset}")
+    window.export_panel.template_edit.editingFinished.emit()
+
+    assert pending[0].out_path == before
+    assert finished.out_path == occupied
+    assert occupied.read_bytes() == b"completed export"
+    assert len(warned) == 1
+    assert "Nothing in the queue was renamed" in warned[0]
+    assert "shared_master.mp4" in warned[0]
+    assert "Done" in warned[0]
+
+
 def test_exported_marker_resolves_all_named_range_template_paths(
         window, tmp_path):
     """One legacy whole-clip guess cannot mark two named ranges exported."""
