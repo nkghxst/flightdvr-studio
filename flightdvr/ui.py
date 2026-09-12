@@ -1054,29 +1054,47 @@ class MainWindow(QMainWindow):
             return refusal
         return ""
 
-    def _build_monitor_stream(self, target):
-        """One `AudioStream` for the selected output, or None.
+    def _monitor_plan(self, target, listening):
+        """The audio plan being listened to, which is not always the export's.
 
-        Returns None rather than raising for the ordinary cases — a clip with
-        no configured music has nothing to mix, and that is not a fault.
+        Source only is a different plan, not a different volume: it resolves
+        `Original`, so the mix carries the recording's own sound and no music
+        at all. Reaching for the target's stored choice either way would leave
+        the control rebuilding the same thing it already had.
         """
         clip = self._trim_clip
         if clip is None or target is None:
-            return None
-        choice = self._planned_music(target)
-        if not choice.configured:
-            return None
+            return None, 0
+        if listening is Listening.SOURCE:
+            if not clip.has_audio:
+                return None, 0          # nothing of its own to hear
+            choice = MusicChoice(mode=AudioMode.ORIGINAL)
+        else:
+            choice = self._planned_music(target)
+            if not choice.configured:
+                return None, 0
         samples = round_samples(
             (clip.trimmed_duration or clip.duration) * OUTPUT_RATE)
         if samples <= 0:
-            return None
-        plan = resolve_audio_plan(
+            return None, 0
+        return resolve_audio_plan(
             choice, samples,
             source_has_audio=clip.has_audio,
             preset_key=self._preset_key(),
             joined=self.export_panel.join_enabled(),
             bundle=False,
-        )
+        ), samples
+
+    def _build_monitor_stream(self, target, listening=Listening.MIX):
+        """One `AudioStream` for what is being listened to, or None.
+
+        Returns None rather than raising for the ordinary cases — a clip with
+        no configured music has nothing to mix, and that is not a fault.
+        """
+        clip = self._trim_clip
+        plan, samples = self._monitor_plan(target, listening)
+        if plan is None or clip is None:
+            return None
         mapping = LiveAudioMapping(
             audio=plan, source=SampleSpan(0, samples, OUTPUT_RATE))
         source_reader = None

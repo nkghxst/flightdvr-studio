@@ -140,7 +140,7 @@ class LivePreview:
             self._reason = "monitoring is not available"
             return
         try:
-            self._stream = self._make_stream(target)
+            self._stream = self._make_stream(target, self._listening)
         except Exception as exc:
             self._stream = None
             self._reason = f"this output cannot be monitored: {exc}"

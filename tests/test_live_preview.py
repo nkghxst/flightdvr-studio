@@ -172,7 +172,7 @@ class FakeOutput:
 def transport(*, blocks: int = 4) -> tuple[LivePreview, FakeStream, FakeOutput]:
     stream = FakeStream(blocks=blocks)
     output = FakeOutput()
-    live = LivePreview(stream_factory=lambda _t: stream, output=output)
+    live = LivePreview(stream_factory=lambda _t, _l: stream, output=output)
     live.set_target("hdz_001.ts")
     return live, stream, output
 
@@ -196,7 +196,7 @@ def test_taking_a_target_leaves_it_paused_and_muted():
 def test_music_still_being_read_is_offered_as_a_reason_not_as_silence():
     """A pending track has nothing to mix. Saying so is the difference between
     a rule and a transport that looks broken."""
-    live = LivePreview(stream_factory=lambda _t: FakeStream(),
+    live = LivePreview(stream_factory=lambda _t, _l: FakeStream(),
                        output=FakeOutput())
     live.set_target("hdz_001.ts", reason="its music track is still being read")
 
@@ -211,7 +211,7 @@ def test_an_output_with_nothing_to_hear_is_not_a_refusal():
     """`offered` already says there is nothing. A reason on top of that would
     put an explanation where the ordinary standing note belongs, and a person
     who reads one excuse too many stops reading them."""
-    live = LivePreview(stream_factory=lambda _t: None, output=FakeOutput())
+    live = LivePreview(stream_factory=lambda _t, _l: None, output=FakeOutput())
     live.set_target("no music here")
     assert not live.status.offered
     assert not live.status.available
@@ -219,7 +219,7 @@ def test_an_output_with_nothing_to_hear_is_not_a_refusal():
 
 
 def test_a_stream_that_cannot_be_built_is_reported():
-    def explode(_target):
+    def explode(_target, _listening):
         raise RuntimeError("no reader for this target")
 
     live = LivePreview(stream_factory=explode, output=FakeOutput())
@@ -322,7 +322,7 @@ def test_switching_target_cannot_emit_the_old_output_s_sound():
     second = FakeStream(generation=7)
     output = FakeOutput()
     streams = iter((first, second))
-    live = LivePreview(stream_factory=lambda _t: next(streams), output=output)
+    live = LivePreview(stream_factory=lambda _t, _l: next(streams), output=output)
 
     live.set_target("one")
     live.play()
@@ -595,7 +595,7 @@ def test_playing_starts_both_sides_rather_than_resuming_a_stream_that_never_ran(
 def test_a_machine_with_no_audio_output_says_so_and_stays_quiet():
     stream = FakeStream()
     output = FakeOutput(no_device=True)
-    live = LivePreview(stream_factory=lambda _t: stream, output=output)
+    live = LivePreview(stream_factory=lambda _t, _l: stream, output=output)
     live.set_target("hdz_001.ts")
 
     live.play()
@@ -621,9 +621,9 @@ def test_choosing_source_only_rebuilds_rather_than_being_remembered():
     something."""
     built = []
 
-    def factory(target):
+    def factory(target, listening):
         stream = FakeStream()
-        built.append(stream)
+        built.append((listening, stream))
         return stream
 
     live = LivePreview(stream_factory=factory, output=FakeOutput())
@@ -633,15 +633,18 @@ def test_choosing_source_only_rebuilds_rather_than_being_remembered():
     live.set_listening(Listening.SOURCE)
 
     assert len(built) == 2, "the mix was not rebuilt for a different choice"
-    assert built[0].stopped, "the old mix was left running"
+    assert [listening for listening, _ in built] == [
+        Listening.MIX, Listening.SOURCE], (
+        "the factory was never told what to build")
+    assert built[0][1].stopped, "the old mix was left running"
 
 
 def test_choosing_the_same_thing_again_rebuilds_nothing():
     built = []
 
-    def factory(target):
-        built.append(FakeStream())
-        return built[-1]
+    def factory(target, listening):
+        built.append((listening, FakeStream()))
+        return built[-1][1]
 
     live = LivePreview(stream_factory=factory, output=FakeOutput())
     live.set_target("hdz_001.ts")
@@ -652,9 +655,9 @@ def test_choosing_the_same_thing_again_rebuilds_nothing():
 def test_changing_what_is_heard_while_playing_keeps_playing():
     built = []
 
-    def factory(target):
-        built.append(FakeStream())
-        return built[-1]
+    def factory(target, listening):
+        built.append((listening, FakeStream()))
+        return built[-1][1]
 
     live = LivePreview(stream_factory=factory, output=FakeOutput())
     live.set_target("hdz_001.ts")
@@ -662,7 +665,7 @@ def test_changing_what_is_heard_while_playing_keeps_playing():
     live.set_listening(Listening.SOURCE)
 
     assert live.status.playing
-    assert built[-1].started
+    assert built[-1][1].started
 
 
 def test_a_producer_that_fails_stops_monitoring_instead_of_being_swallowed():
@@ -699,7 +702,7 @@ def test_switching_target_reaps_the_stream_it_leaves():
     first = FakeStream(generation=0)
     second = FakeStream(generation=5)
     streams = iter((first, second))
-    live = LivePreview(stream_factory=lambda _t: next(streams),
+    live = LivePreview(stream_factory=lambda _t, _l: next(streams),
                        output=FakeOutput())
     live.set_target("one")
     live.play()
@@ -710,3 +713,79 @@ def test_switching_target_reaps_the_stream_it_leaves():
     for waiter in live._reapers:
         waiter.join(2.0)
     assert first.waited is not None, "the old producer was never waited for"
+
+
+def test_source_only_and_the_finished_mix_are_different_plans(window):
+    """The finding my last correction missed (#121 rereview).
+
+    Rebuilding proved only that a second object was made. What matters is that
+    it carries a different plan: source only resolves `Original`, so the mix is
+    the recording's own sound and no music at all. Asserted on the resolved
+    plan, which is the thing the stream is built from.
+    """
+    from flightdvr.audio_plan import (
+        AudioMode, AudioAsset, MusicChoice, SampleSpan,
+    )
+
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    target = window._music_target
+    assert target is not None
+
+    track = window._trim_clip.path.parent / "song.mp3"
+    asset = AudioAsset(track, "b" * 64, 0, 44_100, 2, 44_100 * 30)
+    window._store_music(target, MusicChoice(
+        track=track, mode=AudioMode.REPLACE, asset=asset,
+        passage=SampleSpan(0, asset.decoded_samples, asset.sample_rate)))
+
+    mixed, _ = window._monitor_plan(target, Listening.MIX)
+    source, _ = window._monitor_plan(target, Listening.SOURCE)
+
+    assert mixed is not None and source is not None
+    assert mixed.mode is AudioMode.REPLACE
+    # Equal, not identical: `OutputPlan.get` hands back a defensive copy.
+    assert mixed.asset == asset, "the mix lost the chosen track"
+    assert source.mode is AudioMode.ORIGINAL, (
+        "source only resolved the same plan as the finished mix")
+    assert source.asset is None, "source only was still carrying the music"
+    assert source.music_gain == 0
+
+
+def test_source_only_on_a_silent_recording_has_nothing_to_offer(window,
+                                                               monkeypatch):
+    """`Original` on a clip with no sound of its own is silence. Offering it
+    would be a control that plays nothing and says nothing."""
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    monkeypatch.setattr(type(window._trim_clip), "has_audio",
+                        property(lambda _self: False))
+
+    plan, _ = window._monitor_plan(window._music_target, Listening.SOURCE)
+    assert plan is None
+
+
+def test_the_window_passes_the_listening_choice_through_to_the_plan(window):
+    """The whole path, not the halves: changing the control changes what the
+    factory is asked to build."""
+    from flightdvr.audio_plan import (
+        AudioMode, AudioAsset, MusicChoice, SampleSpan,
+    )
+
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    target = window._music_target
+    track = window._trim_clip.path.parent / "song.mp3"
+    asset = AudioAsset(track, "c" * 64, 0, 44_100, 2, 44_100 * 30)
+    window._store_music(target, MusicChoice(
+        track=track, mode=AudioMode.REPLACE, asset=asset,
+        passage=SampleSpan(0, asset.decoded_samples, asset.sample_rate)))
+
+    asked = []
+    original = window._build_monitor_stream
+    window.live_preview._make_stream = lambda t, listening: asked.append(
+        listening) or None
+    combo = window.preview_view.listening_combo
+    combo.setCurrentIndex(combo.findData("source"))
+
+    assert Listening.SOURCE in asked, (
+        "the control changed nothing the factory could see")
