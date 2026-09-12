@@ -36,7 +36,7 @@ import pytest
 from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import QApplication
 
-from flightdvr.audio_plan import AudioMode, AudioAsset, MusicChoice
+from flightdvr.audio_plan import AudioMode, AudioAsset, MusicChoice, SampleSpan
 from flightdvr.jobs import Job, JobStatus
 from flightdvr.media import ClipInfo, Select
 from flightdvr.output_plan import OutputTarget
@@ -289,6 +289,87 @@ def warnings_from(monkeypatch) -> list:
 
 # -- what a queued job carries -------------------------------------------------
 
+def test_accepting_a_track_stores_the_displayed_full_passage_and_queues_it(
+        window, monkeypatch, tmp_path, app):
+    """The panel shows the whole validated track, so the authoritative choice
+    and the queued snapshot must carry that same passage without a token edit.
+
+    The missing integration stored ``passage=None`` at acceptance, even though
+    the visible controls and ``capture()`` both said the whole track. The
+    worker then rejected the plausible queued job before publication.
+    """
+    clip = focus(window, 0)
+    target = window._music_target
+    track = tmp_path / "song.mp3"
+    asset = an_asset(track)
+    probe = choose_track(window, monkeypatch, track)
+
+    probe.deliver(asset)
+    app.processEvents()
+
+    expected = SampleSpan(0, asset.decoded_samples, asset.sample_rate)
+    displayed = window.music_panel.capture()
+    authoritative = window._planned_music(target)
+    assert displayed.passage == expected
+    assert authoritative.passage == expected, (
+        "the displayed full-track default never reached OutputPlan")
+
+    tick(window, 0)
+    said = warnings_from(monkeypatch)
+    window._add_to_queue()
+
+    queued = [job for job in window.jobs if job.clips[0].path == clip.path]
+    assert said == []
+    assert len(queued) == 1
+    assert queued[0].audio.passage == expected
+
+
+def test_a_late_accepted_track_stores_its_default_on_the_bound_nonfocus_target(
+        window, monkeypatch, tmp_path, app):
+    """A probe result belongs to its bound target, not whichever row is open."""
+    first = focus(window, 0)
+    first_target = window._music_target
+    track = tmp_path / "first.mp3"
+    asset = an_asset(track)
+    probe = choose_track(window, monkeypatch, track)
+
+    second = focus(window, 1)
+    probe.deliver(asset)
+    app.processEvents()
+
+    expected = SampleSpan(0, asset.decoded_samples, asset.sample_rate)
+    stored = window._planned_music(first_target)
+    assert stored.asset == asset
+    assert stored.passage == expected
+    assert window.music_panel.capture().track is None, (
+        "the late result changed the output that happened to be focused")
+    assert first.path != second.path
+
+
+def test_reaccepting_a_validated_track_preserves_an_explicit_user_passage(
+        window, monkeypatch, tmp_path, app):
+    """Normalising a missing default must never widen a passage the user set."""
+    focus(window, 0)
+    target = window._music_target
+    track = tmp_path / "song.mp3"
+    asset = an_asset(track)
+    probe = choose_track(window, monkeypatch, track)
+    probe.deliver(asset)
+    app.processEvents()
+
+    window.music_panel.passage_start.setValue(2.0)
+    window.music_panel.passage_end.setValue(5.0)
+    app.processEvents()
+    chosen = window._planned_music(target).passage
+    assert chosen == SampleSpan(88_200, 220_500, 44_100)
+
+    window._start_music_probe(target, track)
+    _FakeProbe.made[-1].deliver(asset)
+    app.processEvents()
+
+    assert window._planned_music(target).passage == chosen
+
+
 def test_a_queued_job_carries_the_choice_that_was_on_screen(
         window, monkeypatch, tmp_path, app):
     """The whole point: the band's value reaches `Job.audio`."""
@@ -378,6 +459,27 @@ def test_a_retarget_renames_the_output_and_leaves_the_music_alone(
 
 
 # -- refusing, rather than dropping --------------------------------------------
+
+def test_a_validated_track_without_a_passage_is_refused_before_queue_mutation(
+        window, monkeypatch, tmp_path):
+    """The UI rejects a genuinely incomplete choice before the worker has to."""
+    clip = focus(window, 0)
+    target = window._music_target
+    track = tmp_path / "incomplete.mp3"
+    asset = an_asset(track)
+    window._store_music(target, MusicChoice(
+        track=track, mode=AudioMode.REPLACE, asset=asset, passage=None))
+    tick(window, 0)
+    before = list(window.jobs)
+    said = warnings_from(monkeypatch)
+
+    window._add_to_queue()
+
+    assert window.jobs == before
+    assert said and "Nothing has been queued" in said[0]
+    assert "passage" in said[0].lower()
+    assert clip.path.name in said[0]
+
 
 def test_an_unsupported_preset_refuses_instead_of_dropping_the_music(
         window, monkeypatch, tmp_path, app):
