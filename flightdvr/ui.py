@@ -1765,20 +1765,27 @@ class MainWindow(QMainWindow):
         for item in items:
             item.setData(REVIEW_ROLE, clip.review)
 
-        # These are six programmatic cells, not six user edits. Letting every
-        # setItem emit itemChanged ran the count, source-option and estimate
-        # refresh chain six times per recording. The scan keeps its progressive
-        # row/review/count updates below, and _scan_done performs the one final
-        # derived refresh after every delivered row exists. Signals are restored
-        # before any person can edit the row.
+        # During a rebuild these are six programmatic cells, not six user edits.
+        # Letting every setItem emit itemChanged ran the count, source-option and
+        # estimate refresh chain six times per recording. The scan keeps its
+        # progressive row/review/count updates below, and _scan_done performs
+        # the one final derived refresh after every delivered row exists.
+        #
+        # Outside a rebuild there is no final callback. Preserve that path's
+        # ordinary itemChanged delivery exactly; layout construction and any
+        # future direct caller still see the complete row arrive as before.
         row = self.table.rowCount()
-        previous = self.table.blockSignals(True)
+        suppress_refresh = self._scan_rebuilding
+        previous = (
+            self.table.blockSignals(True) if suppress_refresh else False
+        )
         try:
             self.table.insertRow(row)
             for column, item in enumerate(items):
                 self.table.setItem(row, column, item)
         finally:
-            self.table.blockSignals(previous)
+            if suppress_refresh:
+                self.table.blockSignals(previous)
 
         self.table.setRowHeight(row, self.table.iconSize().height() + 6)
         self.thumbs.request(clip)

@@ -141,3 +141,34 @@ def test_a_cancelled_partial_scan_keeps_its_rows_and_flushes_once(
         window._scan_source = None
         window._flight_scan_ready = False
         table.setSortingEnabled(True)
+
+
+def test_a_row_delivered_outside_a_scan_keeps_ordinary_signal_delivery(
+        window, monkeypatch):
+    """Direct delivery has no later ``_scan_done`` callback to flush state.
+
+    Layout fixtures use this path. The optimization belongs only to an active
+    rebuild, so a direct caller keeps the same itemChanged behavior it had at
+    the base rather than acquiring a second, subtly different delivery policy.
+    """
+    table = window.table
+    table.setSortingEnabled(False)
+    table.setRowCount(0)
+    window.clips.clear()
+    window.clip_by_path.clear()
+    window._expected = 0
+    window._scan_rebuilding = False
+    generation = window._scan_generation
+    refreshed = []
+    monkeypatch.setattr(window, "_update_counts",
+                        lambda: refreshed.append("derived"))
+    monkeypatch.setattr(window.thumbs, "request", lambda *_: None)
+
+    try:
+        window._add_clip(generation, clip("hdz_direct.ts"))
+        assert refreshed == ["derived"] * table.columnCount()
+    finally:
+        table.setRowCount(0)
+        window.clips.clear()
+        window.clip_by_path.clear()
+        table.setSortingEnabled(True)
