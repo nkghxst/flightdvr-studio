@@ -19,7 +19,13 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 
-from test_ui_and_scan import clip, qt_app, window  # noqa: F401
+from test_music_wiring import (  # noqa: F401
+    a_clip as clip,
+    app,
+    probes,
+    sessions_home,
+    window,
+)
 
 
 def test_inserting_a_scan_row_does_not_imitate_six_user_edits(
