@@ -19,8 +19,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QScrollArea, QSlider, QVBoxLayout, QWidget,
 )
 
 from .music_panel import MusicPanel
@@ -31,6 +31,12 @@ from .widgets import INNER, TIGHT, PreviewPanel as AspectPreviewBox, dim
 # Enough of the band to work in without the window demanding a screen it may
 # not have. The rest scrolls; nothing is removed.
 MUSIC_BAND_MINIMUM = 220
+
+# Said whenever monitoring is not running for an ordinary reason.
+SILENT_PREVIEW = (
+    "The preview above is the source picture and has no sound. Music is heard "
+    "in the finished file."
+)
 
 
 # What the sidebar says about where the keys are going.
@@ -101,6 +107,10 @@ class PreviewView(QObject):
     activity_accepted = Signal()
     track_requested = Signal()
     music_changed = Signal()
+    listen_toggled = Signal(bool)
+    listen_level_changed = Signal(int)
+    listening_changed = Signal(str)
+    restart_requested = Signal()
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -428,6 +438,69 @@ class PreviewView(QObject):
             # range can carry a name nobody chose to abbreviate.
             self.select_name.setCursorPosition(0)
 
+    def _build_listening_row(self) -> QHBoxLayout:
+        """Monitoring only, and no second transport.
+
+        Play and Pause stay the picture's own button: there is one player and
+        one clock, and a separate sound transport would be a second one to
+        disagree with.
+        """
+        row = QHBoxLayout()
+        row.setSpacing(TIGHT)
+
+        self.listen_check = QCheckBox("Listen")
+        self.listen_check.setToolTip(
+            "Hear the mix while the preview plays. Off until you ask for it, "
+            "and off again whenever the sound cannot be trusted."
+        )
+        self.listen_check.toggled.connect(
+            lambda on: self.listen_toggled.emit(bool(on)))
+        row.addWidget(self.listen_check)
+
+        self.listening_combo = QComboBox()
+        self.listening_combo.addItem("Finished mix", "mix")
+        self.listening_combo.addItem("Source only", "source")
+        self.listening_combo.currentIndexChanged.connect(
+            lambda *_: self.listening_changed.emit(
+                str(self.listening_combo.currentData())))
+        row.addWidget(self.listening_combo)
+
+        row.addWidget(dim(QLabel("Level")))
+        self.listen_level = QSlider(Qt.Orientation.Horizontal)
+        self.listen_level.setRange(0, 100)
+        self.listen_level.setValue(25)
+        self.listen_level.setMaximumWidth(120)
+        self.listen_level.setToolTip(
+            "How loud the monitoring is. It changes nothing about the export."
+        )
+        self.listen_level.valueChanged.connect(
+            lambda value: self.listen_level_changed.emit(int(value)))
+        row.addWidget(self.listen_level)
+
+        self.restart_button = QPushButton("Start from the beginning")
+        self.restart_button.setToolTip(
+            "Back to the start of this output — the usual thing to want after "
+            "changing a track."
+        )
+        self.restart_button.clicked.connect(
+            lambda: self.restart_requested.emit())
+        row.addWidget(self.restart_button)
+        row.addStretch(1)
+        return row
+
+    def show_monitoring(self, listening: bool, reason: str) -> None:
+        """Say what the sound is doing, including when it is doing nothing.
+
+        A reason replaces the standing note rather than sitting beside it:
+        two lines about silence, one of them stale, is how a person stops
+        reading either.
+        """
+        self.music_silence_note.setText(reason or SILENT_PREVIEW)
+        if self.listen_check.isChecked() != listening:
+            blocked = self.listen_check.blockSignals(True)
+            self.listen_check.setChecked(listening)
+            self.listen_check.blockSignals(blocked)
+
     def _build_music_band(self) -> QWidget:
         """The approved music band, under the filmstrip and collapsed by default.
 
@@ -468,10 +541,9 @@ class PreviewView(QObject):
         # Said plainly rather than left to be discovered by pressing play. The
         # preview is the source picture and has no sound at all, so silence
         # here is not a fault in the music that was just chosen.
-        self.music_silence_note = dim(QLabel(
-            "The preview above is the source picture and has no sound. Music "
-            "is heard in the finished file."
-        ))
+        body.addLayout(self._build_listening_row())
+
+        self.music_silence_note = dim(QLabel(SILENT_PREVIEW))
         self.music_silence_note.setWordWrap(True)
         body.addWidget(self.music_silence_note)
 

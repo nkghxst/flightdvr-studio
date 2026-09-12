@@ -67,8 +67,14 @@ from .jobs import ExportWorker, Job, JobStatus, write_concat_file
 from .media import ClipInfo, Select, Tools, available_encoders
 from dataclasses import replace
 
-from .audio_plan import AudioMode, MusicChoice
-from .audio_reader import MusicAssetProbe
+from .audio_plan import (
+    OUTPUT_RATE, AudioMode, MusicChoice, SampleSpan, resolve_audio_plan,
+    round_samples,
+)
+from .audio_device import AudioOutput
+from .audio_reader import FfmpegPcmReader, MusicAssetProbe
+from .audio_stream import AudioStream, LiveAudioMapping, MonitorState
+from .live_preview import Listening, LivePreview
 from .music_panel import MusicPanel
 from .output_naming import naming_inputs, resolve_output
 from .output_plan import OutputPlan, OutputTarget
@@ -194,6 +200,9 @@ class MainWindow(QMainWindow):
         # reading with nothing that can be done about it.
         self._music_reading: dict[OutputTarget, Path] = {}
         self._music_trouble: dict[OutputTarget, str] = {}
+        # Built once the preview view exists, because it wires that view's
+        # controls. Monitoring only: nothing here reaches a job or a session.
+        self.live_preview: LivePreview | None = None
         # The folder the running scan is reading. The source box can be changed
         # while a scan runs, so the folder a result belongs to is the one that
         # was read, not whatever the box says by the time it finishes.
@@ -757,6 +766,7 @@ class MainWindow(QMainWindow):
         view.track_requested.connect(self._choose_music_track)
         view.music_changed.connect(self._on_music_changed)
         view.music_band.toggled.connect(lambda *_: self._relayout())
+        self._build_live_preview()
         return view.music_band
 
     @property
@@ -825,6 +835,7 @@ class MainWindow(QMainWindow):
                               joined=joined, bundle=bundle)
         self.music_panel.set_asset(choice.asset)
         self._show_music_state(target)
+        self._sync_live_preview()
 
     def _show_music_state(self, target: OutputTarget) -> None:
         """One line about acquisition, and one about what the export will do."""
@@ -869,6 +880,7 @@ class MainWindow(QMainWindow):
             return
         self._store_music(target, self.music_panel.capture())
         self._show_music_state(target)
+        self._sync_live_preview()
         self._refresh_export_markers()
 
     def _choose_music_track(self) -> None:
@@ -1006,6 +1018,115 @@ class MainWindow(QMainWindow):
         if target is None:
             return MusicChoice()
         return self._planned_music(target)
+
+    # -- monitoring ------------------------------------------------------------
+
+    def _build_live_preview(self) -> None:
+        """One transport, wired to the picture's own clock and controls."""
+        view = self.preview_view
+        self.live_preview = LivePreview(
+            stream_factory=self._build_monitor_stream,
+            output=AudioOutput(),
+        )
+        view.listen_toggled.connect(self._on_listen_toggled)
+        view.listen_level_changed.connect(
+            lambda value: self.live_preview.set_level(value / 100.0))
+        view.listening_changed.connect(
+            lambda name: self.live_preview.set_listening(Listening(name)))
+        view.restart_requested.connect(self._on_monitor_restart)
+
+    def _monitor_refusal(self, target) -> str:
+        """Why this output cannot be monitored, in the words it is refused in.
+
+        The same triple `_run_job` resolves music under, asked of the panel so
+        there is one place the rule lives, plus the two states music wiring
+        already models: a read still running, and one that failed.
+        """
+        if target is None:
+            return "Choose a clip to hear its output."
+        if target in self._music_reading:
+            return "Its music track is still being read."
+        if target in self._music_trouble:
+            return self._music_trouble[target]
+        _name, preset_key, joined, bundle = self._music_context()
+        refusal = MusicPanel._refusal(preset_key, joined, bundle)
+        if refusal:
+            return refusal
+        return ""
+
+    def _build_monitor_stream(self, target):
+        """One `AudioStream` for the selected output, or None.
+
+        Returns None rather than raising for the ordinary cases — a clip with
+        no configured music has nothing to mix, and that is not a fault.
+        """
+        clip = self._trim_clip
+        if clip is None or target is None:
+            return None
+        choice = self._planned_music(target)
+        if not choice.configured:
+            return None
+        samples = round_samples(
+            (clip.trimmed_duration or clip.duration) * OUTPUT_RATE)
+        if samples <= 0:
+            return None
+        plan = resolve_audio_plan(
+            choice, samples,
+            source_has_audio=clip.has_audio,
+            preset_key=self._preset_key(),
+            joined=self.export_panel.join_enabled(),
+            bundle=False,
+        )
+        mapping = LiveAudioMapping(
+            audio=plan, source=SampleSpan(0, samples, OUTPUT_RATE))
+        source_reader = None
+        if clip.has_audio:
+            source_reader = FfmpegPcmReader.for_source(
+                self.tools, clip.path, stream_index=0,
+                timeline_frames=samples)
+        music_reader = None
+        if plan.asset is not None:
+            music_reader = FfmpegPcmReader.for_music(self.tools, plan.asset)
+        return AudioStream(mapping, source_reader=source_reader,
+                           music_reader=music_reader,
+                           monitor=MonitorState(
+                               level=self.live_preview.level, muted=True))
+
+    def _sync_live_preview(self) -> None:
+        """Point the transport at whatever the band is now editing."""
+        if self.live_preview is None:
+            return
+        target = self._music_target
+        self.live_preview.set_target(
+            target, reason=self._monitor_refusal(target))
+        self.live_preview.set_speed(
+            2.0 if self._preset_key() == "slowmo" else 1.0)
+        self._show_monitoring()
+
+    def _show_monitoring(self) -> None:
+        status = self.live_preview.status
+        self.preview_view.show_monitoring(
+            status.playing and not status.muted, status.reason)
+
+    def _on_listen_toggled(self, listening: bool) -> None:
+        if listening:
+            self.live_preview.set_muted(False)
+            self.live_preview.play()
+        else:
+            self.live_preview.set_muted(True)
+            self.live_preview.pause()
+        self._show_monitoring()
+
+    def _on_monitor_restart(self) -> None:
+        self.live_preview.restart()
+        self._show_monitoring()
+
+    def _drive_monitoring(self, seconds: float) -> None:
+        """The picture is here. Hand over the sound that belongs there."""
+        if self.live_preview is None or not self.live_preview.status.playing:
+            return
+        self.live_preview.tick(round_samples(max(0.0, seconds) * OUTPUT_RATE))
+        self._show_monitoring()
 
     def _build_export_panel(self) -> QWidget:
         panel = self.export_panel = ExportPanel(self)
@@ -1459,6 +1580,8 @@ class MainWindow(QMainWindow):
         # is exactly when someone expects their work to have been kept.
         self._flush_session()
         self._retire_still_capture()
+        if self.live_preview is not None:
+            self.live_preview.close()
         self._stop_music_probe()
         # First, because it is the one holding a decoder open on the card.
         self.player.shutdown()
@@ -2214,6 +2337,12 @@ class MainWindow(QMainWindow):
         """The filmstrip was clicked or dragged."""
         self._clear_precise_frame()
         self.player.seek(seconds)
+        # The sound goes where the picture went. Without this it would carry
+        # on from where it was, which is the drift the transport would then
+        # correctly refuse to play.
+        if self.live_preview is not None:
+            self.live_preview.seek(
+                round_samples(max(0.0, seconds) * OUTPUT_RATE))
         self._show_frame(seconds)
         self._update_trim_labels()
         self._sharpen_timer.start()
@@ -2291,6 +2420,10 @@ class MainWindow(QMainWindow):
         # I always means the picture on screen.
         self.trim_bar.set_playhead(seconds)
         self._update_trim_labels()
+        # The painted frame is the tick. Driving the sound from the picture
+        # that was actually shown, rather than from a clock running beside it,
+        # is what keeps one player in charge of both.
+        self._drive_monitoring(seconds)
 
     def _precise_frame_ready(self, image, seconds: float,
                              frame_number: int) -> None:

@@ -139,7 +139,10 @@ class LivePreview:
             self._reason = f"this output cannot be monitored: {exc}"
             return
         if self._stream is None:
-            self._reason = "this output has nothing to monitor"
+            # Not a refusal. An output nobody gave music to has nothing to
+            # listen to, which `offered` already says; inventing a reason for
+            # it would put an explanation where the ordinary standing note
+            # belongs, and train people to stop reading both.
             return
         # Anchor the device to the new stream's generation. Without this the
         # output still holds the one it was given for the previous target, so

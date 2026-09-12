@@ -176,11 +176,15 @@ def test_music_still_being_read_is_offered_as_a_reason_not_as_silence():
     assert not live.status.playing, "play worked while the track was pending"
 
 
-def test_an_unmonitorable_output_says_so_rather_than_pretending():
+def test_an_output_with_nothing_to_hear_is_not_a_refusal():
+    """`offered` already says there is nothing. A reason on top of that would
+    put an explanation where the ordinary standing note belongs, and a person
+    who reads one excuse too many stops reading them."""
     live = LivePreview(stream_factory=lambda _t: None, output=FakeOutput())
-    live.set_target("assembly")
+    live.set_target("no music here")
+    assert not live.status.offered
     assert not live.status.available
-    assert "nothing to monitor" in live.status.reason
+    assert live.status.reason == ""
 
 
 def test_a_stream_that_cannot_be_built_is_reported():
@@ -445,3 +449,98 @@ def test_nothing_here_is_written_anywhere():
                        for name in dir(LivePreview) if not name.startswith("_"))
         assert not any(forbidden in name.lower()
                        for name in vars(live_preview) if not name.startswith("_"))
+
+
+# -- the window's half ----------------------------------------------------------
+
+@pytest.fixture
+def window(monkeypatch, tmp_path):
+    """A window whose background work is stubbed, as #116 established.
+
+    The audio output is replaced too: these settle the wiring, and a real sink
+    would be a device opening in a test suite.
+    """
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from datetime import datetime
+    from pathlib import Path
+
+    from flightdvr.media import ClipInfo, find_tools
+    import tests.test_music_wiring as wiring
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr("flightdvr.ui.ScanWorker", wiring._NoScan)
+    monkeypatch.setattr("flightdvr.ui.HardwareProbe", wiring._NoProbe)
+    monkeypatch.setattr("flightdvr.ui.FilmstripLoader", wiring._NoStrip)
+    monkeypatch.setattr("flightdvr.updates.should_check", lambda *a, **k: False)
+    monkeypatch.setattr("flightdvr.ui.AudioOutput", lambda *a, **k: FakeOutput())
+    monkeypatch.setattr("flightdvr.ui.MusicAssetProbe", wiring._FakeProbe,
+                        raising=False)
+
+    from flightdvr.ui import MainWindow
+    card = tmp_path / "card"
+    card.mkdir()
+    made = MainWindow(find_tools())
+    made.source_combo.insertItem(0, str(card), str(card))
+    made.source_combo.setCurrentIndex(0)
+    monkeypatch.setattr(made.thumbs, "request", lambda *_: None)
+    monkeypatch.setattr(made.player, "load", lambda *a, **k: None)
+    clip = ClipInfo(path=card / "hdz_001.ts", size=1024,
+                    modified=datetime(2025, 10, 8, 18, 39), duration=30.0,
+                    width=1280, height=720, fps=60.0, video_codec="hevc",
+                    audio_codec="aac", pix_fmt="yuvj420p", color_range="pc")
+    made._add_clip(made._scan_generation, clip)
+    made._scan_done(made._scan_generation, 1)
+    app.processEvents()
+    yield made
+    made.close()
+
+
+def test_the_window_offers_no_sound_until_it_is_asked(window):
+    assert window.live_preview is not None
+    assert not window.preview_view.listen_check.isChecked()
+    assert not window.live_preview.status.playing
+    assert window.live_preview.status.muted
+
+
+def test_a_clip_with_no_music_says_the_preview_is_silent(window):
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    said = window.preview_view.music_silence_note.text()
+    assert "no sound" in said and "finished file" in said
+
+
+def test_the_level_slider_reaches_the_transport(window):
+    window.preview_view.listen_level.setValue(70)
+    assert window.live_preview.level == pytest.approx(0.70)
+
+
+def test_the_listening_choice_reaches_the_transport(window):
+    combo = window.preview_view.listening_combo
+    combo.setCurrentIndex(combo.findData("source"))
+    assert window.live_preview.listening is Listening.SOURCE
+
+
+def test_asking_to_listen_with_nothing_to_hear_stays_quiet(window):
+    """No target, so nothing is offered. It must not pretend otherwise."""
+    window.preview_view.listen_check.setChecked(True)
+    assert not window.live_preview.status.playing
+
+
+def test_closing_the_window_closes_the_transport(window):
+    transport = window.live_preview
+    window.close()
+    assert not transport.status.playing
+    assert not transport.status.offered
+
+
+def test_monitoring_never_reaches_a_job_or_the_session(window):
+    """Listening is not an export choice and has nowhere to be stored."""
+    window.preview_view.listen_level.setValue(90)
+    window.preview_view.listen_check.setChecked(True)
+    settings = window.current_settings()
+    for absent in ("listen", "monitor", "mute", "volume"):
+        assert not any(absent in name.lower() for name in dir(settings)
+                       if not name.startswith("_"))
+    assert window.jobs == []
