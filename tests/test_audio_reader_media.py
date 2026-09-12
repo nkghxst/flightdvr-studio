@@ -344,14 +344,23 @@ def test_recoverable_decoder_error_is_not_accepted_as_asset_or_clean_silence(
     assert len(control.stdout) // 4 == 2_399
     assert b"Invalid PCM packet" in control.stderr
 
-    with pytest.raises(AudioAssetError, match="Invalid data found"):
+    # FFmpeg 4.4 and current builds reject the same malformed packet with
+    # different text. The exception types are the rejection oracle; these
+    # named variants keep the diagnostic useful without making one supported
+    # decoder's wording the contract.
+    diagnostic_fragments = ("invalid data", "corrupt input packet")
+    with pytest.raises(AudioAssetError) as asset_failure:
         inspect_music_asset(tools, media.partial_pcm)
+    assert any(text in str(asset_failure.value).lower()
+               for text in diagnostic_fragments)
 
     reader = FfmpegPcmReader.for_source(
         tools, media.partial_pcm, stream_index=0, timeline_frames=2_400)
     try:
-        with pytest.raises(AudioReaderError, match="Invalid data found"):
+        with pytest.raises(AudioReaderError) as reader_failure:
             read_all(reader)
+        assert any(text in str(reader_failure.value).lower()
+                   for text in diagnostic_fragments)
     finally:
         reader.close()
 
