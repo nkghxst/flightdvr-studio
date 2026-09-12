@@ -29,16 +29,15 @@ can claim synchronisation, is written down in
 from __future__ import annotations
 
 import array
-from fractions import Fraction
+from types import SimpleNamespace
 
 import pytest
 
 from flightdvr.audio_device import (
-    FRAME_BYTES, AudioOutput, DeviceFormat, DeviceUnavailable, block_bytes,
+    ACTIVE, FRAME_BYTES, IDLE, STOPPED, SUSPENDED, UNKNOWN, AudioOutput,
+    DeviceFormat, DeviceReport, DeviceUnavailable, block_bytes, qt_state_name,
 )
-from flightdvr.audio_plan import (
-    OUTPUT_CHANNELS, OUTPUT_RATE, AudioMode, SampleSpan,
-)
+from flightdvr.audio_plan import OUTPUT_CHANNELS, OUTPUT_RATE
 from flightdvr.audio_stream import PcmBlock
 
 
@@ -63,24 +62,62 @@ class FakeSink:
     """A sink that records what it was asked to do and plays nothing."""
 
     def __init__(self, *, accept: int | None = None, fail: bool = False,
-                 refuse: bool = False):
+                 refuse: bool = False, buffer_size: int = 4096,
+                 observe_fails: bool = False):
         self.written = bytearray()
         self.calls = []
         self.volume = None
         self._accept = accept
         self._fail = fail
         self._refuse = refuse
+        self._observe_fails = observe_fails
         self.device = self
+        # The backend's own account of itself. `processed` is deliberately
+        # *behind* `written`: a device that had played everything the instant
+        # it was handed over is the one shape that cannot show the difference
+        # between submitted and processed, which is the distinction under test.
+        self.reported_state = "StoppedState"
+        self.reported_error = ""
+        self.processed_usecs = 0
+        self.buffer_size = buffer_size
+
+    def play(self, usecs: int) -> None:
+        """Let the backend work through some of what it holds."""
+        self.processed_usecs += usecs
+
+    def state(self):
+        if self._observe_fails:
+            raise OSError("the backend will not say")
+        return SimpleNamespace(name=self.reported_state)
+
+    def error(self) -> str:
+        return self.reported_error
+
+    def bytesFree(self) -> int:                   # noqa: N802 (Qt naming)
+        # Qt reports zero outside Active and Idle. Modelled, because reading
+        # that as a full buffer inverts the signal.
+        if self.reported_state not in ("ActiveState", "IdleState"):
+            return 0
+        return max(0, self.buffer_size - len(self.written))
+
+    def bufferSize(self) -> int:                  # noqa: N802 (Qt naming)
+        return self.buffer_size
+
+    def processedUSecs(self) -> int:              # noqa: N802 (Qt naming)
+        return self.processed_usecs
 
     def start(self):
         self.calls.append("start")
+        self.reported_state = "ActiveState"
         return self.device
 
     def suspend(self) -> None:
         self.calls.append("suspend")
+        self.reported_state = "SuspendedState"
 
     def resume(self) -> None:
         self.calls.append("resume")
+        self.reported_state = "ActiveState"
 
     def reset(self) -> None:
         """What `QAudioSink.reset()` does: drop the buffer, and stop.
@@ -91,9 +128,14 @@ class FakeSink:
         """
         self.calls.append("reset")
         self.written.clear()
+        # Qt restarts the processed count with the sink, so a fake that kept
+        # it would hide exactly the re-anchoring this has to get right.
+        self.processed_usecs = 0
+        self.reported_state = "StoppedState"
 
     def stop(self) -> None:
         self.calls.append("stop")
+        self.reported_state = "StoppedState"
 
     def setVolume(self, volume: float) -> None:   # noqa: N802 (Qt naming)
         self.volume = volume
@@ -354,136 +396,179 @@ def test_block_bytes_is_exactly_the_frames_it_was_given():
 
 # -- what this cannot settle ---------------------------------------------------
 
-def test_what_a_real_device_still_has_to_tell_us():
-    """Written as a test so it is read, and fails if the claim is overstated.
+# -- what the backend says about itself ----------------------------------------
 
-    Everything above runs against a stand-in. A stand-in accepts bytes
-    instantly and forgets them, so it can prove what the adapter *sends* and
-    nothing at all about what is *heard*. Before any transport claims
-    synchronisation, a real device has to be observed for three things this
-    adapter does not yet expose, because none of them can be invented from a
-    fake:
+def test_submitted_and_processed_are_different_numbers():
+    """The distinction the whole observation exists for.
 
-    1. how far behind the write the device actually is — `QAudioSink` reports
-       `processedUSecs` and a buffer size, and the difference between them is
-       the latency a picture would have to be offset by;
-    2. how often it underruns in practice, which is what decides whether the
-       queue bound above is generous or mean;
-    3. whether its clock drifts against the video clock over minutes, which
-       no single measurement can answer.
-
-    Until those are observed on a machine that can make a sound, this module
-    is a sender, not a synchroniser.
-    """
-    from flightdvr import audio_device
-
-    surface = {name for name in vars(audio_device) if not name.startswith("_")}
-    for absent in ("latency", "processed_usecs", "drift", "sync"):
-        assert not any(absent in name.lower() for name in surface), (
-            f"{absent} appears in the adapter's surface; this module does not "
-            "measure it and must not look as though it does")
-
-def test_pausing_fences_sound_the_device_is_already_holding():
-    """The second finding (#119 review).
-
-    `QAudioSink.suspend()` keeps what it has already been handed and plays it
-    on resume. Clearing only this adapter's queue therefore left a fifth of a
-    second of sound from before the pause waiting to be heard after it.
+    Submitted is what the device took from us. Processed is what the backend
+    says it has worked through. They are not the same, and the difference is
+    sound the device is holding — which is why neither may be called heard.
     """
     out, sink = started()
     out.resume()
-    out.present(a_block(frames=6))
+    out.present(a_block(frames=480))
     out.pump()
-    assert sink.written, "nothing reached the device to begin with"
+    submitted = out.submitted_bytes
+    assert submitted > 0
 
-    out.pause()
+    assert out.processed_bytes() == 0, "a fresh backend had already played it"
+    assert out.unplayed_bytes() == submitted
 
-    assert "reset" in sink.calls, "the device kept its buffered sound"
-    assert sink.written == b"", "sound from before the pause survived it"
-    assert out.queued_bytes == 0
+    sink.play(5_000)                       # 5 ms of it
+    processed = out.processed_bytes()
+    assert 0 < processed < submitted
+    assert out.unplayed_bytes() == submitted - processed
     out.stop()
 
 
-def test_a_reset_fences_sound_the_device_is_already_holding():
-    """Same fence, for a seek. Old sound after the seek point is the defect."""
-    out, sink = started()
-    out.resume()
-    out.present(a_block(frames=6))
-    out.pump()
-    assert sink.written
-
-    out.reset(1)
-
-    assert "reset" in sink.calls
-    assert sink.written == b"", "sound from before the seek survived it"
-    out.stop()
-
-
-def test_the_device_handle_is_usable_again_after_a_fence():
-    """`reset()` leaves a sink stopped, so the handle has to be retaken.
-
-    Without that, everything after the first pause or seek would queue and
-    never be written, which is silence that looks like a working transport.
-    """
+def test_a_backend_ahead_of_us_reports_nothing_unplayed_rather_than_less_than_none():
+    """Two counts from different places. A rounded microsecond can put the
+    backend a shade ahead, and a negative gap there is an artefact — not sound
+    that arrived before it was sent."""
     out, sink = started()
     out.resume()
     out.present(a_block(frames=4))
     out.pump()
-    out.reset(1)
-    out.resume()
+    sink.play(1_000_000)                   # far more than we ever sent
 
-    out.present(a_block(generation=1, frames=4))
-    assert out.pump() > 0, "nothing could be written after the fence"
-    assert sink.written, "the device handle was not usable again"
+    assert out.unplayed_bytes() == 0
     out.stop()
 
 
-def test_a_sink_that_fails_while_clearing_goes_quiet_and_says_so():
-    sink = FakeSink()
-
-    def explode() -> None:
-        raise OSError("the device went away")
-
-    out = AudioOutput(sink_factory=lambda: sink)
-    out.start()
+def test_bytes_free_is_only_meaningful_while_the_device_is_consuming():
+    """Qt reports zero outside Active and Idle, and zero there means
+    "not applicable" — reading it as a full buffer inverts the signal."""
+    out, sink = started()
     out.resume()
-    out.present(a_block())
-    sink.reset = explode
+    assert out.observe().room_known
+
+    sink.reported_state = "SuspendedState"
+    report = out.observe()
+    assert report.state == SUSPENDED
+    assert report.bytes_free == 0
+    assert not report.room_known, "zero was read as a full buffer"
+    out.stop()
+
+
+def test_a_backend_that_will_not_answer_is_unknown_rather_than_a_crash():
+    out, _sink = started(observe_fails=True)
+    out.resume()
+    report = out.observe()
+    assert report.state == UNKNOWN
+    assert not report.usable
+    assert out.processed_bytes() is None
+    assert out.unplayed_bytes() is None
+    assert out.starvation() == "", "a cause was guessed from a non-answer"
+    out.stop()
+
+
+def test_the_counters_re_anchor_together_on_a_fence():
+    """`processedUSecs` restarts with the sink. Comparing a fresh backend count
+    against a submitted total from before the reset invents a gap."""
+    out, sink = started()
+    out.resume()
+    out.present(a_block(frames=480))
+    out.pump()
+    sink.play(3_000)
+    assert out.submitted_bytes > 0
+
     out.reset(1)
 
-    assert out.failure and "clearing" in out.failure
-    assert out.paused
+    assert out.submitted_bytes == 0
+    assert sink.processed_usecs == 0
+    assert out.unplayed_bytes() == 0, "a gap survived the re-anchor"
+    out.stop()
 
 
-def test_a_pause_survives_a_sink_that_fails_while_clearing():
-    """The correction-induced finding (#119 rereview).
-
-    `_fence` releases the sink when it fails, so pausing had nothing left to
-    suspend and raised `AttributeError` out of an ordinary pause — a device
-    fault turned into a crash. The earlier failure test exercised `reset()`
-    and never reached this path.
-    """
+def test_the_counters_re_anchor_on_start_as_well():
     sink = FakeSink()
-
-    def explode() -> None:
-        raise OSError("the device went away")
-
     out = AudioOutput(sink_factory=lambda: sink)
     out.start()
     out.resume()
-    out.present(a_block())
-    sink.reset = explode
+    out.present(a_block(frames=8))
+    out.pump()
+    out.stop()
+    assert out.submitted_bytes == 0
 
-    out.pause()                      # must not raise
 
-    assert out.failure and "clearing" in out.failure
-    assert out.paused and not out.running
+# -- telling the three quiet states apart --------------------------------------
+
+def test_a_finished_stream_is_ended_not_starved():
+    out, sink = started()
+    out.resume()
+    out.present(a_block(frames=480))
+    out.pump()
+    sink.play(10_000_000)                  # worked through all of it
+    sink.reported_state = "IdleState"
+
+    assert out.starvation() == "ended"
+    out.stop()
+
+
+def test_a_device_idle_with_sound_still_in_hand_is_starved():
+    out, sink = started()
+    out.resume()
+    out.present(a_block(frames=480))
+    out.pump()
+    sink.reported_state = "IdleState"      # idle, but it has not played it
+
+    assert out.starvation() == "starved"
+    out.stop()
+
+
+def test_an_empty_queue_against_a_hungry_device_is_starved():
+    """Us being late, which is the one feeding faster would fix."""
+    out, sink = started()
+    out.resume()
     assert out.queued_bytes == 0
-    out.stop()                       # and stopping afterwards is still safe
+    sink.reported_state = "ActiveState"
+
+    assert out.starvation() == "starved"
+    out.stop()
 
 
-def test_every_control_is_safe_after_a_failure():
-    """Whatever order the transport calls them in, none of them raises."""
+def test_a_backend_error_is_its_own_cause_and_not_starvation():
+    """Neither of the other two, and not fixed by feeding it faster."""
+    out, sink = started()
+    out.resume()
+    sink.reported_error = "UnderrunError"
+
+    assert out.starvation() == "backend"
+    out.stop()
+
+
+def test_a_busy_device_with_work_in_hand_is_not_starving():
+    out, sink = started()
+    out.resume()
+    out.present(a_block(frames=480))
+    out.pump()
+    sink.reported_state = "ActiveState"
+
+    assert out.starvation() == ""
+    out.stop()
+
+
+# -- closing quietly -----------------------------------------------------------
+
+def test_stopping_drops_the_buffer_before_it_stops_the_sink():
+    """Qt documents that `stop()` may play out what the backend holds, and on
+    Linux and macOS that drain is synchronous. On the UI thread that is a
+    window which will not close while half a second of music finishes.
+    """
+    out, sink = started()
+    out.resume()
+    out.present(a_block(frames=480))
+    out.pump()
+    assert sink.written
+
+    out.stop()
+
+    assert sink.calls.index("reset") < sink.calls.index("stop"), sink.calls
+    assert sink.written == b"", "the backend still held sound when it stopped"
+
+
+def test_stopping_still_releases_a_sink_that_cannot_drop_its_buffer():
     sink = FakeSink()
 
     def explode() -> None:
@@ -491,14 +576,28 @@ def test_every_control_is_safe_after_a_failure():
 
     out = AudioOutput(sink_factory=lambda: sink)
     out.start()
-    out.resume()
     sink.reset = explode
-    out.pause()
 
-    out.resume()
-    out.pause()
-    out.reset(2)
-    assert out.present(a_block(generation=2)) == 0
-    assert out.pump() == 0
-    out.stop()
+    out.stop()                             # must not raise
+
+    assert "stop" in sink.calls, "a failed reset stopped us releasing the sink"
     assert out.paused and not out.running
+
+
+# -- the enum names Qt actually uses -------------------------------------------
+
+def test_qt_state_names_map_to_ours():
+    for name, expected in (("ActiveState", ACTIVE), ("IdleState", IDLE),
+                           ("SuspendedState", SUSPENDED),
+                           ("StoppedState", STOPPED)):
+        assert qt_state_name(SimpleNamespace(name=name)) == expected
+
+
+def test_an_unrecognised_state_stays_reportable_rather_than_forced():
+    assert qt_state_name(SimpleNamespace(name="SomethingNewState")) == UNKNOWN
+    assert qt_state_name(None) == UNKNOWN
+
+
+def test_a_report_from_no_sink_is_stopped_not_unknown():
+    out = AudioOutput(sink_factory=lambda: FakeSink())
+    assert out.observe() == DeviceReport(state=STOPPED)
