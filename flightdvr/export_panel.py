@@ -40,6 +40,11 @@ from .presets import (
 )
 from .widgets import INNER, dim
 
+AUDIO_CHECK_HELP = (
+    "DVR audio is mostly motor noise and wind. Dropping it makes a small file "
+    "smaller, and there is less to distract an editor."
+)
+
 # Offered as downscale targets when the footage is taller than they are. Every
 # HDZero goggle records .ts the same way, but not at the same size: the Box Pro
 # does 720p60, other modes do 720p90 and 1080p30, and the Goggle 2 goes to 1080p.
@@ -188,14 +193,19 @@ class ExportPanel(QWidget):
 
         self.audio_check = QCheckBox("Keep the audio track")
         self.audio_check.setChecked(True)
-        self.audio_check.setToolTip(
-            "DVR audio is mostly motor noise and wind. Dropping it makes a "
-            "small file smaller, and there is less to distract an editor."
-        )
+        self.audio_check.setToolTip(AUDIO_CHECK_HELP)
         self.audio_check.toggled.connect(
             lambda *_: self.settings_changed.emit()
         )
         out_layout.addWidget(self.audio_check)
+
+        # What the selected output's music does, said where the export choices
+        # are rather than only in the band. Hidden until there is something to
+        # say, so a card nobody has given music to reads exactly as before.
+        self.music_summary = dim(QLabel(""))
+        self.music_summary.setWordWrap(True)
+        self.music_summary.hide()
+        out_layout.addWidget(self.music_summary)
 
         # The join checkbox that used to live here is now the assembly list:
         # it asked for a joined file and inferred the order, which cannot say
@@ -751,6 +761,22 @@ class ExportPanel(QWidget):
     def set_flight_date(self, chosen: date) -> None:
         self.export_date.setDate(QDate(chosen))
         self.date_check.setChecked(True)
+
+    def set_music_summary(self, text: str) -> None:
+        """Say what music this output carries, or nothing at all."""
+        self.music_summary.setText(text)
+        self.music_summary.setVisible(bool(text))
+
+    def set_audio_track_editable(self, editable: bool, why: str = "") -> None:
+        """Derive whether the checkbox can be used, never what it holds.
+
+        Replace and No sound decide the finished audio themselves, so the box
+        has nothing left to choose. Its *value* is untouched: `capture` writes
+        it into the session, and quietly clearing it here would rewrite a saved
+        choice the person never changed.
+        """
+        self.audio_check.setEnabled(editable)
+        self.audio_check.setToolTip(why if not editable else AUDIO_CHECK_HELP)
 
     def set_estimate(self, text: str) -> None:
         self.estimate_label.setText(text)
