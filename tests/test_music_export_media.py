@@ -380,7 +380,7 @@ def test_ui_replace_music_survives_real_export_and_decodes_as_the_known_tone(
     from flightdvr.jobs import JobStatus
     from PySide6.QtWidgets import QPushButton
 
-    assert window.music_panel.mode_combo.currentData() is AudioMode.REPLACE
+    assert AudioMode(window.music_panel.mode_combo.currentData()) is AudioMode.REPLACE
     window.music_panel.mode_combo.setCurrentIndex(
         window.music_panel.mode_combo.findData(AudioMode.REPLACE))
     qt_app.processEvents()
