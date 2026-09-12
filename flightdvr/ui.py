@@ -996,6 +996,22 @@ class MainWindow(QMainWindow):
     def _say_the_scan_is_not_finished(self) -> None:
         self.statusBar().showMessage(SCAN_IN_PROGRESS, 4000)
 
+    def _refuse_while_rebuilding(self) -> bool:
+        """True when an edit must not be accepted yet, having said so.
+
+        Every route that changes a clip asks this before it changes anything.
+        Disabling the trim band is the visible half of the rule and not the
+        enforcement: the picture owns the I, N and O shortcuts and is not
+        inside that band, so those handlers stay reachable while it is
+        disabled — and each of them writes to the clip before the session is
+        asked about it. A refusal that happens after the write is the
+        accept-then-discard this was supposed to end.
+        """
+        if self._decisions_editable():
+            return False
+        self._say_the_scan_is_not_finished()
+        return True
+
     def _touch_session(self) -> None:
         """Something was decided. Write it, once the deciding has stopped."""
         if self.session is None:
@@ -1487,10 +1503,9 @@ class MainWindow(QMainWindow):
         if row < 0:
             self.statusBar().showMessage("Click a clip before marking it", 3000)
             return
-        if not self._decisions_editable():
-            # Before the clip is touched: this one writes the state onto the
-            # clip and into the table before the session hears about it.
-            self._say_the_scan_is_not_finished()
+        # Before the clip is touched: this writes the state onto the clip and
+        # into the table before the session hears about it.
+        if self._refuse_while_rebuilding():
             return
         name = self.table.item(row, 0)
         if name is None:
@@ -2117,6 +2132,11 @@ class MainWindow(QMainWindow):
         clip = self._trim_clip
         if clip is None:
             return
+        # Silently, unlike the others: this arrives continuously while a
+        # handle is dragged, and one status message per frame is not a rule,
+        # it is noise. The gestures that reach it have already said so.
+        if not self._decisions_editable():
+            return
         if len(clip.selects) > 1:
             # One range of several that happens to span the whole recording is
             # still a range. Normalising it to zero the way a lone trim is
@@ -2324,6 +2344,8 @@ class MainWindow(QMainWindow):
         Two seconds long rather than empty, because a zero-length select is
         not a range and would be dropped the moment it was written.
         """
+        if self._refuse_while_rebuilding():
+            return
         clip = self._trim_clip
         if clip is None:
             self.statusBar().showMessage("Click a clip in the list first", 4000)
@@ -2337,6 +2359,8 @@ class MainWindow(QMainWindow):
         self._touch_session()
 
     def _remove_select(self) -> None:
+        if self._refuse_while_rebuilding():
+            return
         clip = self._trim_clip
         if clip is None or len(clip.selects) < 2:
             return
@@ -2348,6 +2372,8 @@ class MainWindow(QMainWindow):
         self._touch_session()
 
     def _rename_select(self, name: str) -> None:
+        if self._refuse_while_rebuilding():
+            return
         clip = self._trim_clip
         if clip is None or not clip.selects:
             return
@@ -2355,7 +2381,7 @@ class MainWindow(QMainWindow):
         self._touch_session()
 
     def _set_in(self) -> None:
-        if self._trim_clip is None:
+        if self._trim_clip is None or self._refuse_while_rebuilding():
             return
         self.trim_bar.in_point = min(self.trim_bar.playhead,
                                      self.trim_bar.out_point - 0.5)
@@ -2363,7 +2389,7 @@ class MainWindow(QMainWindow):
         self._on_trim_changed(self.trim_bar.in_point, self.trim_bar.out_point)
 
     def _set_out(self) -> None:
-        if self._trim_clip is None:
+        if self._trim_clip is None or self._refuse_while_rebuilding():
             return
         self.trim_bar.out_point = max(self.trim_bar.playhead,
                                       self.trim_bar.in_point + 0.5)
@@ -2371,6 +2397,8 @@ class MainWindow(QMainWindow):
         self._on_trim_changed(self.trim_bar.in_point, self.trim_bar.out_point)
 
     def _reset_trim(self) -> None:
+        if self._refuse_while_rebuilding():
+            return
         clip = self._trim_clip
         if clip is None:
             return

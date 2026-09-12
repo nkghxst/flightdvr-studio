@@ -1006,3 +1006,57 @@ def test_the_window_says_decisions_are_not_editable_during_a_scan(
     assert window._decisions_editable()
     assert window.preview_view.trim_band.isEnabled()
     close(window)
+
+
+def test_no_trim_route_can_change_a_partial_clip_during_a_scan(
+        app, sessions_home, card, no_scan_worker):
+    """The picture's shortcuts are not inside the trim band (#111 review).
+
+    `I`, `N` and `O` are owned by the frame view, so disabling the band leaves
+    their handlers reachable — and each writes to the clip before the session
+    is asked anything. Disabling the band is the visible half of the rule; this
+    is the half that enforces it. Handler-level state, not a physical keypress.
+    """
+    one, two = marked_window(app, card, sessions_home)
+
+    window = open_window(app, card, [one, two])
+    window._scan()
+    partial = real_clip(card, "hdz_001.ts")
+    window._add_clip(window._scan_generation, partial)
+    window._trim_clip = partial
+    window.trim_bar.set_clip(partial.duration, 0.0, partial.duration)
+    window.trim_bar.playhead = 12.0
+    assert not window._decisions_editable()
+    assert not window.preview_view.trim_band.isEnabled()
+
+    untouched = ([(s.start, s.end, s.name, s.sid) for s in partial.selects],
+                 partial.trim_in, partial.trim_out, partial.review)
+    for route in (window._set_in, window._set_out, window._add_select,
+                  window._remove_select, window._reset_trim,
+                  lambda: window._rename_select("renamed"),
+                  lambda: window._on_trim_changed(12.0, 30.0)):
+        route()
+        assert ([(s.start, s.end, s.name, s.sid) for s in partial.selects],
+                partial.trim_in, partial.trim_out,
+                partial.review) == untouched, f"{route} edited a partial clip"
+
+    window._scan_done(window._scan_generation, 1)
+    app.processEvents()
+    close(window)
+    both_decisions_intact(card, one, two)
+
+
+def test_the_trim_routes_work_again_once_the_scan_has_finished(
+        app, sessions_home, card, no_scan_worker):
+    """The guard must not become "trims can never be set again"."""
+    one, two = marked_window(app, card, sessions_home)
+
+    window = open_window(app, card, [one, two])
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    clip = window._trim_clip
+    assert clip is not None
+    window.trim_bar.playhead = 5.0
+    window._add_select()
+    assert len(clip.selects) == 2, "adding a range after the scan was refused"
+    close(window)
