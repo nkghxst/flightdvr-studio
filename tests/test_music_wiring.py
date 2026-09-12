@@ -57,6 +57,63 @@ def an_asset(track: Path) -> AudioAsset:
     return AudioAsset(track, "a" * 64, 0, 44_100, 2, 44_100 * 30)
 
 
+class _NoProbe(QObject):
+    """A HardwareProbe that starts no thread.
+
+    These tests have no opinion about encoders, and a real probe runs test
+    encodes through ffmpeg. On macOS one is slow enough to still be running
+    when the test that built it has finished — which perturbs anything else
+    measuring how long a close takes, and leaves a live QThread behind.
+    """
+
+    result = Signal(object)
+
+    def __init__(self, tools, parent=None):
+        super().__init__(parent)
+
+    def start(self, *_args) -> None:
+        pass
+
+    def isRunning(self) -> bool:               # noqa: N802 (Qt naming)
+        return False
+
+    def stop(self) -> None:
+        pass
+
+    def wait(self, *_args) -> bool:
+        return True
+
+
+class _NoStrip(QThread):
+    """A FilmstripLoader that decodes nothing.
+
+    A QThread because the window connects to the inherited `finished`, and
+    carrying the same signals it connects to — a stand-in that is missing one
+    fails where the real object would have worked, which proves nothing about
+    the code under test.
+    """
+
+    ready = Signal(object)
+    activity_ready = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, *args, **kwargs):
+        parent = args[3] if len(args) > 3 else kwargs.get("parent")
+        super().__init__(parent)
+
+    def start(self, *_args) -> None:
+        self.finished.emit()
+
+    def isRunning(self) -> bool:               # noqa: N802 (Qt naming)
+        return False
+
+    def stop(self) -> None:
+        pass
+
+    def wait(self, *_args) -> bool:
+        return True
+
+
 class _NoScan(QObject):
     """A ScanWorker that starts no thread."""
 
@@ -159,6 +216,17 @@ def probes(monkeypatch):
     monkeypatch.setattr("flightdvr.ui.MusicAssetProbe", _FakeProbe,
                         raising=False)
     monkeypatch.setattr("flightdvr.ui.ScanWorker", _NoScan)
+    # Hermetic: these windows start no encoder probe and ask no release API.
+    # Both are real work with real threads, neither has any bearing on music
+    # wiring, and a probe still running at interpreter exit takes the process
+    # with it after every assertion has already passed.
+    monkeypatch.setattr("flightdvr.ui.HardwareProbe", _NoProbe)
+    monkeypatch.setattr("flightdvr.updates.should_check",
+                        lambda *a, **k: False)
+    # Selecting a clip normally starts a filmstrip decode. These tests only
+    # need the selection, and a strip still extracting after its test has
+    # finished runs ffmpeg against whatever the next test is measuring.
+    monkeypatch.setattr("flightdvr.ui.FilmstripLoader", _NoStrip)
     return _FakeProbe.made
 
 
@@ -183,6 +251,8 @@ def window(app, tmp_path, sessions_home, probes, monkeypatch):
     made.export_panel.preset_buttons["master"].setChecked(True)
     made.export_panel.subfolder_check.setChecked(False)
     made.export_panel.date_check.setChecked(False)
+    monkeypatch.setattr(made.thumbs, "request", lambda *_: None)
+    monkeypatch.setattr(made.player, "load", lambda *a, **k: None)
     app.processEvents()
     yield made
     made.close()
