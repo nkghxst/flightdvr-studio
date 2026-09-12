@@ -657,14 +657,37 @@ BASE_MINIMUM = (1402, 712)
 ONE_CLIP_ROW = 24
 
 
-def test_the_browser_rows_cost_no_more_than_one_row(qt_app):
-    """A new control may cost height. It may not cost width, or a second row.
+def compact_header_cost(spacing: int) -> int:
+    """What adding one collapsed, checkable band to a column actually costs.
 
-    Tightening the gap in front of the row was tried and bought nothing back,
-    so the cost is the row itself rather than spacing. Measured between 6 and
-    12 px depending on what is loaded, which is why the bound is a row rather
-    than a number.
+    Measured by doing it, on the platform running this, rather than by adding
+    a header's size hint to a spacing and hoping those are the only two things
+    a layout charges for. An empty checkable group box, flat and unpadded, is
+    exactly what the music band shows when it is collapsed — so a style whose
+    group boxes are taller gets a taller allowance, and nobody has to edit a
+    constant to make a particular platform pass.
     """
+    from PySide6.QtWidgets import QGroupBox, QLabel, QVBoxLayout, QWidget
+
+    holder = QWidget()
+    column = QVBoxLayout(holder)
+    column.setSpacing(spacing)
+    column.addWidget(QLabel("x"))
+    without = holder.minimumSizeHint().height()
+
+    reference = QGroupBox("Music")
+    reference.setCheckable(True)
+    reference.setChecked(False)
+    reference.setFlat(True)
+    inner = QVBoxLayout(reference)
+    inner.setContentsMargins(0, 0, 0, 0)
+    column.addWidget(reference)
+    cost = holder.minimumSizeHint().height() - without
+    holder.deleteLater()
+    return cost
+
+
+def loaded_window(qt_app):
     from flightdvr.media import find_tools
     from flightdvr.ui import MainWindow
 
@@ -672,15 +695,89 @@ def test_the_browser_rows_cost_no_more_than_one_row(qt_app):
     window.resize(*BASE_MINIMUM)
     window.show()
     qt_app.processEvents()
+    for index, seconds in enumerate((8.0, 191.0, 184.0, 0.0, 212.0)):
+        window._add_clip(window._scan_generation,
+                         a_clip(f"hdz_{index:03d}.ts", seconds))
+    qt_app.processEvents()
+    return window
+
+
+def test_the_browser_rows_cost_no_more_than_one_row(qt_app):
+    """A new control may cost height. It may not cost width, or a second row.
+
+    Tightening the gap in front of the row was tried and bought nothing back,
+    so the cost is the row itself rather than spacing. Measured between 6 and
+    12 px depending on what is loaded, which is why the bound is a row rather
+    than a number.
+
+    The music band is taken out of the layout first. This budget is about the
+    browser, and charging a second, unrelated addition to it would turn one
+    number into a pot that anything can be paid out of — which is how a bound
+    stops meaning anything. The band is bounded on its own below.
+    """
+    window = loaded_window(qt_app)
     try:
-        for index, seconds in enumerate((8.0, 191.0, 184.0, 0.0, 212.0)):
-            window._add_clip(window._scan_generation,
-                             a_clip(f"hdz_{index:03d}.ts", seconds))
+        window.music_band.hide()          # a hidden widget is not laid out
         qt_app.processEvents()
         smallest = window.minimumSizeHint()
         assert smallest.width() <= BASE_MINIMUM[0], smallest.width()
         assert smallest.height() <= BASE_MINIMUM[1] + ONE_CLIP_ROW, (
             smallest.height())
+    finally:
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_the_collapsed_music_band_costs_one_header_and_the_spacing(qt_app):
+    """Bounded against what a header actually is here, not against 744.
+
+    The allowance is derived: an empty checkable group box plus the spacing
+    the window's own layout puts between its rows. Nothing is chosen to make a
+    particular platform's number pass, and a style with taller group boxes
+    gets a taller allowance because the reference is measured the same way.
+    """
+    window = loaded_window(qt_app)
+    try:
+        window.music_band.hide()
+        qt_app.processEvents()
+        browser_only = window.minimumSizeHint().height()
+
+        window.music_band.show()
+        qt_app.processEvents()
+        with_band = window.minimumSizeHint().height()
+
+        allowance = compact_header_cost(
+            window.centralWidget().layout().spacing())
+        assert with_band - browser_only <= allowance, (
+            f"collapsed band cost {with_band - browser_only}px, "
+            f"one header plus spacing is {allowance}px")
+    finally:
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_a_second_row_in_the_collapsed_band_would_still_fail(qt_app):
+    """The bound above has to be tight enough to notice content appearing.
+
+    Expanding the band is the cheapest honest way to prove that: if a header's
+    worth of allowance also covered the body, it would cover anything, and the
+    check would be decoration.
+    """
+    window = loaded_window(qt_app)
+    try:
+        window.music_band.hide()
+        qt_app.processEvents()
+        browser_only = window.minimumSizeHint().height()
+
+        window.music_band.show()
+        window.music_band.setChecked(True)
+        qt_app.processEvents()
+        expanded = window.minimumSizeHint().height()
+
+        allowance = compact_header_cost(
+            window.centralWidget().layout().spacing())
+        assert expanded - browser_only > allowance, (
+            "the collapsed-band allowance is loose enough to hide a row")
     finally:
         window.close()
         assert_no_threads_left(window)
