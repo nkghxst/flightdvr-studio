@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import functools
 import sys
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from fractions import Fraction
@@ -550,23 +551,71 @@ def _fps_from(rate: str | None) -> float:
         return 0.0
 
 
-def _probe_once(tools: Tools, path: Path, info: ClipInfo, extra: list[str]) -> ClipInfo:
+PROBE_TIMEOUT_SECONDS = 120
+_PROBE_WAIT_SECONDS = 0.1
+
+
+def _probe_once(
+    tools: Tools, path: Path, info: ClipInfo, extra: list[str],
+    should_stop=None, register=None,
+) -> ClipInfo:
     args = [
         str(tools.ffprobe), "-v", "error", *extra,
         "-print_format", "json", "-show_format", "-show_streams", str(path),
     ]
-    try:
-        result = run_hidden(args, timeout=120)
-    except subprocess.TimeoutExpired:
-        info.error = "ffprobe timed out"
+    if should_stop is not None and should_stop():
+        info.error = "probe cancelled"
         return info
 
-    if result.returncode != 0:
-        info.error = (result.stderr or "ffprobe failed").strip().splitlines()[-1][:200]
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, creationflags=NO_WINDOW,
+        )
+    except OSError as exc:
+        info.error = str(exc)
         return info
+    if register is not None:
+        register(proc)
 
     try:
-        data = json.loads(result.stdout)
+        deadline = time.monotonic() + PROBE_TIMEOUT_SECONDS
+        while True:
+            if should_stop is not None and should_stop():
+                info.error = "probe cancelled"
+                return info
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                info.error = "ffprobe timed out"
+                return info
+            try:
+                stdout, stderr = proc.communicate(
+                    timeout=min(_PROBE_WAIT_SECONDS, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+
+        if should_stop is not None and should_stop():
+            info.error = "probe cancelled"
+            return info
+        if proc.returncode != 0:
+            info.error = (
+                (stderr or "ffprobe failed").strip().splitlines()[-1][:200]
+            )
+            return info
+    except OSError as exc:
+        info.error = str(exc)
+        return info
+    finally:
+        # The probe thread owns the bounded wait/escalation.  A UI-side stop
+        # only terminates to unblock communicate(), then returns immediately.
+        stop_process(proc)
+        if register is not None:
+            register(None)
+
+    try:
+        data = json.loads(stdout)
     except json.JSONDecodeError:
         info.error = "could not parse ffprobe output"
         return info
@@ -599,8 +648,13 @@ def _probe_once(tools: Tools, path: Path, info: ClipInfo, extra: list[str]) -> C
     return info
 
 
-def probe(tools: Tools, path: Path) -> ClipInfo:
+def probe(tools: Tools, path: Path, should_stop=None,
+          register=None) -> ClipInfo:
     """Read stream details. Never raises: failures come back on `.error`.
+
+    A concurrent scan supplies `should_stop` and `register`. The first keeps a
+    cancelled probe from launching either pass; the second exposes this
+    thread's one active child so the scan can make a prompt termination request.
 
     ffprobe's own defaults are tried first. Forcing a large probe size costs
     about 0.73 s per clip reading from an SD card over USB, against 0.09 s at
@@ -615,11 +669,18 @@ def probe(tools: Tools, path: Path) -> ClipInfo:
         modified=datetime.fromtimestamp(stat.st_mtime),
     )
 
-    _probe_once(tools, path, info, [])
+    _probe_once(
+        tools, path, info, [], should_stop=should_stop, register=register)
+    if should_stop is not None and should_stop():
+        return info
     if info.error or not info.width or info.duration <= 0:
         # A stubborn transport stream: pay for a deeper look this time.
         retry = ClipInfo(path=path, size=info.size, modified=info.modified)
-        _probe_once(tools, path, retry, ["-analyzeduration", "100M", "-probesize", "100M"])
+        _probe_once(
+            tools, path, retry,
+            ["-analyzeduration", "100M", "-probesize", "100M"],
+            should_stop=should_stop, register=register,
+        )
         if not retry.error and retry.width:
             return retry
     return info
@@ -654,7 +715,8 @@ HW_ENCODERS = [
 ]
 
 
-def _encoder_runs(tools: Tools, name: str, register=None) -> bool:
+def _encoder_runs(tools: Tools, name: str, register=None,
+                  should_stop=None) -> bool:
     """Try a token encode.
 
     An encoder being compiled into ffmpeg says nothing about whether the
@@ -671,6 +733,8 @@ def _encoder_runs(tools: Tools, name: str, register=None) -> bool:
         "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=0.2",
         "-c:v", name, "-frames:v", "3", "-f", "null", "-",
     ]
+    if should_stop is not None and should_stop():
+        return False
     try:
         proc = subprocess.Popen(
             args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -681,11 +745,22 @@ def _encoder_runs(tools: Tools, name: str, register=None) -> bool:
     if register is not None:
         register(proc)
     try:
-        return proc.wait(timeout=PROBE_SECONDS) == 0
-    except subprocess.TimeoutExpired:
-        stop_process(proc)
-        return False
+        deadline = time.monotonic() + PROBE_SECONDS
+        while True:
+            if should_stop is not None and should_stop():
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                return proc.wait(
+                    timeout=min(_PROBE_WAIT_SECONDS, remaining)) == 0
+            except subprocess.TimeoutExpired:
+                continue
     finally:
+        # Includes cancellation and timeout: the worker that launched this
+        # child is the one that waits for termination and reaps it.
+        stop_process(proc)
         if register is not None:
             register(None)
 
@@ -705,6 +780,8 @@ def detect_hardware_encoder(
     for name, label in HW_ENCODERS:
         if should_stop is not None and should_stop():
             return None
-        if name in encoders and _encoder_runs(tools, name, register):
+        if name in encoders and _encoder_runs(
+            tools, name, register, should_stop,
+        ):
             return name, label
     return None

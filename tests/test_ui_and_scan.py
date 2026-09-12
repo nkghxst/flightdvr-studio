@@ -1206,6 +1206,23 @@ def test_signals_from_the_last_scan_are_ignored_after_close_starts():
     assert not window._is_current_scan(2)
 
 
+def test_a_late_hardware_result_is_ignored_after_close_starts():
+    """A queued result must not touch controls owned by a closing window."""
+    from types import SimpleNamespace
+
+    from flightdvr.ui import MainWindow
+
+    class ClosedPanel:
+        def set_hardware(self, _found):
+            raise AssertionError("late hardware result reached the closed UI")
+
+    owner = SimpleNamespace(
+        _closing=True, export_panel=ClosedPanel(),
+        hw_encoder="", hw_label="",
+    )
+    MainWindow._hardware_found(owner, ("h264_nvenc", "NVIDIA NVENC"))
+
+
 def test_a_scan_worker_stamps_everything_it_emits(tmp_path):
     from flightdvr.ui import ScanWorker
     worker = ScanWorker(TOOLS, tmp_path, recursive=False, generation=7)
@@ -1275,6 +1292,11 @@ def test_stopping_a_scan_cancels_and_reaps_every_owned_probe(
     monkeypatch.setattr(
         media.subprocess, "Popen",
         lambda args, **_kwargs: ControlledProbe(args),
+    )
+    real_stop_process = media.stop_process
+    monkeypatch.setattr(
+        media, "stop_process",
+        lambda process: real_stop_process(process, timeout=0.05),
     )
     worker = workers.ScanWorker(TOOLS, tmp_path, False, generation=9)
     worker.start()
@@ -3232,7 +3254,7 @@ def test_the_probe_is_asked_before_every_candidate():
     tried = []
     stop = []
 
-    def ran(_tools, name, _register=None):
+    def ran(_tools, name, _register=None, _should_stop=None):
         tried.append(name)
         stop.append(True)          # cancelled while the first one is running
         return False
@@ -3252,8 +3274,11 @@ def test_the_probe_hands_out_the_process_it_is_waiting_on():
     from flightdvr.media import detect_hardware_encoder
 
     seen = []
-    with _swapped("_encoder_runs", lambda t, n, register=None: (
-            seen.append(register), False)[1]):
+    def records_callback(_tools, _name, register=None, should_stop=None):
+        seen.append(register)
+        return False
+
+    with _swapped("_encoder_runs", records_callback):
         detect_hardware_encoder(
             TOOLS, encoders={name for name, _ in _all_hw_encoders()},
             register="the-callback",
@@ -3311,6 +3336,7 @@ def test_closing_requests_hardware_stop_and_retains_it_until_finished(
     window = ui.MainWindow(TOOLS)
     worker = window.hw_probe
     try:
+        assert qt_app.quitOnLastWindowClosed()
         assert started.wait(1), "the controlled hardware probe never started"
         assert worker.isRunning()
         began = time.monotonic()
@@ -3318,6 +3344,7 @@ def test_closing_requests_hardware_stop_and_retains_it_until_finished(
         close_seconds = time.monotonic() - began
 
         assert close_seconds < 0.05
+        assert not qt_app.quitOnLastWindowClosed()
         assert stop_requested.wait(0.2)
         assert worker.isRunning(), "close discarded the worker during cleanup"
         assert worker in ui.MainWindow._retired_probe_threads
@@ -3325,9 +3352,12 @@ def test_closing_requests_hardware_stop_and_retains_it_until_finished(
         qt_app.processEvents()
         assert killed.is_set()
         assert worker not in ui.MainWindow._retired_probe_threads
+        assert qt_app.quitOnLastWindowClosed()
     finally:
         exited.set()
         worker.wait(5000)
+        qt_app.setQuitOnLastWindowClosed(True)
+        ui.MainWindow._quit_after_probe_threads = False
 
 
 class _Stoppable:

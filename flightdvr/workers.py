@@ -23,6 +23,7 @@ any more must not be mistaken for the current one.
 from __future__ import annotations
 
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
@@ -36,7 +37,7 @@ from PySide6.QtWidgets import (
 from . import scan
 from .format import human_size
 from .media import (
-    ClipInfo, Tools, detect_hardware_encoder, probe, stop_process,
+    ClipInfo, Tools, detect_hardware_encoder, probe, request_stop,
 )
 from .widgets import dim
 
@@ -63,35 +64,65 @@ class ScanWorker(QThread):
         self.folder = folder
         self.recursive = recursive
         self.generation = generation
-        self._stop = False
+        self._cancel = threading.Event()
+        self._process_lock = threading.Lock()
+        self._processes: dict[int, subprocess.Popen] = {}
 
     def stop(self) -> None:
-        self._stop = True
+        """Flag first, then make prompt requests for every owned child."""
+        self._cancel.set()
+        with self._process_lock:
+            processes = list(self._processes.values())
+        for process in processes:
+            request_stop(process)
+
+    def _register(self, process) -> None:
+        owner = threading.get_ident()
+        with self._process_lock:
+            if process is None:
+                self._processes.pop(owner, None)
+                return
+            self._processes[owner] = process
+            cancelled = self._cancel.is_set()
+        # stop() can win between Popen returning and registration.
+        if cancelled:
+            request_stop(process)
 
     def run(self) -> None:
         paths = scan.find_clips(self.folder, self.recursive)
         self.counted.emit(self.generation, len(paths))
         count = 0
-        with ThreadPoolExecutor(max_workers=PROBE_WORKERS) as pool:
-            futures = {pool.submit(probe, self.tools, path): path for path in paths}
-            try:
-                for future in as_completed(futures):
-                    if self._stop:
-                        break
-                    try:
-                        clip = future.result()
-                    except Exception:  # pragma: no cover - a single bad file
-                        continue
-                    if clip.error and not clip.width:
-                        continue
-                    self.found.emit(self.generation, clip)
-                    count += 1
-            finally:
-                # cancel_futures drops the ones not started; the context manager
-                # still waits for any probe already inside ffprobe, which is why
-                # the window cannot rely on this worker being finished.
-                if self._stop:
-                    pool.shutdown(wait=False, cancel_futures=True)
+        pool = ThreadPoolExecutor(max_workers=PROBE_WORKERS)
+        futures = {}
+        try:
+            for path in paths:
+                if self._cancel.is_set():
+                    break
+                future = pool.submit(
+                    probe, self.tools, path, self._cancel.is_set,
+                    self._register,
+                )
+                futures[future] = path
+
+            for future in as_completed(futures):
+                if self._cancel.is_set():
+                    break
+                try:
+                    clip = future.result()
+                except Exception:  # pragma: no cover - a single bad file
+                    continue
+                # stop can land after future.result() but before delivery.
+                if self._cancel.is_set():
+                    break
+                if clip.error and not clip.width:
+                    continue
+                self.found.emit(self.generation, clip)
+                count += 1
+        finally:
+            # Active probes observe the flag and reap their own children;
+            # queued probes are cancelled before they can launch anything.
+            pool.shutdown(
+                wait=True, cancel_futures=self._cancel.is_set())
         self.done.emit(self.generation, count)
 
 
@@ -109,7 +140,8 @@ class HardwareProbe(QThread):
     def __init__(self, tools: Tools, parent=None):
         super().__init__(parent)
         self.tools = tools
-        self._cancel = False
+        self._cancel = threading.Event()
+        self._process_lock = threading.Lock()
         self._process: subprocess.Popen | None = None
 
     def stop(self) -> None:
@@ -118,28 +150,32 @@ class HardwareProbe(QThread):
         Order matters, as it does in the decoder: the flag first, then the
         process, or the run can start another encode after the process is gone.
         """
-        self._cancel = True
-        stop_process(self._process)
+        self._cancel.set()
+        with self._process_lock:
+            process = self._process
+        request_stop(process)
 
     def _register(self, proc) -> None:
-        self._process = proc
+        with self._process_lock:
+            self._process = proc
+            cancelled = self._cancel.is_set()
         # stop() can land between the encode starting and this assignment, in
         # which case it found nothing to stop and this is the only thing that
         # will stop it.
-        if self._cancel and proc is not None:
-            stop_process(proc)
+        if cancelled and proc is not None:
+            request_stop(proc)
 
     def run(self) -> None:
         try:
             found = detect_hardware_encoder(
-                self.tools, should_stop=lambda: self._cancel,
+                self.tools, should_stop=self._cancel.is_set,
                 register=self._register,
             )
         except Exception:  # pragma: no cover - never block startup on this
             found = None
         # A cancelled probe has nothing to say, and the window it would say it
         # to is on its way out.
-        if not self._cancel:
+        if not self._cancel.is_set():
             self.result.emit(found)
 
 
