@@ -23,11 +23,14 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+import tempfile
+import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
-from .media import NO_WINDOW, ClipInfo, Tools
+from .media import NO_WINDOW, ClipInfo, Tools, request_stop, stop_process
 
 THUMB_WIDTH = 240
 
@@ -37,6 +40,8 @@ THUMB_WIDTH = 240
 # grey. Decoding through a second and a half lets it resynchronise on a real
 # keyframe. Without this, most thumbnails come out as noise.
 RESYNC_SECONDS = 1.5
+THUMB_TIMEOUT_SECONDS = 90
+_WAIT_SLICE_SECONDS = 0.1
 
 
 def cache_dir() -> Path:
@@ -81,25 +86,80 @@ def build_command(tools: Tools, clip: ClipInfo, target: Path) -> list[str]:
     return command
 
 
-def extract(tools: Tools, clip: ClipInfo) -> Path | None:
-    """Grab a representative frame, reusing the cached copy when present."""
+def extract(tools: Tools, clip: ClipInfo, *, register=None, cancelled=None,
+            publish=None) -> Path | None:
+    """Grab a representative frame without exposing a partial cache entry.
+
+    The task supplies the three callbacks.  `register` gives it the child it
+    must be able to stop, `cancelled` prevents work continuing after its row is
+    gone, and `publish` serializes the final rename with cancellation.  Keeping
+    that last decision beside the task lock closes the race where a check made
+    just before `replace()` was already stale by the time the file moved.
+    """
     target = thumbnail_path(clip)
     if target.exists() and target.stat().st_size > 0:
-        return target
+        return publish(None, target) if publish is not None else target
 
+    target.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        prefix=f".{target.stem}-", suffix=target.suffix,
+        dir=target.parent, delete=False,
+    )
+    handle.close()
+    staged = Path(handle.name)
+    proc = None
     try:
-        subprocess.run(
-            build_command(tools, clip, target),
-            capture_output=True, timeout=90, creationflags=NO_WINDOW,
+        if cancelled is not None and cancelled():
+            return None
+        proc = subprocess.Popen(
+            build_command(tools, clip, staged),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=NO_WINDOW,
         )
-    except (subprocess.TimeoutExpired, OSError):
+        if register is not None:
+            register(proc)
+
+        deadline = time.monotonic() + THUMB_TIMEOUT_SECONDS
+        while True:
+            if cancelled is not None and cancelled():
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                returncode = proc.wait(
+                    timeout=min(_WAIT_SLICE_SECONDS, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+
+        if returncode != 0 or (cancelled is not None and cancelled()):
+            return None
+        if not staged.exists() or staged.stat().st_size <= 0:
+            return None
+        if publish is not None:
+            return publish(staged, target)
+        staged.replace(target)
+        return target
+    except OSError:
         return None
-    return target if target.exists() and target.stat().st_size > 0 else None
+    finally:
+        # This is the task/worker side.  UI code only makes the prompt request;
+        # the owner waits, escalates if needed, and removes its staging file.
+        stop_process(proc)
+        if register is not None:
+            register(None)
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 class _Signals(QObject):
-    ready = Signal(str, str)  # clip path, thumbnail path
-    finished = Signal(int, str)  # loader generation, clip path
+    # loader generation, clip fingerprint, clip path, thumbnail path
+    ready = Signal(int, str, str, str)
+    # loader generation, clip fingerprint, clip path
+    finished = Signal(int, str, str)
 
 
 class _ThumbTask(QRunnable):
@@ -110,14 +170,64 @@ class _ThumbTask(QRunnable):
         self.clip = clip
         self.signals = signals
         self.generation = generation
+        self.fingerprint = clip.fingerprint
+        self.token = (generation, self.fingerprint, str(clip.path))
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._completed = False
+        self._process = None
+        # The loader, not QThreadPool's auto-delete timing, owns this task
+        # until the queued finished signal has removed its final reference.
+        self.setAutoDelete(False)
+
+    def stop(self) -> None:
+        """Ask from the UI thread; never wait here."""
+        with self._lock:
+            if self._completed:
+                return
+            self._cancelled = True
+            proc = self._process
+        request_stop(proc)
+
+    def _register(self, proc) -> None:
+        with self._lock:
+            self._process = proc
+            cancelled = self._cancelled
+        # stop() may have won the race before Popen returned.
+        if proc is not None and cancelled:
+            request_stop(proc)
+
+    def _is_cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def _publish(self, staged: Path | None, target: Path) -> Path | None:
+        """Linearize cancellation with the one visible cache mutation."""
+        with self._lock:
+            if self._cancelled:
+                return None
+            if staged is not None:
+                if target.exists() and target.stat().st_size > 0:
+                    staged.unlink(missing_ok=True)
+                else:
+                    staged.replace(target)
+            self._completed = True
+            return target
 
     def run(self) -> None:
         try:
-            result = extract(self.tools, self.clip)
+            result = extract(
+                self.tools, self.clip, register=self._register,
+                cancelled=self._is_cancelled, publish=self._publish,
+            )
             if result:
-                self.signals.ready.emit(str(self.clip.path), str(result))
+                self.signals.ready.emit(
+                    self.generation, self.fingerprint,
+                    str(self.clip.path), str(result),
+                )
         finally:
-            self.signals.finished.emit(self.generation, str(self.clip.path))
+            self.signals.finished.emit(
+                self.generation, self.fingerprint, str(self.clip.path))
 
 
 class ThumbnailLoader(QObject):
@@ -128,8 +238,13 @@ class ThumbnailLoader(QObject):
     makes the listing crawl.
     """
 
-    ready = Signal(str, str)
+    ready = Signal(int, str, str, str)
     idle = Signal()
+
+    # Closing a window must not collect a loader whose QRunnable still owns a
+    # process.  Shutdown detaches it from the window and this set holds it until
+    # the last task's finished signal arrives.
+    _retired: set["ThumbnailLoader"] = set()
 
     def __init__(self, tools: Tools, parent=None):
         super().__init__(parent)
@@ -139,11 +254,17 @@ class ThumbnailLoader(QObject):
         self._signals.finished.connect(self._finished)
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(3)
-        self._queued: set[str] = set()
-        self._pending: set[tuple[int, str]] = set()
-        self._held: list[ClipInfo] = []
+        self._queued: set[tuple[str, str]] = set()
+        self._pending: set[tuple[int, str, str]] = set()
+        self._tasks: dict[tuple[int, str, str], _ThumbTask] = {}
+        self._held: list[tuple[tuple[int, str, str], ClipInfo]] = []
         self._paused = False
         self._generation = 0
+        self._shutting_down = False
+
+    @property
+    def generation(self) -> int:
+        return self._generation
 
     def pause(self) -> None:
         self._paused = True
@@ -151,27 +272,35 @@ class ThumbnailLoader(QObject):
     def resume(self) -> None:
         self._paused = False
         held, self._held = self._held, []
-        for clip in held:
-            self._start(clip)
+        for token, clip in held:
+            if token in self._pending:
+                self._start(token, clip)
 
     def request(self, clip: ClipInfo) -> None:
-        key = str(clip.path)
-        if key in self._queued:
+        identity = (str(clip.path), clip.fingerprint)
+        if identity in self._queued:
             return
-        self._queued.add(key)
-        self._pending.add((self._generation, key))
+        self._queued.add(identity)
+        token = (self._generation, clip.fingerprint, str(clip.path))
+        self._pending.add(token)
         if self._paused:
-            self._held.append(clip)
+            self._held.append((token, clip))
         else:
-            self._start(clip)
+            self._start(token, clip)
 
-    def _start(self, clip: ClipInfo) -> None:
-        self._pool.start(_ThumbTask(
-            self.tools, clip, self._signals, self._generation))
+    def _start(self, token, clip: ClipInfo) -> None:
+        task = _ThumbTask(self.tools, clip, self._signals, token[0])
+        self._tasks[token] = task
+        self._pool.start(task)
 
-    def _finished(self, generation: int, clip_path: str) -> None:
-        self._pending.discard((generation, clip_path))
-        if self.is_idle:
+    def _finished(self, generation: int, fingerprint: str,
+                  clip_path: str) -> None:
+        token = (generation, fingerprint, clip_path)
+        self._pending.discard(token)
+        self._tasks.pop(token, None)
+        if self._shutting_down and not self._tasks:
+            self._retired.discard(self)
+        elif self.is_idle:
             self.idle.emit()
 
     @property
@@ -181,12 +310,25 @@ class ThumbnailLoader(QObject):
                 and self._pool.activeThreadCount() == 0)
 
     def clear(self) -> None:
-        self._pool.clear()
         self._generation += 1
         self._queued.clear()
-        self._pending.clear()
+        held, self._held = self._held, []
+        for token, _clip in held:
+            self._pending.discard(token)
+
+        # tryTake distinguishes work Qt removed before it began from work that
+        # may already own a process.  The latter remains in both dictionaries
+        # until its finished signal, so `is_idle` cannot lie about card access.
+        for token, task in list(self._tasks.items()):
+            task.stop()
+            if self._pool.tryTake(task):
+                self._pending.discard(token)
+                self._tasks.pop(token, None)
         self._held.clear()
 
     def shutdown(self) -> None:
-        self._pool.clear()
-        self._pool.waitForDone(2000)
+        self._shutting_down = True
+        self.clear()
+        if self._tasks:
+            self.setParent(None)
+            self._retired.add(self)
