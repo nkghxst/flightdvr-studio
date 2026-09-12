@@ -174,8 +174,8 @@ def ui_window(tools, tmp_path, qt_app, monkeypatch):
     made.export_panel.out_edit.setCurrentText(str(output))
     made.export_panel.subfolder_check.setChecked(False)
     made.export_panel.date_check.setChecked(False)
-    made.export_panel.master_speed.setCurrentText("ultrafast")
-    assert made.export_panel.master_speed.currentText() == "ultrafast"
+    made.export_panel.master_speed.setCurrentText("veryfast")
+    assert made.export_panel.master_speed.currentText() == "veryfast"
 
     try:
         yield made, card, output
