@@ -1469,7 +1469,13 @@ class MainWindow(QMainWindow):
                 f"Reading {len(self.clips)} of {self._expected} clips…"
             )
 
-    def _thumb_ready(self, clip_path: str, thumb_path: str) -> None:
+    def _thumb_ready(self, generation: int, fingerprint: str,
+                     clip_path: str, thumb_path: str) -> None:
+        if generation != self.thumbs.generation:
+            return
+        current = self.clip_by_path.get(clip_path)
+        if current is None or current.fingerprint != fingerprint:
+            return
         pixmap = QPixmap(thumb_path)
         if pixmap.isNull():
             return

@@ -157,11 +157,11 @@ def test_thumbnail_loader_only_reports_idle_after_every_request_finishes(
     loader.request(second)
     assert not loader.is_idle
 
-    loader._finished(loader._generation, str(first.path))
+    loader._finished(loader.generation, first.fingerprint, str(first.path))
     assert not loader.is_idle
     assert idle == []
 
-    loader._finished(loader._generation, str(second.path))
+    loader._finished(loader.generation, second.fingerprint, str(second.path))
     assert loader.is_idle
     assert idle == [True]
 
@@ -181,10 +181,13 @@ def test_cleared_thumbnail_results_cannot_finish_a_new_generation(
     loader.clear()
     loader.request(new)
 
-    loader._finished(old_generation, str(old.path))
+    loader._finished(old_generation, old.fingerprint, str(old.path))
 
     assert not loader.is_idle
-    assert (loader._generation, str(new.path)) in loader._pending
+    assert (loader.generation, new.fingerprint, str(new.path)) in loader._pending
+
+    loader._finished(loader.generation, new.fingerprint, str(new.path))
+    loader.shutdown()
 
 
 def test_cancelling_a_blocked_thumbnail_owns_cleanup_and_publishes_nothing(
@@ -286,6 +289,87 @@ def test_cancelling_a_blocked_thumbnail_owns_cleanup_and_publishes_nothing(
     assert tasks_after_finished == {}
     assert ready == [], "a cancelled thumbnail was published"
     assert not target.exists(), "a partial thumbnail became a cache hit"
+
+
+def test_thumbnail_publication_and_cancel_have_one_winner(
+        qt_app, monkeypatch, tmp_path):
+    """The final rename and cancellation must be one atomic decision."""
+    from flightdvr import thumbs
+
+    signals = thumbs._Signals()
+
+    cancelled = thumbs._ThumbTask(TOOLS, clip("cancelled.ts"), signals, 1)
+    cancelled_stage = tmp_path / "cancelled-stage.jpg"
+    cancelled_target = tmp_path / "cancelled.jpg"
+    cancelled_stage.write_bytes(b"complete jpeg")
+    cancelled.stop()
+
+    assert cancelled._publish(cancelled_stage, cancelled_target) is None
+    assert not cancelled_target.exists()
+
+    stop_requests = []
+    monkeypatch.setattr(
+        thumbs, "request_stop", lambda proc: stop_requests.append(proc))
+    published = thumbs._ThumbTask(TOOLS, clip("published.ts"), signals, 2)
+    published_stage = tmp_path / "published-stage.jpg"
+    published_target = tmp_path / "published.jpg"
+    published_stage.write_bytes(b"complete jpeg")
+
+    assert (published._publish(published_stage, published_target)
+            == published_target)
+    published.stop()
+
+    assert published_target.read_bytes() == b"complete jpeg"
+    assert stop_requests == [], "completed publication was recancelled"
+
+
+def test_a_valid_cached_thumbnail_skips_child_launch(
+        qt_app, monkeypatch, tmp_path):
+    """Cancellation support must not turn a cache hit into another card read."""
+    from flightdvr import thumbs
+
+    cached = tmp_path / "cached.jpg"
+    cached.write_bytes(b"complete jpeg")
+    monkeypatch.setattr(thumbs, "thumbnail_path", lambda _clip: cached)
+
+    def unexpected_launch(*_args, **_kwargs):
+        raise AssertionError("a valid cache hit launched ffmpeg")
+
+    monkeypatch.setattr(thumbs.subprocess, "Popen", unexpected_launch)
+    signals = thumbs._Signals()
+    ready = []
+    finished = []
+    signals.ready.connect(lambda *args: ready.append(args))
+    signals.finished.connect(lambda *args: finished.append(args))
+    current = clip("cached.ts")
+
+    thumbs._ThumbTask(TOOLS, current, signals, 4).run()
+
+    assert ready == [(4, current.fingerprint, str(current.path), str(cached))]
+    assert finished == [(4, current.fingerprint, str(current.path))]
+
+
+def test_shutdown_retains_the_loader_until_its_task_finishes(
+        qt_app, monkeypatch):
+    """Closing a window cannot collect the owner of an active child."""
+    from flightdvr import thumbs
+
+    loader = thumbs.ThumbnailLoader(TOOLS)
+    monkeypatch.setattr(loader._pool, "start", lambda _task: None)
+    monkeypatch.setattr(loader._pool, "tryTake", lambda _task: False)
+    current = clip("still-running.ts")
+    loader.request(current)
+    token = (loader.generation, current.fingerprint, str(current.path))
+
+    loader.shutdown()
+
+    assert token in loader._tasks
+    assert loader in thumbs.ThumbnailLoader._retired
+
+    loader._finished(*token)
+
+    assert token not in loader._tasks
+    assert loader not in thumbs.ThumbnailLoader._retired
 
 
 def test_thumbnail_ready_rejects_an_old_identity_at_the_same_path(
@@ -1047,10 +1131,11 @@ def test_asking_nothing_to_stop_is_harmless():
 def test_the_ui_facing_stops_do_not_wait(window):
     """Every one of these is reached from the UI thread."""
     import inspect
-    from flightdvr import jobs, player, trim
+    from flightdvr import jobs, player, thumbs, trim
 
     for owner, name in ((jobs.ExportWorker, "cancel"),
                         (player.DecodeWorker, "stop"),
+                        (thumbs._ThumbTask, "stop"),
                         (trim.FilmstripLoader, "stop")):
         body = inspect.getsource(getattr(owner, name))
         assert "request_stop" in body, f"{owner.__name__}.{name} does not ask"
