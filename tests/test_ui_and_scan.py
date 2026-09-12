@@ -1131,10 +1131,12 @@ def test_asking_nothing_to_stop_is_harmless():
 def test_the_ui_facing_stops_do_not_wait(window):
     """Every one of these is reached from the UI thread."""
     import inspect
-    from flightdvr import jobs, player, thumbs, trim
+    from flightdvr import jobs, player, thumbs, trim, workers
 
     for owner, name in ((jobs.ExportWorker, "cancel"),
                         (player.DecodeWorker, "stop"),
+                        (workers.ScanWorker, "stop"),
+                        (workers.HardwareProbe, "stop"),
                         (thumbs._ThumbTask, "stop"),
                         (trim.FilmstripLoader, "stop")):
         body = inspect.getsource(getattr(owner, name))
@@ -1181,6 +1183,7 @@ class FakeWindow:
 
     def __init__(self):
         self._scan_generation = 2
+        self._closing = False
 
 
 def test_signals_from_the_current_scan_are_accepted():
@@ -1196,6 +1199,13 @@ def test_signals_from_an_earlier_scan_are_ignored():
     assert not window._is_current_scan(0)
 
 
+def test_signals_from_the_last_scan_are_ignored_after_close_starts():
+    """Queued callbacks must not revive a window that is being destroyed."""
+    window = FakeWindow()
+    window._closing = True
+    assert not window._is_current_scan(2)
+
+
 def test_a_scan_worker_stamps_everything_it_emits(tmp_path):
     from flightdvr.ui import ScanWorker
     worker = ScanWorker(TOOLS, tmp_path, recursive=False, generation=7)
@@ -1204,6 +1214,257 @@ def test_a_scan_worker_stamps_everything_it_emits(tmp_path):
     # can tell whose scan it belongs to.
     for signal in ("found", "counted", "done"):
         assert hasattr(worker, signal)
+
+
+def test_stopping_a_scan_cancels_and_reaps_every_owned_probe(
+        qt_app, monkeypatch, tmp_path):
+    """Four concurrent ffprobes must all remain reachable through cleanup."""
+    import subprocess
+    import threading
+    import time
+
+    from flightdvr import media, workers
+
+    paths = []
+    for index in range(workers.PROBE_WORKERS):
+        path = tmp_path / f"hdz_{index:03d}.ts"
+        path.write_bytes(b"synthetic probe input")
+        paths.append(path)
+
+    legacy_release = threading.Event()
+    all_started = threading.Event()
+    processes = []
+    processes_lock = threading.Lock()
+
+    class ControlledProbe:
+        def __init__(self, args):
+            self.args = args
+            self.returncode = None
+            self.stop_requested = threading.Event()
+            self.exited = threading.Event()
+            with processes_lock:
+                processes.append(self)
+                if len(processes) == workers.PROBE_WORKERS:
+                    all_started.set()
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.stop_requested.set()
+
+        def kill(self):
+            self.returncode = -9
+            self.exited.set()
+
+        def wait(self, timeout=None):
+            if not self.exited.wait(timeout):
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            self.wait(timeout)
+            return "", ""
+
+    def legacy_run(args, **_kwargs):
+        legacy_release.wait(2)
+        return subprocess.CompletedProcess(args, 1, "", "legacy probe")
+
+    monkeypatch.setattr(workers.scan, "find_clips", lambda *_args: paths)
+    monkeypatch.setattr(media.subprocess, "run", legacy_run)
+    monkeypatch.setattr(
+        media.subprocess, "Popen",
+        lambda args, **_kwargs: ControlledProbe(args),
+    )
+    worker = workers.ScanWorker(TOOLS, tmp_path, False, generation=9)
+    worker.start()
+
+    try:
+        assert all_started.wait(1), (
+            "the concurrent probes were launched without owned child handles")
+        began = time.monotonic()
+        worker.stop()
+        request_seconds = time.monotonic() - began
+
+        assert request_seconds < 0.05
+        assert all(p.stop_requested.wait(0.2) for p in processes)
+        assert worker.wait(4000), "probe cleanup did not finish"
+        assert all(p.exited.is_set() for p in processes)
+        assert not worker.isRunning()
+        assert not worker._processes
+    finally:
+        legacy_release.set()
+        for process in processes:
+            process.kill()
+        worker.stop()
+        worker.wait(5000)
+
+
+def test_probe_cancelled_after_quick_pass_never_starts_the_fallback(
+        monkeypatch, tmp_path):
+    """Cancellation between passes must not pay for another card read."""
+    import json
+    import threading
+
+    from flightdvr import media
+
+    path = tmp_path / "hdz_cancel.ts"
+    path.write_bytes(b"synthetic probe input")
+    cancelled = threading.Event()
+    launches = []
+    registrations = []
+
+    class QuickIncompleteProbe:
+        returncode = None
+
+        def __init__(self, args):
+            self.args = args
+            launches.append(args)
+
+        def communicate(self, timeout=None):
+            self.returncode = 0
+            cancelled.set()
+            return json.dumps({"format": {}, "streams": []}), ""
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(
+        media.subprocess, "Popen",
+        lambda args, **_kwargs: QuickIncompleteProbe(args),
+    )
+
+    media.probe(
+        TOOLS, path, should_stop=cancelled.is_set,
+        register=registrations.append,
+    )
+
+    assert len(launches) == 1
+    assert "-analyzeduration" not in launches[0]
+    assert registrations[0] is not None and registrations[-1] is None
+
+
+def test_cancellable_probe_preserves_a_legitimate_success(
+        monkeypatch, tmp_path):
+    """Owning the child must not change the ClipInfo a good probe returns."""
+    import json
+
+    from flightdvr import media
+
+    path = tmp_path / "hdz_good.ts"
+    path.write_bytes(b"synthetic probe input")
+    payload = json.dumps({
+        "format": {"duration": "2.5", "bit_rate": "123456"},
+        "streams": [{
+            "codec_type": "video", "codec_name": "hevc",
+            "width": 1280, "height": 720, "pix_fmt": "yuvj420p",
+            "color_range": "pc", "avg_frame_rate": "60/1",
+        }],
+    })
+    registrations = []
+
+    class SuccessfulProbe:
+        returncode = None
+
+        def __init__(self, args):
+            self.args = args
+
+        def communicate(self, timeout=None):
+            self.returncode = 0
+            return payload, ""
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(
+        media.subprocess, "Popen",
+        lambda args, **_kwargs: SuccessfulProbe(args),
+    )
+
+    found = media.probe(
+        TOOLS, path, should_stop=lambda: False,
+        register=registrations.append,
+    )
+
+    assert found.error == ""
+    assert (found.width, found.height, found.fps) == (1280, 720, 60.0)
+    assert found.duration == 2.5
+    assert registrations[0] is not None and registrations[-1] is None
+
+
+def test_rescan_does_not_wait_and_retains_the_old_worker_until_finished(
+        qt_app, monkeypatch, tmp_path):
+    """Rescan must return while the old worker finishes owned cleanup."""
+    import threading
+    import time
+
+    from PySide6.QtCore import QObject, QThread, Signal
+
+    from flightdvr import ui, workers
+
+    started = threading.Event()
+    stopped = threading.Event()
+    release = threading.Event()
+
+    class OldScan(QThread):
+        def run(self):
+            started.set()
+            release.wait(5)
+
+        def stop(self):
+            stopped.set()
+
+    class QuietScan(QObject):
+        counted = Signal(int, int)
+        found = Signal(int, object)
+        done = Signal(int, int)
+
+        def __init__(self, _tools, _folder, _recursive, generation, parent=None):
+            super().__init__(parent)
+            self.generation = generation
+
+        def start(self):
+            pass
+
+        def isRunning(self):  # noqa: N802 (Qt naming)
+            return False
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(ui, "available_encoders", lambda _tools: set())
+    monkeypatch.setattr(workers, "detect_hardware_encoder", lambda *_a, **_k: None)
+    monkeypatch.setattr(ui.MainWindow, "_start_update_check", lambda _self: None)
+    monkeypatch.setattr(ui, "ScanWorker", QuietScan)
+
+    window = ui.MainWindow(TOOLS)
+    folder = tmp_path / "card"
+    folder.mkdir()
+    window.source_combo.insertItem(0, str(folder), str(folder))
+    window.source_combo.setCurrentIndex(0)
+    old = OldScan(window)
+    window.scan_worker = old
+    old.start()
+
+    try:
+        assert started.wait(1), "the controlled old scan never started"
+        began = time.monotonic()
+        window._scan()
+        rescan_seconds = time.monotonic() - began
+
+        assert rescan_seconds < 0.05
+        assert stopped.is_set()
+        assert old.isRunning()
+        assert old in ui.MainWindow._retired_probe_threads
+
+        release.set()
+        assert old.wait(2000)
+        qt_app.processEvents()
+        assert old not in ui.MainWindow._retired_probe_threads
+    finally:
+        release.set()
+        old.wait(5000)
+        window.close()
 
 
 # -- editing the queue while it is running ------------------------------------
@@ -3000,40 +3261,73 @@ def test_the_probe_hands_out_the_process_it_is_waiting_on():
     assert seen and all(r == "the-callback" for r in seen)
 
 
-def test_closing_the_window_stops_a_probe_that_is_still_running(qt_app):
-    """The regression itself: build a window whose probe will not finish on
-    its own, close it, and it must be gone rather than left running."""
+def test_closing_requests_hardware_stop_and_retains_it_until_finished(
+        qt_app, monkeypatch):
+    """Close must not wait or collect a probe still reaping its child."""
+    import subprocess
     import threading
+    import time
 
-    from flightdvr.media import find_tools
-    from flightdvr.ui import MainWindow
+    from flightdvr import media, ui
 
     started = threading.Event()
-    release = threading.Event()
+    stop_requested = threading.Event()
+    killed = threading.Event()
+    exited = threading.Event()
 
-    def never_finishes(_tools, _name, register=None):
-        if register is not None:
-            register(_Stoppable(release))
-        started.set()
-        release.wait(30)
-        if register is not None:
-            register(None)
-        return False
+    class StubbornProbe:
+        returncode = None
 
-    with _swapped("_encoder_runs", never_finishes), \
-            _swapped("available_encoders", lambda *a, **k: {"h264_nvenc"}):
-        window = MainWindow(find_tools())
-        try:
-            assert started.wait(10), "the probe never got going"
-            assert window.hw_probe.isRunning()
-            window.close()
-            assert not window.hw_probe.isRunning(), (
-                "the probe outlived the window and will abort the process "
-                "when the window is collected"
-            )
-        finally:
-            release.set()
-            window.hw_probe.wait(5000)
+        def __init__(self, args):
+            self.args = args
+            started.set()
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            stop_requested.set()
+
+        def wait(self, timeout=None):
+            bounded = min(timeout, 0.2) if timeout is not None else 0.2
+            if not exited.wait(bounded):
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            return self.returncode
+
+        def kill(self):
+            killed.set()
+            self.returncode = -9
+            exited.set()
+
+    monkeypatch.setattr(ui, "available_encoders", lambda _tools: {"h264_nvenc"})
+    monkeypatch.setattr(
+        media, "available_encoders", lambda _tools: {"h264_nvenc"})
+    monkeypatch.setattr(
+        media.subprocess, "Popen",
+        lambda args, **_kwargs: StubbornProbe(args),
+    )
+    monkeypatch.setattr(ui.MainWindow, "_start_update_check", lambda _self: None)
+
+    window = ui.MainWindow(TOOLS)
+    worker = window.hw_probe
+    try:
+        assert started.wait(1), "the controlled hardware probe never started"
+        assert worker.isRunning()
+        began = time.monotonic()
+        window.close()
+        close_seconds = time.monotonic() - began
+
+        assert close_seconds < 0.05
+        assert stop_requested.wait(0.2)
+        assert worker.isRunning(), "close discarded the worker during cleanup"
+        assert worker in ui.MainWindow._retired_probe_threads
+        assert worker.wait(3000), "worker-side escalation did not finish"
+        qt_app.processEvents()
+        assert killed.is_set()
+        assert worker not in ui.MainWindow._retired_probe_threads
+    finally:
+        exited.set()
+        worker.wait(5000)
 
 
 class _Stoppable:
