@@ -275,7 +275,7 @@ def test_pending_named_ranges_follow_destination_template_and_date_edits(
     window.export_panel.out_edit.setEditText(str(changed))
     template = "review-{date}_{clip}_{range_number}_{range}_{preset}"
     window.export_panel.template_edit.setText(template)
-    window.export_panel.template_edit.textEdited.emit(template)
+    window.export_panel.template_edit.editingFinished.emit()
     window.export_panel.set_flight_date(date(2026, 9, 12))
 
     expected = [
@@ -288,6 +288,82 @@ def test_pending_named_ranges_follow_destination_template_and_date_edits(
     for target in (job.out_path for job in jobs):
         assert target.name.count("2026-09-12") == 1, target
         assert target.stem.count("master") == 1, target
+
+
+def test_a_retarget_collision_with_a_running_job_changes_nothing(
+        window, tmp_path, monkeypatch):
+    """The complete queue is checked before the first pending path moves."""
+    from PySide6.QtWidgets import QMessageBox
+
+    from flightdvr.jobs import Job, JobStatus
+    from flightdvr.presets import ExportSettings
+
+    first = clip("hdz_047.ts")
+    second = clip("hdz_048.ts")
+    pending = list(queue_up(window, [first, second]))
+    before = [job.out_path for job in pending]
+    occupied = (
+        Path(window.export_panel.output_text()) /
+        "Master" / "shared_master.mp4"
+    )
+    running = Job(
+        [clip("hdz_049.ts")], "master", ExportSettings(), occupied,
+        status=JobStatus.RUNNING,
+    )
+    window.jobs.append(running)
+    warned = []
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        lambda *args, **kwargs: warned.append(args[2]),
+    )
+
+    window.export_panel.template_edit.setText("shared_{preset}")
+    window.export_panel.template_edit.editingFinished.emit()
+
+    assert [job.out_path for job in pending] == before
+    assert running.out_path == occupied
+    assert len(warned) == 1
+    assert "Nothing in the queue was renamed" in warned[0]
+    assert "shared_master.mp4" in warned[0]
+    assert "Encoding" in warned[0]
+
+
+def test_exported_marker_resolves_all_named_range_template_paths(
+        window, tmp_path):
+    """One legacy whole-clip guess cannot mark two named ranges exported."""
+    from flightdvr.ui import EXPORTED_ROLE
+
+    out_dir = tmp_path / "markers"
+    window.export_panel.out_edit.setCurrentText(str(out_dir))
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    template = "review-{date}_{clip}_{range_number}_{range}_{preset}"
+    window.export_panel.template_edit.setText(template)
+    window.export_panel.set_flight_date(date(2026, 9, 12))
+    flight = clip("hdz_047.ts")
+    flight.selects = [
+        Select(10, 40, "Launch"),
+        Select(90, 120, "Tree dive"),
+    ]
+    window._add_clip(window._scan_generation, flight)
+    targets = [
+        out_dir / "Master" /
+        "review-2026-09-12_hdz_047_1_Launch_master.mp4",
+        out_dir / "Master" /
+        "review-2026-09-12_hdz_047_2_Tree-dive_master.mp4",
+    ]
+    for target in targets:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"finished")
+
+    window._refresh_export_markers()
+    item = window.table.item(0, 0)
+    assert item.data(EXPORTED_ROLE) is True
+    assert all(str(target) in item.toolTip() for target in targets)
+
+    targets[-1].unlink()
+    window._refresh_export_markers()
+    assert item.data(EXPORTED_ROLE) is False, (
+        "one range output made the whole multi-range clip look exported")
 
 
 def test_a_joined_export_keeps_the_name_it_always_had(window):
