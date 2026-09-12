@@ -42,6 +42,7 @@ from flightdvr.format import (  # noqa: E402
     expand_template, export_fields, select_stem,
 )
 from flightdvr.media import ClipInfo, Select  # noqa: E402
+from flightdvr.output_naming import naming_inputs, resolve_output  # noqa: E402
 from flightdvr.presets import PRESETS, output_path  # noqa: E402
 
 
@@ -131,6 +132,31 @@ def test_an_already_dated_clip_is_not_dated_twice():
     stem = template_stem(source, 0, 1, "master", date(2026, 7, 4))
     assert stem == "2026-07-04_hdz_048_master"
     assert stem.count("2026-07-04") == 1
+
+
+def test_one_resolver_builds_the_complete_named_range_target():
+    """The queue, retarget and marker consumers share this exact answer."""
+    source = clip()
+    source.selects = [
+        Select(12.0, 48.0, "Launch"),
+        Select(96.0, 141.0, "Tree dive"),
+    ]
+    piece = source.for_export()[1]
+
+    resolved = resolve_output(
+        naming_inputs(piece, 1, 2, "Saturday"),
+        "master", Path("/out"),
+        "review-{date}_{session}_{clip}_{range_number}_{range}_{preset}",
+        True, date(2026, 9, 12),
+    )
+
+    assert resolved.stem == (
+        "review-2026-09-12_Saturday_hdz_048_2_Tree-dive_master")
+    assert resolved.target == Path(
+        "/out/Master/"
+        "review-2026-09-12_Saturday_hdz_048_2_Tree-dive_master.mp4")
+    assert resolved.target.name.count("2026-09-12") == 1
+    assert resolved.target.stem.count("master") == 1
 
 
 # -- the rules the expansion has to hold ---------------------------------------

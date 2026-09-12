@@ -67,11 +67,12 @@ from .media import (
     ClipInfo, Select, Tools, available_encoders, detect_hardware_encoder, probe,
     stop_process,
 )
+from .output_naming import naming_inputs, resolve_output
 from .presets import (
     PRESET_ORDER, PRESETS, ExportSettings, describe_join_problems,
     estimate_output_size,
-    join_problems, output_path, output_runtime, slow_problems, vertical_crop,
-    vertical_problems, templated_output_path,
+    join_problems, output_runtime, slow_problems, vertical_crop,
+    vertical_problems,
 )
 from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
@@ -759,6 +760,13 @@ class MainWindow(QMainWindow):
         )
         panel.output_changed.connect(self._on_output_changed)
         panel.date_changed.connect(self._on_date_changed)
+        # ExportPanel's generic signal covers the subfolder checkbox. These
+        # two controls expose their own edit signals, and a pending job must
+        # follow all three parts of the output policy rather than only one.
+        panel.out_edit.currentTextChanged.connect(self._on_output_changed)
+        # Wait until the edit is committed. Retargeting on every keystroke
+        # would turn a temporarily incomplete template into a modal warning.
+        panel.template_edit.editingFinished.connect(self._on_output_changed)
         panel.add_requested.connect(self._add_to_queue)
         panel.bundle_requested.connect(self._add_bundle)
         return panel
@@ -2590,6 +2598,8 @@ class MainWindow(QMainWindow):
         key = self._preset_key()
         subfolders = self.export_panel.subfolders_enabled()
         stamp = self.flight_date()
+        template = self.export_panel.template()
+        session_name = self.session.title if self.session else ""
 
         self.table.blockSignals(True)
         for row in range(self.table.rowCount()):
@@ -2599,12 +2609,32 @@ class MainWindow(QMainWindow):
             clip = self.clip_by_path.get(item.data(Qt.ItemDataRole.UserRole))
             if clip is None:
                 continue
-            target = output_path(out_dir, clip.stem, key, subfolders, stamp)
-            done = target.exists() and target.stat().st_size > 0
+            pieces = clip.for_export()
+            try:
+                targets = [
+                    resolve_output(
+                        naming_inputs(
+                            piece, index, len(pieces), session_name),
+                        key, out_dir, template, subfolders, stamp,
+                    ).target
+                    for index, piece in enumerate(pieces)
+                ]
+            except (UnknownTemplateField, BadTemplate):
+                targets = []
+            identities = {output_key(target) for target in targets}
+            # If two ranges render to one name, that one existing file cannot
+            # prove both exports were made. The queue rejects the same shape.
+            done = (
+                bool(targets)
+                and len(identities) == len(targets)
+                and all(target.exists() and target.stat().st_size > 0
+                        for target in targets)
+            )
             item.setData(EXPORTED_ROLE, done)
             item.setText(f"{clip.path.name}    ✓ exported" if done else clip.path.name)
             if done:
-                item.setToolTip(f"{clip.path}\nAlready exported to {target}")
+                listed = "\n".join(str(target) for target in targets)
+                item.setToolTip(f"{clip.path}\nAlready exported to {listed}")
         self.table.blockSignals(False)
         self._refresh_review_filter()
 
@@ -2617,9 +2647,65 @@ class MainWindow(QMainWindow):
         """
         if not self._ready or not self.jobs:
             return
+        out_text = self.export_panel.output_text().strip()
+        if not out_text:
+            return
+        out_dir = Path(out_text)
+        template = self.export_panel.template()
+        subfolders = self.export_panel.subfolders_enabled()
         stamp = self.flight_date()
+
+        planned = []
+        occupied: dict[str, list[str]] = {}
         for job in self.jobs:
-            job.retarget(stamp)
+            try:
+                resolved = job.proposed_retarget(
+                    stamp, out_dir=out_dir, template=template,
+                    subfolders=subfolders,
+                )
+            except (UnknownTemplateField, BadTemplate) as exc:
+                QMessageBox.warning(
+                    self, "Queued outputs cannot be renamed",
+                    f"Nothing in the queue was renamed.\n\n{exc}",
+                )
+                return
+            if resolved is None:
+                # A path does not stop being owned when its job stops moving.
+                # In particular, DONE is the state most likely to name a real
+                # file: omitting it lets a panel edit retarget a waiting job
+                # onto a completed export before the queue starts again.
+                occupied.setdefault(output_key(job.out_path), []).append(
+                    f"{job.name} ({job.status.value})")
+                continue
+            identity = output_key(resolved.target)
+            owners = occupied.setdefault(identity, [])
+            owners.append(job.name)
+            planned.append((job, resolved))
+
+        clashes = {
+            identity: owners for identity, owners in occupied.items()
+            if len(owners) > 1
+        }
+        if clashes:
+            lines = []
+            for identity, owners in clashes.items():
+                lines.append(
+                    f"{Path(identity).name}\n    from " + ", ".join(owners)
+                )
+            QMessageBox.warning(
+                self, "Queued outputs cannot be renamed",
+                "Nothing in the queue was renamed. These queued, running, or "
+                "finished "
+                "exports would write to the same file:\n\n"
+                + "\n".join(lines),
+            )
+            return
+
+        for job, resolved in planned:
+            job.apply_retarget(
+                resolved, out_dir=out_dir, template=template,
+                subfolders=subfolders,
+            )
         self._rebuild_queue()
 
     def flight_date(self) -> date | None:
@@ -2778,28 +2864,27 @@ class MainWindow(QMainWindow):
             # still carried the old date and suffix handling.
             joined_template = self.export_panel.template()
             try:
-                check_template(joined_template)
-                fields = export_fields(
-                    ordered[0], 0, 1, PRESETS[key].suffix,
-                    flight_date=stamp,
-                    session_name=self.session.title if self.session else "",
-                )
                 # One file out of several clips, so {clip} alone would name it
                 # after whichever sorted first. The marker goes *into* the clip
                 # field rather than onto the end of the rendered name: that is
                 # where it has always been, so the default template still
                 # produces hdz_047_joined_master.mp4 exactly as before, and a
                 # template ending in {preset} still reads correctly.
-                fields["clip"] = f"{fields['clip']}_joined"
-                stem = expand_template(joined_template, fields)
-                check_stem(stem)
+                naming = naming_inputs(
+                    ordered[0], 0, 1,
+                    self.session.title if self.session else "",
+                    joined=True,
+                )
+                resolved = resolve_output(
+                    naming, key, out_dir, joined_template, subfolders, stamp,
+                )
             except (UnknownTemplateField, BadTemplate) as exc:
                 QMessageBox.warning(
                     self, "That name template cannot be used",
                     f"Nothing has been queued.\n\n{exc}",
                 )
                 return
-            target = templated_output_path(out_dir, stem, key, subfolders)
+            stem, target = resolved.stem, resolved.target
             if output_key(target) not in already:
                 # The list is written only once the target is accepted, and its
                 # name covers every clip in it. Writing it first, under a name
@@ -2809,7 +2894,9 @@ class MainWindow(QMainWindow):
                 concat = write_concat_file(ordered, work_dir(),
                                            f"{stem}_{_clip_set_id(ordered)}")
                 self.jobs.append(Job(ordered, key, settings, target, concat_file=concat,
-                                     out_dir=out_dir, stem=stem, subfolders=subfolders))
+                                     out_dir=out_dir, stem=stem,
+                                     subfolders=subfolders, naming=naming,
+                                     template=joined_template))
         else:
             # Every target is rendered before a single job is appended. Two
             # pieces of this one action landing on the same filename is not the
@@ -2850,22 +2937,11 @@ class MainWindow(QMainWindow):
                 for clip in clips:
                     parts = clip.for_export()
                     for index, piece in enumerate(parts):
-                        stem = expand_template(template, export_fields(
-                            piece, index, len(parts), PRESETS[key].suffix,
-                            flight_date=stamp, session_name=session_name,
-                        ))
-                        # A template can be valid and still expand to something
-                        # unusable — every field empty, or a clip whose own stem
-                        # is a Windows device name. Checked per clip, and one
-                        # bad name refuses the action rather than queueing the
-                        # rest and leaving a gap nobody notices.
-                        check_stem(stem)
-                        # Not output_path: that appends the preset suffix and
-                        # prefixes the date, and the template has already placed
-                        # both. Using it produced hdz_047_master_master.mp4.
-                        target = templated_output_path(out_dir, stem, key,
-                                                       subfolders)
-                        planned.append((piece, stem, target))
+                        naming = naming_inputs(
+                            piece, index, len(parts), session_name)
+                        resolved = resolve_output(
+                            naming, key, out_dir, template, subfolders, stamp)
+                        planned.append((piece, naming, resolved))
             except BadTemplate as exc:
                 QMessageBox.warning(
                     self, "That name cannot be used",
@@ -2875,8 +2951,8 @@ class MainWindow(QMainWindow):
 
             seen: dict[str, Path] = {}
             clashing: dict[str, list[Path]] = {}
-            for piece, _stem, target in planned:
-                identity = output_key(target)
+            for piece, _naming, resolved in planned:
+                identity = output_key(resolved.target)
                 if identity in seen:
                     clashing.setdefault(
                         identity, [seen[identity]]).append(piece.path)
@@ -2897,13 +2973,15 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-            for piece, stem, target in planned:
+            for piece, naming, resolved in planned:
+                stem, target = resolved.stem, resolved.target
                 if output_key(target) in already:
                     continue
                 already.add(output_key(target))
                 self.jobs.append(Job([piece], key, settings, target,
                                      out_dir=out_dir, stem=stem,
-                                     subfolders=subfolders))
+                                     subfolders=subfolders, naming=naming,
+                                     template=template))
 
         added = len(self.jobs) - before
         skipped = (

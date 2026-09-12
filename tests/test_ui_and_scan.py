@@ -1843,11 +1843,16 @@ def test_each_review_filter_shows_only_the_rows_it_names(window, monkeypatch,
         # Exported means the same thing as the marker already shown in the
         # name column: an output for the current settings exists and is not
         # empty. Only one of these four targets exists.
-        monkeypatch.setattr(
-            "flightdvr.ui.output_path",
-            lambda _out, stem, *_args: tmp_path / f"{stem}.mp4",
-        )
-        (tmp_path / f"{clips[1].stem}.mp4").write_bytes(b"finished")
+        from flightdvr.format import DEFAULT_TEMPLATE
+
+        window.export_panel.out_edit.setCurrentText(str(tmp_path))
+        window.export_panel.preset_buttons["master"].setChecked(True)
+        window.export_panel.template_edit.setText(DEFAULT_TEMPLATE)
+        window.export_panel.date_check.setChecked(False)
+        window.export_panel.subfolder_check.setChecked(True)
+        target = tmp_path / "Master" / f"{clips[1].stem}_master.mp4"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"finished")
         window._refresh_export_markers()
         panel.review_filter.setCurrentIndex(
             panel.review_filter.findData(FILTER_EXPORTED))

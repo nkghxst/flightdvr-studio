@@ -37,6 +37,8 @@ from .media import (
     NO_WINDOW, TERMINATE_SECONDS, ClipInfo, Tools, request_stop, stop_process,
 )
 from .audio_plan import MusicChoice, OUTPUT_RATE, resolve_audio_plan, round_samples
+from .format import DEFAULT_TEMPLATE
+from .output_naming import NamingInputs, ResolvedOutput, resolve_output
 from .presets import (
     PRESETS, ExportSettings, build_commands, join_problems, output_runtime,
     slow_problems, vertical_problems,
@@ -129,6 +131,8 @@ class Job:
     out_dir: Path | None = None
     stem: str = ""
     subfolders: bool = True
+    naming: NamingInputs | None = None
+    template: str = DEFAULT_TEMPLATE
 
     # A bundle member is named and sized in a confirmation the user reads
     # before agreeing to it, so it keeps the name it was shown under. The
@@ -161,16 +165,71 @@ class Job:
         self.clips = deepcopy(self.clips)
         self.settings = deepcopy(self.settings)
         self.audio = deepcopy(self.audio)
+        if self.out_dir is not None and self.naming is None:
+            # Compatibility callers still hand over the old bare `stem`.
+            # Capture it once: `apply_retarget` replaces `stem` with the newly
+            # rendered value, which must never become the next render's input.
+            self.naming = NamingInputs(clip=self.stem)
 
-    def retarget(self, flight_date) -> None:
-        """Recompute the output path after an output setting changed."""
-        if self.status is not JobStatus.PENDING or self.out_dir is None:
-            return
+    def proposed_retarget(self, flight_date, *, out_dir: Path | None = None,
+                          template: str | None = None,
+                          subfolders: bool | None = None,
+                          ) -> ResolvedOutput | None:
+        """Render a pending path without changing the job.
+
+        The window asks every pending job first, checks the complete set for
+        collisions, and only then applies any of them. Mutating here would make
+        the preflight itself capable of leaving half the queue renamed.
+        """
+        if self.status is not JobStatus.PENDING:
+            return None
         if self.frozen:
+            return None
+        chosen_dir = self.out_dir if out_dir is None else out_dir
+        if chosen_dir is None:
+            return None
+        chosen_template = self.template if template is None else template
+        chosen_subfolders = (
+            self.subfolders if subfolders is None else subfolders
+        )
+        # Older tests and callers supplied a bare legacy stem rather than the
+        # retained fields. Production queue paths always provide `naming` now;
+        # treating that old bare stem as the clip field keeps the API useful
+        # without restoring the rendered-stem bug.
+        naming = self.naming or NamingInputs(clip=self.stem)
+        return resolve_output(
+            naming, self.preset_key, chosen_dir, chosen_template,
+            chosen_subfolders, flight_date,
+        )
+
+    def apply_retarget(self, resolved: ResolvedOutput, *, out_dir: Path,
+                       template: str, subfolders: bool) -> None:
+        """Commit one path after the window has accepted the whole plan."""
+        if self.status is not JobStatus.PENDING or self.frozen:
             return
-        from .presets import output_path
-        self.out_path = output_path(
-            self.out_dir, self.stem, self.preset_key, self.subfolders, flight_date
+        self.out_path = resolved.target
+        self.out_dir = out_dir
+        self.stem = resolved.stem
+        self.template = template
+        self.subfolders = subfolders
+
+    def retarget(self, flight_date, *, out_dir: Path | None = None,
+                 template: str | None = None,
+                 subfolders: bool | None = None) -> None:
+        """Recompute one pending path for direct non-window callers."""
+        resolved = self.proposed_retarget(
+            flight_date, out_dir=out_dir, template=template,
+            subfolders=subfolders,
+        )
+        if resolved is None:
+            return
+        self.apply_retarget(
+            resolved,
+            out_dir=self.out_dir if out_dir is None else out_dir,
+            template=self.template if template is None else template,
+            subfolders=(
+                self.subfolders if subfolders is None else subfolders
+            ),
         )
 
     @property

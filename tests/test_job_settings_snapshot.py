@@ -19,7 +19,8 @@ from pathlib import Path
 
 from flightdvr.bundle import frozen_settings
 from flightdvr.jobs import Job, JobStatus
-from flightdvr.media import ClipInfo
+from flightdvr.media import ClipInfo, Select
+from flightdvr.output_naming import naming_inputs
 from flightdvr.presets import ExportSettings
 
 
@@ -109,3 +110,32 @@ def test_snapshot_does_not_freeze_job_status_progress_or_path_policy(tmp_path):
     assert ordinary.status is JobStatus.CANCELLED
     assert ordinary.progress == 0.4
     assert ordinary.message == "Cancelled"
+
+
+def test_retarget_uses_the_original_named_range_inputs(tmp_path):
+    """Later browser edits cannot rewrite what a pending job was named from."""
+    source = clip("hdz_047.ts")
+    source.selects = [
+        Select(1.0, 4.0, "Launch"),
+        Select(6.0, 9.0, "Tree dive"),
+    ]
+    piece = source.for_export()[0]
+    naming = naming_inputs(piece, 0, 2, "Saturday")
+    job = Job(
+        [piece], "master", ExportSettings(), tmp_path / "old.mp4",
+        out_dir=tmp_path, stem="old", subfolders=False,
+        naming=naming,
+    )
+
+    source.path = Path("renamed.ts")
+    source.selects[0].name = "Changed later"
+    job.retarget(
+        date(2026, 9, 12),
+        out_dir=tmp_path / "changed",
+        template="review-{date}_{session}_{clip}_{range_number}_{range}_{preset}",
+        subfolders=False,
+    )
+
+    assert job.out_path == (
+        tmp_path / "changed" /
+        "review-2026-09-12_Saturday_hdz_047_1_Launch_master.mp4")
