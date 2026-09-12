@@ -1725,9 +1725,6 @@ class MainWindow(QMainWindow):
         self.clips.append(clip)
         self.clip_by_path[str(clip.path)] = clip
 
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-
         name_item = SortItem(clip.path.name, natural_key(clip.path.name))
         name_item.setFlags(name_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         name_item.setCheckState(Qt.CheckState.Unchecked)
@@ -1739,16 +1736,9 @@ class MainWindow(QMainWindow):
         if clip.error:
             tip.append(f"Warning: {clip.error}")
         name_item.setToolTip("\n".join(tip))
-        self.table.setItem(row, 0, name_item)
 
         # Sort keys are the underlying numbers, so the columns order correctly
         # rather than alphabetically by their formatted text.
-        self.table.setItem(row, 1, SortItem(clip.duration_label, clip.duration))
-        self.table.setItem(row, 2, SortItem(clip.size_label, clip.size))
-        self.table.setItem(row, 3, SortItem(
-            clip.modified.strftime("%d %b %Y  %H:%M"), clip.modified.timestamp()
-        ))
-        self.table.setItem(row, 4, SortItem(clip.format_label, clip.format_label))
         range_count = len(clip.real_selects)
         flight_count = self._flight_count(clip)
         review_item = SortItem(
@@ -1757,14 +1747,45 @@ class MainWindow(QMainWindow):
         )
         review_item.setToolTip(
             review_state_tooltip(clip.review, range_count, flight_count))
-        self.table.setItem(row, 5, review_item)
+        items = (
+            name_item,
+            SortItem(clip.duration_label, clip.duration),
+            SortItem(clip.size_label, clip.size),
+            SortItem(
+                clip.modified.strftime("%d %b %Y  %H:%M"),
+                clip.modified.timestamp(),
+            ),
+            SortItem(clip.format_label, clip.format_label),
+            review_item,
+        )
+
         # Store this on every item rather than looking sideways from the paint
         # delegate. A review change then invalidates every cell in the row,
         # including when sorting moves that row after the State key changes.
-        previous = self.table.blockSignals(True)
-        for column in range(self.table.columnCount()):
-            self.table.item(row, column).setData(REVIEW_ROLE, clip.review)
-        self.table.blockSignals(previous)
+        for item in items:
+            item.setData(REVIEW_ROLE, clip.review)
+
+        # During a rebuild these are six programmatic cells, not six user edits.
+        # Letting every setItem emit itemChanged ran the count, source-option and
+        # estimate refresh chain six times per recording. The scan keeps its
+        # progressive row/review/count updates below, and _scan_done performs
+        # the one final derived refresh after every delivered row exists.
+        #
+        # Outside a rebuild there is no final callback. Preserve that path's
+        # ordinary itemChanged delivery exactly; layout construction and any
+        # future direct caller still see the complete row arrive as before.
+        row = self.table.rowCount()
+        suppress_refresh = self._scan_rebuilding
+        previous = (
+            self.table.blockSignals(True) if suppress_refresh else False
+        )
+        try:
+            self.table.insertRow(row)
+            for column, item in enumerate(items):
+                self.table.setItem(row, column, item)
+        finally:
+            if suppress_refresh:
+                self.table.blockSignals(previous)
 
         self.table.setRowHeight(row, self.table.iconSize().height() + 6)
         self.thumbs.request(clip)
