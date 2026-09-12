@@ -49,6 +49,21 @@ def test_job_owns_a_deep_snapshot_of_future_nested_settings():
     assert job.settings.music is not caller.music
 
 
+def test_job_owns_the_submitted_source_metadata():
+    """A later browser trim must not rewrite a waiting whole-clip job."""
+    source = clip("whole.ts")
+    source.duration = 240.0
+    job = Job([source], "master", ExportSettings(), Path("whole.mp4"))
+
+    source.trim_in, source.trim_out = 12.0, 30.0
+
+    submitted = job.clips[0]
+    assert submitted is not source
+    assert submitted.selects == []
+    assert (submitted.trim_in, submitted.out_point) == (0.0, 240.0)
+    assert job.total_duration == 240.0
+
+
 def test_ordinary_assembly_and_bundle_shaped_jobs_do_not_share_settings():
     caller = FutureMusicSettings(social_crf=20)
     ordinary = Job([clip("ordinary.ts")], "social", caller,
