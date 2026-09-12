@@ -1287,12 +1287,20 @@ def test_stopping_a_scan_cancels_and_reaps_every_owned_probe(
         legacy_release.wait(2)
         return subprocess.CompletedProcess(args, 1, "", "legacy probe")
 
+    real_popen = subprocess.Popen
+
+    def controlled_popen(args, **kwargs):
+        # Other windows can still be finishing their deliberately asynchronous
+        # hardware probe.  Replacing subprocess.Popen process-wide captured
+        # those unrelated children on Linux and made this scan own a process it
+        # never launched.  Only these generated files belong to this oracle.
+        if Path(args[-1]) in paths:
+            return ControlledProbe(args)
+        return real_popen(args, **kwargs)
+
     monkeypatch.setattr(workers.scan, "find_clips", lambda *_args: paths)
     monkeypatch.setattr(media.subprocess, "run", legacy_run)
-    monkeypatch.setattr(
-        media.subprocess, "Popen",
-        lambda args, **_kwargs: ControlledProbe(args),
-    )
+    monkeypatch.setattr(media.subprocess, "Popen", controlled_popen)
     real_stop_process = media.stop_process
     monkeypatch.setattr(
         media, "stop_process",
