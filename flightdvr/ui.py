@@ -27,6 +27,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
+from functools import partial
 from html import escape
 from pathlib import Path
 
@@ -63,10 +64,7 @@ from .format import (
 )
 from .help_content import naming_help_html, release_links
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
-from .media import (
-    ClipInfo, Select, Tools, available_encoders, detect_hardware_encoder, probe,
-    stop_process,
-)
+from .media import ClipInfo, Select, Tools, available_encoders
 from .output_naming import naming_inputs, resolve_output
 from .presets import (
     PRESET_ORDER, PRESETS, ExportSettings, describe_join_problems,
@@ -112,28 +110,17 @@ SCAN_IN_PROGRESS = ("Still listing this folder — decisions can be made once "
 # Exported filter reads the same answer the row displays.
 EXPORTED_ROLE = Qt.ItemDataRole.UserRole + 2
 
-# Probing is I/O bound on a card reader, so a few at once helps a lot; beyond
-# about four the reader becomes the limit and it gets slower again.
-PROBE_WORKERS = 4
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 class MainWindow(QMainWindow):
+    # A closing window cannot parent a QThread that is still reaping a probe
+    # child. These parentless references live exactly until `finished`.
+    _retired_probe_threads: set[QThread] = set()
+    _retired_probe_callbacks: dict[QThread, object] = {}
+    _quit_after_probe_threads = False
+
     def __init__(self, tools: Tools):
         super().__init__()
         self.tools = tools
+        self._closing = False
         self.settings_store = QSettings(ORG, APP_NAME)
         self.clips: list[ClipInfo] = []
         self._layout_state = ClassicLayout.default()
@@ -142,9 +129,6 @@ class MainWindow(QMainWindow):
         self.worker: ExportWorker | None = None
         self.scan_worker: ScanWorker | None = None
         self._scan_generation = 0
-        # Workers asked to stop that may still be finishing a probe. Held only
-        # so a running QThread is not collected out from under itself.
-        self._retired_scans: list[ScanWorker] = []
         self.copy_worker: CopyWorker | None = None
         self.update_check = None
         self.encoders = available_encoders(tools)
@@ -1193,6 +1177,7 @@ class MainWindow(QMainWindow):
         self.browser_panel.sync_thumbnail_size()
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self._closing = True
         self._save()
         # Before the threads are stopped: a trim set in the last second and a
         # half is still sitting on the debounce timer, and closing the window
@@ -1206,12 +1191,29 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
             self.worker.wait(4000)
-        # Retired scans are included: one can still be inside a probe, and a
-        # QThread destroyed while running takes the process with it.
+        # These stops only ask. Worker-side cleanup may safely outlive this
+        # window, so retain each QThread through `finished` instead of waiting.
+        # Retain every live thread before asking any of them to stop: one can
+        # finish synchronously while another still needs its lifetime secured.
+        probe_threads = [
+            thread for thread in (self.hw_probe, self.scan_worker)
+            if thread and thread.isRunning()
+        ]
+        for thread in probe_threads:
+            self._retain_probe_thread(thread)
+        if type(self)._retired_probe_threads:
+            # Closing the last window normally ends app.exec() immediately.
+            # Keep the event loop alive for the finished callbacks which own
+            # these threads; the workers, never the UI, reap their children.
+            app = QApplication.instance()
+            if app is not None:
+                app.setQuitOnLastWindowClosed(False)
+                type(self)._quit_after_probe_threads = True
+        for thread in probe_threads:
+            thread.stop()
         if self.update_check and self.update_check.isRunning():
             self.update_check.wait(2000)
-        for thread in [self.hw_probe, self.scan_worker, self.copy_worker,
-                       *self._retired_scans]:
+        for thread in [self.copy_worker]:
             if thread and thread.isRunning():
                 thread.stop()
                 thread.wait(2000)
@@ -1230,9 +1232,42 @@ class MainWindow(QMainWindow):
         self.thumbs.shutdown()
         super().closeEvent(event)
 
+    @classmethod
+    def _release_retired_probe_thread(cls, thread: QThread) -> None:
+        callback = cls._retired_probe_callbacks.pop(thread, None)
+        cls._retired_probe_threads.discard(thread)
+        if callback is not None:
+            try:
+                thread.finished.disconnect(callback)
+            except (RuntimeError, TypeError):
+                pass
+        if not cls._retired_probe_threads and cls._quit_after_probe_threads:
+            cls._quit_after_probe_threads = False
+            app = QApplication.instance()
+            if app is not None:
+                app.setQuitOnLastWindowClosed(True)
+                app.quit()
+
+    def _retain_probe_thread(self, thread: QThread) -> None:
+        """Detach one stopped probe thread until its real finished signal."""
+        cls = type(self)
+        if thread in cls._retired_probe_threads:
+            return
+        thread.setParent(None)
+        callback = partial(cls._release_retired_probe_thread, thread)
+        cls._retired_probe_threads.add(thread)
+        cls._retired_probe_callbacks[thread] = callback
+        thread.finished.connect(callback)
+        # The thread can finish between stop() and this connection. Connecting
+        # first and checking second makes either path release the reference.
+        if not thread.isRunning():
+            cls._release_retired_probe_thread(thread)
+
     # -- hardware -------------------------------------------------------------
 
     def _hardware_found(self, found) -> None:
+        if self._closing:
+            return
         self.export_panel.set_hardware(found)
         if found:
             self.hw_encoder, self.hw_label = found
@@ -1297,7 +1332,7 @@ class MainWindow(QMainWindow):
         self._retire_still_capture()
         if self.scan_worker and self.scan_worker.isRunning():
             self.scan_worker.stop()
-            self.scan_worker.wait(1500)
+            self._retain_probe_thread(self.scan_worker)
         self._flight_scan_ready = False
         self._stop_flight_analysis()
         self._flight_attempted.clear()
@@ -1325,9 +1360,6 @@ class MainWindow(QMainWindow):
         self.thumbs.clear()
         self.thumbs.pause()
 
-        # A worker that was asked to stop may still be inside a probe, so the
-        # old one is left to finish in its own time and simply ignored. Keeping
-        # a reference stops Python collecting a running QThread.
         self._scan_generation += 1
         # From here until _adopt_session runs, the clips on screen are a
         # half-built list with no decisions on them. Both the folder being read
@@ -1337,10 +1369,6 @@ class MainWindow(QMainWindow):
         self._pending_generation = (
             self._scan_generation if self._pending_session is not None else -1)
         self._apply_decision_availability()
-        if self.scan_worker and self.scan_worker.isRunning():
-            self._retired_scans.append(self.scan_worker)
-        self._retired_scans = [w for w in self._retired_scans if w.isRunning()]
-
         self.scan_worker = ScanWorker(
             self.tools, folder, self.recursive_check.isChecked(),
             self._scan_generation, self,
@@ -1352,7 +1380,7 @@ class MainWindow(QMainWindow):
 
     def _is_current_scan(self, generation: int) -> bool:
         """Whether a signal belongs to the scan now on screen."""
-        return generation == self._scan_generation
+        return not self._closing and generation == self._scan_generation
 
     def _scan_counted(self, generation: int, total: int) -> None:
         if not self._is_current_scan(generation):
