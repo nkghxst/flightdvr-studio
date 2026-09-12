@@ -60,9 +60,12 @@ try {
 Never copy a private key or token into a checkout, persist a token in `gh`
 configuration, weaken a key ACL, or create a second persistent login. A
 separate clone may need its own local app settings; a linked worktree shares
-them. If token generation fails, report whether normal auth, local settings,
-the key path or token generation failed. Do not rotate credentials in response
-to an unclassified transport timeout.
+them. The non-secret settings are `flightdvr.githubAppId=4511822` and
+`flightdvr.githubAppInstallationId=151828984`; set them in each standalone
+clone. The private-key path remains machine-local and must never be written
+here or copied into a checkout. If token generation fails, report whether
+normal auth, local settings, the key path or token generation failed. Do not
+rotate credentials in response to an unclassified transport timeout.
 
 For incomplete acceptance, use a neutral issue reference such as
 `Related to #96; acceptance remains pending`. Do not use `Closes`, `Fixes` or a

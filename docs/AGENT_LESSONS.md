@@ -29,6 +29,11 @@ asked an encoder for 127x95 and silently received 126x94, so all of its tests
 passed while testing the wrong dimensions. Compare paths as `Path` objects;
 Windows paths are not portable strings on POSIX.
 
+For real media, identify the source by its filename and the first 16 lowercase
+characters of its full-file SHA-256. Do not substitute `ClipInfo.fingerprint`:
+it includes the local path and modification time for cache invalidation, so it
+changes when the same clip is copied to another machine.
+
 ## Output and ffmpeg
 
 Unit tests can check the command the app would issue. Only an integration test
