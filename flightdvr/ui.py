@@ -777,6 +777,10 @@ class MainWindow(QMainWindow):
         """
         if clip is None:
             return None
+        # The bundle path hands `bundle.Piece`, which carries the recording in
+        # `.clip`; every other route hands the recording itself. One identity
+        # either way, or the same output would be keyed two ways.
+        clip = getattr(clip, "clip", clip)
         ranges = clip.real_selects
         sid = ""
         if ranges:
@@ -959,18 +963,26 @@ class MainWindow(QMainWindow):
         if target == self._music_target:
             self._show_music_state(target)
 
-    def _music_refusal(self, pieces) -> str:
+    def _music_refusal(self, pieces, *, joined: bool | None = None,
+                       bundle: bool = False) -> str:
         """Why this action cannot be queued, asked before anything is queued.
 
         Configured music that cannot be exported refuses the whole action. It
         is never quietly replaced with an unconfigured choice: the person asked
         for music and would otherwise get a silent file and no explanation.
+
+        Every route that queues has to ask. A delivery bundle is the one that
+        was missed: its members are frozen at a name the person has already
+        agreed to, `resolve_audio_plan` refuses music for one, and without this
+        the choice was dropped on the way in with nothing said.
         """
-        joined = len(pieces) > 1 and self.export_panel.join_enabled()
+        if joined is None:
+            joined = len(pieces) > 1 and self.export_panel.join_enabled()
         for piece in pieces:
             target = self._music_target_for(piece)
             if target is None:
                 continue
+            piece = getattr(piece, "clip", piece)
             choice = self._planned_music(target)
             if not choice.configured:
                 continue
@@ -979,7 +991,7 @@ class MainWindow(QMainWindow):
                         "read. Wait for it to finish, or clear the choice.")
             if target in self._music_trouble:
                 return f"{piece.path.name}: {self._music_trouble[target]}"
-            reason = MusicPanel._refusal(self._preset_key(), joined, False)
+            reason = MusicPanel._refusal(self._preset_key(), joined, bundle)
             if reason:
                 return f"{piece.path.name}: {reason}"
             if choice.mode in (AudioMode.REPLACE, AudioMode.MIX) and (
@@ -3364,6 +3376,18 @@ class MainWindow(QMainWindow):
         pieces, joined, problem = self._bundle_material()
         if problem:
             QMessageBox.warning(self, "Nothing to deliver", problem)
+            return
+
+        # Before the confirmation, never mind the queue. A bundle member is
+        # frozen at the name it was agreed under, and music is not exported
+        # for one — so a configured choice has to refuse here rather than be
+        # dropped on the way past.
+        refusal = self._music_refusal(pieces, joined=joined, bundle=True)
+        if refusal:
+            QMessageBox.warning(
+                self, "That music cannot be exported yet",
+                "Nothing has been queued.\n\n" + refusal,
+            )
             return
 
         out_dir = Path(self.export_panel.output_text().strip())

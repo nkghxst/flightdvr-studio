@@ -540,3 +540,53 @@ def test_the_band_starts_collapsed_and_gives_the_picture_its_height_back(
     app.processEvents()
     assert not window.preview_view.music_body.isHidden()
     assert window.music_band.sizeHint().height() > collapsed
+
+
+def test_a_delivery_bundle_refuses_instead_of_dropping_the_music(
+        window, monkeypatch, tmp_path, app):
+    """The route the first version missed (#116 review).
+
+    A bundle member is frozen at the name it was agreed under, and
+    `resolve_audio_plan` refuses music for one. Without a check on this path
+    the choice was dropped on the way in and the bundle queued Master with an
+    unconfigured choice, silently — the exact substitution every other route
+    was written to prevent.
+    """
+    focus(window, 0)
+    probe = choose_track(window, monkeypatch, tmp_path / "song.mp3")
+    probe.deliver()
+    app.processEvents()
+
+    said = warnings_from(monkeypatch)
+    # Patched so this test can also be run against a build without the fix:
+    # there the refusal never happens and the confirmation opens, which blocks
+    # forever with nobody to close it. Rejecting it means a build that drops
+    # the music fails here for saying nothing, rather than by hanging.
+    from PySide6.QtWidgets import QDialog
+    monkeypatch.setattr("flightdvr.ui.BundleDialog.exec",
+                        lambda self: QDialog.DialogCode.Rejected)
+    tick(window, 0)
+    window._add_bundle()
+
+    assert window.jobs == [], "a bundle queued despite music it cannot export"
+    assert said, "the bundle dropped the music without saying anything"
+    assert "Nothing has been queued" in said[0]
+    assert "bundle" in said[0]
+
+
+def test_a_bundle_with_no_music_is_untouched_by_the_new_check(
+        window, monkeypatch, tmp_path, app):
+    """The compatibility half: an unconfigured choice is not this rule's
+    business, and the bundle confirmation must still open."""
+    from PySide6.QtWidgets import QDialog
+
+    focus(window, 0)
+    said = warnings_from(monkeypatch)
+    opened = []
+    monkeypatch.setattr(
+        "flightdvr.ui.BundleDialog.exec",
+        lambda self: (opened.append(True), QDialog.DialogCode.Rejected)[1])
+    tick(window, 0)
+    window._add_bundle()
+
+    assert opened, f"the bundle was refused before its confirmation: {said}"
