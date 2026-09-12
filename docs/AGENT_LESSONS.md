@@ -90,9 +90,24 @@ and export overwrites.
 
 ## Qt and native acceptance
 
-Do not use `QtMultimedia`: its Windows backend cannot decode HEVC in MPEG-TS,
-the only format this app exists for. It can pass synthetic tests and fail on
-every real recording.
+Do not use `QtMultimedia` to decode: its Windows backend cannot decode HEVC in
+MPEG-TS, the only format this app exists for. It can pass synthetic tests and
+fail on every real recording.
+
+The rule is about decoding, and it was written without that word because for a
+long time nothing needed the distinction. Live monitoring did: playing the
+mixed preview needs somewhere to put samples FFmpeg has already decoded, and
+the only output available without adding a dependency is `QAudioSink`, which
+decodes nothing. So `flightdvr/audio_device.py` may take `QAudioFormat`,
+`QAudioSink` and `QMediaDevices`, and nothing else may take anything from
+`QtMultimedia` at all. The exception is held by an exact list in
+`tests/test_player.py` rather than by intent, so widening it means editing that
+test and saying why.
+
+A fake sink proves what an adapter sends, never what is heard. Device latency,
+underrun rate and clock drift against the picture cannot be invented from a
+stand-in, and nothing that has only been run against one may claim
+synchronisation.
 
 Offscreen Qt is useful for geometry and state transitions, not for native
 readability, keyboard focus, pointer behavior or live Studio acceptance. A

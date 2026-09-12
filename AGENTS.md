@@ -35,7 +35,11 @@ not happen. Chat coordinates work; Git and the issue tracker preserve it.
   from a reconnect.
 - Do not import `QtMultimedia`, remove the preview's bounded frame queue, or
   call `stop_process` from the UI thread. Use the existing worker-owned stop
-  boundary described in [AGENT_LESSONS.md](docs/AGENT_LESSONS.md).
+  boundary described in [AGENT_LESSONS.md](docs/AGENT_LESSONS.md). The one
+  exception is `flightdvr/audio_device.py`, which may take `QAudioFormat`,
+  `QAudioSink` and `QMediaDevices` to hand already-decoded PCM to an output
+  device. Players, decoders and capture stay forbidden everywhere, FFmpeg
+  keeps all decoding, and `tests/test_player.py` holds that line.
 - Do not change default colour handling or ffmpeg arguments without the
   measurements and applicable platform/package evidence described in the
   development notes.
