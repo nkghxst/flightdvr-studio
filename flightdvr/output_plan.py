@@ -142,3 +142,104 @@ class OutputPlan:
         except KeyError:
             raise KeyError("output target is not in this plan") from None
         return deepcopy(planned)
+
+@dataclass(frozen=True)
+class WorkingOutput:
+    """One output this session would build, and the identity it is keyed by.
+
+    A descriptor rather than a bare `OutputTarget`, because a target alone
+    cannot say which queued piece it came from or where it sits in an ordered
+    set — and a sidebar that lists targets while the queue builds pieces is two
+    answers to one question waiting to disagree.
+
+    `pieces` is what the queue would hand to one `Job`: one entry for an
+    ordinary export, the whole ordered run for an Assembly.
+    """
+
+    target: OutputTarget
+    pieces: tuple
+    label: str = ""
+    joined: bool = False
+
+    @property
+    def piece(self):
+        """The single piece, for the ordinary case."""
+        return self.pieces[0] if self.pieces else None
+
+
+def ordinary_pieces(clips) -> list:
+    """Ticked clips expanded the way an ordinary export expands them.
+
+    A function rather than a method, so the queue and the sidebar call the
+    same one without either owning it. A clip with three selects becomes three
+    ordinary clips here, and everything downstream carries on believing a
+    recording has one in point and one out point.
+    """
+    return [piece for clip in clips for piece in clip.for_export()]
+
+
+def target_for_piece(piece) -> OutputTarget | None:
+    """The identity of one already-resolved export piece.
+
+    Fingerprint plus the stable range id, which is what the session and the
+    Assembly already key on. The piece is whatever the caller resolved — this
+    invents no fingerprint and looks nothing up.
+    """
+    clip = getattr(piece, "clip", piece)
+    fingerprint = getattr(clip, "fingerprint", "")
+    if not fingerprint:
+        return None
+    ranges = getattr(clip, "real_selects", None) or []
+    sid = ""
+    if ranges:
+        current = min(getattr(clip, "current", 0), len(ranges) - 1)
+        sid = ranges[max(0, current)].sid
+    return OutputTarget.clip_or_range(fingerprint, sid)
+
+
+def working_outputs(pieces, *, joined: bool = False) -> list[WorkingOutput]:
+    """The outputs a queue action would build, from pieces already resolved.
+
+    Deliberately takes pieces rather than clips. The two routes resolve
+    differently and only their own callers know how: an ordinary export is
+    ticked clips expanded by `for_export`, and an Assembly is the ordered rows
+    it actually names — which can include material nobody ticked and the same
+    range more than once. Re-deriving either here would be a second authority
+    on what gets exported, and the first thing a second authority does is
+    disagree.
+
+    Joined gives one output for the whole run, because that is one job.
+    """
+    resolved = [piece for piece in pieces if piece is not None]
+    if not resolved:
+        return []
+    if joined:
+        items = []
+        for piece in resolved:
+            target = target_for_piece(piece)
+            if target is not None:
+                items.extend(target.items)
+        if not items:
+            return []
+        return [WorkingOutput(OutputTarget.assembly(items), tuple(resolved),
+                              label=f"{len(resolved)} ranges joined",
+                              joined=True)]
+    outputs = []
+    for piece in resolved:
+        target = target_for_piece(piece)
+        if target is None:
+            continue
+        outputs.append(WorkingOutput(target, (piece,), label=piece_label(piece)))
+    return outputs
+
+
+def piece_label(piece) -> str:
+    """What to call one output: its recording, and its range when it has one."""
+    clip = getattr(piece, "clip", piece)
+    name = getattr(getattr(clip, "path", None), "name", "") or "this recording"
+    ranges = getattr(clip, "real_selects", None) or []
+    if not ranges:
+        return name
+    current = min(getattr(clip, "current", 0), len(ranges) - 1)
+    chosen = ranges[max(0, current)]
+    return f"{name} · {chosen.name}" if chosen.name else name

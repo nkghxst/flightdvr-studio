@@ -470,3 +470,204 @@ def test_a_window_reopened_after_saving_in_flow_has_the_same_split(
         again.close()
         window.set_view_mode(Mode.CLASSIC)
         app.processEvents()
+
+
+# -- the working-output sidebar ------------------------------------------------
+
+def tick(window, index: int) -> None:
+    from PySide6.QtCore import Qt
+    window.table.item(index, 0).setCheckState(Qt.CheckState.Checked)
+
+
+def rows(listing) -> list[str]:
+    return [listing.item(row).text() for row in range(listing.count())]
+
+
+def test_a_ticked_clip_nobody_clicked_is_listed(window, app):
+    """The finding this slice exists for.
+
+    `OutputPlan.targets` holds outputs whose music panel has been *looked at*,
+    because the only place a target is added is the focus handler. A sidebar
+    built on it would omit ticked work nobody had clicked — so the list comes
+    from what a queue action would resolve instead.
+    """
+    tick(window, 1)
+    app.processEvents()
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+
+    assert any("hdz_002.ts" in text for text in rows(window.sidebar_working))
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_three_ranges_are_three_cards(window, app):
+    window.clips[0].selects = [
+        Select(1.0, 5.0, "one", sid="r-1"),
+        Select(6.0, 9.0, "two", sid="r-2"),
+        Select(11.0, 14.0, "three", sid="r-3"),
+    ]
+    tick(window, 0)
+    app.processEvents()
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+
+    listed = rows(window.sidebar_working)
+    assert len(listed) == 3, listed
+    assert sum("one" in text for text in listed) == 1
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_the_cards_say_the_target_the_preset_and_one_line_about_sound(
+        window, app):
+    """No percentage, no duration, no invented metadata."""
+    tick(window, 0)
+    app.processEvents()
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+
+    text = rows(window.sidebar_working)[0]
+    assert "hdz_001.ts" in text
+    assert len(text.splitlines()) <= 3
+    for absent in ("%", " s,", "fade", "trimmed to fit"):
+        assert absent not in text, text
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_the_sound_line_is_truthful_about_a_track_still_being_read(
+        window, app, monkeypatch, tmp_path):
+    import tests.test_music_wiring as wiring
+
+    tick(window, 0)
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    app.processEvents()
+    monkeypatch.setattr(
+        "flightdvr.ui.QFileDialog.getOpenFileName",
+        staticmethod(lambda *a, **k: (str(tmp_path / "song.mp3"), "")))
+    window._choose_music_track()
+    app.processEvents()
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+
+    assert any("Reading" in text for text in rows(window.sidebar_working))
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_an_unticked_clip_leaves_the_list_but_keeps_its_music(window, app):
+    """Nothing is silently discarded, and nothing stale is displayed."""
+    from PySide6.QtCore import Qt
+
+    tick(window, 0)
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    app.processEvents()
+    target = window._music_target
+    assert target in window.output_plan.targets
+
+    window.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    app.processEvents()
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+
+    assert not any("hdz_001.ts" in text for text in rows(window.sidebar_working))
+    assert target in window.output_plan.targets, "the choice was discarded"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_choosing_a_card_focuses_it_through_the_ordinary_handlers(window, app):
+    window.clips[0].selects = [
+        Select(1.0, 5.0, "one", sid="r-1"),
+        Select(6.0, 9.0, "two", sid="r-2"),
+    ]
+    tick(window, 0)
+    app.processEvents()
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+
+    window.sidebar_working.item(1).setSelected(True)
+    app.processEvents()
+
+    assert window._trim_clip is window.clips[0]
+    assert window.clips[0].real_selects[window.clips[0].current].sid == "r-2"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_choosing_a_card_starts_no_sound(window, app):
+    tick(window, 0)
+    app.processEvents()
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+
+    window.sidebar_working.item(0).setSelected(True)
+    app.processEvents()
+
+    assert window.live_preview.status.muted
+    assert not window.live_preview.status.playing
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_one_action_causes_one_rebuild(window, app):
+    """A reentrant refresh looks identical on screen and only a counter sees
+    it: writing a list emits selection changes, and answering them would
+    rebuild again."""
+    tick(window, 0)
+    app.processEvents()
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+
+    before = window._sidebar_rebuilds
+    window.sidebar_working.item(0).setSelected(True)
+    app.processEvents()
+
+    assert window._sidebar_rebuilds - before <= 1, (
+        f"one selection caused {window._sidebar_rebuilds - before} rebuilds")
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_a_queued_job_is_listed_as_submitted_and_stays_editable_upstream(
+        window, app, monkeypatch):
+    """A submitted job is an immutable *input* snapshot, not a frozen object:
+    it keeps its status, and the working output it came from stays editable."""
+    monkeypatch.setattr("flightdvr.ui.QMessageBox.warning",
+                        staticmethod(lambda *a, **k: None))
+    tick(window, 0)
+    app.processEvents()
+    window._add_to_queue()
+    app.processEvents()
+    assert window.jobs, "nothing queued, so this proves nothing"
+
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+
+    assert rows(window.sidebar_submitted), "the queued job was not listed"
+    assert any("hdz_001.ts" in text for text in rows(window.sidebar_working)), (
+        "the working output disappeared when it was queued")
+    assert window.queue_panel.start_button is not None
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_the_sidebar_is_flow_only_and_classic_is_unchanged(window, app):
+    assert window._sidebar.parentWidget() is not None
+    assert not window._sidebar.isVisible()
+    assert window.view_mode is Mode.CLASSIC
+
+
+def test_an_assembly_collapses_the_cards_to_one_joined_output(window, app,
+                                                              monkeypatch):
+    """One job, so one card — and it names the run rather than a recording."""
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    window.clips[1].selects = [Select(2.0, 6.0, "two", sid="r-2")]
+    tick(window, 0)
+    tick(window, 1)
+    app.processEvents()
+    window._fill_assembly()
+    monkeypatch.setattr(window.export_panel, "join_enabled", lambda: True)
+    app.processEvents()
+
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+
+    listed = rows(window.sidebar_working)
+    assert len(listed) == 1, listed
+    assert "joined" in listed[0]
+    window.set_view_mode(Mode.CLASSIC)

@@ -40,7 +40,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
-    QStackedWidget,
+    QListWidget, QListWidgetItem, QStackedWidget,
     QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
     QPushButton, QScrollArea, QSizePolicy, QSplitter, QTableWidget,
     QToolButton, QVBoxLayout, QWidget,
@@ -83,7 +83,9 @@ from .flow_layout import (
 from .live_preview import Listening, LivePreview
 from .music_panel import MusicPanel
 from .output_naming import naming_inputs, resolve_output
-from .output_plan import OutputPlan, OutputTarget
+from .output_plan import (
+    OutputPlan, OutputTarget, ordinary_pieces, working_outputs,
+)
 from .presets import (
     PRESET_ORDER, PRESETS, ExportSettings, describe_join_problems,
     estimate_output_size,
@@ -120,6 +122,9 @@ ORG = "FlightDVR Studio"
 COPYRIGHT_HOLDER = "Isadu Nkemi"
 
 # Said whenever a decision is refused because the list is still being built.
+# Enough of a card to read its recording, preset and one line about sound.
+SIDEBAR_MINIMUM = 210
+
 SCAN_IN_PROGRESS = ("Still listing this folder — decisions can be made once "
                     "the scan finishes")
 
@@ -216,6 +221,11 @@ class MainWindow(QMainWindow):
         self._flow_homes: dict = {}
         self._flow_slots: dict = {}
         self._left_column: QWidget | None = None
+        self.sidebar_working = None
+        self.sidebar_submitted = None
+        self._sidebar_target: OutputTarget | None = None
+        self._sidebar_building = False
+        self._sidebar_rebuilds = 0
         # Classic's split, kept while Flow is holding its children. An empty
         # splitter serialises as an empty splitter, so saving in Flow without
         # this threw away the proportions the person had chosen.
@@ -866,6 +876,7 @@ class MainWindow(QMainWindow):
         self.music_panel.set_asset(choice.asset)
         self._show_music_state(target)
         self._sync_live_preview()
+        self._refresh_sidebar()
 
     def _show_music_state(self, target: OutputTarget) -> None:
         """One line about acquisition, and one about what the export will do."""
@@ -911,6 +922,7 @@ class MainWindow(QMainWindow):
         self._store_music(target, self.music_panel.capture())
         self._show_music_state(target)
         self._sync_live_preview()
+        self._refresh_sidebar()
         self._refresh_export_markers()
 
     def _choose_music_track(self) -> None:
@@ -1271,7 +1283,13 @@ class MainWindow(QMainWindow):
             slot_layout.setSpacing(INNER)
             self._flow_slots[stage] = slot
             self.flow_stages.addWidget(slot)
-        layout.addWidget(self.flow_stages, 1)
+        body = QHBoxLayout()
+        body.setSpacing(INNER)
+        body.addWidget(self.flow_stages, 3)
+        self._sidebar = self._build_sidebar()
+        self._sidebar.setMinimumWidth(SIDEBAR_MINIMUM)
+        body.addWidget(self._sidebar, 1)
+        layout.addLayout(body, 1)
 
         steps = QHBoxLayout()
         steps.setSpacing(TIGHT)
@@ -1384,6 +1402,7 @@ class MainWindow(QMainWindow):
         if chosen is Mode.FLOW and not self._offered_stages:
             return
         if chosen is Mode.FLOW:
+            self._refresh_sidebar()
             self._lend_to_flow()
             self.splitter.hide()
             self._flow_host.show()
@@ -1418,6 +1437,152 @@ class MainWindow(QMainWindow):
     def _step_stage(self, direction: int) -> None:
         back, forward = flow_neighbours(self._flow_stage, self._offered_stages)
         self._show_stage(forward if direction > 0 else back)
+
+    # -- the working-output sidebar --------------------------------------------
+
+    def _working_pieces(self) -> tuple[list, bool, list]:
+        """What a queue action would resolve right now, and how.
+
+        The two routes are genuinely different and only their own callers know
+        how: an Assembly is the ordered rows it names — which can include
+        material nobody ticked, and the same range more than once — while an
+        ordinary export is the ticks expanded. Re-deriving either here would be
+        a second authority on what gets exported.
+        """
+        if self.export_panel.join_enabled():
+            pieces, gaps = self._assembly_export_pieces()
+            return pieces, True, gaps
+        return ordinary_pieces(self.selected_clips()), False, []
+
+    def _working_outputs(self) -> list:
+        pieces, joined, gaps = self._working_pieces()
+        if gaps or (joined and len(pieces) < 2):
+            # The same refusals the queue makes. A run the queue would decline
+            # is not an output, and listing it would promise something Add to
+            # queue is about to refuse.
+            return []
+        return working_outputs(pieces, joined=joined)
+
+    def _build_sidebar(self) -> QWidget:
+        """Working outputs above, submitted jobs below. Flow only."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(INNER)
+
+        layout.addWidget(QLabel("Working outputs"))
+        self.sidebar_working = QListWidget()
+        self.sidebar_working.setToolTip(
+            "What Add to queue would build now. Choosing one opens it for "
+            "editing; it does not play anything."
+        )
+        self.sidebar_working.itemSelectionChanged.connect(
+            self._on_sidebar_choice)
+        layout.addWidget(self.sidebar_working, 1)
+
+        self.sidebar_submitted_title = dim(QLabel("Submitted"))
+        layout.addWidget(self.sidebar_submitted_title)
+        self.sidebar_submitted = QListWidget()
+        self.sidebar_submitted.setSelectionMode(
+            QListWidget.SelectionMode.NoSelection)
+        self.sidebar_submitted.setToolTip(
+            "Already queued. Their settings are fixed; start, cancel and "
+            "progress stay on the queue."
+        )
+        layout.addWidget(self.sidebar_submitted)
+        return panel
+
+    def _music_line(self, target) -> str:
+        """One truthful line about sound, or nothing at all.
+
+        Truthful means it says what is actually so now: a track still being
+        read says so, one that failed says so, and a resolved choice is named.
+        No percentage, no duration, no invented metadata — the editor shows
+        those once, where the numbers are.
+        """
+        if target in self._music_reading:
+            return f"Reading {self._music_reading[target].name}…"
+        if target in self._music_trouble:
+            return "Music could not be read"
+        choice = self._planned_music(target)
+        mode = choice.mode
+        if mode is None:
+            return ""
+        if mode is AudioMode.ORIGINAL:
+            return "Original audio"
+        if mode is AudioMode.NO_SOUND:
+            return "No sound"
+        track = choice.track.name if choice.track else "a track"
+        return (f"{track} + original audio" if mode is AudioMode.MIX
+                else track)
+
+    def _refresh_sidebar(self) -> None:
+        """Rebuild both lists from what is true now.
+
+        Guarded against itself: writing a list emits selection changes, and a
+        rebuild that answered them would rebuild again. One user action must
+        produce one rebuild, which a screen cannot show and a counter can.
+        """
+        if self.sidebar_working is None or self._sidebar_building:
+            return
+        self._sidebar_building = True
+        self._sidebar_rebuilds += 1
+        try:
+            chosen = self._sidebar_target
+            self.sidebar_working.clear()
+            preset = PRESETS[self._preset_key()].label
+            outputs = self._working_outputs()
+            for output in outputs:
+                music = self._music_line(output.target)
+                lines = [output.label, preset]
+                if music:
+                    lines.append(music)
+                item = QListWidgetItem("\n".join(lines))
+                item.setData(Qt.ItemDataRole.UserRole, output.target)
+                self.sidebar_working.addItem(item)
+                if output.target == chosen:
+                    item.setSelected(True)
+
+            self.sidebar_submitted.clear()
+            for job in self.jobs:
+                self.sidebar_submitted.addItem(
+                    f"{job.name}\n{job.preset_label} · {job.status.value}")
+            self.sidebar_submitted_title.setVisible(bool(self.jobs))
+            self.sidebar_submitted.setVisible(bool(self.jobs))
+        finally:
+            self._sidebar_building = False
+
+    def _on_sidebar_choice(self) -> None:
+        """Open the chosen output for editing, through the ordinary handlers.
+
+        Selecting a row does what clicking that clip in the table does, so
+        there are not two ways to be focused for them to disagree about. It
+        starts no sound: choosing something to edit is not asking to hear it.
+        """
+        if self._sidebar_building:
+            return
+        items = self.sidebar_working.selectedItems()
+        if not items:
+            return
+        target = items[0].data(Qt.ItemDataRole.UserRole)
+        if target is None:
+            return
+        self._sidebar_target = target
+        fingerprint = target.items[0].fingerprint
+        sid = target.items[0].sid
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            clip = self.clip_by_path.get(item.data(Qt.ItemDataRole.UserRole))
+            if clip is None or clip.fingerprint != fingerprint:
+                continue
+            self.table.setCurrentCell(row, 0)
+            self._load_selected_clip()
+            if sid:
+                for index, chosen in enumerate(clip.real_selects):
+                    if chosen.sid == sid:
+                        self._pick_select(index)
+                        break
+            return
 
     def _build_export_panel(self) -> QWidget:
         panel = self.export_panel = ExportPanel(self)
@@ -3604,7 +3769,7 @@ class MainWindow(QMainWindow):
             # One clip with three selects becomes three ordinary clips here,
             # and everything below carries on believing a recording has one in
             # point and one out point.
-            pieces = [piece for clip in clips for piece in clip.for_export()]
+            pieces = ordinary_pieces(clips)
 
         out_dir = Path(self.export_panel.output_text().strip())
         if not str(out_dir).strip():
@@ -3799,6 +3964,7 @@ class MainWindow(QMainWindow):
             else len(pieces)
         ) - added
         self._rebuild_queue()
+        self._refresh_sidebar()
         note = f"{added} queued"
         if skipped > 0:
             note += f", {skipped} already in the queue"
