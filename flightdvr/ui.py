@@ -40,6 +40,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
+    QStackedWidget,
     QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
     QPushButton, QScrollArea, QSizePolicy, QSplitter, QTableWidget,
     QToolButton, QVBoxLayout, QWidget,
@@ -74,6 +75,11 @@ from .audio_plan import (
 from .audio_device import AudioOutput
 from .audio_reader import FfmpegPcmReader, MusicAssetProbe
 from .audio_stream import AudioStream, LiveAudioMapping, MonitorState
+from .flow_layout import (
+    Mode, Stage, first_stage as flow_first_stage, mode_from_stored,
+    neighbours as flow_neighbours, offered_stages, stage_from_stored,
+    title as flow_title,
+)
 from .live_preview import Listening, LivePreview
 from .music_panel import MusicPanel
 from .output_naming import naming_inputs, resolve_output
@@ -203,6 +209,19 @@ class MainWindow(QMainWindow):
         # Built once the preview view exists, because it wires that view's
         # controls. Monitoring only: nothing here reaches a job or a session.
         self.live_preview: LivePreview | None = None
+        # Presentation only. Both modes show the same panels over the same
+        # session; nothing here is a second copy of anything.
+        self._view_mode = Mode.CLASSIC
+        self._flow_stage: Stage | None = None
+        self._flow_homes: dict = {}
+        self._flow_slots: dict = {}
+        self._left_column: QWidget | None = None
+        # Classic's split, kept while Flow is holding its children. An empty
+        # splitter serialises as an empty splitter, so saving in Flow without
+        # this threw away the proportions the person had chosen.
+        self._classic_split = None
+        self._view_actions: dict = {}
+        self._offered_stages: tuple = ()
         # The folder the running scan is reading. The source box can be changed
         # while a scan runs, so the folder a result belongs to is the one that
         # was read, not whatever the box says by the time it finishes.
@@ -294,6 +313,16 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._build_music_band())
         outer.addSpacing(GAP - INNER)
         outer.addWidget(self._build_queue())
+
+        # Classic's layout is left exactly as it was, including every parent
+        # chain: wrapping it in a page would have moved the filmstrip a level
+        # deeper for no gain a person could see. Flow is a sibling that is
+        # hidden until it is asked for, and it borrows these same panels.
+        self._offered_stages = offered_stages(self._stage_panels())
+        self._flow_host = self._build_flow_host()
+        self._flow_host.hide()
+        outer.addWidget(self._flow_host, 1)
+
         self._install_shortcuts()
         self.statusBar().showMessage(f"{APP_TAGLINE}   ·   ffmpeg: {self.tools.ffmpeg}")
 
@@ -685,6 +714,7 @@ class MainWindow(QMainWindow):
         table.setMinimumHeight(MIN_LIST_HEIGHT)
         layout.addWidget(table, 1)
         layout.addWidget(self._build_preview_panel())
+        self._left_column = column
         return column
 
     def _build_preview_panel(self) -> QWidget:
@@ -1188,6 +1218,207 @@ class MainWindow(QMainWindow):
         self.live_preview.tick(round_samples(max(0.0, seconds) * OUTPUT_RATE))
         self._show_monitoring()
 
+    # -- view modes ------------------------------------------------------------
+
+    def _stage_panels(self) -> dict:
+        """Which existing widget is which stage. No new panel, ever.
+
+        Assemble is absent on purpose. It lives inside `ExportPanel`, and
+        lifting it out means changing that panel's internals, which this slice
+        does not do — so the stage is not offered rather than offered blank.
+        """
+        return {
+            Stage.BROWSE: self._left_column,
+            Stage.TRIM: self.preview_view.trim_band,
+            Stage.MUSIC: self.preview_view.music_band,
+            Stage.OUTPUT: self.export_panel,
+            Stage.QUEUE: self.queue_panel,
+        }
+
+    def _build_flow_host(self) -> QWidget:
+        """The Flow page: a stage bar, one stage at a time, and Back/Next.
+
+        It owns no panel. Panels are lent to it when the mode changes and go
+        home when it changes back, so there is exactly one of each and nothing
+        is reconnected.
+        """
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(INNER)
+
+        self.flow_stage_bar = QWidget()
+        bar = QHBoxLayout(self.flow_stage_bar)
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.setSpacing(TIGHT)
+        self.flow_stage_buttons = {}
+        for stage in self._offered_stages:
+            button = QPushButton(flow_title(stage))
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked=False, chosen=stage: self._show_stage(chosen))
+            bar.addWidget(button)
+            self.flow_stage_buttons[stage] = button
+        bar.addStretch(1)
+        layout.addWidget(self.flow_stage_bar)
+
+        self.flow_stages = QStackedWidget()
+        self._flow_slots = {}
+        for stage in self._offered_stages:
+            slot = QWidget()
+            slot_layout = QVBoxLayout(slot)
+            slot_layout.setContentsMargins(0, 0, 0, 0)
+            slot_layout.setSpacing(INNER)
+            self._flow_slots[stage] = slot
+            self.flow_stages.addWidget(slot)
+        layout.addWidget(self.flow_stages, 1)
+
+        steps = QHBoxLayout()
+        steps.setSpacing(TIGHT)
+        self.flow_back = QPushButton("Back")
+        self.flow_back.clicked.connect(lambda: self._step_stage(-1))
+        self.flow_next = QPushButton("Next")
+        self.flow_next.clicked.connect(lambda: self._step_stage(1))
+        steps.addStretch(1)
+        steps.addWidget(self.flow_back)
+        steps.addWidget(self.flow_next)
+        layout.addLayout(steps)
+        return host
+
+    def _lend_to_flow(self) -> None:
+        """Move the real panels into their stages, remembering where they live.
+
+        Remembered by index rather than by re-deriving it later: a layout that
+        has had a widget taken out of it renumbers, and putting the picture
+        back one place too far is not the kind of thing a test notices.
+        """
+        # Every position is read before anything moves. Recording and removing
+        # in one pass takes the second index from a container the first removal
+        # has already renumbered — which put the clip list back on the wrong
+        # side of the splitter handle, exactly as the comment below warns and
+        # exactly as a single pass guarantees.
+        panels = self._stage_panels()
+        self._classic_split = bytes(self.splitter.saveState())
+        for stage, panel in panels.items():
+            if stage not in self._flow_slots:
+                continue
+            parent = panel.parentWidget()
+            home = self.splitter if self.splitter.indexOf(panel) >= 0 else None
+            if home is not None:
+                # A splitter is not a layout and does not put a widget back
+                # through one: restoring through `layout()` left the column
+                # parented to the splitter's own child rather than to the
+                # splitter, which looks right until the handle is dragged.
+                self._flow_homes[stage] = (
+                    home, home.indexOf(panel), tuple(home.sizes()))
+            else:
+                layout = parent.layout() if parent is not None else None
+                if layout is None:
+                    continue
+                index = layout.indexOf(panel)
+                stretch = (layout.stretch(index)
+                           if hasattr(layout, "stretch") else 0)
+                self._flow_homes[stage] = (layout, index, stretch)
+
+        for stage in list(self._flow_homes):
+            panel = panels.get(stage)
+            if panel is None:
+                continue
+            self._flow_slots[stage].layout().addWidget(panel, 1)
+            panel.show()
+
+    def _return_from_flow(self) -> None:
+        """Put every panel back exactly where it was.
+
+        In reverse order of the remembered indices, so each insertion lands in
+        a layout that still has the same shape it had when the index was taken.
+        """
+        # Grouped by the container they came from, and ascending within each.
+        # One global sort mixes splitter positions with layout positions, and
+        # an index that means "second in the splitter" is not comparable with
+        # one that means "second in the column" — which put the clip list back
+        # on the wrong side of the handle.
+        panels = self._stage_panels()
+        homes: dict = {}
+        for stage, (home, index, extra) in self._flow_homes.items():
+            homes.setdefault(id(home), []).append((index, stage, home, extra))
+        ordered = [entry for group in homes.values()
+                   for entry in sorted(group, key=lambda item: item[0])]
+        for index, stage, home, extra in ordered:
+            panel = panels.get(stage)
+            if panel is None:
+                continue
+            slot = self._flow_slots.get(stage)
+            if slot is not None and slot.layout() is not None:
+                slot.layout().removeWidget(panel)
+            home.insertWidget(index, panel)
+            if isinstance(home, QSplitter):
+                # The sizes it had, not sizes computed now. C1's rule was that
+                # a mode change must never impose a fresh split; putting back
+                # the recorded one is restoring, not deciding.
+                home.setSizes(list(extra))
+            elif extra and hasattr(home, "setStretch"):
+                home.setStretch(index, extra)
+            panel.show()
+        if self._classic_split is not None:
+            # The whole state, not just the sizes: it carries collapse as well,
+            # and restoring half of it is how a collapsed panel comes back open.
+            self.splitter.restoreState(self._classic_split)
+            self._classic_split = None
+        self._flow_homes.clear()
+
+    @property
+    def view_mode(self) -> Mode:
+        return self._view_mode
+
+    def set_view_mode(self, mode) -> None:
+        """Switch presentation without touching the session behind it.
+
+        Nothing is rebuilt, copied or reconnected: the same panels move, so
+        there is one player, one transport, one set of signals and one queue
+        whichever mode is showing.
+        """
+        chosen = Mode(mode)
+        if chosen is self._view_mode:
+            return
+        if chosen is Mode.FLOW and not self._offered_stages:
+            return
+        if chosen is Mode.FLOW:
+            self._lend_to_flow()
+            self.splitter.hide()
+            self._flow_host.show()
+            self._show_stage(self._flow_stage or
+                             flow_first_stage(self._offered_stages))
+        else:
+            self._flow_host.hide()
+            self._return_from_flow()
+            self.splitter.show()
+        self._view_mode = chosen
+        self.settings_store.setValue("view_mode", chosen.value)
+        for name, action in self._view_actions.items():
+            action.setChecked(name is chosen)
+        self._relayout()
+
+    def _show_stage(self, stage) -> None:
+        """Show one stage. Navigation alone changes nothing but what is seen."""
+        if stage is None or stage not in self._flow_slots:
+            return
+        chosen = Stage(stage)
+        self._flow_stage = chosen
+        self.flow_stages.setCurrentWidget(self._flow_slots[chosen])
+        self.settings_store.setValue("flow_stage", chosen.value)
+        back, forward = flow_neighbours(chosen, self._offered_stages)
+        self.flow_back.setEnabled(back is not None)
+        self.flow_next.setEnabled(forward is not None)
+        for offered, button in self.flow_stage_buttons.items():
+            blocked = button.blockSignals(True)
+            button.setChecked(offered is chosen)
+            button.blockSignals(blocked)
+
+    def _step_stage(self, direction: int) -> None:
+        back, forward = flow_neighbours(self._flow_stage, self._offered_stages)
+        self._show_stage(forward if direction > 0 else back)
+
     def _build_export_panel(self) -> QWidget:
         panel = self.export_panel = ExportPanel(self)
         panel.preset_changed.connect(self._on_preset_changed)
@@ -1291,6 +1522,22 @@ class MainWindow(QMainWindow):
         # discoverable one, and the only home for the reset: an escape hatch
         # beside the controls it undoes invites being pressed by accident.
         view_menu = self.view_menu = self.menuBar().addMenu("&View")
+
+        # The same app, arranged two ways. Classic is first and is what an
+        # unreadable stored value falls back to, per issue #84.
+        self._view_actions = {}
+        views = QActionGroup(self)
+        views.setExclusive(True)
+        for mode, name in ((Mode.CLASSIC, "Classic"), (Mode.FLOW, "Flow")):
+            action = view_menu.addAction(f"View: {name}")
+            action.setCheckable(True)
+            action.setChecked(mode is self._view_mode)
+            action.triggered.connect(
+                lambda *_, chosen=mode: self.set_view_mode(chosen))
+            views.addAction(action)
+            self._view_actions[mode] = action
+        view_menu.addSeparator()
+
         self.browser_mode_actions: dict[BrowserMode, QAction] = {}
         group = QActionGroup(self)
         group.setExclusive(True)
@@ -1581,6 +1828,19 @@ class MainWindow(QMainWindow):
         if state and self.splitter is not None:
             self.splitter.restoreState(state)
 
+        # The mode goes last, after the split it may have to carry has been
+        # put back. Entering Flow first captured the *default* split as the
+        # Classic one to remember — so a window that opened in Flow forgot the
+        # layout it had been saved with, one restart later.
+        #
+        # The stage is settled before the mode even so, because switching must
+        # not land on a stage this build no longer offers.
+        self._flow_stage = stage_from_stored(
+            store.value("flow_stage"), self._offered_stages)
+        wanted = mode_from_stored(store.value("view_mode"))
+        if wanted is not self._view_mode:
+            self.set_view_mode(wanted)
+
         # The flight date is deliberately not remembered: it belongs to the
         # footage in front of you, and a stale one would mislabel a new card.
 
@@ -1589,7 +1849,14 @@ class MainWindow(QMainWindow):
         self.export_panel.save(store)
         store.setValue("geometry", self.saveGeometry())
         if self.splitter is not None:
-            store.setValue("splitter", self.splitter.saveState())
+            # In Flow the splitter is empty, because both of its children are
+            # lent to stages. Serialising it then stores an empty split and
+            # loses the one the person chose, so the remembered Classic state
+            # is written instead.
+            store.setValue("splitter",
+                           self._classic_split
+                           if self._classic_split is not None
+                           else self.splitter.saveState())
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         if (event.key() == Qt.Key.Key_Delete
