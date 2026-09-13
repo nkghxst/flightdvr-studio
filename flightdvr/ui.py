@@ -1821,20 +1821,25 @@ class MainWindow(QMainWindow):
         store = self.settings_store
         self.export_panel.restore(store)
 
-        # Which stage to reopen on is settled before the mode, so switching
-        # cannot land on a stage this build no longer offers.
-        self._flow_stage = stage_from_stored(
-            store.value("flow_stage"), self._offered_stages)
-        wanted = mode_from_stored(store.value("view_mode"))
-        if wanted is not self._view_mode:
-            self.set_view_mode(wanted)
-
         geometry = store.value("geometry")
         if geometry:
             self.restoreGeometry(geometry)
         state = store.value("splitter")
         if state and self.splitter is not None:
             self.splitter.restoreState(state)
+
+        # The mode goes last, after the split it may have to carry has been
+        # put back. Entering Flow first captured the *default* split as the
+        # Classic one to remember — so a window that opened in Flow forgot the
+        # layout it had been saved with, one restart later.
+        #
+        # The stage is settled before the mode even so, because switching must
+        # not land on a stage this build no longer offers.
+        self._flow_stage = stage_from_stored(
+            store.value("flow_stage"), self._offered_stages)
+        wanted = mode_from_stored(store.value("view_mode"))
+        if wanted is not self._view_mode:
+            self.set_view_mode(wanted)
 
         # The flight date is deliberately not remembered: it belongs to the
         # footage in front of you, and a stale one would mislabel a new card.

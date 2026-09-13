@@ -428,24 +428,36 @@ def test_a_window_reopened_after_saving_in_flow_has_the_same_split(
     window.resize(1402, 900)
     window.show()
     app.processEvents()
-    window.splitter.setSizes([900, 320])
+    # Deliberately far from the default split. A chosen split that sits near
+    # where the window would have put it anyway cannot tell a restored layout
+    # from a fresh one — my first tolerance was wide enough to let exactly
+    # that through.
+    window.splitter.setSizes([1150, 200])
     app.processEvents()
     chosen = list(window.splitter.sizes())
-    assert chosen[0] > chosen[1], chosen
+    assert chosen[0] > 2 * chosen[1], chosen
 
     window.set_view_mode(Mode.FLOW)
     app.processEvents()
     window._save()
-    window.settings_store.setValue("view_mode", "classic")
-    window.set_view_mode(Mode.CLASSIC)
-    app.processEvents()
 
+    # The first window stays in Flow until the second has been built:
+    # returning it to Classic first rewrites the stored mode, and window two
+    # then opens in Classic and never exercises the ordering at all.
+    #
+    # The second window opens in Flow, because that is what was stored. An
+    # earlier version of this forced Classic first, which walked straight past
+    # the bug: entering Flow during startup captured the *default* split as
+    # the Classic one, and only a window that actually reopens in Flow shows
+    # it.
     again = MainWindow(find_tools())
     try:
         again.resize(1402, 900)
         again.show()
         app.processEvents()
-        assert again.view_mode is Mode.CLASSIC
+        assert again.view_mode is Mode.FLOW, "the stored mode was not reopened"
+        again.set_view_mode(Mode.CLASSIC)
+        app.processEvents()
         assert again.splitter.count() == 2, "the reopened window lost a panel"
         assert sum(again.splitter.sizes()) > 0
         # Proportion rather than pixels: the second window is not guaranteed
@@ -453,7 +465,8 @@ def test_a_window_reopened_after_saving_in_flow_has_the_same_split(
         # measuring the window manager.
         left = again.splitter.sizes()[0] / max(1, sum(again.splitter.sizes()))
         wanted = chosen[0] / max(1, sum(chosen))
-        assert abs(left - wanted) < 0.15, (again.splitter.sizes(), chosen)
+        assert abs(left - wanted) < 0.06, (again.splitter.sizes(), chosen)
     finally:
         again.close()
+        window.set_view_mode(Mode.CLASSIC)
         app.processEvents()
