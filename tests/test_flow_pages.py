@@ -377,3 +377,83 @@ def test_asking_for_the_mode_it_is_already_in_does_nothing(window, app):
     window.set_view_mode(Mode.CLASSIC)
     assert window.view_mode is Mode.CLASSIC
     assert window._flow_host.isHidden()
+
+
+# -- what a save in Flow must not throw away ------------------------------------
+
+def test_saving_while_flow_holds_the_panels_keeps_the_classic_split(window, app):
+    """The finding (#123 review).
+
+    Flow lends both splitter children to stages, so the splitter is empty while
+    it is showing. `saveState()` on an empty splitter is an empty split, and
+    writing that threw away the proportions the person had chosen.
+    """
+    window.splitter.setSizes([900, 320])
+    app.processEvents()
+    chosen = bytes(window.splitter.saveState())
+
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+    assert window.splitter.count() == 0, "Flow did not actually borrow them"
+
+    window._save()
+
+    assert bytes(window.settings_store.value("splitter")) == chosen, (
+        "an empty splitter was written over the chosen split")
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_the_split_comes_back_after_a_round_trip(window, app):
+    window.splitter.setSizes([880, 340])
+    app.processEvents()
+    before = list(window.splitter.sizes())
+
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+    window.set_view_mode(Mode.CLASSIC)
+    app.processEvents()
+
+    assert list(window.splitter.sizes()) == before
+
+
+def test_a_window_reopened_after_saving_in_flow_has_the_same_split(
+        window, app, tmp_path, monkeypatch):
+    """The restart Sol asked for, end to end: choose a split, save while Flow
+    is showing, and open a second window against the same stored settings."""
+    from flightdvr.media import find_tools
+    from flightdvr.ui import MainWindow
+
+    # Room first: a splitter in a window too small to hold the sizes clamps
+    # them, and a baseline taken from a clamped split measures nothing.
+    window.resize(1402, 900)
+    window.show()
+    app.processEvents()
+    window.splitter.setSizes([900, 320])
+    app.processEvents()
+    chosen = list(window.splitter.sizes())
+    assert chosen[0] > chosen[1], chosen
+
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+    window._save()
+    window.settings_store.setValue("view_mode", "classic")
+    window.set_view_mode(Mode.CLASSIC)
+    app.processEvents()
+
+    again = MainWindow(find_tools())
+    try:
+        again.resize(1402, 900)
+        again.show()
+        app.processEvents()
+        assert again.view_mode is Mode.CLASSIC
+        assert again.splitter.count() == 2, "the reopened window lost a panel"
+        assert sum(again.splitter.sizes()) > 0
+        # Proportion rather than pixels: the second window is not guaranteed
+        # the first one's exact geometry, and asserting pixels here would be
+        # measuring the window manager.
+        left = again.splitter.sizes()[0] / max(1, sum(again.splitter.sizes()))
+        wanted = chosen[0] / max(1, sum(chosen))
+        assert abs(left - wanted) < 0.15, (again.splitter.sizes(), chosen)
+    finally:
+        again.close()
+        app.processEvents()

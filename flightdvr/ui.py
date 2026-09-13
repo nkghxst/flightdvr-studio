@@ -216,6 +216,10 @@ class MainWindow(QMainWindow):
         self._flow_homes: dict = {}
         self._flow_slots: dict = {}
         self._left_column: QWidget | None = None
+        # Classic's split, kept while Flow is holding its children. An empty
+        # splitter serialises as an empty splitter, so saving in Flow without
+        # this threw away the proportions the person had chosen.
+        self._classic_split = None
         self._view_actions: dict = {}
         self._offered_stages: tuple = ()
         # The folder the running scan is reading. The source box can be changed
@@ -1294,6 +1298,7 @@ class MainWindow(QMainWindow):
         # side of the splitter handle, exactly as the comment below warns and
         # exactly as a single pass guarantees.
         panels = self._stage_panels()
+        self._classic_split = bytes(self.splitter.saveState())
         for stage, panel in panels.items():
             if stage not in self._flow_slots:
                 continue
@@ -1355,6 +1360,11 @@ class MainWindow(QMainWindow):
             elif extra and hasattr(home, "setStretch"):
                 home.setStretch(index, extra)
             panel.show()
+        if self._classic_split is not None:
+            # The whole state, not just the sizes: it carries collapse as well,
+            # and restoring half of it is how a collapsed panel comes back open.
+            self.splitter.restoreState(self._classic_split)
+            self._classic_split = None
         self._flow_homes.clear()
 
     @property
@@ -1834,7 +1844,14 @@ class MainWindow(QMainWindow):
         self.export_panel.save(store)
         store.setValue("geometry", self.saveGeometry())
         if self.splitter is not None:
-            store.setValue("splitter", self.splitter.saveState())
+            # In Flow the splitter is empty, because both of its children are
+            # lent to stages. Serialising it then stores an empty split and
+            # loses the one the person chose, so the remembered Classic state
+            # is written instead.
+            store.setValue("splitter",
+                           self._classic_split
+                           if self._classic_split is not None
+                           else self.splitter.saveState())
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         if (event.key() == Qt.Key.Key_Delete
