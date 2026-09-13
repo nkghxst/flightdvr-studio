@@ -156,6 +156,13 @@ def ui_window(tools, tmp_path, qt_app, monkeypatch):
 
     from flightdvr.ui import MainWindow
 
+    # MainWindow's ordinary session/recent paths are real application state.
+    # Keep this acceptance case from writing sessions/recent.json in the
+    # developer's home while retaining the production session behavior.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+
     made = MainWindow(tools)
     # Do not let the unrelated idle sweep start after _scan_done below.
     monkeypatch.setattr(made.thumbs, "request", lambda *_args: None)
@@ -436,9 +443,8 @@ def test_ui_replace_music_survives_real_export_and_decodes_as_the_known_tone(
 
     def export_finished() -> bool:
         # The completion signal settles Job.status before the worker thread's
-        # final event-loop turn returns.  Accept DONE first, then assert the
-        # worker has settled below; checking isRunning() before DONE creates a
-        # false failure after a successful publication.
+        # final event-loop turn returns. Accept DONE first; the separate wait
+        # below observes the worker's settled state without racing that signal.
         if job.status is JobStatus.DONE:
             return True
         if job.status in (JobStatus.FAILED, JobStatus.CANCELLED):
@@ -452,6 +458,13 @@ def test_ui_replace_music_survives_real_export_and_decodes_as_the_known_tone(
 
     _wait_for(qt_app, export_finished,
               "the real Master export", timeout=180.0)
+
+    def worker_settled() -> bool:
+        worker = window.worker
+        return worker is not None and not worker.isRunning()
+
+    _wait_for(qt_app, worker_settled,
+              "the export worker to settle", timeout=10.0)
     assert not window.worker.isRunning()
     assert job.out_path.exists() and job.out_path.stat().st_size > 0
 
