@@ -1401,6 +1401,10 @@ class MainWindow(QMainWindow):
             return
         if chosen is Mode.FLOW and not self._offered_stages:
             return
+        # The mode is recorded first. The sidebar only does its work while
+        # Flow is the mode, so refreshing before this was refreshing into a
+        # guard that had every right to refuse — and the list arrived empty.
+        self._view_mode = chosen
         if chosen is Mode.FLOW:
             self._refresh_sidebar()
             self._lend_to_flow()
@@ -1412,7 +1416,6 @@ class MainWindow(QMainWindow):
             self._flow_host.hide()
             self._return_from_flow()
             self.splitter.show()
-        self._view_mode = chosen
         self.settings_store.setValue("view_mode", chosen.value)
         for name, action in self._view_actions.items():
             action.setChecked(name is chosen)
@@ -1524,6 +1527,11 @@ class MainWindow(QMainWindow):
         produce one rebuild, which a screen cannot show and a counter can.
         """
         if self.sidebar_working is None or self._sidebar_building:
+            return
+        if self._view_mode is not Mode.FLOW:
+            # Classic does not show it, and entering Flow rebuilds. Doing the
+            # work anyway would be a cost on every tick in the mode that never
+            # displays the result.
             return
         self._sidebar_building = True
         self._sidebar_rebuilds += 1
@@ -2691,6 +2699,10 @@ class MainWindow(QMainWindow):
         return chosen
 
     def _update_counts(self) -> None:
+        # Ticking a clip changes which outputs exist, so the sidebar follows
+        # the same signal the counts do rather than waiting for a focus change
+        # that may never come.
+        self._refresh_sidebar()
         if not self._ready:
             return
         total = len(self.clips)
@@ -3513,6 +3525,7 @@ class MainWindow(QMainWindow):
         return self.export_panel.preset_key()
 
     def _on_preset_changed(self, key: str | None = None) -> None:
+        self._refresh_sidebar()
         if not self._ready:
             return
         key = key or self._preset_key()
@@ -4175,6 +4188,7 @@ class MainWindow(QMainWindow):
         self._store_assembly(default_items(self.selected_clips()))
 
     def _store_assembly(self, items) -> None:
+        self._refresh_sidebar()
         """Set the list and schedule the write.
 
         Filling and resetting change the stored assembly exactly as reordering
@@ -4202,6 +4216,10 @@ class MainWindow(QMainWindow):
             resolve(stored, self.clips, names))
 
     def _rebuild_queue(self) -> None:
+        # One place for every queue change. Status steps, removals and clears
+        # all arrive here, so the submitted list follows them without each
+        # caller having to remember.
+        self._refresh_sidebar()
         # The single funnel for anything that changes the queue, so this is
         # where the strip learns what to say and when to open itself.
         self.queue_panel.rebuild(self.jobs)
@@ -4393,6 +4411,10 @@ class MainWindow(QMainWindow):
         if row is None:
             return
         self.queue_panel.mark_started(row)
+        # The worker sets the status; the sidebar reads it. Without this a job
+        # that started still read as waiting until something else happened to
+        # rebuild the list.
+        self._refresh_sidebar()
 
     def _job_progress(self, index: int, fraction: float, speed: str) -> None:
         job, row = self._reported_job(index)
@@ -4407,6 +4429,7 @@ class MainWindow(QMainWindow):
         job, row = self._reported_job(index)
         if job is None:
             return
+        self._refresh_sidebar()
         if row is not None:
             self.queue_panel.mark_finished(row, ok, job.status, message)
         self._queue_done += job.total_duration

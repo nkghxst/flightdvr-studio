@@ -671,3 +671,162 @@ def test_an_assembly_collapses_the_cards_to_one_joined_output(window, app,
     assert len(listed) == 1, listed
     assert "joined" in listed[0]
     window.set_view_mode(Mode.CLASSIC)
+
+
+# -- the sidebar is live, not a snapshot taken on the way in (#124 review) ------
+
+def in_flow(window, app):
+    """Open Flow *first*, then change things. That ordering is the finding.
+
+    Every earlier test here set its state and then switched, so it only ever
+    inspected the first render — a sidebar that never refreshed again would
+    have passed all of them.
+    """
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+    return window.sidebar_working
+
+
+def test_ticking_a_clip_while_flow_is_open_adds_its_card(window, app):
+    listing = in_flow(window, app)
+    assert not any("hdz_002.ts" in text for text in rows(listing))
+
+    tick(window, 1)
+    app.processEvents()
+
+    assert any("hdz_002.ts" in text for text in rows(listing))
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_unticking_a_clip_while_flow_is_open_removes_its_card(window, app):
+    from PySide6.QtCore import Qt
+
+    tick(window, 0)
+    app.processEvents()
+    listing = in_flow(window, app)
+    assert any("hdz_001.ts" in text for text in rows(listing))
+
+    window.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    app.processEvents()
+
+    assert not any("hdz_001.ts" in text for text in rows(listing))
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_changing_the_preset_while_flow_is_open_relabels_every_card(
+        window, app):
+    tick(window, 0)
+    app.processEvents()
+    listing = in_flow(window, app)
+    before = rows(listing)[0]
+
+    window.export_panel.preset_buttons["upload"].setChecked(True)
+    app.processEvents()
+
+    after = rows(listing)[0]
+    assert after != before, "the preset on the card did not follow the choice"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_filling_the_assembly_while_flow_is_open_collapses_the_cards(
+        window, app, monkeypatch):
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    window.clips[1].selects = [Select(2.0, 6.0, "two", sid="r-2")]
+    tick(window, 0)
+    tick(window, 1)
+    app.processEvents()
+    listing = in_flow(window, app)
+    assert len(rows(listing)) == 2
+
+    window._fill_assembly()
+    monkeypatch.setattr(window.export_panel, "join_enabled", lambda: True)
+    window._store_assembly(window.export_panel.assembly_panel.items())
+    app.processEvents()
+
+    listed = rows(listing)
+    assert len(listed) == 1 and "joined" in listed[0], listed
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_a_rescan_while_flow_is_open_empties_the_cards(window, app,
+                                                       monkeypatch):
+    """An empty or failed rescan leaves nothing to export, so nothing is
+    listed — a stale card would name material that is no longer here."""
+    import tests.test_music_wiring as wiring
+
+    tick(window, 0)
+    app.processEvents()
+    listing = in_flow(window, app)
+    assert rows(listing)
+
+    monkeypatch.setattr("flightdvr.ui.ScanWorker", wiring._NoScan)
+    window._scan()
+    window._scan_done(window._scan_generation, 0)
+    app.processEvents()
+
+    assert rows(listing) == []
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_a_job_that_starts_while_flow_is_open_shows_that_it_is_running(
+        window, app, monkeypatch):
+    from flightdvr.jobs import JobStatus
+
+    monkeypatch.setattr("flightdvr.ui.QMessageBox.warning",
+                        staticmethod(lambda *a, **k: None))
+    tick(window, 0)
+    app.processEvents()
+    window._add_to_queue()
+    app.processEvents()
+    assert window.jobs
+    listing = in_flow(window, app)
+    assert any("Waiting" in text for text in rows(window.sidebar_submitted))
+
+    window.jobs[0].status = JobStatus.RUNNING
+    window._job_started(0)
+    app.processEvents()
+
+    assert any("Encoding" in text for text in rows(window.sidebar_submitted)), (
+        rows(window.sidebar_submitted))
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_removing_a_job_while_flow_is_open_takes_it_off_the_list(
+        window, app, monkeypatch):
+    monkeypatch.setattr("flightdvr.ui.QMessageBox.warning",
+                        staticmethod(lambda *a, **k: None))
+    tick(window, 0)
+    app.processEvents()
+    window._add_to_queue()
+    app.processEvents()
+    listing = in_flow(window, app)
+    assert rows(window.sidebar_submitted)
+
+    window.jobs.clear()
+    window._rebuild_queue()
+    app.processEvents()
+
+    assert rows(window.sidebar_submitted) == []
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_a_live_change_still_causes_one_rebuild_each(window, app):
+    """The refresh is now on several signals. Each has to stay once-only."""
+    in_flow(window, app)
+    before = window._sidebar_rebuilds
+
+    tick(window, 0)
+    app.processEvents()
+
+    assert 1 <= window._sidebar_rebuilds - before <= 2, (
+        f"one tick caused {window._sidebar_rebuilds - before} rebuilds")
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_classic_pays_nothing_for_the_sidebar(window, app):
+    """It is not on screen there, so it is not rebuilt there."""
+    assert window.view_mode is Mode.CLASSIC
+    before = window._sidebar_rebuilds
+    tick(window, 0)
+    app.processEvents()
+    assert window._sidebar_rebuilds == before
