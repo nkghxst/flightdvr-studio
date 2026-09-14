@@ -98,3 +98,133 @@ def test_invalid_targets_and_unknown_presets_fail_before_entering_the_plan():
 def test_music_choice_rejects_an_empty_path_without_claiming_it_exists():
     with pytest.raises(ValueError, match="cannot be empty"):
         MusicChoice("")
+
+
+# -- what the queue would build (#84 sidebar) ----------------------------------
+
+def a_piece(name: str, ranges=(), current: int = 0):
+    """A resolved export piece, shaped the way `for_export` leaves one."""
+    from datetime import datetime
+    from pathlib import Path
+
+    from flightdvr.media import ClipInfo, Select
+
+    clip = ClipInfo(
+        path=Path(name), size=1024, modified=datetime(2025, 10, 8, 18, 39),
+        duration=30.0, width=1280, height=720, fps=60.0, video_codec="hevc",
+        audio_codec="aac", pix_fmt="yuvj420p", color_range="pc",
+    )
+    clip.selects = [Select(start, end, label, sid=sid)
+                    for start, end, label, sid in ranges]
+    clip.current = current
+    return clip
+
+
+def test_a_whole_recording_is_one_output_with_no_range_id():
+    from flightdvr.output_plan import working_outputs
+
+    outputs = working_outputs([a_piece("hdz_001.ts")])
+    assert len(outputs) == 1
+    assert outputs[0].target.items[0].sid == ""
+    assert outputs[0].label == "hdz_001.ts"
+
+
+def test_three_ranges_are_three_outputs_each_with_its_own_identity():
+    """`for_export` hands three one-select pieces, so this hands three
+    outputs — one per piece, keyed by that piece's range."""
+    from flightdvr.output_plan import working_outputs
+
+    pieces = [
+        a_piece("hdz_001.ts", ranges=[(1.0, 5.0, "one", "r-1")]),
+        a_piece("hdz_001.ts", ranges=[(6.0, 9.0, "two", "r-2")]),
+        a_piece("hdz_001.ts", ranges=[(11.0, 14.0, "", "r-3")]),
+    ]
+    outputs = working_outputs(pieces)
+
+    assert [o.target.items[0].sid for o in outputs] == ["r-1", "r-2", "r-3"]
+    assert len({o.target for o in outputs}) == 3
+    assert outputs[0].label.endswith("· one")
+    assert outputs[2].label == "hdz_001.ts", "an unnamed range invented a name"
+
+
+def test_retrimming_a_range_does_not_change_its_identity():
+    """The card's content changes; the thing its music hangs on does not."""
+    from flightdvr.output_plan import working_outputs
+
+    before = working_outputs([a_piece("hdz_001.ts",
+                                      ranges=[(1.0, 5.0, "one", "r-1")])])
+    after = working_outputs([a_piece("hdz_001.ts",
+                                     ranges=[(2.5, 8.0, "one", "r-1")])])
+    assert before[0].target == after[0].target
+
+
+def test_renaming_a_range_changes_the_label_and_not_the_identity():
+    from flightdvr.output_plan import working_outputs
+
+    before = working_outputs([a_piece("hdz_001.ts",
+                                      ranges=[(1.0, 5.0, "one", "r-1")])])
+    after = working_outputs([a_piece("hdz_001.ts",
+                                     ranges=[(1.0, 5.0, "renamed", "r-1")])])
+    assert before[0].target == after[0].target
+    assert before[0].label != after[0].label
+
+
+def test_an_assembly_is_one_output_over_its_whole_ordered_run():
+    """One job, so one output — and its pieces are the run, in order."""
+    from flightdvr.output_plan import working_outputs
+
+    pieces = [
+        a_piece("hdz_001.ts", ranges=[(1.0, 5.0, "one", "r-1")]),
+        a_piece("hdz_002.ts"),
+    ]
+    outputs = working_outputs(pieces, joined=True)
+
+    assert len(outputs) == 1
+    assert outputs[0].joined
+    assert outputs[0].target.is_assembly
+    assert len(outputs[0].pieces) == 2
+    assert [item.sid for item in outputs[0].target.items] == ["r-1", ""]
+
+
+def test_an_assembly_keeps_material_nobody_ticked_and_repeated_ranges():
+    """Assembly rows are resolved from the list, not from the ticks, and the
+    same range may appear more than once. Both have to survive."""
+    from flightdvr.output_plan import working_outputs
+
+    twice = a_piece("hdz_001.ts", ranges=[(1.0, 5.0, "one", "r-1")])
+    pieces = [twice, a_piece("hdz_009.ts"), twice]
+    outputs = working_outputs(pieces, joined=True)
+
+    assert len(outputs[0].pieces) == 3, "a repeated occurrence was collapsed"
+    assert [item.fingerprint for item in outputs[0].target.items].count(
+        twice.fingerprint) == 2
+
+
+def test_nothing_resolved_is_no_outputs_rather_than_an_empty_one():
+    from flightdvr.output_plan import working_outputs
+
+    assert working_outputs([]) == []
+    assert working_outputs([], joined=True) == []
+    assert working_outputs([None]) == []
+
+
+def test_a_piece_with_no_fingerprint_is_skipped_not_invented():
+    """No identity is made up for something that cannot supply one."""
+    from types import SimpleNamespace
+
+    from flightdvr.output_plan import target_for_piece, working_outputs
+
+    assert target_for_piece(SimpleNamespace(fingerprint="")) is None
+    assert working_outputs([SimpleNamespace(fingerprint="")]) == []
+
+
+def test_a_wrapped_piece_resolves_to_the_same_identity_as_a_bare_one():
+    """The bundle path wraps its recording in `.clip`; one identity either
+    way, or the same output would be keyed two ways."""
+    from types import SimpleNamespace
+
+    from flightdvr.output_plan import target_for_piece
+
+    bare = a_piece("hdz_001.ts", ranges=[(1.0, 5.0, "one", "r-1")])
+    wrapped = SimpleNamespace(clip=bare)
+    assert target_for_piece(wrapped) == target_for_piece(bare)
