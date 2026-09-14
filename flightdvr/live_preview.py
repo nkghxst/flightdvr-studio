@@ -37,9 +37,9 @@ import threading
 from dataclasses import dataclass
 from enum import Enum
 
-from .audio_device import AudioOutput, DeviceUnavailable
-from .audio_plan import OUTPUT_RATE
-from .audio_stream import Buffering, StreamFailed
+from .audio_device import FRAME_BYTES, AudioOutput, DeviceUnavailable
+from .audio_plan import OUTPUT_CHANNELS, OUTPUT_RATE
+from .audio_stream import Buffering, PcmBlock, StreamFailed
 
 # How far the backend's processed count may sit from where the picture is
 # before monitoring stops. A fifth of a second is past the point where a person
@@ -50,6 +50,29 @@ DRIFT_LIMIT_SAMPLES = OUTPUT_RATE // 5
 # block arrived late. A run of them means we are not keeping up, and carrying
 # on would be a stutter nobody asked to listen to.
 STARVED_LIMIT = 8
+
+
+def _unaccepted(block: PcmBlock, taken: int) -> PcmBlock | None:
+    """The tail of a block the adapter did not take, or None if it took it all.
+
+    Rebuilt rather than sliced in place, because a `PcmBlock` is immutable and
+    carries where it belongs: the tail starts `taken` frames later, so its
+    `output_start` moves with it. The generation and monitor revision are the
+    block's own — this is the same sound, not new sound, and re-stamping it
+    would smuggle stale audio past the next fence.
+    """
+    frames_taken = max(0, taken) // FRAME_BYTES
+    if frames_taken >= block.frames:
+        return None
+    samples = frames_taken * OUTPUT_CHANNELS
+    return PcmBlock(
+        generation=block.generation,
+        monitor_revision=block.monitor_revision,
+        output_start=block.output_start + frames_taken,
+        frames=block.frames - frames_taken,
+        planned=block.planned[samples:],
+        monitored=block.monitored[samples:],
+    )
 
 
 class Listening(str, Enum):
@@ -95,6 +118,11 @@ class LivePreview:
         self._reapers: list[threading.Thread] = []
         self._target_reason = ""
         self._starved = 0
+        # At most one block, and only ever the unaccepted tail of the block
+        # last offered. A pulled block is gone from the producer, so the
+        # alternative to holding it is losing it; a list here would be an
+        # unbounded second queue in front of the one whose bound is the point.
+        self._held: PcmBlock | None = None
 
     # -- what is on offer ------------------------------------------------------
 
@@ -204,6 +232,11 @@ class LivePreview:
 
     def pause(self) -> None:
         self._playing = False
+        # `AudioOutput.pause` fences the queue *and* the sink's own buffer, so
+        # keeping a tail here would put back sound the pause just decided
+        # nobody should hear after it. Following that policy, not inventing a
+        # new one.
+        self._held = None
         if self._stream is not None:
             self._stream.pause()
         if self._output is not None:
@@ -219,6 +252,7 @@ class LivePreview:
         if self._stream is None:
             return
         self._generation = self._stream.restart()
+        self._held = None
         if self._output is not None:
             self._output.reset(self._generation)
         self._starved = 0
@@ -228,6 +262,7 @@ class LivePreview:
         if self._stream is None:
             return
         self._generation = self._stream.reprime(int(output_sample))
+        self._held = None
         if self._output is not None:
             self._output.reset(self._generation)
         self._starved = 0
@@ -290,29 +325,49 @@ class LivePreview:
         return sent
 
     def _drain(self) -> int:
+        """Offer what belongs here, and keep what the adapter could not take.
+
+        `pull` removes the block from the producer and `present` may take a
+        frame-aligned prefix or nothing at all, so going straight on to the
+        next block threw the remainder away — and nothing upstream still had
+        it. What the adapter refused is retained and re-offered *before* any
+        newer block, which is what keeps the byte order exact.
+        """
         sent = 0
         while True:
-            try:
-                block = self._stream.pull()
-            except Buffering:
-                # Ordinary: nothing ready this tick, including while paused.
-                break
-            except StreamFailed as exc:
-                # Not ordinary, and it used to be swallowed here — the
-                # transport went on saying it was playing while the producer
-                # had given up behind it.
-                self._stop_with(f"the sound could not be produced: {exc}")
-                break
-            except Exception as exc:
-                self._stop_with(f"the sound could not be produced: {exc}")
-                break
+            block, self._held = self._held, None
             if block is None:
-                break
+                try:
+                    block = self._stream.pull()
+                except Buffering:
+                    # Ordinary: nothing ready this tick, including while
+                    # paused. The adapter may still be holding sound, so this
+                    # leaves the loop but not without servicing it below.
+                    break
+                except StreamFailed as exc:
+                    # Not ordinary, and it used to be swallowed here — the
+                    # transport went on saying it was playing while the
+                    # producer had given up behind it.
+                    self._stop_with(f"the sound could not be produced: {exc}")
+                    return sent
+                except Exception as exc:
+                    self._stop_with(f"the sound could not be produced: {exc}")
+                    return sent
+                if block is None:
+                    break
             taken = self._output.present(block)
-            if taken == 0:
-                break
             sent += taken
+            self._held = _unaccepted(block, taken)
             self._output.pump()
+            if self._held is not None:
+                # The bound has been reached. Pulling another block now would
+                # be asking the producer for sound there is nowhere to put.
+                break
+        # Even on a tick where nothing new was accepted. Pumping only after a
+        # fresh acceptance left a stalled final tail with no service path at
+        # all: the producer had ended, so nothing was ever accepted again and
+        # the last of the music never reached the device.
+        self._output.pump()
         return sent
 
     def _judge_drift(self, output_sample: int) -> None:
@@ -353,6 +408,7 @@ class LivePreview:
         self._playing = False
         self._starved = 0
         self._reason = ""
+        self._held = None
         if self._stream is not None:
             self._stream.pause()
             self._reap(self._stream)
@@ -385,6 +441,7 @@ class LivePreview:
         """
         stream, self._stream = self._stream, None
         self._playing = False
+        self._held = None
         if stream is not None:
             self._reap(stream)
         if self._output is not None:
