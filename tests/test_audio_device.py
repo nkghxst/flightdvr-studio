@@ -29,16 +29,34 @@ can claim synchronisation, is written down in
 from __future__ import annotations
 
 import array
+import enum
 from types import SimpleNamespace
 
 import pytest
 
 from flightdvr.audio_device import (
     ACTIVE, FRAME_BYTES, IDLE, STOPPED, SUSPENDED, UNKNOWN, AudioOutput,
-    DeviceFormat, DeviceReport, DeviceUnavailable, block_bytes, qt_state_name,
+    DeviceFormat, DeviceReport, DeviceUnavailable, block_bytes,
+    qt_error_text, qt_state_name,
 )
 from flightdvr.audio_plan import OUTPUT_CHANNELS, OUTPUT_RATE
 from flightdvr.audio_stream import PcmBlock
+
+
+class QtLikeError(enum.Enum):
+    """The shape Qt's `error()` actually answers with.
+
+    Not a convenience. The stand-in used to answer `""`, which is a value Qt
+    never returns, and that single unfaithful default is why a healthy device
+    read as a failure for as long as it did: the fake agreed with the code's
+    assumption instead of modelling the thing the code talks to.
+    """
+
+    NoError = 0
+    OpenError = 1
+    IOError = 2
+    UnderrunError = 3
+    FatalError = 4
 
 
 def a_block(*, generation: int = 0, frames: int = 4, planned: float = 0.8,
@@ -77,7 +95,8 @@ class FakeSink:
         # it was handed over is the one shape that cannot show the difference
         # between submitted and processed, which is the distinction under test.
         self.reported_state = "StoppedState"
-        self.reported_error = ""
+        # Healthy, spelled the way a device spells it.
+        self.reported_error = QtLikeError.NoError
         self.processed_usecs = 0
         self.buffer_size = buffer_size
 
@@ -90,7 +109,7 @@ class FakeSink:
             raise OSError("the backend will not say")
         return SimpleNamespace(name=self.reported_state)
 
-    def error(self) -> str:
+    def error(self):
         return self.reported_error
 
     def bytesFree(self) -> int:                   # noqa: N802 (Qt naming)
@@ -532,7 +551,7 @@ def test_a_backend_error_is_its_own_cause_and_not_starvation():
     """Neither of the other two, and not fixed by feeding it faster."""
     out, sink = started()
     out.resume()
-    sink.reported_error = "UnderrunError"
+    sink.reported_error = QtLikeError.UnderrunError
 
     assert out.starvation() == "backend"
     out.stop()
@@ -601,3 +620,97 @@ def test_an_unrecognised_state_stays_reportable_rather_than_forced():
 def test_a_report_from_no_sink_is_stopped_not_unknown():
     out = AudioOutput(sink_factory=lambda: FakeSink())
     assert out.observe() == DeviceReport(state=STOPPED)
+
+
+# -- the error value Qt actually answers with ----------------------------------
+
+def a_real_qt_error(name: str):
+    """One value from the installed Qt, or a skip that says why.
+
+    Importing the module does not open a device or make a sound; it is the
+    enum that is wanted, not the hardware. CI runs with `-rs`, so a skip here
+    is visible rather than silently turning this file back into the
+    empty-string fake it used to be.
+    """
+    multimedia = pytest.importorskip("PySide6.QtMultimedia")
+    error = getattr(multimedia, "QAudio", None)
+    if error is None or not hasattr(error, "Error"):
+        pytest.skip("this Qt build does not expose QAudio.Error")
+    value = getattr(error.Error, name, None)
+    if value is None:
+        pytest.skip(f"this Qt build has no QAudio.Error.{name}")
+    return value
+
+
+def test_the_real_qt_healthy_value_is_not_an_error():
+    """The defect, with the actual value the actual installed Qt returns.
+
+    `str(QAudio.Error.NoError)` is `"Error.NoError"` — a non-empty string, and
+    every caller here treats a non-empty error as a fault. So a device that
+    was working reported `"backend"` starvation and the transport stopped
+    playback on it. No device is opened to show this; the enum is the whole
+    defect.
+    """
+    healthy = a_real_qt_error("NoError")
+    assert str(healthy), "the premise is that Qt's healthy value stringifies"
+
+    out, sink = started()
+    out.resume()
+    sink.reported_error = healthy
+    sink.reported_state = "ActiveState"
+
+    assert out.observe().error == "", out.observe().error
+    assert out.starvation() != "backend"
+    out.stop()
+
+
+def test_a_real_qt_fault_keeps_its_own_text():
+    """The other half. Normalising the healthy value must not normalise the
+    ones that mean something is wrong."""
+    fault = a_real_qt_error("UnderrunError")
+
+    out, sink = started()
+    out.resume()
+    sink.reported_error = fault
+
+    report = out.observe()
+    assert report.error, "a real fault lost its text"
+    assert "UnderrunError" in report.error
+    assert out.starvation() == "backend"
+    out.stop()
+
+
+def test_an_api_shaped_healthy_value_is_not_an_error():
+    """The same contract without the installed Qt, so it stays pinned on a
+    runner where QtMultimedia cannot be imported at all."""
+    out, sink = started()
+    out.resume()
+    sink.reported_error = QtLikeError.NoError
+    sink.reported_state = "ActiveState"
+
+    assert out.observe().error == ""
+    assert out.starvation() != "backend"
+    out.stop()
+
+
+def test_qt_error_text_recognises_health_by_name_not_by_number():
+    """Matched on the name, like `qt_state_name` and for the same reason: the
+    numbers are not part of the documented contract."""
+    assert qt_error_text(None) == ""
+    assert qt_error_text("") == ""
+    assert qt_error_text(QtLikeError.NoError) == ""
+    assert qt_error_text(SimpleNamespace(name="NoError")) == ""
+    # The class prefix differs between Qt builds; the answer does not.
+    assert qt_error_text("Error.NoError") == ""
+    assert qt_error_text("QAudio.Error.NoError") == ""
+    assert qt_error_text("NoError") == ""
+
+
+def test_an_unrecognised_answer_stays_an_error():
+    """Silently swallowing a fault nobody has seen before is worse than the
+    defect being fixed here, so only the recognised healthy name is cleared."""
+    assert qt_error_text(QtLikeError.FatalError)
+    assert qt_error_text(SimpleNamespace(name="SomethingNewError"))
+    assert qt_error_text("the backend fell over")
+    # A bare number is not taken as a promise of health.
+    assert qt_error_text(0)
