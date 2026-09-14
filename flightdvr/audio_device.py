@@ -177,6 +177,33 @@ def qt_state_name(state) -> str:
     return UNKNOWN
 
 
+def qt_error_text(error) -> str:
+    """What the backend is complaining about, or nothing when it is healthy.
+
+    Qt's `error()` answers with an enum, and its healthy value is `NoError` —
+    not `None`, and not an empty string. Stringifying it produced
+    `"Error.NoError"`, which every caller here reads as a fault: `starvation`
+    returned `"backend"` and the transport stopped playback on a device that
+    was working perfectly. Only a stand-in that answered with an empty string
+    made that look correct.
+
+    Recognised by name, like `qt_state_name` and for the same reason — the
+    numbers are not part of the documented contract, so a backend answering
+    with a bare `0` is not taken as a promise of health. Anything unrecognised
+    keeps its text and stays an error: silently swallowing a fault nobody has
+    seen before is the one failure worse than the one being fixed here.
+    """
+    if error is None:
+        return ""
+    name = getattr(error, "name", None) or str(error)
+    # `Error.NoError`, `QAudio.Error.NoError` and a bare `NoError` are the same
+    # answer wearing the class prefix of whichever Qt build produced it.
+    last = str(name).rsplit(".", 1)[-1].strip()
+    if not last or last.lower() == "noerror":
+        return ""
+    return str(error)
+
+
 def block_bytes(block: PcmBlock) -> bytes:
     """The monitored rendering of one block, as the device wants it.
 
@@ -343,7 +370,7 @@ class AudioOutput:
             error = sink.error()
             report = DeviceReport(
                 state=state,
-                error="" if error is None else str(error),
+                error=qt_error_text(error),
                 processed_usecs=_non_negative(sink.processedUSecs()),
                 bytes_free=_non_negative(sink.bytesFree()),
                 buffer_size=_non_negative(sink.bufferSize()),
