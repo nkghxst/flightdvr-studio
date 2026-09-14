@@ -38,6 +38,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QApplication
 
+from flightdvr.assembly_panel import ITEM_ROLE as ASSEMBLY_ITEM_ROLE
 from flightdvr.flow_layout import Mode, Stage
 from flightdvr.media import ClipInfo, Select
 
@@ -1002,9 +1003,14 @@ def test_browse_and_trim_are_not_captioned(window, app):
 
 def test_with_nothing_in_focus_no_target_is_named(window, app):
     """An unresolved focus must not show some other output as though it were
-    the one selected."""
+    the one selected.
+
+    Nothing is assigned here. A card nobody has clicked has no focus already,
+    and reaching that state by writing `_trim_clip = None` tested the branch
+    rather than any way of arriving at it.
+    """
+    assert window._trim_clip is None
     in_flow(window, app)
-    window._trim_clip = None
     window._show_stage(Stage.OUTPUT)
     app.processEvents()
 
@@ -1012,6 +1018,205 @@ def test_with_nothing_in_focus_no_target_is_named(window, app):
     assert "choose an output" in said
     assert "hdz_" not in said, said
     window.set_view_mode(Mode.CLASSIC)
+
+
+def test_a_rescan_that_finds_nothing_stops_the_caption_naming_it(
+        window, app, monkeypatch):
+    """The focus outlives the list it came from, and the caption read it raw.
+
+    Scanning clears the clips and the table and puts nothing down, so a
+    recording that had just been rescanned away was still named as this
+    output's source — a stale picture with a line underneath asserting it was
+    current.
+    """
+    import tests.test_music_wiring as wiring
+
+    tick(window, 0)
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    app.processEvents()
+    in_flow(window, app)
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+    assert "hdz_001.ts" in window.flow_source_note.text()
+
+    monkeypatch.setattr("flightdvr.ui.ScanWorker", wiring._NoScan)
+    window._scan()
+    window._scan_done(window._scan_generation, 0)
+    app.processEvents()
+
+    said = window.flow_source_note.text()
+    assert "hdz_001.ts" not in said, said
+    assert "choose an output" in said, said
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_choosing_another_assembly_row_moves_the_picture_and_the_caption(
+        window, app, monkeypatch):
+    """The stage borrows a list that already had a selection of its own.
+
+    With a picture above it that selection acquired a claim it could not keep:
+    nothing connected it to the focus, so choosing the second row left both
+    the frame and the caption on the first.
+    """
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    window.clips[1].selects = [Select(2.0, 6.0, "two", sid="r-2")]
+    tick(window, 0)
+    tick(window, 1)
+    app.processEvents()
+    window._fill_assembly()
+    app.processEvents()
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    app.processEvents()
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+    assert window._trim_clip is window.clips[0]
+
+    shown = []
+    monkeypatch.setattr(window.player, "load",
+                        lambda clip, *a, **k: shown.append(clip))
+    listing = window.export_panel.assembly_panel.list
+    second = [listing.item(r) for r in range(listing.count())
+              if listing.item(r).data(ASSEMBLY_ITEM_ROLE).fingerprint
+              == window.clips[1].fingerprint]
+    assert second, "the fill did not put the second recording in the list"
+    listing.setCurrentItem(second[0])
+    app.processEvents()
+
+    assert window._trim_clip is window.clips[1]
+    assert shown and shown[-1] is window.clips[1], shown
+    assert "hdz_002.ts" in window.flow_source_note.text(), (
+        window.flow_source_note.text())
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_choosing_a_second_range_of_the_same_recording_moves_the_picture(
+        window, app, monkeypatch):
+    """Two ranges of one recording never reload the clip, so the frame only
+    moves if the seek happens — the caption alone would prove nothing."""
+    window.clips[0].selects = [
+        Select(1.0, 5.0, "one", sid="r-1"),
+        Select(6.0, 9.0, "two", sid="r-2"),
+    ]
+    tick(window, 0)
+    app.processEvents()
+    window._fill_assembly()
+    app.processEvents()
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    app.processEvents()
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+
+    sought = []
+    monkeypatch.setattr(window.player, "seek", lambda at: sought.append(at))
+    listing = window.export_panel.assembly_panel.list
+    rows_for = [listing.item(r) for r in range(listing.count())
+                if listing.item(r).data(ASSEMBLY_ITEM_ROLE).sid == "r-2"]
+    assert rows_for, "the second range is not in the list"
+    listing.setCurrentItem(rows_for[0])
+    app.processEvents()
+
+    assert window.clips[0].current == 1
+    assert 6.0 in sought, sought
+    assert "two" in window.flow_source_note.text(), (
+        window.flow_source_note.text())
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_arriving_on_assemble_with_a_row_selected_shows_that_row(window, app):
+    """A selection made while another stage was showing is gated out, so the
+    list can be pointing at one range while the picture holds another.
+    Arriving is the moment that has to be settled — the caption is about to
+    name whatever the picture is."""
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    window.clips[1].selects = [Select(2.0, 6.0, "two", sid="r-2")]
+    tick(window, 0)
+    tick(window, 1)
+    app.processEvents()
+    window._fill_assembly()
+    app.processEvents()
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    app.processEvents()
+    in_flow(window, app)
+    window._show_stage(Stage.BROWSE)
+    app.processEvents()
+
+    listing = window.export_panel.assembly_panel.list
+    second = [listing.item(r) for r in range(listing.count())
+              if listing.item(r).data(ASSEMBLY_ITEM_ROLE).fingerprint
+              == window.clips[1].fingerprint]
+    listing.setCurrentItem(second[0])
+    app.processEvents()
+    assert window._trim_clip is window.clips[0], "Browse took the selection"
+
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+
+    assert window._trim_clip is window.clips[1]
+    assert "hdz_002.ts" in window.flow_source_note.text(), (
+        window.flow_source_note.text())
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_redrawing_the_assembly_does_not_steal_the_focus(window, app):
+    """`show_rows` puts the selection back, which emits the same signal a
+    person clicking emits. Answering it would reload the clip on every refresh
+    and drag the picture off whatever the table had just focused."""
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    window.clips[1].selects = [Select(2.0, 6.0, "two", sid="r-2")]
+    tick(window, 0)
+    tick(window, 1)
+    app.processEvents()
+    window._fill_assembly()
+    app.processEvents()
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+
+    listing = window.export_panel.assembly_panel.list
+    second = [listing.item(r) for r in range(listing.count())
+              if listing.item(r).data(ASSEMBLY_ITEM_ROLE).fingerprint
+              == window.clips[1].fingerprint]
+    listing.setCurrentItem(second[0])
+    app.processEvents()
+    assert window._trim_clip is window.clips[1]
+
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    app.processEvents()
+    assert window._trim_clip is window.clips[0]
+
+    window._refresh_assembly()
+    app.processEvents()
+
+    assert window._trim_clip is window.clips[0], (
+        "a redraw put the focus back on the row it happened to reselect")
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_classic_is_not_given_the_new_assembly_behaviour(window, app):
+    """The same panel sits in Classic's Output group, where picking rows to
+    move or remove has never loaded anything. This slice does not change
+    what Classic does."""
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    window.clips[1].selects = [Select(2.0, 6.0, "two", sid="r-2")]
+    tick(window, 0)
+    tick(window, 1)
+    app.processEvents()
+    window._fill_assembly()
+    app.processEvents()
+    assert window._view_mode is Mode.CLASSIC
+
+    listing = window.export_panel.assembly_panel.list
+    listing.setCurrentRow(listing.count() - 1)
+    app.processEvents()
+
+    assert window._trim_clip is None
 
 
 def test_the_caption_follows_the_focused_range(window, app):
@@ -1039,7 +1244,7 @@ def test_the_caption_follows_the_focused_range(window, app):
 # -- real actions, after entering Flow -----------------------------------------
 
 def test_filling_the_assembly_after_entering_flow_reaches_the_stage(
-        window, app, monkeypatch):
+        window, app):
     """One real action with the join state set first — no second store, and no
     patched state standing in for the mutation."""
     window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
@@ -1050,8 +1255,10 @@ def test_filling_the_assembly_after_entering_flow_reaches_the_stage(
     in_flow(window, app)
     window._show_stage(Stage.ASSEMBLE)
     app.processEvents()
-    monkeypatch.setattr(window.export_panel, "join_enabled", lambda: True)
 
+    # No patched `join_enabled`. It reads `assembly_panel.is_empty()`, which
+    # the fill is supposed to change — patching it handed the test the very
+    # answer the action was being asked to produce.
     window._fill_assembly()
     app.processEvents()
 
