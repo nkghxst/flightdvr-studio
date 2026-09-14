@@ -96,6 +96,7 @@ from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
 from .queue_panel import QueuePanel
 from .assembly import absent, default_items, export_piece, present, resolve
+from .assembly_panel import ITEM_ROLE as ASSEMBLY_ITEM_ROLE
 from .bundle import (
     Piece, collisions as bundle_collisions, frozen_settings, plan_bundle,
 )
@@ -221,10 +222,14 @@ class MainWindow(QMainWindow):
         self._flow_homes: dict = {}
         self._flow_slots: dict = {}
         self._left_column: QWidget | None = None
+        self.flow_viewport = None
+        self.flow_source_note = None
+        self._viewport_home = None
         self.sidebar_working = None
         self.sidebar_submitted = None
         self._sidebar_target: OutputTarget | None = None
         self._sidebar_building = False
+        self._assembly_drawing = False
         self._sidebar_rebuilds = 0
         # Classic's split, kept while Flow is holding its children. An empty
         # splitter serialises as an empty splitter, so saving in Flow without
@@ -877,6 +882,7 @@ class MainWindow(QMainWindow):
         self._show_music_state(target)
         self._sync_live_preview()
         self._refresh_sidebar()
+        self._show_source_note()
 
     def _show_music_state(self, target: OutputTarget) -> None:
         """One line about acquisition, and one about what the export will do."""
@@ -1241,6 +1247,10 @@ class MainWindow(QMainWindow):
         """
         return {
             Stage.BROWSE: self._left_column,
+            # The panel `ExportPanel` builds, borrowed rather than extracted.
+            # Nothing of its internals changes, so PR #78's drag work and this
+            # never touch the same lines.
+            Stage.ASSEMBLE: self.export_panel.assembly_panel,
             Stage.TRIM: self.preview_view.trim_band,
             Stage.MUSIC: self.preview_view.music_band,
             Stage.OUTPUT: self.export_panel,
@@ -1258,6 +1268,18 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(host)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(INNER)
+
+        # The picture is persistent, as the approved revision places it: every
+        # page that decides something you can only judge by looking has it, and
+        # there is one of it. It is the same `PreviewView` Classic uses.
+        self.flow_viewport = QWidget()
+        viewport = QVBoxLayout(self.flow_viewport)
+        viewport.setContentsMargins(0, 0, 0, 0)
+        viewport.setSpacing(TIGHT)
+        self.flow_source_note = dim(QLabel(""))
+        self.flow_source_note.setWordWrap(True)
+        viewport.addWidget(self.flow_source_note)
+        layout.addWidget(self.flow_viewport)
 
         self.flow_stage_bar = QWidget()
         bar = QHBoxLayout(self.flow_stage_bar)
@@ -1408,12 +1430,14 @@ class MainWindow(QMainWindow):
         if chosen is Mode.FLOW:
             self._refresh_sidebar()
             self._lend_to_flow()
+            self._lend_viewport()
             self.splitter.hide()
             self._flow_host.show()
             self._show_stage(self._flow_stage or
                              flow_first_stage(self._offered_stages))
         else:
             self._flow_host.hide()
+            self._return_viewport()
             self._return_from_flow()
             self.splitter.show()
         self.settings_store.setValue("view_mode", chosen.value)
@@ -1429,6 +1453,12 @@ class MainWindow(QMainWindow):
         self._flow_stage = chosen
         self.flow_stages.setCurrentWidget(self._flow_slots[chosen])
         self.settings_store.setValue("flow_stage", chosen.value)
+        if chosen is Stage.ASSEMBLE:
+            # Arriving with a row already selected is the same claim as
+            # selecting one: the picture has to agree with it before the
+            # caption underneath says which range it is.
+            self._on_assembly_choice()
+        self._show_source_note()
         back, forward = flow_neighbours(chosen, self._offered_stages)
         self.flow_back.setEnabled(back is not None)
         self.flow_next.setEnabled(forward is not None)
@@ -1465,6 +1495,94 @@ class MainWindow(QMainWindow):
             # queue is about to refuse.
             return []
         return working_outputs(pieces, joined=joined)
+
+    # -- the persistent picture ------------------------------------------------
+
+    def _lend_viewport(self) -> None:
+        """Hoist the picture above the stages, remembering where it lives.
+
+        It cannot be lent to a stage. A widget is in one place at a time, and
+        the approved design has it on Browse, Trim, Assemble and Output — so it
+        goes above them, which is also what makes it one picture rather than
+        four.
+        """
+        box = self.preview_view.preview_box
+        home = self._left_column.layout() if self._left_column else None
+        if home is None or self.flow_viewport is None:
+            return
+        index = home.indexOf(box)
+        if index < 0:
+            return
+        self._viewport_home = (home, index)
+        self.flow_viewport.layout().insertWidget(0, box, 1)
+        box.show()
+
+    def _return_viewport(self) -> None:
+        """Put it back in the column, at the index it came from."""
+        if self._viewport_home is None:
+            return
+        home, index = self._viewport_home
+        self._viewport_home = None
+        box = self.preview_view.preview_box
+        if self.flow_viewport is not None and self.flow_viewport.layout():
+            self.flow_viewport.layout().removeWidget(box)
+        home.insertWidget(index, box)
+        box.show()
+
+    def _source_note(self, stage) -> str:
+        """One short line saying what the picture is, on the two pages that
+        would otherwise be read as showing something else.
+
+        Assemble and Output decide things about a joined run and a finished
+        file, and neither exists to be shown. The picture is the source of the
+        row or target in focus, and saying so is the difference between an
+        honest preview and a claim nobody made on purpose.
+
+        Browse and Trim already show source and are not captioned: a line
+        under every page is a line nobody reads.
+        """
+        if stage not in (Stage.ASSEMBLE, Stage.OUTPUT):
+            return ""
+        clip = self._focused_source()
+        if clip is None:
+            # No focus, so no claim. Naming some other target here would show
+            # one output while another was selected.
+            return ("Source preview — choose a row to see it."
+                    if stage is Stage.ASSEMBLE
+                    else "Source preview — choose an output to see it.")
+        name = clip.path.name
+        ranges = clip.real_selects
+        if ranges:
+            chosen = ranges[min(clip.current, len(ranges) - 1)]
+            if chosen.name:
+                name = f"{name} · {chosen.name}"
+        if stage is Stage.ASSEMBLE:
+            return f"Source: {name} — not the joined result."
+        return f"Source: {name} — not the finished file."
+
+    def _focused_source(self) -> ClipInfo | None:
+        """The focused recording, but only while it is still on this card.
+
+        `_trim_clip` outlives the list it came from: scanning clears the clips
+        and the table, and nothing puts the focus down. A caption reading it
+        raw named a recording that had just been rescanned away as this
+        output's source — the picture had gone stale and the line underneath
+        asserted it was current. Presence is checked by fingerprint, which is
+        what survives the card being listed again.
+        """
+        clip = self._trim_clip
+        if clip is None:
+            return None
+        if not any(c.fingerprint == clip.fingerprint for c in self.clips):
+            return None
+        return clip
+
+    def _show_source_note(self) -> None:
+        if self.flow_source_note is None:
+            return
+        text = self._source_note(self._flow_stage)
+        self.flow_source_note.setText(text)
+        self.flow_source_note.setVisible(bool(text))
 
     def _build_sidebar(self) -> QWidget:
         """Working outputs above, submitted jobs below. Flow only."""
@@ -1576,8 +1694,16 @@ class MainWindow(QMainWindow):
         if target is None:
             return
         self._sidebar_target = target
-        fingerprint = target.items[0].fingerprint
-        sid = target.items[0].sid
+        self._focus_piece(target.items[0].fingerprint, target.items[0].sid)
+
+    def _focus_piece(self, fingerprint: str, sid: str) -> None:
+        """Focus one range of one recording, through the table's own handlers.
+
+        Both lists that offer something to choose come through here, so there
+        is only one way to become focused and no second one to disagree with
+        it. Nothing is started: choosing something to edit is not asking to
+        hear it.
+        """
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             clip = self.clip_by_path.get(item.data(Qt.ItemDataRole.UserRole))
@@ -1592,6 +1718,36 @@ class MainWindow(QMainWindow):
                         break
             return
 
+    def _on_assembly_choice(self) -> None:
+        """Choosing a row on the Assemble stage moves the picture to it.
+
+        The stage borrows the assembly list whole, and that list already had a
+        selection of its own that meant nothing outside the panel. With a
+        picture above it the selection acquired a claim it could not keep:
+        choosing the second row left the frame and the caption on the first.
+
+        Only on that stage. The same panel sits in Classic's Output group,
+        where picking rows to move or remove has never loaded anything, and
+        this is not the slice that changes what Classic does.
+        """
+        if self._assembly_drawing or self._view_mode is not Mode.FLOW:
+            return
+        if self._flow_stage is not Stage.ASSEMBLE:
+            return
+        listing = self.export_panel.assembly_panel.list
+        entry = listing.currentItem()
+        if entry is None or not entry.isSelected():
+            chosen = listing.selectedItems()
+            entry = chosen[0] if chosen else None
+        if entry is None or not (entry.flags() & Qt.ItemFlag.ItemIsEnabled):
+            # A row whose material is gone is a problem to resolve, not
+            # something to show. Naming it would be the stale claim again.
+            return
+        item = entry.data(ASSEMBLY_ITEM_ROLE)
+        if item is None:
+            return
+        self._focus_piece(item.fingerprint, item.sid)
+
     def _build_export_panel(self) -> QWidget:
         panel = self.export_panel = ExportPanel(self)
         panel.preset_changed.connect(self._on_preset_changed)
@@ -1599,6 +1755,8 @@ class MainWindow(QMainWindow):
         panel.assembly_panel.fill_requested.connect(self._fill_assembly)
         panel.assembly_panel.order_changed.connect(self._capture_assembly)
         panel.assembly_panel.export_requested.connect(self._add_to_queue)
+        panel.assembly_panel.list.itemSelectionChanged.connect(
+            self._on_assembly_choice)
         self.frame_view.vertical_position_changed.connect(
             panel.set_vertical_position
         )
@@ -2248,6 +2406,9 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(0)
         self.clips.clear()
         self.clip_by_path.clear()
+        # The focus named one of those. Say so now rather than at the next
+        # stage change, so the caption cannot outlive the list it read.
+        self._show_source_note()
         self.browser_panel.set_review_progress(0, 0)
         self.warning_label.hide()
         self.scan_button.setEnabled(False)
@@ -4219,8 +4380,15 @@ class MainWindow(QMainWindow):
                   else (self.session.assembly if self.session else []))
         names = ({f: m.name for f, m in self.session.clips.items()}
                  if self.session else {})
-        self.export_panel.assembly_panel.show_rows(
-            resolve(stored, self.clips, names))
+        # `show_rows` puts the selection back, which emits the same signal a
+        # person clicking does. Answering it would reload the clip on every
+        # refresh and fight whatever the table had just focused.
+        self._assembly_drawing = True
+        try:
+            self.export_panel.assembly_panel.show_rows(
+                resolve(stored, self.clips, names))
+        finally:
+            self._assembly_drawing = False
 
     def _rebuild_queue(self) -> None:
         # One place for every queue change. Status steps, removals and clears
