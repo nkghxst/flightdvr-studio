@@ -1277,6 +1277,51 @@ def test_real_adapter_uses_a_nonzero_reset_baseline_once_and_keeps_bytes():
     live.close()
 
 
+def test_known_seek_origin_waits_for_acceptance_then_enforces_drift():
+    """A requested coordinate is known, but is not submitted material yet."""
+    sink = ShortSink()
+    output = AudioOutput(sink_factory=lambda: sink)
+    stream = NumberedStream(blocks=0)
+    live = LivePreview(stream_factory=lambda *a, **k: stream, output=output)
+    live.set_target(object())
+    live.play()
+    live.seek(48_000)
+    stream.raises = Buffering()
+
+    live.tick(57_601)
+
+    assert output.submitted_bytes == 0
+    assert bytes(sink.received) == b""
+    assert live.status.playing, live.status.reason
+
+    stream.raises = None
+    live.tick(48_000)
+    assert output.submitted_bytes > 0, "the epoch never accepted PCM"
+    assert live.status.playing, live.status.reason
+
+    live.tick(57_601)
+    assert not live.status.playing, "acceptance never armed drift checking"
+    assert "drifted too far" in live.status.reason
+
+
+def test_known_restart_origin_stays_pending_while_the_stream_buffers():
+    sink = ShortSink()
+    output = AudioOutput(sink_factory=lambda: sink)
+    stream = NumberedStream(blocks=0)
+    live = LivePreview(stream_factory=lambda *a, **k: stream, output=output)
+    live.set_target(object())
+    live.play()
+    stream.raises = Buffering()
+
+    live.restart()
+    live.tick(9_601)
+
+    assert output.submitted_bytes == 0
+    assert bytes(sink.received) == b""
+    assert live.status.playing, live.status.reason
+    live.close()
+
+
 def test_a_block_the_adapter_refused_outright_is_not_thrown_away():
     """Zero acceptance is the bound being reached, not the block being
     unwanted. It has already left the producer."""

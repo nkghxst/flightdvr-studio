@@ -111,6 +111,7 @@ class _OutputEpoch:
     output_anchor: int | None
     processed_anchor: int | None = None
     latest_processed: int | None = None
+    accepted: bool = False
 
 
 class LivePreview:
@@ -401,11 +402,14 @@ class LivePreview:
             sent += taken
             if taken > 0:
                 epoch = self._current_epoch()
-                if epoch is not None and epoch.output_anchor is None:
-                    # `present` accepted this current-generation material. Its
-                    # immutable start is the first real output coordinate in a
-                    # play/resume epoch where no explicit seek supplied one.
-                    epoch.output_anchor = block.output_start
+                if epoch is not None:
+                    epoch.accepted = True
+                    if epoch.output_anchor is None:
+                        # `present` accepted this current-generation material.
+                        # Its immutable start is the first real output
+                        # coordinate in a play/resume epoch where no explicit
+                        # seek supplied one.
+                        epoch.output_anchor = block.output_start
             self._held = _unaccepted(block, taken)
             self._output.pump()
             if self._held is not None:
@@ -497,8 +501,13 @@ class LivePreview:
         processed = self._record_epoch_progress(report)
         if processed is None:
             return
+        if not epoch.accepted:
+            # A requested seek/restart coordinate may already be known, but
+            # Buffering/EOF/zero acceptance is not submitted material and must
+            # not turn that coordinate into a completed timing observation.
+            return
         if epoch.output_anchor is None:
-            # Buffering/EOF before any accepted block is not an output origin.
+            self._stop_with("the audio device lost its output origin")
             return
         estimated_output = (
             epoch.output_anchor + processed - epoch.processed_anchor)
