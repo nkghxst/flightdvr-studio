@@ -221,6 +221,9 @@ class MainWindow(QMainWindow):
         self._flow_homes: dict = {}
         self._flow_slots: dict = {}
         self._left_column: QWidget | None = None
+        self.flow_viewport = None
+        self.flow_source_note = None
+        self._viewport_home = None
         self.sidebar_working = None
         self.sidebar_submitted = None
         self._sidebar_target: OutputTarget | None = None
@@ -877,6 +880,7 @@ class MainWindow(QMainWindow):
         self._show_music_state(target)
         self._sync_live_preview()
         self._refresh_sidebar()
+        self._show_source_note()
 
     def _show_music_state(self, target: OutputTarget) -> None:
         """One line about acquisition, and one about what the export will do."""
@@ -1241,6 +1245,10 @@ class MainWindow(QMainWindow):
         """
         return {
             Stage.BROWSE: self._left_column,
+            # The panel `ExportPanel` builds, borrowed rather than extracted.
+            # Nothing of its internals changes, so PR #78's drag work and this
+            # never touch the same lines.
+            Stage.ASSEMBLE: self.export_panel.assembly_panel,
             Stage.TRIM: self.preview_view.trim_band,
             Stage.MUSIC: self.preview_view.music_band,
             Stage.OUTPUT: self.export_panel,
@@ -1258,6 +1266,18 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(host)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(INNER)
+
+        # The picture is persistent, as the approved revision places it: every
+        # page that decides something you can only judge by looking has it, and
+        # there is one of it. It is the same `PreviewView` Classic uses.
+        self.flow_viewport = QWidget()
+        viewport = QVBoxLayout(self.flow_viewport)
+        viewport.setContentsMargins(0, 0, 0, 0)
+        viewport.setSpacing(TIGHT)
+        self.flow_source_note = dim(QLabel(""))
+        self.flow_source_note.setWordWrap(True)
+        viewport.addWidget(self.flow_source_note)
+        layout.addWidget(self.flow_viewport)
 
         self.flow_stage_bar = QWidget()
         bar = QHBoxLayout(self.flow_stage_bar)
@@ -1408,12 +1428,14 @@ class MainWindow(QMainWindow):
         if chosen is Mode.FLOW:
             self._refresh_sidebar()
             self._lend_to_flow()
+            self._lend_viewport()
             self.splitter.hide()
             self._flow_host.show()
             self._show_stage(self._flow_stage or
                              flow_first_stage(self._offered_stages))
         else:
             self._flow_host.hide()
+            self._return_viewport()
             self._return_from_flow()
             self.splitter.show()
         self.settings_store.setValue("view_mode", chosen.value)
@@ -1429,6 +1451,7 @@ class MainWindow(QMainWindow):
         self._flow_stage = chosen
         self.flow_stages.setCurrentWidget(self._flow_slots[chosen])
         self.settings_store.setValue("flow_stage", chosen.value)
+        self._show_source_note()
         back, forward = flow_neighbours(chosen, self._offered_stages)
         self.flow_back.setEnabled(back is not None)
         self.flow_next.setEnabled(forward is not None)
@@ -1465,6 +1488,77 @@ class MainWindow(QMainWindow):
             # queue is about to refuse.
             return []
         return working_outputs(pieces, joined=joined)
+
+    # -- the persistent picture ------------------------------------------------
+
+    def _lend_viewport(self) -> None:
+        """Hoist the picture above the stages, remembering where it lives.
+
+        It cannot be lent to a stage. A widget is in one place at a time, and
+        the approved design has it on Browse, Trim, Assemble and Output — so it
+        goes above them, which is also what makes it one picture rather than
+        four.
+        """
+        box = self.preview_view.preview_box
+        home = self._left_column.layout() if self._left_column else None
+        if home is None or self.flow_viewport is None:
+            return
+        index = home.indexOf(box)
+        if index < 0:
+            return
+        self._viewport_home = (home, index)
+        self.flow_viewport.layout().insertWidget(0, box, 1)
+        box.show()
+
+    def _return_viewport(self) -> None:
+        """Put it back in the column, at the index it came from."""
+        if self._viewport_home is None:
+            return
+        home, index = self._viewport_home
+        self._viewport_home = None
+        box = self.preview_view.preview_box
+        if self.flow_viewport is not None and self.flow_viewport.layout():
+            self.flow_viewport.layout().removeWidget(box)
+        home.insertWidget(index, box)
+        box.show()
+
+    def _source_note(self, stage) -> str:
+        """One short line saying what the picture is, on the two pages that
+        would otherwise be read as showing something else.
+
+        Assemble and Output decide things about a joined run and a finished
+        file, and neither exists to be shown. The picture is the source of the
+        row or target in focus, and saying so is the difference between an
+        honest preview and a claim nobody made on purpose.
+
+        Browse and Trim already show source and are not captioned: a line
+        under every page is a line nobody reads.
+        """
+        if stage not in (Stage.ASSEMBLE, Stage.OUTPUT):
+            return ""
+        clip = self._trim_clip
+        if clip is None:
+            # No focus, so no claim. Naming some other target here would show
+            # one output while another was selected.
+            return ("Source preview — choose a row to see it."
+                    if stage is Stage.ASSEMBLE
+                    else "Source preview — choose an output to see it.")
+        name = clip.path.name
+        ranges = clip.real_selects
+        if ranges:
+            chosen = ranges[min(clip.current, len(ranges) - 1)]
+            if chosen.name:
+                name = f"{name} · {chosen.name}"
+        if stage is Stage.ASSEMBLE:
+            return f"Source: {name} — not the joined result."
+        return f"Source: {name} — not the finished file."
+
+    def _show_source_note(self) -> None:
+        if self.flow_source_note is None:
+            return
+        text = self._source_note(self._flow_stage)
+        self.flow_source_note.setText(text)
+        self.flow_source_note.setVisible(bool(text))
 
     def _build_sidebar(self) -> QWidget:
         """Working outputs above, submitted jobs below. Flow only."""

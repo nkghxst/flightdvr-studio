@@ -265,12 +265,12 @@ def test_classic_gets_its_panels_back_where_they_were(window, app):
 
 # -- navigation ----------------------------------------------------------------
 
-def test_only_stages_with_something_behind_them_are_offered(window):
-    """Assemble lives inside ExportPanel and lifting it out would change that
-    panel's internals, so it is left out rather than shown blank."""
-    assert Stage.ASSEMBLE not in window._offered_stages
-    assert Stage.BROWSE in window._offered_stages
-    assert Stage.QUEUE in window._offered_stages
+def test_every_stage_now_has_something_behind_it(window):
+    """Assemble was left out while its panel could only be reached by changing
+    `ExportPanel`'s internals. It is borrowed whole now, like every other
+    panel, so the approved six are all offered and the bar has no gap."""
+    for stage in Stage:
+        assert stage in window._offered_stages, stage
     assert set(window.flow_stage_buttons) == set(window._offered_stages)
 
 
@@ -883,3 +883,225 @@ def test_reordering_the_assembly_while_flow_is_open_refreshes(window, app,
     assert window._sidebar_rebuilds > before, (
         "a reorder did not reach the sidebar at all")
     window.set_view_mode(Mode.CLASSIC)
+
+
+# -- Assemble, and a picture on the pages that decide by looking (#84) ----------
+
+def test_assemble_shows_the_panel_export_already_owns(window, app):
+    """Borrowed, not rebuilt — asserted by identity, because a copy would look
+    the same and share nothing."""
+    owned = window.export_panel.assembly_panel
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+
+    # The stage has to actually be the one showing, or this passes on a build
+    # where Assemble is not offered at all and `_show_stage` returns early.
+    assert window._flow_stage is Stage.ASSEMBLE
+    assert window.export_panel.assembly_panel is owned
+    assert owned.parentWidget() is window._flow_slots[Stage.ASSEMBLE], (
+        "the stage is showing something other than the panel ExportPanel owns")
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_classic_gets_the_assembly_back_at_its_own_index(window, app):
+    owned = window.export_panel.assembly_panel
+    home = owned.parentWidget().layout()
+    index = home.indexOf(owned)
+    assert index >= 0
+
+    in_flow(window, app)
+    # It has to have left, or coming back proves nothing.
+    assert home.indexOf(owned) < 0, "the assembly never moved"
+    window.set_view_mode(Mode.CLASSIC)
+    app.processEvents()
+
+    assert owned.parentWidget().layout() is home
+    assert home.indexOf(owned) == index, "the assembly came back elsewhere"
+
+
+def test_the_picture_is_one_object_above_every_stage(window, app):
+    """One picture, one player, one decoder — it is hoisted above the stages
+    rather than lent to one, because a widget is in one place at a time."""
+    box = window.preview_view.preview_box
+    in_flow(window, app)
+
+    seen = []
+    for stage in window._offered_stages:
+        window._show_stage(stage)
+        app.processEvents()
+        seen.append(window.preview_view.preview_box)
+        assert box.parentWidget() is window.flow_viewport
+
+    assert all(one is box for one in seen)
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_the_picture_goes_home_to_the_left_column(window, app):
+    box = window.preview_view.preview_box
+    home = window._left_column.layout()
+    index = home.indexOf(box)
+    assert index >= 0
+
+    in_flow(window, app)
+    assert home.indexOf(box) < 0, "it never left the column"
+    window.set_view_mode(Mode.CLASSIC)
+    app.processEvents()
+
+    assert home.indexOf(box) == index, "the picture came back elsewhere"
+
+
+def test_the_music_band_keeps_its_panel_and_controls(window, app):
+    """Hoisting the picture must not cost the Music stage anything."""
+    panel = window.music_panel
+    in_flow(window, app)
+    window._show_stage(Stage.MUSIC)
+    app.processEvents()
+
+    assert window.music_panel is panel
+    assert window.preview_view.listen_check is not None
+    assert window.preview_view.restart_button is not None
+    window.set_view_mode(Mode.CLASSIC)
+
+
+# -- what the picture is allowed to say ----------------------------------------
+
+def test_assemble_and_output_say_the_picture_is_the_source(window, app):
+    """A source frame on a page headed Assemble reads as the assembly unless
+    the page says otherwise, and no label repairs a picture already believed."""
+    window.clips[0].selects = [Select(1.0, 5.0, "run in", sid="r-1")]
+    tick(window, 0)
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    app.processEvents()
+    in_flow(window, app)
+
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+    said = window.flow_source_note.text()
+    assert "Source" in said and "hdz_001.ts" in said
+    assert "not the joined result" in said
+
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+    said = window.flow_source_note.text()
+    assert "not the finished file" in said
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_browse_and_trim_are_not_captioned(window, app):
+    """They already show source. A line under every page is one nobody reads."""
+    in_flow(window, app)
+    for stage in (Stage.BROWSE, Stage.TRIM):
+        window._show_stage(stage)
+        app.processEvents()
+        assert window.flow_source_note.text() == ""
+        assert window.flow_source_note.isHidden()
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_with_nothing_in_focus_no_target_is_named(window, app):
+    """An unresolved focus must not show some other output as though it were
+    the one selected."""
+    in_flow(window, app)
+    window._trim_clip = None
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+
+    said = window.flow_source_note.text()
+    assert "choose an output" in said
+    assert "hdz_" not in said, said
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_the_caption_follows_the_focused_range(window, app):
+    window.clips[0].selects = [
+        Select(1.0, 5.0, "one", sid="r-1"),
+        Select(6.0, 9.0, "two", sid="r-2"),
+    ]
+    tick(window, 0)
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    app.processEvents()
+    in_flow(window, app)
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+    assert "one" in window.flow_source_note.text()
+
+    window._pick_select(1)
+    app.processEvents()
+
+    assert "two" in window.flow_source_note.text(), (
+        window.flow_source_note.text())
+    window.set_view_mode(Mode.CLASSIC)
+
+
+# -- real actions, after entering Flow -----------------------------------------
+
+def test_filling_the_assembly_after_entering_flow_reaches_the_stage(
+        window, app, monkeypatch):
+    """One real action with the join state set first — no second store, and no
+    patched state standing in for the mutation."""
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    window.clips[1].selects = [Select(2.0, 6.0, "two", sid="r-2")]
+    tick(window, 0)
+    tick(window, 1)
+    app.processEvents()
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+    monkeypatch.setattr(window.export_panel, "join_enabled", lambda: True)
+
+    window._fill_assembly()
+    app.processEvents()
+
+    assert not window.export_panel.assembly_panel.is_empty()
+    listed = rows(window.sidebar_working)
+    assert len(listed) == 1 and "joined" in listed[0], listed
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_moving_between_stages_makes_no_second_player_or_worker(window, app):
+    before = counts(window)
+    in_flow(window, app)
+    for stage in window._offered_stages:
+        window._show_stage(stage)
+        app.processEvents()
+    window.set_view_mode(Mode.CLASSIC)
+    app.processEvents()
+
+    assert counts(window) == before
+
+
+def test_entering_a_stage_starts_no_playback_and_no_sound(window, app):
+    in_flow(window, app)
+    for stage in window._offered_stages:
+        window._show_stage(stage)
+        app.processEvents()
+        assert window.live_preview.status.muted
+        assert not window.live_preview.status.playing
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_the_queue_is_reachable_from_the_new_stage_too(window, app):
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+    assert window.queue_panel.parentWidget() is not None
+    assert window.queue_panel.start_button is not None
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_a_round_trip_with_the_picture_hoisted_changes_nothing(window, app):
+    decide_something(window)
+    app.processEvents()
+    before = snapshot(window)
+
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+    window.set_view_mode(Mode.CLASSIC)
+    app.processEvents()
+
+    assert snapshot(window) == before
