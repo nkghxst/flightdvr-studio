@@ -523,6 +523,38 @@ def test_pause_invalidates_the_epoch_without_changing_stream_generation():
     assert live.status.playing, live.status.reason
 
 
+def test_restart_uses_a_fresh_nonzero_backend_baseline():
+    live, _stream, output = transport()
+    live.play()
+    live.tick(0)
+
+    output.processed = 12_000 * FRAME_BYTES
+    live.restart()
+    live.tick(0)
+
+    assert live.status.playing, live.status.reason
+
+
+def test_target_replacement_cannot_reuse_the_previous_device_epoch():
+    first = FakeStream()
+    second = FakeStream(generation=7)
+    streams = iter((first, second))
+    output = FakeOutput()
+    live = LivePreview(stream_factory=lambda _t, _l: next(streams),
+                       output=output)
+    live.set_target("first")
+    live.play()
+    live.tick(0)
+
+    output.processed = 12_000 * FRAME_BYTES
+    live.set_target("second")
+    live.play()
+    live.tick(0)
+
+    assert output.generation == second.generation
+    assert live.status.playing, live.status.reason
+
+
 def test_a_counter_reversal_inside_one_epoch_is_a_named_failure():
     live, _stream, output = transport(blocks=1)
     output.processed = 5_000 * FRAME_BYTES
