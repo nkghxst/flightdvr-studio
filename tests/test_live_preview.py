@@ -28,7 +28,10 @@ speaker.
 
 from __future__ import annotations
 
+import array
+import enum
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -947,3 +950,345 @@ def test_start_from_the_beginning_moves_the_picture_as_well(window):
 
     assert restarted, "the sound was not restarted"
     assert moved, "the picture stayed where it was"
+
+
+# -- the real adapter, composed: what the device actually received -------------
+#
+# Everything above drives a `FakeOutput` that swallows whole blocks, so none of
+# it settles what happens when the adapter takes a prefix or nothing at all.
+# These compose the real `AudioOutput` with a sink that writes short, and then
+# read the bytes back off the sink rather than believing either layer's own
+# account of what it sent.
+
+
+class QtLikeError(enum.Enum):
+    """The shape Qt's `error()` answers with, healthy value included."""
+
+    NoError = 0
+    UnderrunError = 3
+
+
+class ShortSink:
+    """A device that accepts less than it is offered, on purpose.
+
+    `accepts` is consumed one write at a time, so a test spells out the exact
+    sequence of short writes it wants -- including zero, and including a
+    deliberately mid-frame count, which a byte stream is allowed to do.
+    """
+
+    def __init__(self, accepts=(), buffer_size: int = 1 << 20):
+        self.received = bytearray()
+        self.accepts = list(accepts)
+        self.buffer_size = buffer_size
+        self.reported_state = "StoppedState"
+        self.reported_error = QtLikeError.NoError
+        self.processed_usecs = 0
+        self.device = self
+
+    def write(self, payload: bytes) -> int:
+        allowed = self.accepts.pop(0) if self.accepts else len(payload)
+        taken = max(0, min(int(allowed), len(payload)))
+        self.received += payload[:taken]
+        return taken
+
+    def state(self):
+        return SimpleNamespace(name=self.reported_state)
+
+    def error(self):
+        return self.reported_error
+
+    def bytesFree(self) -> int:                   # noqa: N802 (Qt naming)
+        if self.reported_state not in ("ActiveState", "IdleState"):
+            return 0
+        return self.buffer_size
+
+    def bufferSize(self) -> int:                  # noqa: N802 (Qt naming)
+        return self.buffer_size
+
+    def processedUSecs(self) -> int:              # noqa: N802 (Qt naming)
+        return self.processed_usecs
+
+    def start(self):
+        self.reported_state = "ActiveState"
+        return self.device
+
+    def suspend(self) -> None:
+        self.reported_state = "SuspendedState"
+
+    def resume(self) -> None:
+        self.reported_state = "ActiveState"
+
+    def reset(self) -> None:
+        self.reported_state = "StoppedState"
+
+    def stop(self) -> None:
+        self.reported_state = "StoppedState"
+
+    def setVolume(self, volume: float) -> None:   # noqa: N802 (Qt naming)
+        pass
+
+
+def numbered_block(index: int, generation: int = 0, frames: int = 4,
+                   start: int = 0) -> PcmBlock:
+    """One block whose samples say which block it is.
+
+    Distinct on purpose: the oracle concatenates what the sink received and
+    compares it to the expected PCM byte for byte, which a run of identical
+    blocks could pass while dropping or reordering half of them.
+    """
+    samples = frames * OUTPUT_CHANNELS
+    value = (index + 1) / 100.0
+    return PcmBlock(generation=generation, monitor_revision=0,
+                    output_start=start, frames=frames,
+                    planned=[value] * samples, monitored=[value] * samples)
+
+
+class NumberedStream(FakeStream):
+    """Hands out distinct blocks and remembers every one it gave away.
+
+    A pulled block is gone from the producer -- that is the whole hazard here,
+    so what was handed over is recorded at the moment of handing over, and the
+    expected sound is built from that record rather than from anything the
+    transport says afterwards.
+    """
+
+    def __init__(self, *, blocks: int = 4, frames: int = 4, **kwargs):
+        super().__init__(blocks=blocks, **kwargs)
+        self._frames = frames
+        self._index = 0
+        self.handed_out = []
+
+    def pull(self):
+        if self.raises is not None:
+            raise self.raises
+        if self.remaining <= 0:
+            return None
+        self.remaining -= 1
+        block = numbered_block(self._index, self.generation,
+                               frames=self._frames,
+                               start=self._index * self._frames)
+        self._index += 1
+        self.handed_out.append(block)
+        return block
+
+
+def expected_bytes(blocks) -> bytes:
+    """The monitored rendering of those blocks, in order, as the device wants
+    it. Built independently of the transport, from the blocks themselves."""
+    return b"".join(array.array("f", block.monitored).tobytes()
+                    for block in blocks)
+
+
+def composed(*, accepts=(), max_queued_bytes: int = 1 << 20, blocks: int = 4,
+             frames: int = 4):
+    """A transport over the real adapter over a sink that writes short."""
+    sink = ShortSink(accepts=accepts)
+    output = AudioOutput(sink_factory=lambda: sink,
+                         max_queued_bytes=max_queued_bytes)
+    stream = NumberedStream(blocks=blocks, frames=frames)
+    live = LivePreview(stream_factory=lambda *a, **k: stream, output=output)
+    live.set_target(object())
+    live.play()
+    return live, stream, output, sink
+
+
+def test_a_block_the_adapter_only_partly_took_is_not_thrown_away():
+    """`pull` removes the block from the producer, and `present` may take a
+    frame-aligned prefix. Pulling the next block after a partial acceptance
+    drops the remainder of this one, and nothing upstream still has it."""
+    # The device must refuse first, or the adapter drains to empty between
+    # blocks and `present` never has to take a prefix at all. With one block
+    # and one frame of room, the second block is accepted in part.
+    live, stream, output, sink = composed(
+        accepts=(0,), max_queued_bytes=5 * FRAME_BYTES, blocks=3, frames=4)
+
+    for _ in range(12):
+        live.tick(0)
+
+    assert stream.handed_out, "the stream never gave anything away"
+    assert bytes(sink.received) == expected_bytes(stream.handed_out), (
+        f"{len(sink.received)} bytes arrived, "
+        f"{len(expected_bytes(stream.handed_out))} were handed over")
+    live.close()
+
+
+def test_a_block_the_adapter_refused_outright_is_not_thrown_away():
+    """Zero acceptance is the bound being reached, not the block being
+    unwanted. It has already left the producer."""
+    # Room for exactly one block, and a device that takes nothing on the
+    # first write, so the second block meets a full queue.
+    live, stream, output, sink = composed(
+        accepts=(0,), max_queued_bytes=4 * FRAME_BYTES, blocks=4, frames=4)
+
+    for _ in range(16):
+        live.tick(0)
+
+    assert bytes(sink.received) == expected_bytes(stream.handed_out)
+    live.close()
+
+
+def test_a_short_mid_frame_device_write_loses_nothing():
+    """A QIODevice is a byte stream and may stop anywhere. The adapter already
+    retains the exact remainder; composing it must not undo that."""
+    live, stream, output, sink = composed(
+        accepts=(7, 0, 13, 1, 0, 99), blocks=3)
+
+    for _ in range(20):
+        live.tick(0)
+
+    assert bytes(sink.received) == expected_bytes(stream.handed_out)
+    live.close()
+
+
+def test_a_stalled_tail_is_serviced_without_a_new_block():
+    """The producer has ended, but the adapter is still holding sound.
+
+    Pumping only after a fresh acceptance leaves that tail with no service
+    path at all: the last of the music never reaches the device.
+    """
+    # Two refusals: one for the offer inside the loop, one for the service
+    # pass that closes the tick. With only one, the tick ends having already
+    # cleared its own tail and there is nothing left for a later tick to do.
+    live, stream, output, sink = composed(accepts=(0, 0), blocks=1)
+
+    live.tick(0)                      # the device refuses everything offered
+    assert stream.remaining == 0, "the fixture did not exhaust the producer"
+    held = len(expected_bytes(stream.handed_out)) - len(sink.received)
+    assert held > 0, "nothing was left held, so there is no tail to service"
+
+    for _ in range(6):                # ordinary later ticks, no new block
+        live.tick(0)
+
+    assert bytes(sink.received) == expected_bytes(stream.handed_out), (
+        "the tail never reached the device")
+    live.close()
+
+
+def test_a_buffering_producer_still_lets_the_device_drink():
+    """`Buffering` says nothing new is ready. It does not say the bytes
+    already queued should sit there."""
+    live, stream, output, sink = composed(accepts=(0,), blocks=1)
+
+    live.tick(0)
+    stream.raises = Buffering()
+
+    for _ in range(6):
+        live.tick(0)
+
+    assert bytes(sink.received) == expected_bytes(stream.handed_out)
+    live.close()
+
+
+def test_repeated_full_backpressure_neither_drops_nor_duplicates():
+    """The device takes nothing for a while and then opens up. What arrives
+    must be exactly what was handed over, once each and in order."""
+    live, stream, output, sink = composed(
+        accepts=(0, 0, 0, 0, 0), max_queued_bytes=6 * FRAME_BYTES, blocks=4)
+
+    for _ in range(24):
+        live.tick(0)
+
+    arrived = bytes(sink.received)
+    expected = expected_bytes(stream.handed_out)
+    assert arrived == expected
+    assert len(arrived) == len(expected), "a byte was duplicated or dropped"
+    live.close()
+
+
+def test_a_new_generation_does_not_leak_the_retained_old_sound():
+    """A seek makes everything held stale. Retaining a suffix must not smuggle
+    the old generation's sound past the fence."""
+    live, stream, output, sink = composed(
+        accepts=(0,), max_queued_bytes=4 * FRAME_BYTES, blocks=4)
+
+    live.tick(0)
+    before = len(sink.received)
+    live.seek(9_000)
+    stale = list(stream.handed_out)
+    stream.handed_out.clear()
+
+    for _ in range(12):
+        live.tick(0)
+
+    fresh = bytes(sink.received)[before:]
+    # Both halves, and the first one matters most: holding a stale tail makes
+    # `present` refuse it for ever, and a held block is re-offered before
+    # anything newer, so the transport pulls nothing at all. Comparing two
+    # empty byte strings would call that a pass.
+    assert stream.handed_out, "the seek produced no new sound to check"
+    assert fresh, "nothing reached the device after the seek"
+    assert fresh == expected_bytes(stream.handed_out), (
+        "the new generation did not arrive intact")
+    for old in stale:
+        assert expected_bytes([old]) not in fresh, (
+            "sound from before the seek was played after it")
+    live.close()
+
+
+def test_pausing_does_not_keep_a_tail_the_fence_just_dropped():
+    """`AudioOutput.pause` fences the queue and the sink's own buffer. Keeping
+    a tail here would put back sound the pause decided nobody should hear."""
+    live, stream, output, sink = composed(
+        accepts=(0, 0), max_queued_bytes=5 * FRAME_BYTES, blocks=3)
+    live.tick(0)
+    assert live._held is not None, "the fixture left no tail to drop"
+
+    live.pause()
+
+    assert live._held is None
+    live.close()
+
+
+def test_restarting_does_not_keep_a_tail_from_before_the_restart():
+    live, stream, output, sink = composed(
+        accepts=(0, 0), max_queued_bytes=5 * FRAME_BYTES, blocks=3)
+    live.tick(0)
+    assert live._held is not None, "the fixture left no tail to drop"
+
+    live.restart()
+
+    assert live._held is None
+    live.close()
+
+
+def test_a_held_tail_never_becomes_a_second_queue():
+    """At most one block is retained, however long the device refuses."""
+    live, stream, output, sink = composed(
+        accepts=(0,) * 40, max_queued_bytes=5 * FRAME_BYTES, blocks=8, frames=4)
+
+    for _ in range(20):
+        live.tick(0)
+        if live._held is not None:
+            assert live._held.frames <= 4, (
+                "the retained tail grew beyond one block")
+
+    assert stream.remaining > 0, (
+        "the fixture never reached the bound, so nothing was held back")
+    live.close()
+
+
+def test_leaving_the_output_drops_the_tail_of_the_one_being_left():
+    """`set_target` silences first so a single-target slice cannot emit sound
+    belonging to the output just left. A retained tail is that sound."""
+    live, stream, output, sink = composed(
+        accepts=(0, 0), max_queued_bytes=5 * FRAME_BYTES, blocks=3)
+    live.tick(0)
+    assert live._held is not None, "the fixture left no tail to drop"
+
+    live.set_target(None)
+
+    assert live._held is None
+    live.close()
+
+
+def test_closing_after_a_partial_acceptance_leaves_nothing_running():
+    live, stream, output, sink = composed(
+        accepts=(0, 0), max_queued_bytes=5 * FRAME_BYTES, blocks=3)
+    live.tick(0)
+    assert live._held is not None, "the fixture left no tail to drop"
+
+    live.close()
+
+    assert live._held is None
+    assert stream.stopped
+    assert not live.status.playing
