@@ -96,6 +96,24 @@ class Status:
         return self.offered and not self.reason
 
 
+@dataclass
+class _OutputEpoch:
+    """One sink lifetime expressed in the monitored output's coordinates.
+
+    Backend progress begins wherever the current sink says it begins. The
+    transport supplies the missing output origin, while the fence identity
+    prevents a same-generation pause/reset from borrowing an older origin.
+    These are estimates of backend processing only, never speaker time.
+    """
+
+    generation: int
+    fence: int
+    output_anchor: int | None
+    processed_anchor: int | None = None
+    latest_processed: int | None = None
+    accepted: bool = False
+
+
 class LivePreview:
     """One output's monitoring, and the reasons it is not running."""
 
@@ -123,6 +141,8 @@ class LivePreview:
         # alternative to holding it is losing it; a list here would be an
         # unbounded second queue in front of the one whose bound is the point.
         self._held: PcmBlock | None = None
+        self._fence = 0
+        self._epoch: _OutputEpoch | None = None
 
     # -- what is on offer ------------------------------------------------------
 
@@ -224,6 +244,12 @@ class LivePreview:
             except DeviceUnavailable as exc:
                 self._stop_with(f"there is nothing to listen on: {exc}")
                 return
+            if self._current_epoch() is None:
+                self._begin_epoch()
+            # Capture after the sink exists and before the first PCM can be
+            # accepted. A non-answer remains pending for `tick`, which applies
+            # the existing explicit device-reporting refusal before draining.
+            self._capture_epoch_baseline()
         self._playing = True
         self._starved = 0
         self._stream.resume()
@@ -241,6 +267,7 @@ class LivePreview:
             self._stream.pause()
         if self._output is not None:
             self._output.pause()
+        self._invalidate_epoch()
 
     def restart(self) -> None:
         """Start from the beginning of this output.
@@ -251,20 +278,27 @@ class LivePreview:
         """
         if self._stream is None:
             return
+        self._invalidate_epoch()
         self._generation = self._stream.restart()
         self._held = None
         if self._output is not None:
             self._output.reset(self._generation)
+            self._begin_epoch(output_anchor=0)
+            self._capture_epoch_baseline()
         self._starved = 0
 
     def seek(self, output_sample: int) -> None:
         """Follow the picture somewhere else in the same output."""
         if self._stream is None:
             return
-        self._generation = self._stream.reprime(int(output_sample))
+        requested = int(output_sample)
+        self._invalidate_epoch()
+        self._generation = self._stream.reprime(requested)
         self._held = None
         if self._output is not None:
             self._output.reset(self._generation)
+            self._begin_epoch(output_anchor=requested)
+            self._capture_epoch_baseline()
         self._starved = 0
 
     def set_muted(self, muted: bool) -> None:
@@ -310,18 +344,27 @@ class LivePreview:
             return 0
         if self._output is None:
             return 0
+        if self._current_epoch() is None:
+            self._begin_epoch()
+        before = self._output.observe()
+        if not self._device_report_is_usable(before):
+            return 0
+        if not self._capture_epoch_baseline(before):
+            self._stop_with("the audio device stopped reporting its progress")
+            return 0
+        if self._record_epoch_progress(before) is None:
+            return 0
         sent = self._drain()
+        if not self._playing:
+            # A producer failure inside `_drain` has already named the reason
+            # and fenced this epoch. Do not replace it with a timing symptom.
+            return sent
         report = self._output.observe()
-        if report.error or self._output.failure:
-            self._stop_with(
-                f"the audio device stopped: "
-                f"{report.error or self._output.failure}")
+        if not self._device_report_is_usable(report):
             return sent
-        if not report.usable:
-            self._stop_with("the audio device stopped reporting its state")
-            return sent
-        self._judge_drift(output_sample)
-        self._judge_starvation()
+        self._judge_drift(output_sample, report)
+        if self._playing:
+            self._judge_starvation(report)
         return sent
 
     def _drain(self) -> int:
@@ -357,6 +400,16 @@ class LivePreview:
                     break
             taken = self._output.present(block)
             sent += taken
+            if taken > 0:
+                epoch = self._current_epoch()
+                if epoch is not None:
+                    epoch.accepted = True
+                    if epoch.output_anchor is None:
+                        # `present` accepted this current-generation material.
+                        # Its immutable start is the first real output
+                        # coordinate in a play/resume epoch where no explicit
+                        # seek supplied one.
+                        epoch.output_anchor = block.output_start
             self._held = _unaccepted(block, taken)
             self._output.pump()
             if self._held is not None:
@@ -370,21 +423,101 @@ class LivePreview:
         self._output.pump()
         return sent
 
-    def _judge_drift(self, output_sample: int) -> None:
-        """Bounded, and an estimate. Never a claim about what was heard."""
-        processed = self._output.processed_bytes()
+    def _current_epoch(self) -> _OutputEpoch | None:
+        epoch = self._epoch
+        if (epoch is None or epoch.generation != self._generation
+                or epoch.fence != self._fence):
+            return None
+        return epoch
+
+    def _invalidate_epoch(self) -> None:
+        """Forget every coordinate belonging to the sink before this fence."""
+        self._fence += 1
+        self._epoch = None
+
+    def _begin_epoch(self, *, output_anchor: int | None = None) -> None:
+        """Name a fresh sink epoch; its backend baseline is still pending."""
+        self._fence += 1
+        self._epoch = _OutputEpoch(
+            generation=self._generation,
+            fence=self._fence,
+            output_anchor=output_anchor,
+        )
+
+    def _capture_epoch_baseline(self, report=None) -> bool:
+        """Capture backend progress once, before this epoch accepts PCM."""
+        epoch = self._current_epoch()
+        if epoch is None or self._output is None:
+            return False
+        if epoch.processed_anchor is not None:
+            return True
+        report = self._output.observe() if report is None else report
+        if report.error or self._output.failure or not report.usable:
+            return False
+        processed = self._output.processed_bytes(report)
         if processed is None:
+            return False
+        frames = processed // FRAME_BYTES
+        epoch.processed_anchor = frames
+        epoch.latest_processed = frames
+        return True
+
+    def _device_report_is_usable(self, report) -> bool:
+        if report.error or self._output.failure:
+            self._stop_with(
+                f"the audio device stopped: "
+                f"{report.error or self._output.failure}")
+            return False
+        if not report.usable:
+            self._stop_with("the audio device stopped reporting its state")
+            return False
+        return True
+
+    def _record_epoch_progress(self, report) -> int | None:
+        """Record one counter reading, refusing an unexplained reversal."""
+        epoch = self._current_epoch()
+        if epoch is None or epoch.processed_anchor is None:
+            self._stop_with("the audio device lost its timing origin")
+            return None
+        processed_bytes = self._output.processed_bytes(report)
+        if processed_bytes is None:
             self._stop_with("the audio device stopped reporting its progress")
+            return None
+        processed = processed_bytes // FRAME_BYTES
+        if (epoch.latest_processed is not None
+                and processed < epoch.latest_processed):
+            self._stop_with(
+                "the audio device reset its progress unexpectedly")
+            return None
+        epoch.latest_processed = processed
+        return processed
+
+    def _judge_drift(self, output_sample: int, report) -> None:
+        """Bounded backend estimate. Never a claim about what was heard."""
+        epoch = self._current_epoch()
+        if epoch is None or epoch.processed_anchor is None:
+            self._stop_with("the audio device lost its timing origin")
             return
-        from .audio_device import FRAME_BYTES
-        heard_ish = processed // FRAME_BYTES
-        if abs(int(output_sample) - heard_ish) > DRIFT_LIMIT_SAMPLES:
+        processed = self._record_epoch_progress(report)
+        if processed is None:
+            return
+        if not epoch.accepted:
+            # A requested seek/restart coordinate may already be known, but
+            # Buffering/EOF/zero acceptance is not submitted material and must
+            # not turn that coordinate into a completed timing observation.
+            return
+        if epoch.output_anchor is None:
+            self._stop_with("the audio device lost its output origin")
+            return
+        estimated_output = (
+            epoch.output_anchor + processed - epoch.processed_anchor)
+        if abs(int(output_sample) - estimated_output) > DRIFT_LIMIT_SAMPLES:
             self._stop_with(
                 "monitoring stopped: the sound had drifted too far from the "
                 "picture to be worth hearing")
 
-    def _judge_starvation(self) -> None:
-        cause = self._output.starvation()
+    def _judge_starvation(self, report) -> None:
+        cause = self._output.starvation(report)
         if cause == "backend":
             self._stop_with("the audio device reported a problem of its own")
         elif cause == "starved":
@@ -409,6 +542,7 @@ class LivePreview:
         self._starved = 0
         self._reason = ""
         self._held = None
+        self._invalidate_epoch()
         if self._stream is not None:
             self._stream.pause()
             self._reap(self._stream)
@@ -442,6 +576,7 @@ class LivePreview:
         stream, self._stream = self._stream, None
         self._playing = False
         self._held = None
+        self._invalidate_epoch()
         if stream is not None:
             self._reap(stream)
         if self._output is not None:
