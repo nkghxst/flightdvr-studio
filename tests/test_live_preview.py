@@ -46,9 +46,11 @@ from flightdvr.live_preview import (
 )
 
 
-def a_block(generation: int = 0, frames: int = 4) -> PcmBlock:
+def a_block(generation: int = 0, frames: int = 4,
+            output_start: int = 0) -> PcmBlock:
     samples = frames * OUTPUT_CHANNELS
-    return PcmBlock(generation=generation, monitor_revision=0, output_start=0,
+    return PcmBlock(generation=generation, monitor_revision=0,
+                    output_start=output_start,
                     frames=frames, planned=[0.8] * samples,
                     monitored=[0.2] * samples)
 
@@ -57,9 +59,10 @@ class FakeStream:
     """A stream that can refuse, end, and be superseded."""
 
     def __init__(self, *, blocks: int = 4, generation: int = 0,
-                 refuse_start: bool = False):
+                 output_start: int = 0, refuse_start: bool = False):
         self.generation = generation
         self.remaining = blocks
+        self.output_start = output_start
         self.calls = []
         self.monitor = None
         self.raises = None
@@ -85,7 +88,9 @@ class FakeStream:
         if self.remaining <= 0:
             return None
         self.remaining -= 1
-        return a_block(self.generation)
+        block = a_block(self.generation, output_start=self.output_start)
+        self.output_start += block.frames
+        return block
 
     def resume(self) -> None:
         # The real stream refuses this before `start`, which is exactly the
@@ -105,12 +110,14 @@ class FakeStream:
         self.calls.append("restart")
         self.generation += 1
         self.remaining = 4
+        self.output_start = 0
         return self.generation
 
     def reprime(self, sample: int) -> int:
         self.calls.append(f"reprime:{sample}")
         self.generation += 1
         self.remaining = 4
+        self.output_start = sample
         return self.generation
 
     def set_monitor(self, *, level=None, muted=None):
@@ -430,6 +437,108 @@ def test_drift_inside_the_bound_keeps_playing():
     output.processed = 0
     live.tick(DRIFT_LIMIT_SAMPLES - 1)
     assert live.status.playing
+
+
+def test_nonzero_seek_uses_the_requested_output_as_its_device_epoch():
+    """A reset sink reports time since its own start, not output time zero."""
+    live, _stream, output = transport()
+    live.play()
+
+    live.seek(48_000)
+    output.processed = 0
+    live.tick(48_000)
+    assert live.status.playing, live.status.reason
+
+    output.processed = 4_800 * FRAME_BYTES
+    live.tick(52_800)
+    assert live.status.playing, live.status.reason
+
+
+def test_reseek_subtracts_one_fresh_nonzero_backend_baseline():
+    """A backend may begin a reset epoch at a nonzero counter reading."""
+    live, _stream, output = transport()
+    live.play()
+    live.seek(48_000)
+    output.processed = 4_800 * FRAME_BYTES
+    live.tick(52_800)
+    assert live.status.playing, live.status.reason
+
+    output.processed = 2_400 * FRAME_BYTES
+    live.seek(144_000)
+    output.processed = 7_200 * FRAME_BYTES
+    live.tick(148_800)
+
+    assert live.status.playing, live.status.reason
+
+
+def test_device_epoch_keeps_the_literal_drift_boundary():
+    """Re-anchoring at every tick would hide the second discrepancy."""
+    live, _stream, output = transport()
+    live.play()
+    output.processed = 0
+
+    live.tick(9_600)
+    assert live.status.playing, "the inclusive 9600-sample bound changed"
+
+    live.tick(9_601)
+    assert not live.status.playing
+    assert "drifted too far" in live.status.reason
+
+
+def test_startup_buffering_waits_for_the_first_accepted_block_origin():
+    """No producer cursor or assumed output zero may stand in for material."""
+    stream = FakeStream(blocks=0, output_start=48_000)
+    output = FakeOutput()
+    output.processed = 2_400 * FRAME_BYTES
+    live = LivePreview(stream_factory=lambda _t, _l: stream, output=output)
+    live.set_target("nonzero-output")
+    live.play()
+
+    live.tick(48_000)
+    assert live.status.playing, "buffering was mistaken for an output origin"
+
+    stream.remaining = 1
+    live.tick(48_000)
+    assert output.presented[0].output_start == 48_000
+    assert live.status.playing, live.status.reason
+
+
+def test_pause_invalidates_the_epoch_without_changing_stream_generation():
+    stream = FakeStream(blocks=0, output_start=72_000)
+    output = FakeOutput()
+    live = LivePreview(stream_factory=lambda _t, _l: stream, output=output)
+    live.set_target("same-generation-resume")
+    live.play()
+    live.pause()
+
+    # Model a newly fenced sink whose counter origin is not zero. The stream
+    # generation deliberately stays unchanged across this pause/resume.
+    output.processed = 12_000 * FRAME_BYTES
+    stream.remaining = 1
+    generation = stream.generation
+    live.play()
+    live.tick(72_000)
+
+    assert stream.generation == generation
+    assert live.status.playing, live.status.reason
+
+
+def test_a_counter_reversal_inside_one_epoch_is_a_named_failure():
+    live, _stream, output = transport(blocks=1)
+    output.processed = 5_000 * FRAME_BYTES
+    live.play()
+    live.tick(0)
+    assert live.status.playing, live.status.reason
+
+    output.processed = 7_000 * FRAME_BYTES
+    live.tick(2_000)
+    assert live.status.playing, live.status.reason
+
+    output.processed = 6_500 * FRAME_BYTES
+    live.tick(1_500)
+
+    assert not live.status.playing
+    assert "reset its progress" in live.status.reason
 
 
 def test_a_backend_that_stops_reporting_progress_stops_monitoring():
@@ -1066,8 +1175,9 @@ class NumberedStream(FakeStream):
         self.remaining -= 1
         block = numbered_block(self._index, self.generation,
                                frames=self._frames,
-                               start=self._index * self._frames)
+                               start=self.output_start)
         self._index += 1
+        self.output_start += self._frames
         self.handed_out.append(block)
         return block
 
@@ -1109,6 +1219,29 @@ def test_a_block_the_adapter_only_partly_took_is_not_thrown_away():
     assert bytes(sink.received) == expected_bytes(stream.handed_out), (
         f"{len(sink.received)} bytes arrived, "
         f"{len(expected_bytes(stream.handed_out))} were handed over")
+    live.close()
+
+
+def test_real_adapter_uses_a_nonzero_reset_baseline_once_and_keeps_bytes():
+    """The transport owns coordinates; the adapter still owns exact bytes."""
+    sink = ShortSink()
+    sink.processed_usecs = 50_000             # 2,400 frames at 48 kHz
+    output = AudioOutput(sink_factory=lambda: sink)
+    stream = NumberedStream(blocks=0)
+    live = LivePreview(stream_factory=lambda *a, **k: stream, output=output)
+    live.set_target(object())
+    live.play()
+
+    live.seek(48_000)
+    live.tick(48_000)
+    assert live.status.playing, live.status.reason
+
+    sink.processed_usecs = 150_000            # 7,200; delta is 4,800
+    live.tick(52_800)
+
+    assert live.status.playing, live.status.reason
+    assert stream.handed_out, "the fixture submitted no epoch material"
+    assert bytes(sink.received) == expected_bytes(stream.handed_out)
     live.close()
 
 
