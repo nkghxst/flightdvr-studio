@@ -90,6 +90,33 @@ class PlannedOutput:
         object.__setattr__(self, "settings", deepcopy(self.settings))
 
 
+@dataclass(frozen=True)
+class ResolvedPieceProvenance:
+    """Primitive identity captured while a piece is resolved for an output.
+
+    ``ClipInfo.fingerprint`` is a computed convenience property.  Capturing
+    its value here keeps pure consumers from recomputing it later (which would
+    resolve the source path again), while ``piece_identity`` keeps the value
+    tied to the exact piece object and ordinal supplied to the output.  The
+    piece itself is deliberately not retained in this value.
+    """
+
+    ordinal: int
+    piece_identity: int
+    fingerprint: str
+    sid: str
+
+    def __post_init__(self) -> None:
+        if type(self.ordinal) is not int or self.ordinal < 0:
+            raise ValueError("piece provenance ordinal must be non-negative")
+        if type(self.piece_identity) is not int or self.piece_identity <= 0:
+            raise ValueError("piece provenance identity must be a positive integer")
+        if not isinstance(self.fingerprint, str) or not self.fingerprint.strip():
+            raise ValueError("piece provenance needs a source fingerprint")
+        if not isinstance(self.sid, str):
+            raise ValueError("piece provenance range id must be a string")
+
+
 class OutputPlan:
     """Ordered planned outputs with one stable selected editing target."""
 
@@ -160,6 +187,13 @@ class WorkingOutput:
     pieces: tuple
     label: str = ""
     joined: bool = False
+    piece_provenance: tuple[ResolvedPieceProvenance, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Keep the new metadata immutable without changing the established
+        # four-argument constructor shape or the pieces consumers already use.
+        object.__setattr__(self, "piece_provenance",
+                           tuple(self.piece_provenance))
 
     @property
     def piece(self):
@@ -185,6 +219,14 @@ def target_for_piece(piece) -> OutputTarget | None:
     Assembly already key on. The piece is whatever the caller resolved — this
     invents no fingerprint and looks nothing up.
     """
+    resolved = _resolved_target_data(piece)
+    return resolved[0] if resolved is not None else None
+
+
+def _resolved_target_data(
+    piece,
+) -> tuple[OutputTarget, str, str] | None:
+    """Resolve a piece once, retaining the identity primitives it supplied."""
     clip = getattr(piece, "clip", piece)
     fingerprint = getattr(clip, "fingerprint", "")
     if not fingerprint:
@@ -194,7 +236,8 @@ def target_for_piece(piece) -> OutputTarget | None:
     if ranges:
         current = min(getattr(clip, "current", 0), len(ranges) - 1)
         sid = ranges[max(0, current)].sid
-    return OutputTarget.clip_or_range(fingerprint, sid)
+    target = OutputTarget.clip_or_range(fingerprint, sid)
+    return target, fingerprint, sid
 
 
 def working_outputs(pieces, *, joined: bool = False) -> list[WorkingOutput]:
@@ -213,23 +256,32 @@ def working_outputs(pieces, *, joined: bool = False) -> list[WorkingOutput]:
     resolved = [piece for piece in pieces if piece is not None]
     if not resolved:
         return []
+    resolved_targets = []
+    for ordinal, piece in enumerate(resolved):
+        data = _resolved_target_data(piece)
+        if data is None:
+            continue
+        target, fingerprint, sid = data
+        resolved_targets.append((piece, target, fingerprint, sid, ordinal))
     if joined:
         items = []
-        for piece in resolved:
-            target = target_for_piece(piece)
-            if target is not None:
-                items.extend(target.items)
+        provenance = []
+        for piece, target, fingerprint, sid, ordinal in resolved_targets:
+            items.extend(target.items)
+            provenance.append(ResolvedPieceProvenance(
+                ordinal, id(piece), fingerprint, sid))
         if not items:
             return []
         return [WorkingOutput(OutputTarget.assembly(items), tuple(resolved),
                               label=f"{len(resolved)} ranges joined",
-                              joined=True)]
+                              joined=True, piece_provenance=tuple(provenance))]
     outputs = []
-    for piece in resolved:
-        target = target_for_piece(piece)
-        if target is None:
-            continue
-        outputs.append(WorkingOutput(target, (piece,), label=piece_label(piece)))
+    for piece, target, fingerprint, sid, _ordinal in resolved_targets:
+        provenance = (ResolvedPieceProvenance(
+            0, id(piece), fingerprint, sid),)
+        outputs.append(WorkingOutput(
+            target, (piece,), label=piece_label(piece),
+            piece_provenance=provenance))
     return outputs
 
 

@@ -37,6 +37,7 @@ from typing import Any
 
 from .assembly import Item
 from .audio_plan import OUTPUT_RATE, SampleSpan, round_samples
+from .output_plan import ResolvedPieceProvenance
 
 
 class SequencePlanError(ValueError):
@@ -357,9 +358,12 @@ class SequencePlan:
 
 
 _MISSING = object()
+_TRIM_MATERIAL_THRESHOLD = Fraction(1, 100)
 
 
-def _items_and_pieces(working_output: Any) -> tuple[tuple[Item, ...], tuple[Any, ...]]:
+def _items_and_pieces(
+    working_output: Any,
+) -> tuple[tuple[Item, ...], tuple[Any, ...], tuple[ResolvedPieceProvenance, ...]]:
     try:
         target = working_output.target
         raw_items = target.items
@@ -381,7 +385,41 @@ def _items_and_pieces(working_output: Any) -> tuple[tuple[Item, ...], tuple[Any,
         raise SequencePlanError(
             "WorkingOutput target references and resolved pieces must correspond one-to-one"
         )
-    return items, pieces
+    raw_provenance = getattr(working_output, "piece_provenance", _MISSING)
+    if raw_provenance is _MISSING or raw_provenance is None:
+        raise SequencePlanError(
+            "resolved WorkingOutput needs explicit piece provenance"
+        )
+    if isinstance(raw_provenance, (str, bytes)):
+        raise SequencePlanError("WorkingOutput piece provenance must be a sequence")
+    try:
+        provenance = tuple(raw_provenance)
+    except TypeError as exc:
+        raise SequencePlanError(
+            "WorkingOutput piece provenance must be iterable"
+        ) from exc
+    if not provenance:
+        raise SequencePlanError(
+            "resolved WorkingOutput needs explicit piece provenance"
+        )
+    if len(provenance) != len(pieces):
+        raise SequencePlanError(
+            "WorkingOutput piece provenance must correspond one-to-one with pieces"
+        )
+    for index, entry in enumerate(provenance):
+        if not isinstance(entry, ResolvedPieceProvenance):
+            raise SequencePlanError(
+                f"piece {index} lacks captured primitive provenance"
+            )
+        if entry.ordinal != index:
+            raise SequencePlanError(
+                f"piece {index} provenance ordinal does not match its position"
+            )
+        if entry.piece_identity != id(pieces[index]):
+            raise SequencePlanError(
+                f"piece {index} provenance does not correspond to the supplied piece"
+            )
+    return items, pieces, provenance
 
 
 def _snapshot_item(raw_item: Any, index: int) -> Item:
@@ -408,24 +446,37 @@ def _raw_selects(clip: Any, index: int) -> tuple[Any, ...]:
         raise SequencePlanError(f"piece {index} ranges are not iterable") from exc
 
 
-def _validated_ranges(clip: Any, index: int) -> list[tuple[str, Fraction, Fraction]]:
+def _validated_ranges(
+    clip: Any,
+    index: int,
+    duration: Fraction,
+) -> list[tuple[str, Fraction, Fraction]]:
     records: list[tuple[str, Fraction, Fraction]] = []
     for select in _raw_selects(clip, index):
         start = _fraction(getattr(select, "start", None),
                           f"piece {index} range start")
         end = _fraction(getattr(select, "end", None),
                         f"piece {index} range end")
-        # ClipInfo keeps an empty editing row after a trim is cleared.  It is
-        # not material.  Every other invalid row must refuse rather than be
-        # mistaken for a whole-recording piece.
-        if start == 0 and end == 0:
-            continue
-        if start < 0 or end < 0 or end <= start:
+        if start < 0 or end < 0:
             raise SequencePlanError(f"piece {index} contains an invalid range")
+        # ClipInfo.real_selects treats values at or below 0.01 seconds as an
+        # empty editing row.  Keep validating those raw values so negative or
+        # nonfinite input cannot disappear, but do not reinterpret a valid
+        # nonmaterial row as range material for a whole-recording Item.
+        if (start <= _TRIM_MATERIAL_THRESHOLD
+                and end <= _TRIM_MATERIAL_THRESHOLD):
+            continue
         sid = getattr(select, "sid", None)
         if not isinstance(sid, str) or not sid.strip():
             raise SequencePlanError(f"piece {index} range has no stable id")
-        records.append((sid, start, end))
+        # ClipInfo.out_point uses the known duration when trim_out is at or
+        # below the same threshold.  That is an effective open endpoint, not
+        # whole-clip substitution: the positive trim_in remains the source
+        # origin and the material ends at the known duration.
+        effective_end = (duration if end <= _TRIM_MATERIAL_THRESHOLD else end)
+        if effective_end <= start:
+            raise SequencePlanError(f"piece {index} contains an invalid range")
+        records.append((sid, start, effective_end))
     return records
 
 
@@ -434,7 +485,7 @@ def _source_span(clip: Any, item: Item, index: int) -> TimeSpan:
                          f"piece {index} duration")
     if duration <= 0:
         raise SequencePlanError(f"piece {index} duration must be positive")
-    ranges = _validated_ranges(clip, index)
+    ranges = _validated_ranges(clip, index, duration)
     if item.sid:
         if len(ranges) != 1 or ranges[0][0] != item.sid:
             raise SequencePlanError(
@@ -484,22 +535,26 @@ def compile_sequence(
             f"cannot compile an unresolved sequence: {detail}"
         )
     sequence_revision = _revision(revision)
-    items, pieces = _items_and_pieces(working_output)
+    items, pieces, provenance = _items_and_pieces(working_output)
 
     occurrences: list[SequenceOccurrence] = []
     boundaries = [0]
     cursor = Fraction(0)
-    for index, (raw_item, piece) in enumerate(zip(items, pieces)):
+    for index, (raw_item, piece, captured) in enumerate(
+            zip(items, pieces, provenance)):
         item = _snapshot_item(raw_item, index)
         clip = getattr(piece, "clip", piece)
         if clip is None:
             raise SequencePlanError(f"piece {index} is unresolved")
-        fingerprint = getattr(clip, "fingerprint", None)
-        if not isinstance(fingerprint, str) or not fingerprint.strip():
-            raise SequencePlanError(f"piece {index} has no source fingerprint")
-        if fingerprint != item.fingerprint:
+        # The producer captured the dynamic ClipInfo identity before this pure
+        # boundary.  Comparing that primitive here retains the ordered
+        # Item/piece check without invoking ClipInfo.fingerprint (and its
+        # filesystem-dependent Path.resolve) again.
+        if (captured.fingerprint != item.fingerprint
+                or captured.sid != item.sid):
             raise SequencePlanError(
-                f"piece {index} fingerprint does not correspond to its target Item"
+                f"piece {index} provenance fingerprint/range does not correspond "
+                "to its target Item"
             )
         source = _source_span(clip, item, index)
         assembled = TimeSpan(cursor, cursor + source.duration)

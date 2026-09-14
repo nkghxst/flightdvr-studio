@@ -18,7 +18,12 @@ from pathlib import Path
 import pytest
 
 from flightdvr.assembly import Item
-from flightdvr.output_plan import MusicChoice, OutputPlan, OutputTarget
+from flightdvr.output_plan import (
+    MusicChoice,
+    OutputPlan,
+    OutputTarget,
+    WorkingOutput,
+)
 from flightdvr.presets import ExportSettings
 
 
@@ -127,6 +132,40 @@ def test_a_whole_recording_is_one_output_with_no_range_id():
     assert len(outputs) == 1
     assert outputs[0].target.items[0].sid == ""
     assert outputs[0].label == "hdz_001.ts"
+
+
+def test_working_output_captures_primitive_identity_without_replacing_the_piece():
+    from flightdvr.output_plan import working_outputs
+
+    piece = a_piece("hdz_001.ts")
+    working = working_outputs([piece])[0]
+
+    assert working.pieces == (piece,)
+    assert len(working.piece_provenance) == 1
+    provenance = working.piece_provenance[0]
+    assert provenance.ordinal == 0
+    assert provenance.piece_identity == id(piece)
+    assert provenance.fingerprint == working.target.items[0].fingerprint
+    assert provenance.sid == ""
+
+
+def test_working_output_keeps_provenance_in_joined_piece_order():
+    from flightdvr.output_plan import working_outputs
+
+    first = a_piece("hdz_001.ts")
+    second = a_piece("hdz_002.ts")
+    working = working_outputs([first, second], joined=True)[0]
+
+    assert [(p.ordinal, p.piece_identity, p.fingerprint, p.sid)
+            for p in working.piece_provenance] == [
+        (0, id(first), working.target.items[0].fingerprint, ""),
+        (1, id(second), working.target.items[1].fingerprint, ""),
+    ]
+
+
+def test_working_output_constructor_remains_compatible_without_provenance():
+    legacy = WorkingOutput(OutputTarget.clip_or_range("clip-a"), ("piece",))
+    assert legacy.piece_provenance == ()
 
 
 def test_three_ranges_are_three_outputs_each_with_its_own_identity():

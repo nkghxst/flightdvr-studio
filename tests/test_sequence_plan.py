@@ -21,7 +21,13 @@ import pytest
 
 from flightdvr.assembly import Item
 from flightdvr.media import ClipInfo, Select
-from flightdvr.output_plan import OutputTarget, WorkingOutput
+from flightdvr.output_plan import (
+    OutputTarget,
+    ResolvedPieceProvenance,
+    WorkingOutput,
+    ordinary_pieces,
+    working_outputs,
+)
 from flightdvr.sequence_plan import (
     OccurrenceId,
     Resolution,
@@ -53,9 +59,15 @@ def item_for(found: ClipInfo, sid: str = "") -> Item:
     return Item(found.fingerprint, sid)
 
 
-def output(items, pieces) -> WorkingOutput:
+def output(items, pieces, provenance=None) -> WorkingOutput:
+    if provenance is None:
+        provenance = tuple(
+            ResolvedPieceProvenance(index, id(piece), item.fingerprint, item.sid)
+            for index, (item, piece) in enumerate(zip(items, pieces))
+        )
     return WorkingOutput(
         OutputTarget.assembly(items), tuple(pieces), joined=True,
+        piece_provenance=provenance,
     )
 
 
@@ -130,6 +142,82 @@ def test_nonzero_source_origin_maps_without_substituting_file_zero():
         plan.source_to_output(plan.occurrences[0].id, 18)
 
 
+def test_producer_open_end_range_uses_the_known_effective_clip_duration():
+    """A producer's zero out sentinel resolves to material through clip end."""
+    found = clip("open-end.ts", 20)
+    found.trim_in = 12
+    pieces = ordinary_pieces([found])
+    working = working_outputs(pieces)[0]
+
+    assert working.target.items[0].sid == pieces[0].selects[0].sid
+    assert pieces[0].selects[0].end == 0
+    plan = compile_output(working)
+
+    assert plan.occurrences[0].source == TimeSpan(Fraction(12), Fraction(20))
+    assert plan.total_duration == 8
+
+
+def test_producer_nonmaterial_tiny_edit_row_does_not_become_range_material():
+    """Rows below ClipInfo's trim threshold still resolve as whole-clip input."""
+    found = clip("tiny-edit.ts", 20, (0.005, 0.006), sid="tiny-edit")
+    pieces = ordinary_pieces([found])
+    working = working_outputs(pieces)[0]
+
+    assert working.target.items[0].sid == ""
+    plan = compile_output(working)
+
+    assert plan.occurrences[0].source == TimeSpan(Fraction(0), Fraction(20))
+
+
+def test_compilation_uses_captured_identity_without_fingerprint_or_path_io(
+        monkeypatch):
+    """A resolved producer answer stays pure after the identity boundary."""
+    found = clip("guarded.ts", 20)
+    working = working_outputs([found])[0]
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("sequence compilation performed forbidden I/O")
+
+    monkeypatch.setattr(ClipInfo, "fingerprint", property(forbidden))
+    monkeypatch.setattr(Path, "resolve", forbidden)
+
+    plan = compile_output(working)
+    assert plan.occurrences[0].fingerprint == working.target.items[0].fingerprint
+
+
+def test_legacy_working_output_without_captured_provenance_refuses_compilation():
+    """Old descriptors cannot silently claim a pure resolved identity."""
+    found = clip("legacy.ts", 5)
+    legacy = WorkingOutput(
+        OutputTarget.clip_or_range(found.fingerprint), (found,))
+
+    with pytest.raises(SequencePlanError, match="explicit piece provenance"):
+        compile_output(legacy)
+
+
+def test_captured_provenance_rejects_reordered_pieces_and_target_identity():
+    """The primitive identity binds both piece order and target references."""
+    first = clip("provenance-first.ts", 5)
+    second = clip("provenance-second.ts", 5)
+    working = working_outputs([first, second], joined=True)[0]
+
+    reordered = WorkingOutput(
+        working.target, (second, first), joined=True,
+        piece_provenance=working.piece_provenance,
+    )
+    with pytest.raises(SequencePlanError, match="supplied piece"):
+        compile_output(reordered)
+
+    wrong_target = WorkingOutput(
+        OutputTarget.assembly([Item("wrong-fingerprint"),
+                               working.target.items[1]]),
+        working.pieces, joined=True,
+        piece_provenance=working.piece_provenance,
+    )
+    with pytest.raises(SequencePlanError, match="target Item"):
+        compile_output(wrong_target)
+
+
 def test_cumulative_half_up_rounding_uses_boundaries_not_rounded_durations():
     """Three 1000.5-sample spans must end at 0/1001/2001/3002."""
     duration = Fraction(2001, 96_000)
@@ -187,8 +275,13 @@ def test_reference_and_piece_order_must_match_without_dropping_unresolved_input(
 
     with pytest.raises(SequencePlanError, match="one-to-one"):
         compile_output(output(good_items, [first]))
+    resolved = working_outputs([first])[0]
+    mismatched = WorkingOutput(
+        OutputTarget.clip_or_range("not-the-piece"), resolved.pieces,
+        piece_provenance=resolved.piece_provenance,
+    )
     with pytest.raises(SequencePlanError, match="fingerprint"):
-        compile_output(output([Item("not-the-piece", "")], [first]))
+        compile_output(mismatched)
     with pytest.raises(SequencePlanError, match="unresolved"):
         compile_output(output([item_for(first)], [None]))
 
