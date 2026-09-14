@@ -4188,7 +4188,6 @@ class MainWindow(QMainWindow):
         self._store_assembly(default_items(self.selected_clips()))
 
     def _store_assembly(self, items) -> None:
-        self._refresh_sidebar()
         """Set the list and schedule the write.
 
         Filling and resetting change the stored assembly exactly as reordering
@@ -4199,12 +4198,20 @@ class MainWindow(QMainWindow):
             self.session.assembly = list(items)
         self._refresh_assembly(items)
         self._touch_session()
+        # After the rows are written and rendered, not before. Refreshing on
+        # the way in read the assembly that was about to be replaced, so one
+        # Fill left the ordinary cards standing — and my own docstring went
+        # with it, displaced by the call that was put above it.
+        self._refresh_sidebar()
 
     def _capture_assembly(self) -> None:
         """Take the order back from the list after somebody rearranged it."""
         if self.session is not None:
             self.session.assembly = self.export_panel.assembly_panel.items()
         self._touch_session()
+        # Reordering and removing arrive here and nowhere else, so without
+        # this a row taken out of the Assembly left its joined card standing.
+        self._refresh_sidebar()
 
     def _refresh_assembly(self, items=None) -> None:
         """Resolve the stored list against the clips currently in front of us."""

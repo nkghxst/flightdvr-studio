@@ -738,9 +738,12 @@ def test_filling_the_assembly_while_flow_is_open_collapses_the_cards(
     listing = in_flow(window, app)
     assert len(rows(listing)) == 2
 
-    window._fill_assembly()
+    # One real action, and the join state set before it. Calling
+    # `_store_assembly` a second time afterwards is what hid the defect: the
+    # first call refreshed against the assembly it was about to replace, and
+    # the second one tidied up after it.
     monkeypatch.setattr(window.export_panel, "join_enabled", lambda: True)
-    window._store_assembly(window.export_panel.assembly_panel.items())
+    window._fill_assembly()
     app.processEvents()
 
     listed = rows(listing)
@@ -830,3 +833,53 @@ def test_classic_pays_nothing_for_the_sidebar(window, app):
     tick(window, 0)
     app.processEvents()
     assert window._sidebar_rebuilds == before
+
+
+def test_removing_an_assembly_row_while_flow_is_open_updates_the_card(
+        window, app, monkeypatch):
+    """Reordering and removing arrive through `_capture_assembly`, which
+    refreshed nothing — so a row taken out left its joined card standing."""
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    window.clips[1].selects = [Select(2.0, 6.0, "two", sid="r-2")]
+    tick(window, 0)
+    tick(window, 1)
+    app.processEvents()
+    monkeypatch.setattr(window.export_panel, "join_enabled", lambda: True)
+    window._fill_assembly()
+    app.processEvents()
+    listing = in_flow(window, app)
+    joined = rows(listing)
+    assert len(joined) == 1 and "2 ranges joined" in joined[0], joined
+
+    panel = window.export_panel.assembly_panel
+    kept = list(panel.items())[:1]
+    panel.set_items(kept) if hasattr(panel, "set_items") else None
+    window._store_assembly(kept)
+    app.processEvents()
+
+    # One range left, so the queue would refuse to join and there is nothing
+    # to list rather than a stale two-range card.
+    assert "2 ranges joined" not in "".join(rows(listing)), rows(listing)
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_reordering_the_assembly_while_flow_is_open_refreshes(window, app,
+                                                              monkeypatch):
+    """`_capture_assembly` is the only handler a drag reaches."""
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    window.clips[1].selects = [Select(2.0, 6.0, "two", sid="r-2")]
+    tick(window, 0)
+    tick(window, 1)
+    app.processEvents()
+    monkeypatch.setattr(window.export_panel, "join_enabled", lambda: True)
+    window._fill_assembly()
+    app.processEvents()
+    in_flow(window, app)
+
+    before = window._sidebar_rebuilds
+    window._capture_assembly()
+    app.processEvents()
+
+    assert window._sidebar_rebuilds > before, (
+        "a reorder did not reach the sidebar at all")
+    window.set_view_mode(Mode.CLASSIC)
