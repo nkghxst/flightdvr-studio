@@ -18,13 +18,23 @@ on:
     # Prose changes nothing a build could verify. Tags are exempt, so a release
     # is still built even if the tagged commit only touched the changelog.
     paths-ignore: ["**.md", "docs/**", ".gitattributes"]
-  # No pull_request trigger on purpose. Check runs attach to a commit, so a
-  # pull request from this repository already shows the results of the push
-  # that created it; adding the trigger would build every commit twice. A pull
-  # request from a fork gets no build until someone runs this by hand from the
-  # Actions tab, which is the right trade while there are no fork contributors.
+  # For forks. A fork's commits are never pushed to this repository, so the
+  # push trigger above cannot see them and check runs have nothing to attach
+  # to: #131 was the first outside contribution and sat with no checks at all,
+  # with no way to start them. Dispatching by hand does not help, because
+  # workflow_dispatch takes a branch or tag here and refs/pull/N/head is not
+  # dispatchable. A pull request from a branch in this repository is skipped --
+  # see the guard on the test job -- because its own push already built it.
+  pull_request:
+    paths-ignore: ["**.md", "docs/**", ".gitattributes"]
   workflow_dispatch:
 
+# A fork pull request runs code nobody here has vetted, so the default token
+# stays read-only and the repository has no secrets for such a run to take.
+# The one job that needs more asks for contents: write itself, and is gated on
+# a tag ref -- github.ref is refs/pull/N/merge on a pull request, so it can
+# never match. Never use pull_request_target to build fork code: that runs in
+# a privileged context and would hand a stranger a writable token.
 permissions:
   contents: read
 
@@ -40,6 +50,13 @@ env:
 jobs:
   test:
     name: Tests on ${{ matrix.os }}
+    # The pull_request trigger exists for forks only. A pull request from a
+    # branch in this repository was already built by the push that created it,
+    # so skip the duplicate. Every packaging job needs this one, so they skip
+    # with it rather than each repeating the condition.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
