@@ -228,6 +228,12 @@ def report(root: str | None, *, fetch_error: str = "", behind: int | None,
            differ: list[str], unknown: list[str]) -> list[str]:
     """The lines to print, which is usually none of them.
 
+    Plain ASCII, deliberately. A Windows console on a legacy code page cannot
+    encode an em dash, and `print` raising `UnicodeEncodeError` at session
+    start would turn a freshness check into a hook error — the one outcome
+    this must never produce. `test_every_line_it_can_print_is_plain_ascii`
+    holds that.
+
     Being behind is **not** on its own worth saying. A review worktree is
     pinned to an exact head deliberately, and telling its reviewer they are
     behind invites the one action that would destroy what they were asked to
@@ -249,8 +255,8 @@ def report(root: str | None, *, fetch_error: str = "", behind: int | None,
                 f"This checkout is {behind} commit"
                 f"{'' if behind == 1 else 's'} behind {REMOTE}/{BRANCH}.")
         lines.append(
-            f"Follow the refreshed version — read it with "
-            f"`git show {REMOTE}/{BRANCH}:<path>` — and say in your first "
+            f"Follow the refreshed version, read with "
+            f"`git show {REMOTE}/{BRANCH}:<path>`, and say in your first "
             "status message that you did.")
         lines.append(
             "Do not reset, rebase, pull, switch or delete anything to fix "

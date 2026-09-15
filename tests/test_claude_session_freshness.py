@@ -491,6 +491,28 @@ def test_no_git_call_uses_a_shell(paired, capsys, monkeypatch):
     assert shells and not any(shells), shells
 
 
+def test_every_line_it_can_print_is_plain_ascii():
+    """A Windows console on a legacy code page cannot encode an em dash, and
+    `print` raising there would turn this into the hook error it exists to
+    avoid. Asserted on every branch of `report`, not on one sample of output.
+    """
+    cases = [
+        freshness.report(None, behind=None, differ=[], unknown=[]),
+        freshness.report("/repo", behind=1, differ=["CLAUDE.md"], unknown=[]),
+        freshness.report("/repo", behind=None,
+                         differ=["AGENTS.md", "docs/WORKFLOW.md"],
+                         unknown=["CLAUDE.md"]),
+        freshness.report("/repo", fetch_error="no route to host", behind=0,
+                         differ=[], unknown=[]),
+        freshness.report("/repo", fetch_error="timed out after 20s",
+                         behind=3, differ=["CLAUDE.md"], unknown=[]),
+    ]
+    assert any(lines for lines in cases), "no branch produced any output"
+    for lines in cases:
+        for line in lines:
+            line.encode("ascii")           # raises if it ever stops being so
+
+
 # -- what the settings file has to say -----------------------------------------
 
 def test_the_hook_is_wired_to_this_helper():
