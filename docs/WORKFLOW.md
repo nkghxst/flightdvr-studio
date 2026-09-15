@@ -52,6 +52,16 @@ confidently is worse than no rule. Before relying on what you have read:
   offline fetch, a cached ref or a failed API call leaves you not knowing; that
   is a fact to report, not a silence to fill.
 
+A `SessionStart` hook in this repository's `.claude/settings.json` runs
+`tools/claude_session_freshness.py`, which makes that comparison and names any
+operating document that differs. It only reads, it never blocks a session, and
+it is quiet when the documents are current — including when the checkout is
+behind, because a pinned base is not a fault. **It protects only checkouts that
+contain it.** Repository-local settings arrive with the files, so a worktree
+pinned to an older commit has no such hook, warns about nothing, and leaves the
+check above entirely yours to make. It is not installed globally, and no
+existing checkout was modified to add it.
+
 **Refresh the refs, not the worktree.** A review or task worktree is often
 detached, old, or pinned to an exact head on purpose — that is what makes a
 verdict reproducible. Never `reset`, `rebase`, `pull`, `checkout` or re-base
