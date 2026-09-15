@@ -36,12 +36,41 @@ An authentication or transport error is not an empty issue/PR list. Check the
 files of open PRs before editing; overlapping work on a large module is a stop
 condition. Preserve existing worktrees, branches and drafts.
 
+### Check that your instructions are current
+
+The operating documents are read from the working directory at session start,
+so an old checkout supplies old governance silently — and a wrong rule read
+confidently is worse than no rule. Before relying on what you have read:
+
+- Fetch, then confirm the exact task base against the live remote. `git fetch`
+  and `gh api repos/<owner>/<repo>/commits/main` answer the same question two
+  ways; a local `main` or a linked worktree can lag either.
+- Compare the `AGENTS.md`, `CLAUDE.md` and `docs/WORKFLOW.md` you are actually
+  reading with the same files at refreshed `origin/main`. If they differ,
+  follow the refreshed ones and say in your first status message that you did.
+- **State a stale or unreachable ref rather than treating it as current.** An
+  offline fetch, a cached ref or a failed API call leaves you not knowing; that
+  is a fact to report, not a silence to fill.
+
+**Refresh the refs, not the worktree.** A review or task worktree is often
+detached, old, or pinned to an exact head on purpose — that is what makes a
+verdict reproducible. Never `reset`, `rebase`, `pull`, `checkout` or re-base
+assigned work merely to make the instructions newer, and never delete a
+worktree you did not create. Fetching updates refs and changes no working tree.
+If the assigned base genuinely needs to move, that is the coordinator's
+decision, not a tidy-up.
+
 ## Claim and publish
 
 For an implementation or documentation change, create a fresh `codex/` branch
-from the exact authorized base. Make a small, meaningful first commit, then
-open the draft PR before continuing. Put the short plan, allowed paths, not-list
-and done criteria in the PR body. Do not create placeholder commits or PRs.
+from the exact authorized base. `codex/` is the prefix for new work regardless
+of which agent makes it; it marks the branch as agent-made, not which agent.
+Existing `claude/` branches predate this and stand as they are — do not rename,
+rebase or re-open one to match, because moving a published branch costs a
+reviewer their exact head and buys nothing. Make a small, meaningful first
+commit, then open the draft PR before continuing. Put the short plan, allowed
+paths, not-list and done criteria in the PR body. Do not create placeholder
+commits or PRs.
 
 The PR is opened with the `flightdvr-assistant-nkghxst` GitHub App so the human
 maintainer can provide the independent review. Commits and ordinary pushes use
@@ -86,10 +115,23 @@ At the start of a review body, write for example
 `Reviewer: Claude Code (<current model>)`. If the model is not exposed, say
 `unknown/not exposed`; never infer it from a role, nickname or product label.
 
-The GitHub identity is separate again. An App-authored PR is reviewed with the
-normal `nkghxst` login. A human-authored PR is reviewed with a short-lived App
-token. Never review a PR with the identity that authored it. The author names
-the verdict owner at handoff; that agent submits the one GitHub review.
+The GitHub identity is separate again. **Never review a PR with the identity
+that authored it.** The author names the verdict owner at handoff; that agent
+submits the one GitHub review.
+
+| PR author | Reviewed as |
+|---|---|
+| the `flightdvr-assistant-nkghxst` App | the normal `nkghxst` login |
+| `nkghxst` | a short-lived App token |
+| an outside contributor | the normal `nkghxst` login |
+
+The App token is the fallback for a PR opened as `nkghxst`, not the default for
+every human author. **Answer a volunteer in the maintainer's own name.** An
+outside contributor is not part of this repository's agent coordination: do not
+ask them for an ACK, a floor, a role identity, a verdict owner, a `codex/`
+branch name or a handoff template, and do not describe their PR as though they
+had agreed to one. Review their work on its merits and say what is needed in
+ordinary words.
 
 Luna's default verdict is advisory only. She is not the sole verdict owner for
 output correctness and, unless Nk explicitly assigns it, not for documentation
