@@ -38,7 +38,8 @@ from PySide6.QtGui import QColor, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from .media import (
-    NO_WINDOW, ClipInfo, Tools, frame_rate_mode, request_stop, stop_process,
+    NO_WINDOW, ClipInfo, Tools, child_env, frame_rate_mode, request_stop,
+    stop_process,
 )
 
 FRAME_WIDTH = 160
@@ -158,7 +159,7 @@ def extract(tools: Tools, clip: ClipInfo, register=None,
     try:
         proc = subprocess.Popen(
             command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            text=True,
+            text=True, env=child_env(),
             creationflags=(NO_WINDOW | BELOW_NORMAL_PRIORITY
                            if low_priority else NO_WINDOW),
         )
