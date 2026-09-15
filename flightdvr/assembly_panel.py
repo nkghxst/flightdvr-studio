@@ -41,6 +41,25 @@ from .widgets import dim
 ITEM_ROLE = Qt.ItemDataRole.UserRole
 
 
+class OrderedList(QListWidget):
+    """A list that says when a drag actually finished.
+
+    `rowsMoved` is the obvious signal and never fires here: an internal move
+    on a list is an insert followed by a remove, not a move, so listening to
+    the model reports one drag as two events with a half-finished order in
+    between. The drop itself is the only moment the new order is both complete
+    and known to be the user's.
+    """
+
+    dropped = Signal()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        before = self.count()
+        super().dropEvent(event)
+        if event.isAccepted() and self.count() == before:
+            self.dropped.emit()
+
+
 class AssemblyPanel(QWidget):
     """A compact ordered list, and the four things you can do to it."""
 
@@ -65,11 +84,21 @@ class AssemblyPanel(QWidget):
         header.addWidget(self.fill_button)
         layout.addLayout(header)
 
-        self.list = QListWidget()
+        self.list = OrderedList()
         self.list.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list.setAlternatingRowColors(True)
         self.list.setMinimumHeight(120)
+        # A second way to reorder, never the only way. Dragging needs a
+        # pointer, a steady hand and a visible target; the buttons and
+        # Alt+Arrow keys stay exactly as they were.
+        self.list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.list.setDropIndicatorShown(True)
+        # One signal per completed drop. Qt moves rows by inserting and then
+        # removing, so listening to rowsInserted or rowsRemoved would report a
+        # single drag twice and capture a half-finished order in between.
+        self.list.dropped.connect(self._on_dropped)
         layout.addWidget(self.list)
 
         self.summary_label = dim(QLabel("Nothing in the assembly yet"))
@@ -137,9 +166,15 @@ class AssemblyPanel(QWidget):
             entry = QListWidgetItem(text)
             entry.setData(ITEM_ROLE, row.item)
             if row.missing:
-                # Visible, in place, and not selectable as material — it is a
-                # problem to resolve, not something to arrange.
-                entry.setFlags(entry.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+                # Visible, in place, and neither selectable nor draggable — it
+                # is a problem to resolve, not material to arrange. Clearing
+                # ItemIsEnabled alone leaves ItemIsDragEnabled set, so the row
+                # could still be picked up and moved away from the position
+                # that is the only remaining evidence of where it belonged.
+                entry.setFlags(entry.flags()
+                               & ~Qt.ItemFlag.ItemIsEnabled
+                               & ~Qt.ItemFlag.ItemIsDragEnabled
+                               & ~Qt.ItemFlag.ItemIsDropEnabled)
             self.list.addItem(entry)
 
         for index in chosen:
@@ -147,6 +182,12 @@ class AssemblyPanel(QWidget):
                 self.list.item(index).setSelected(True)
 
         self.summary_label.setText(summary(rows))
+        self._update_buttons()
+
+    def _on_dropped(self) -> None:
+        """A drag finished. Same path as the buttons, so the order is captured
+        and scheduled for saving by the code that already does that."""
+        self.order_changed.emit()
         self._update_buttons()
 
     def items(self) -> list[Item]:
