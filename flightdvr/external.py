@@ -28,6 +28,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .media import child_env
+
 PLAYER_PATHS = [
     Path(r"C:\Program Files\VideoLAN\VLC\vlc.exe"),
     Path(r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe"),
@@ -68,6 +70,6 @@ def reveal(path: Path) -> None:
         if os.name == "nt":
             os.startfile(path)  # type: ignore[attr-defined]
         else:
-            subprocess.Popen([DESKTOP_OPEN, str(path)])
+            subprocess.Popen([DESKTOP_OPEN, str(path)], env=child_env())
     except OSError:
         pass

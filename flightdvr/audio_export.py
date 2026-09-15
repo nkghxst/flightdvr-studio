@@ -23,7 +23,7 @@ import subprocess
 from pathlib import Path
 
 from .audio_plan import AudioMode, OutputAudioPlan
-from .media import NO_WINDOW, Tools
+from .media import NO_WINDOW, Tools, child_env
 
 
 AUDIO_FRAME_SAMPLES = 1_024
@@ -124,7 +124,7 @@ def validate_expected_audio(tools: Tools, path: Path,
     ]
     proc = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        creationflags=NO_WINDOW,
+        env=child_env(), creationflags=NO_WINDOW,
     )
     while True:
         try:

@@ -27,7 +27,8 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
 from .media import (
-    NO_WINDOW, ClipInfo, Tools, frame_rate_mode, request_stop, stop_process,
+    NO_WINDOW, ClipInfo, Tools, child_env, frame_rate_mode, request_stop,
+    stop_process,
 )
 from .player import SEEK_LEAD_IN, SHOWINFO_TIME
 from .presets import colour_filters
@@ -158,7 +159,7 @@ class StillWorker(QThread):
         try:
             proc = subprocess.Popen(
                 command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                creationflags=NO_WINDOW,
+                env=child_env(), creationflags=NO_WINDOW,
             )
         except OSError as problem:
             return False, f"Could not start ffmpeg: {problem}"

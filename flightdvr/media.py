@@ -47,6 +47,34 @@ NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 # How long to let a child shut down politely before killing it.
 TERMINATE_SECONDS = 5
 
+
+def child_env() -> dict[str, str]:
+    """Environment for a child process that must use the system's own libraries.
+
+    A PyInstaller build (the AppImage, the Windows one-dir bundle) points the
+    dynamic loader at its own bundled Qt/Python libraries so the frozen app can
+    start, and saves the pre-launch value in `<VAR>_ORIG`. Those libraries are
+    built for the packaging base — Ubuntu 22.04 for the AppImage — and are older
+    than what a current distribution ships. A *system* ffmpeg or ffprobe spawned
+    with that inherited path loads the bundle's stale libstdc++/libz first and
+    dies on a symbol or ABI mismatch before it reads a single frame; the scan
+    then counts zero usable clips and reports "No readable video files found
+    here" over a card that is perfectly fine. Restore the saved value (or drop
+    ours when there was none) so the child links against the system libraries it
+    was actually built for. A normal `python -m flightdvr` run is not frozen, has
+    neither variable, and is returned unchanged.
+    """
+    env = os.environ.copy()
+    if not getattr(sys, "frozen", False):
+        return env
+    for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+        original = env.pop(var + "_ORIG", None)
+        if original:
+            env[var] = original
+        else:
+            env.pop(var, None)
+    return env
+
 # Checked after PATH. On Windows these are where people unpack the gyan.dev
 # builds; on Linux a package manager puts ffmpeg on PATH already, so those are
 # only for a manually installed or Flatpak-exported copy. The Homebrew prefixes
@@ -266,6 +294,7 @@ def run_hidden(args: list[str], timeout: float | None = 60) -> subprocess.Comple
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=child_env(),
         creationflags=NO_WINDOW,
     )
 
@@ -571,7 +600,7 @@ def _probe_once(
     try:
         proc = subprocess.Popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, creationflags=NO_WINDOW,
+            text=True, env=child_env(), creationflags=NO_WINDOW,
         )
     except OSError as exc:
         info.error = str(exc)
@@ -738,7 +767,7 @@ def _encoder_runs(tools: Tools, name: str, register=None,
     try:
         proc = subprocess.Popen(
             args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=NO_WINDOW,
+            env=child_env(), creationflags=NO_WINDOW,
         )
     except OSError:
         return False

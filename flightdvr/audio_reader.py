@@ -38,7 +38,7 @@ from PySide6.QtCore import QThread, Signal
 
 from .audio_plan import AudioAsset, OUTPUT_CHANNELS, OUTPUT_RATE, round_samples
 from .audio_stream import BLOCK_FRAMES
-from .media import NO_WINDOW, Tools, request_stop, stop_process
+from .media import NO_WINDOW, Tools, child_env, request_stop, stop_process
 
 
 FLOAT_BYTES = 4
@@ -146,7 +146,7 @@ def _probe_first_audio(
     try:
         proc = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            bufsize=0, creationflags=NO_WINDOW,
+            bufsize=0, env=child_env(), creationflags=NO_WINDOW,
         )
     except OSError as exc:
         raise AudioAssetError(f"could not start ffprobe: {exc}") from exc
@@ -220,7 +220,7 @@ def _count_native_samples(
     try:
         proc = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            bufsize=0, creationflags=NO_WINDOW,
+            bufsize=0, env=child_env(), creationflags=NO_WINDOW,
         )
     except OSError as exc:
         raise AudioAssetError(f"could not start ffmpeg: {exc}") from exc
@@ -449,7 +449,7 @@ class FfmpegPcmReader:
         try:
             proc = subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                bufsize=0, creationflags=NO_WINDOW,
+                bufsize=0, env=child_env(), creationflags=NO_WINDOW,
             )
         except OSError as exc:
             raise AudioReaderError(f"could not start ffmpeg: {exc}") from exc
