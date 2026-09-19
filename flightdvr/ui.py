@@ -323,6 +323,8 @@ class MainWindow(QMainWindow):
 
         self.player = PreviewPlayer(tools, self)
         self.player.frame_ready.connect(self._preview_frame_ready)
+        self.player.sequence_frame_ready.connect(
+            self._preview_sequence_frame_ready)
         self.player.playback_tick.connect(self._preview_playback_tick)
         self.player.precise_frame_ready.connect(self._precise_frame_ready)
         self.player.precise_loading.connect(self._precise_loading)
@@ -1664,11 +1666,17 @@ class MainWindow(QMainWindow):
         self.settings_store.setValue("flow_stage", chosen.value)
         if chosen is Stage.ASSEMBLE:
             self._refresh_sequence_plan()
+            self.play_button.setToolTip(
+                "Play or pause the assembled picture in joined output time.\n"
+                "Sound and the finished exported file are not previewed.")
             # A row is an occurrence now, not an instruction to retarget the
             # source editor.  Its start is a useful joined position.
             self._on_assembly_choice()
         else:
             self.preview_view.sequence_strip.hide()
+            self.play_button.setToolTip(
+                "Play the highlighted clip here in the window.\n"
+                "Space does the same once the picture has focus.")
         self._show_source_note()
         back, forward = flow_neighbours(chosen, self._offered_stages)
         self.flow_back.setEnabled(back is not None)
@@ -1780,6 +1788,13 @@ class MainWindow(QMainWindow):
             self._show_source_note()
             return
 
+        if (old is not None
+                and self.player.sequence_revision == old.revision):
+            # A revised order must fence both decoder lanes before its output
+            # coordinates can be offered. Never reinterpret an old tick on
+            # newly ordered material.
+            self.player.clear_sequence()
+
         self._sequence_revision = next_revision
         self._sequence_plan = plan
         self._sequence_occurrence = None
@@ -1811,6 +1826,11 @@ class MainWindow(QMainWindow):
             return
 
         self.player.pause()
+        if self.player.sequence_revision is not None:
+            # A user scrub deliberately returns to S1's paused source-frame
+            # inspection. This fences both joined lanes before a precise
+            # source request can be made.
+            self.player.clear_sequence()
         if self.live_preview is not None:
             self.live_preview.pause()
             self.live_preview.set_muted(True)
@@ -1856,7 +1876,10 @@ class MainWindow(QMainWindow):
         """Return the player to the unchanged source editor selection."""
         self._sharpen_timer.stop()
         self.preview_view.sequence_strip.hide()
-        if self._sequence_loaded_clip is not None and self._trim_clip is not None:
+        had_joined_binding = self.player.sequence_revision is not None
+        if (self._sequence_loaded_clip is not None or had_joined_binding):
+            self.player.stop()
+        if self._trim_clip is not None:
             source_seconds = self.trim_bar.playhead
             self.player.load(self._trim_clip, position=source_seconds)
             if self._trim_clip.width and self._trim_clip.height:
@@ -1864,6 +1887,8 @@ class MainWindow(QMainWindow):
                     self._trim_clip.width / self._trim_clip.height)
                 self.preview_box.updateGeometry()
             self._show_frame(source_seconds)
+        elif had_joined_binding:
+            self.player.clear_sequence()
         self._sequence_occurrence = None
         self._sequence_source_seconds = None
         self._sequence_loaded_clip = None
@@ -1925,12 +1950,20 @@ class MainWindow(QMainWindow):
                     "Assembly rows. No playback or finished file is shown.")
             position = self.preview_view.sequence_strip.position
             total = float(plan.total_duration)
+            joined_transport = self.player.sequence_revision == plan.revision
             if self._sequence_occurrence is None:
                 if abs(position - total) < 1e-9:
                     return (
                         f"Joined end {human_duration(total)} — last frame held; "
                         "the terminal requests no source frame. This is not "
                         "continuous playback or the finished file.")
+                if joined_transport:
+                    state = ("playing joined picture" if self.player.is_playing
+                             else "paused joined picture")
+                    return (
+                        f"Joined position {human_duration(position)} of "
+                        f"{human_duration(total)} — {state}; sound and the "
+                        "finished file are not previewed.")
                 return (
                     f"Joined position {human_duration(position)} of "
                     f"{human_duration(total)} — paused source-frame "
@@ -1947,6 +1980,16 @@ class MainWindow(QMainWindow):
                                  if one.sid == occurrence.sid), None)
                 if selected is not None and selected.name:
                     name = f"{name} · {selected.name}"
+            if joined_transport:
+                state = ("playing joined picture" if self.player.is_playing
+                         else "paused joined picture")
+                return (
+                    f"Joined position {human_duration(position)} of "
+                    f"{human_duration(total)} · occurrence "
+                    f"{occurrence.id.ordinal + 1}: {name} at "
+                    f"{human_duration(self._sequence_source_seconds or 0.0)} "
+                    f"— {state}; sound and the finished file are not "
+                    "previewed.")
             return (
                 f"Joined position {human_duration(position)} of "
                 f"{human_duration(total)} · occurrence "
@@ -3444,6 +3487,44 @@ class MainWindow(QMainWindow):
         self.frame_view.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _toggle_play(self) -> None:
+        if self._joined_assemble_active():
+            plan = self._sequence_plan
+            if plan is None:
+                self.statusBar().showMessage(
+                    "Add at least two resolved Assembly rows first", 4000)
+                return
+            if self.player.is_playing:
+                self.player.pause()
+                return
+            position = self.preview_view.sequence_strip.position
+            if abs(position - float(plan.total_duration)) < 1e-9:
+                position = 0.0
+                self.preview_view.sequence_strip.set_position(position)
+            if self.player.sequence_revision != plan.revision:
+                resolved = {}
+                for occurrence in plan.occurrences:
+                    clip = self._sequence_clip(occurrence)
+                    if clip is None:
+                        self.statusBar().showMessage(
+                            "Joined playback stopped: an Assembly source is "
+                            "no longer available", 6000)
+                        return
+                    resolved[occurrence.id] = clip
+                self._sharpen_timer.stop()
+                self._clear_precise_frame()
+                try:
+                    self.player.load_sequence(plan, resolved, position)
+                except (TypeError, ValueError, SequencePlanError) as problem:
+                    self.statusBar().showMessage(
+                        f"Joined playback unavailable: {problem}", 6000)
+                    return
+            if self.live_preview is not None:
+                self.live_preview.pause()
+                self.live_preview.set_muted(True)
+                self._show_monitoring()
+            self._focus_player()
+            self.player.play(self.frame_view.width())
+            return
         if self._refuse_joined_source_action():
             return
         clip = self._trim_clip
@@ -3457,6 +3538,10 @@ class MainWindow(QMainWindow):
         self.player.toggle(self.frame_view.width())
 
     def _stop_preview(self) -> None:
+        if self._joined_assemble_active():
+            self.player.stop()
+            self._show_source_note()
+            return
         if self._refuse_joined_source_action():
             return
         self.player.stop()
@@ -3511,12 +3596,42 @@ class MainWindow(QMainWindow):
         self.trim_bar.set_playhead(seconds)
         self._update_trim_labels()
 
+    def _preview_sequence_frame_ready(
+        self, image, revision: str, occurrence_id: OccurrenceId,
+        output_seconds: float, source_seconds: float,
+    ) -> None:
+        """Paint only provenance from the current joined revision."""
+        plan = self._sequence_plan
+        if (not self._joined_assemble_active() or plan is None
+                or revision != plan.revision
+                or self.player.sequence_revision != revision):
+            return
+        try:
+            occurrence = plan.get_occurrence(occurrence_id)
+        except SequencePlanError:
+            return
+        self._clear_precise_frame()
+        self.frame_view.set_image(image)
+        self._sequence_occurrence = occurrence.id
+        self._sequence_source_seconds = source_seconds
+        self._sequence_loaded_clip = self._sequence_clip(occurrence)
+        # The strip follows the output clock callback. Do not pull it backwards
+        # to the last painted frame when a future frame is pending.
+        self._show_source_note()
+
     def _preview_playback_tick(self, seconds: float, _starved: bool) -> None:
         """Service sound once from the video player's existing timer clock.
 
         Painting deliberately remains separate: the public player position,
         trim marker and still authority continue to name the frame on screen.
         """
+        if self._joined_assemble_active():
+            plan = self._sequence_plan
+            if (plan is not None
+                    and self.player.sequence_revision == plan.revision):
+                self.preview_view.sequence_strip.set_position(seconds)
+                self._show_source_note()
+            return
         self._drive_monitoring(seconds)
 
     def _precise_frame_ready(self, image, seconds: float,
@@ -3527,6 +3642,8 @@ class MainWindow(QMainWindow):
             # its current load/seek.  Do not promote a joined source frame to
             # source-trim or still-capture authority.
             self._clear_precise_frame()
+            if self.player.sequence_revision is not None:
+                return
             self.frame_view.set_image(image)
             return
         self._precise_frame_number = frame_number
@@ -3693,13 +3810,14 @@ class MainWindow(QMainWindow):
 
     def _preview_state_changed(self, playing: bool) -> None:
         if self._joined_assemble_active():
-            if playing:
-                self.player.pause()
             if self.live_preview is not None:
                 self.live_preview.pause()
                 self.live_preview.set_muted(True)
                 self._show_monitoring()
-            self.play_button.setText("Play")
+            if playing:
+                self._clear_precise_frame()
+            self.play_button.setText("Pause" if playing else "Play")
+            self._show_source_note()
             return
         self._follow_picture_state(playing)
         if playing:
@@ -3722,6 +3840,13 @@ class MainWindow(QMainWindow):
 
     def _preview_ended(self) -> None:
         if self._joined_assemble_active():
+            plan = self._sequence_plan
+            if plan is not None:
+                self.preview_view.sequence_strip.set_position(
+                    float(plan.total_duration))
+                self._sequence_occurrence = None
+                self._sequence_source_seconds = None
+                self._show_source_note()
             return
         self._show_frame(self.trim_bar.playhead)
 

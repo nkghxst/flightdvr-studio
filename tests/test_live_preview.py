@@ -723,6 +723,32 @@ def test_monitoring_never_reaches_a_job_or_the_session(window):
     assert window.jobs == []
 
 
+def test_joined_picture_ticks_never_service_source_monitoring(
+        window, monkeypatch):
+    """S2 owns picture only; its output clock cannot tick S1 source audio."""
+    driven = []
+    monkeypatch.setattr(window, "_joined_assemble_active", lambda: True)
+    monkeypatch.setattr(window, "_drive_monitoring", driven.append)
+
+    window._preview_playback_tick(3.0, False)
+
+    assert driven == []
+
+
+def test_joined_picture_state_keeps_the_existing_monitor_fenced(
+        window, monkeypatch):
+    monkeypatch.setattr(window, "_joined_assemble_active", lambda: True)
+    calls = []
+    monkeypatch.setattr(window.live_preview, "pause",
+                        lambda: calls.append("pause"))
+    monkeypatch.setattr(window.live_preview, "set_muted",
+                        lambda value: calls.append(("muted", value)))
+
+    window._preview_state_changed(True)
+
+    assert calls == ["pause", ("muted", True)]
+
+
 # -- what the review found (#121) -----------------------------------------------
 
 def test_playing_starts_both_sides_rather_than_resuming_a_stream_that_never_ran():

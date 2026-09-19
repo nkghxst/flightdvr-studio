@@ -1407,7 +1407,7 @@ def test_joined_precise_frame_cannot_become_source_trim_or_still_authority(
     window.set_view_mode(Mode.CLASSIC)
 
 
-def test_joined_assemble_guards_source_edit_step_and_play_routes(
+def test_joined_assemble_routes_joined_play_but_guards_source_edit_and_listen(
         window, app, monkeypatch):
     make_aba_assembly(window, app)
     window.table.setCurrentCell(0, 0)
@@ -1421,6 +1421,8 @@ def test_joined_assemble_guards_source_edit_step_and_play_routes(
     calls = []
     monkeypatch.setattr(window.player, "load",
                         lambda *a, **k: calls.append("load"))
+    monkeypatch.setattr(window.player, "load_sequence",
+                        lambda *a, **k: calls.append("sequence"))
     monkeypatch.setattr(window.player, "toggle",
                         lambda *a, **k: calls.append("toggle"))
     monkeypatch.setattr(window.player, "step_frames",
@@ -1452,12 +1454,130 @@ def test_joined_assemble_guards_source_edit_step_and_play_routes(
     window._on_listening_changed("source")
     window._on_monitor_restart()
 
-    assert calls == []
+    assert calls == ["sequence", "play", "stop"]
     assert [(one.start, one.end, one.sid)
             for one in window.clips[0].selects] == before
     assert window.live_preview.status.muted
     assert not window.live_preview.status.playing
     assert "return to Browse or Trim" in window.statusBar().currentMessage()
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_joined_play_uses_output_ticks_and_never_promotes_source_authority(
+        window, app, monkeypatch):
+    make_aba_assembly(window, app)
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    source_before = (
+        window._trim_clip,
+        window.trim_bar.in_point,
+        window.trim_bar.out_point,
+        window.trim_bar.playhead,
+    )
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    plan = window._sequence_plan
+    assert plan is not None
+
+    def start_without_ffmpeg(_width=0):
+        window.player.is_playing = True
+        window.player.state_changed.emit(True)
+
+    monkeypatch.setattr(window.player, "play", start_without_ffmpeg)
+    window._toggle_play()
+    assert window.player.sequence_revision == plan.revision
+    assert window.player._sequence_clips == {
+        occurrence.id: window._sequence_clip(occurrence)
+        for occurrence in plan.occurrences
+    }
+    assert window.live_preview.status.muted
+    assert not window.live_preview.status.playing
+
+    image = QImage(2, 2, QImage.Format.Format_RGB888)
+    image.fill(Qt.GlobalColor.green)
+    second = plan.occurrences[1]
+    window.player.sequence_frame_ready.emit(
+        image, plan.revision, second.id, 3.0, 2.0)
+    window.player.playback_tick.emit(3.0, False)
+
+    assert window.preview_view.sequence_strip.position == 3.0
+    assert window._sequence_occurrence == second.id
+    assert window._sequence_source_seconds == 2.0
+    assert window._precise_frame_number is None
+    assert window._precise_frame_seconds is None
+    assert not window.still_button.isEnabled()
+    assert (
+        window._trim_clip,
+        window.trim_bar.in_point,
+        window.trim_bar.out_point,
+        window.trim_bar.playhead,
+    ) == source_before
+    assert "playing joined picture" in window.flow_source_note.text()
+    assert "sound and the finished file are not previewed" in (
+        window.flow_source_note.text())
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_reorder_fences_joined_frames_before_installing_the_new_revision(
+        window, app, monkeypatch):
+    make_aba_assembly(window, app)
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    old = window._sequence_plan
+    resolved = {
+        occurrence.id: window._sequence_clip(occurrence)
+        for occurrence in old.occurrences
+    }
+    window.player.load_sequence(old, resolved)
+    painted = []
+    monkeypatch.setattr(window.frame_view, "set_image",
+                        lambda image: painted.append(image))
+
+    first, second = window.clips
+    window._store_assembly([
+        Item(second.fingerprint, "b"),
+        Item(first.fingerprint, "a"),
+        Item(first.fingerprint, "a"),
+    ])
+    app.processEvents()
+    current = window._sequence_plan
+    assert current.revision != old.revision
+    assert window.player.sequence_revision is None
+
+    image = QImage(2, 2, QImage.Format.Format_RGB888)
+    image.fill(Qt.GlobalColor.red)
+    window.player.sequence_frame_ready.emit(
+        image, old.revision, old.occurrences[0].id, 0.0, 10.0)
+    assert painted == []
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_precise_callback_after_joined_play_starts_is_ignored_entirely(
+        window, app, monkeypatch):
+    make_aba_assembly(window, app)
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    plan = window._sequence_plan
+    resolved = {
+        occurrence.id: window._sequence_clip(occurrence)
+        for occurrence in plan.occurrences
+    }
+    window.player.load_sequence(plan, resolved)
+    painted = []
+    monkeypatch.setattr(window.frame_view, "set_image",
+                        lambda image: painted.append(image))
+    before = window.trim_bar.playhead
+
+    image = QImage(2, 2, QImage.Format.Format_RGB888)
+    image.fill(Qt.GlobalColor.blue)
+    window._precise_frame_ready(image, 10.0, 600)
+
+    assert painted == []
+    assert window.trim_bar.playhead == before
+    assert window._precise_frame_number is None
+    assert not window.still_button.isEnabled()
     window.set_view_mode(Mode.CLASSIC)
 
 

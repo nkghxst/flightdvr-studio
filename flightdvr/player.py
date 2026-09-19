@@ -53,7 +53,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Iterator, Mapping
 
 from PySide6.QtCore import QObject, QRect, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPen
@@ -63,6 +63,9 @@ from .media import (
     NO_WINDOW, ClipInfo, Tools, frame_rate_mode, request_stop, stop_process,
 )
 from .presets import VerticalCrop
+from .sequence_plan import (
+    OccurrenceId, SequencePlan, SequencePlanError, SequenceTerminal,
+)
 
 # Frame sizes offered to the view. Every width gives a row of bytes divisible
 # by four, which keeps QImage's scanline alignment happy without padding.
@@ -102,6 +105,11 @@ IDLE_STOP_SECONDS = 30
 FRAME_WINDOW_SECONDS = 4.0
 FRAME_CACHE_MAX_FRAMES = 121
 FRAME_CACHE_SIZE = (480, 270)
+
+# One bounded queue is about 0.8 seconds at the preview rate. Starting the
+# immediately following occurrence no earlier than that keeps pre-roll useful
+# without creating a second cache or allowing a third streaming decoder.
+SEQUENCE_PREROLL_SECONDS = QUEUE_FRAMES / PREVIEW_FPS
 
 SHOWINFO_TIME = re.compile(r"\bpts_time:([-+0-9.eE]+)")
 
@@ -165,6 +173,30 @@ class CachedFrame:
     frame_number: int
     seconds: float
     pixels: bytes
+
+
+@dataclass
+class _SequenceLane:
+    """One occurrence's runtime decoder state, never a timing authority."""
+
+    revision: str
+    occurrence: OccurrenceId
+    generation: int
+    worker: object
+    frames: queue.Queue
+    pending: tuple[float, bytes] | None = None
+    ended: bool = False
+
+
+@dataclass(frozen=True)
+class _SequenceStart:
+    """The latest joined start waiting for physical decoder capacity."""
+
+    epoch: int
+    revision: str
+    role: str
+    occurrence: OccurrenceId
+    source_start: float
 
 
 def pair_precise_frames(window: FrameWindow, timestamps: list[float],
@@ -677,6 +709,9 @@ class PreviewPlayer(QObject):
 
     frame_ready = Signal(object, float)   # QImage, seconds into the clip
     playback_tick = Signal(float, bool)   # wanted source seconds, starved now
+    sequence_frame_ready = Signal(
+        object, str, object, float, float
+    )  # image, revision, occurrence, output seconds, source seconds
     precise_frame_ready = Signal(object, float, int)  # image, seconds, source frame
     precise_loading = Signal(bool)
     precise_failed = Signal(str)
@@ -709,6 +744,16 @@ class PreviewPlayer(QObject):
         self._starved = True
         self._stream_ended = False
 
+        # Joined playback binds the same clock/timer to output seconds.  The
+        # immutable SequencePlan remains the timing authority; these fields
+        # only own the active and one pre-rolled decoder.
+        self._sequence_plan: SequencePlan | None = None
+        self._sequence_clips: dict[OccurrenceId, ClipInfo] = {}
+        self._sequence_epoch = 0
+        self._sequence_active: _SequenceLane | None = None
+        self._sequence_next: _SequenceLane | None = None
+        self._sequence_pending_start: _SequenceStart | None = None
+
         self._frame_size = PreviewSize(*FRAME_CACHE_SIZE)
         self._frame_cache = FrameCache()
         self._frame_generation = 0
@@ -726,19 +771,78 @@ class PreviewPlayer(QObject):
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
         self._idle.setInterval(IDLE_STOP_SECONDS * 1000)
-        self._idle.timeout.connect(self._release)
+        self._idle.timeout.connect(self._release_idle)
 
     # -- what the window asks for ---------------------------------------------
 
     def load(self, clip: ClipInfo | None, position: float = 0.0) -> None:
         """Point at a clip. Nothing decodes until somebody presses play."""
         self.stop()
+        self._clear_sequence_binding()
         self._clear_frame_cache()
         self.clip = clip
         self.position = max(0.0, position)
 
+    def load_sequence(
+        self,
+        plan: SequencePlan,
+        clips_by_occurrence: Mapping[OccurrenceId, ClipInfo],
+        position: float = 0.0,
+    ) -> None:
+        """Bind the existing transport to one immutable output-time plan."""
+        if not isinstance(plan, SequencePlan):
+            raise TypeError("joined playback requires a SequencePlan")
+        resolved: dict[OccurrenceId, ClipInfo] = {}
+        for occurrence in plan.occurrences:
+            clip = clips_by_occurrence.get(occurrence.id)
+            if clip is None:
+                raise SequencePlanError(
+                    f"joined occurrence {occurrence.id.ordinal} is unresolved")
+            if (clip.fingerprint != occurrence.fingerprint
+                    or str(clip.path) != occurrence.source_path):
+                raise SequencePlanError(
+                    f"joined occurrence {occurrence.id.ordinal} changed source")
+            resolved[occurrence.id] = clip
+
+        self.stop()
+        self._clear_frame_cache()
+        self.clip = None
+        self._sequence_plan = plan
+        self._sequence_clips = resolved
+        total = float(plan.total_duration)
+        self.position = max(0.0, min(float(position), total))
+        self._playclock.jump_to(self.position)
+        self._starved = True
+
+    @property
+    def sequence_revision(self) -> str | None:
+        plan = self._sequence_plan
+        return plan.revision if plan is not None else None
+
+    def clear_sequence(self) -> None:
+        """Fence joined playback without selecting a replacement source."""
+        self.stop()
+        self._clear_sequence_binding()
+
     def play(self, view_width: int = 0) -> None:
-        if self.clip is None or self.is_playing:
+        if self.is_playing:
+            return
+        if self._sequence_plan is not None:
+            if self.position >= float(self._sequence_plan.total_duration):
+                return
+            self._clear_frame_cache()
+            self._idle.stop()
+            if view_width > 0 and self._sequence_active is None:
+                self.size = choose_size(view_width)
+            if self._sequence_active is None:
+                self._request_sequence_active(self.position)
+            self._playclock.jump_to(self.position)
+            self._starved = True
+            self.is_playing = True
+            self._timer.start()
+            self.state_changed.emit(True)
+            return
+        if self.clip is None:
             return
         self._clear_frame_cache()
         self._idle.stop()
@@ -778,6 +882,7 @@ class PreviewPlayer(QObject):
         self._timer.stop()
         self._idle.stop()
         self._release()
+        self._retire_sequence_lanes()
         self._cancel_frame_window()
         if was_playing:
             self.state_changed.emit(False)
@@ -789,6 +894,9 @@ class PreviewPlayer(QObject):
         already has a keyframe for every second and shows it instantly, which
         is a better answer than half a second of black waiting for a decoder.
         """
+        if self._sequence_plan is not None:
+            self._seek_sequence(seconds)
+            return
         target = max(0.0, seconds)
         if self.clip is not None and self.clip.duration > 0:
             target = min(target, self.clip.duration)
@@ -845,6 +953,8 @@ class PreviewPlayer(QObject):
         same, cache included, so a seek inside the window already decoded is
         free.
         """
+        if self._sequence_plan is not None:
+            return
         clip = self.clip
         if clip is None or clip.fps <= 0 or self.is_playing:
             return
@@ -914,6 +1024,8 @@ class PreviewPlayer(QObject):
                                    PREVIEW_FPS, self)
         worker.failed.connect(self._worker_failed)
         worker.ended.connect(self._worker_ended)
+        if hasattr(worker, "finished"):
+            worker.finished.connect(self._stream_worker_finished)
         self._worker = worker
         worker.start()
 
@@ -933,6 +1045,17 @@ class PreviewPlayer(QObject):
         self._pending = None
         self._stream_ended = False
 
+    def _release_idle(self) -> None:
+        if self._sequence_plan is not None:
+            self._retire_sequence_lanes()
+            return
+        self._release()
+
+    def _stream_worker_finished(self) -> None:
+        """Start one coalesced joined request only after capacity is real."""
+        self._retired = [w for w in self._retired if w.isRunning()]
+        self._service_sequence_start()
+
     def _worker_ended(self, generation: int) -> None:
         if generation == self._generation:
             # Not the end of playback — there can still be frames queued.
@@ -948,6 +1071,255 @@ class PreviewPlayer(QObject):
         if was_playing:
             self.state_changed.emit(False)
         self.failed.emit(message)
+
+    # -- joined output-time playback ----------------------------------------
+
+    def _clear_sequence_binding(self) -> None:
+        self._retire_sequence_lanes()
+        self._sequence_plan = None
+        self._sequence_clips = {}
+
+    def _retire_sequence_lane(self, lane: _SequenceLane | None) -> None:
+        if lane is None:
+            return
+        lane.worker.stop()
+        if lane.worker.isRunning():
+            self._retired.append(lane.worker)
+
+    def _retire_sequence_lanes(self) -> None:
+        self._sequence_epoch += 1
+        self._sequence_pending_start = None
+        active, self._sequence_active = self._sequence_active, None
+        following, self._sequence_next = self._sequence_next, None
+        self._retire_sequence_lane(active)
+        self._retire_sequence_lane(following)
+        self._retired = [w for w in self._retired if w.isRunning()]
+
+    def _streaming_workers_alive(self) -> int:
+        workers = []
+        if self._worker is not None:
+            workers.append(self._worker)
+        if self._sequence_active is not None:
+            workers.append(self._sequence_active.worker)
+        if self._sequence_next is not None:
+            workers.append(self._sequence_next.worker)
+        workers.extend(self._retired)
+        seen: set[int] = set()
+        alive = 0
+        for worker in workers:
+            identity = id(worker)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if worker.isRunning():
+                alive += 1
+        return alive
+
+    def _queue_sequence_start(self, request: _SequenceStart) -> None:
+        # One slot is deliberate. Rapid seeks replace an obsolete request;
+        # active work has priority over a speculative pre-roll.
+        pending = self._sequence_pending_start
+        if request.role == "active" or pending is None:
+            self._sequence_pending_start = request
+        elif pending.role != "active":
+            self._sequence_pending_start = request
+        self._service_sequence_start()
+
+    def _service_sequence_start(self) -> None:
+        request = self._sequence_pending_start
+        plan = self._sequence_plan
+        if request is None or plan is None:
+            return
+        if self._streaming_workers_alive() >= 2:
+            return
+        if request.epoch != self._sequence_epoch or request.revision != plan.revision:
+            self._sequence_pending_start = None
+            return
+        try:
+            occurrence = plan.get_occurrence(request.occurrence)
+        except SequencePlanError:
+            self._sequence_pending_start = None
+            return
+        if request.role == "active":
+            if self._sequence_active is not None:
+                self._sequence_pending_start = None
+                return
+        else:
+            active = self._sequence_active
+            if (active is None or self._sequence_next is not None
+                    or occurrence.id.ordinal != active.occurrence.ordinal + 1):
+                self._sequence_pending_start = None
+                return
+
+        clip = self._sequence_clips.get(occurrence.id)
+        if clip is None:
+            self._sequence_pending_start = None
+            return
+        frames: queue.Queue = queue.Queue(maxsize=QUEUE_FRAMES)
+        self._generation += 1
+        generation = self._generation
+        worker = self._make_worker(
+            self.tools, clip, request.source_start, self.size,
+            generation, frames, PREVIEW_FPS, self)
+        worker.failed.connect(self._sequence_worker_failed)
+        worker.ended.connect(self._sequence_worker_ended)
+        if hasattr(worker, "finished"):
+            worker.finished.connect(self._stream_worker_finished)
+        lane = _SequenceLane(
+            revision=plan.revision,
+            occurrence=occurrence.id,
+            generation=generation,
+            worker=worker,
+            frames=frames,
+        )
+        if request.role == "active":
+            self._sequence_active = lane
+        else:
+            self._sequence_next = lane
+        self._sequence_pending_start = None
+        worker.start()
+
+    def _request_sequence_active(self, output_seconds: float) -> None:
+        plan = self._sequence_plan
+        if plan is None:
+            return
+        try:
+            location = plan.locate_output(output_seconds)
+        except SequencePlanError:
+            return
+        if isinstance(location, SequenceTerminal):
+            return
+        self._queue_sequence_start(_SequenceStart(
+            self._sequence_epoch,
+            plan.revision,
+            "active",
+            location.occurrence,
+            float(location.source),
+        ))
+
+    def _request_sequence_preroll(self) -> None:
+        plan = self._sequence_plan
+        active = self._sequence_active
+        if plan is None or active is None or self._sequence_next is not None:
+            return
+        ordinal = active.occurrence.ordinal + 1
+        if ordinal >= len(plan.occurrences):
+            return
+        pending = self._sequence_pending_start
+        if pending is not None and pending.role == "active":
+            return
+        occurrence = plan.occurrences[ordinal]
+        if pending is not None and pending.occurrence == occurrence.id:
+            return
+        self._queue_sequence_start(_SequenceStart(
+            self._sequence_epoch,
+            plan.revision,
+            "next",
+            occurrence.id,
+            float(occurrence.source.start),
+        ))
+
+    def _seek_sequence(self, seconds: float) -> None:
+        plan = self._sequence_plan
+        if plan is None:
+            return
+        target = max(0.0, min(float(seconds), float(plan.total_duration)))
+        self._cancel_frame_window()
+        self._retire_sequence_lanes()
+        self.position = target
+        self._playclock.jump_to(target)
+        self._starved = True
+        if self.is_playing and target < float(plan.total_duration):
+            self._request_sequence_active(target)
+        elif self.is_playing:
+            self._finish_sequence()
+
+    def _sequence_worker_ended(self, generation: int) -> None:
+        for lane in (self._sequence_active, self._sequence_next):
+            if lane is not None and lane.generation == generation:
+                lane.ended = True
+                return
+
+    def _sequence_worker_failed(self, generation: int, message: str) -> None:
+        if not any(lane is not None and lane.generation == generation
+                   for lane in (self._sequence_active, self._sequence_next)):
+            return
+        was_playing = self.is_playing
+        self.is_playing = False
+        self._timer.stop()
+        self._idle.stop()
+        self._retire_sequence_lanes()
+        if was_playing:
+            self.state_changed.emit(False)
+        self.failed.emit(message)
+
+    def _sequence_output_time(self, occurrence, source_seconds: float) -> float:
+        return (float(occurrence.output.start)
+                + source_seconds - float(occurrence.source.start))
+
+    def _pick_sequence(
+        self, lane: _SequenceLane, wanted: float,
+    ) -> tuple[tuple[float, float, bytes] | None, bool]:
+        """Return the newest due frame plus whether the lane is truly empty."""
+        plan = self._sequence_plan
+        if plan is None or lane.revision != plan.revision:
+            return None, True
+        occurrence = plan.get_occurrence(lane.occurrence)
+        chosen: tuple[float, float, bytes] | None = None
+        while True:
+            if lane.pending is None:
+                try:
+                    lane.pending = lane.frames.get_nowait()
+                except queue.Empty:
+                    return chosen, chosen is None
+            source_seconds, data = lane.pending
+            source_start = float(occurrence.source.start)
+            source_end = float(occurrence.source.end)
+            if source_seconds < source_start - 1e-6:
+                lane.pending = None
+                continue
+            if source_seconds >= source_end - 1e-6:
+                lane.pending = None
+                continue
+            output_seconds = self._sequence_output_time(
+                occurrence, source_seconds)
+            if output_seconds > wanted + 1e-6:
+                return chosen, False
+            chosen = (output_seconds, source_seconds, data)
+            lane.pending = None
+
+    def _promote_sequence_lane(self, occurrence: OccurrenceId) -> bool:
+        following = self._sequence_next
+        if following is None or following.occurrence != occurrence:
+            return False
+        old, self._sequence_active = self._sequence_active, following
+        self._sequence_next = None
+        self._retire_sequence_lane(old)
+        self._retired = [w for w in self._retired if w.isRunning()]
+        return True
+
+    def _retarget_sequence_tick(self, wanted: float, occurrence: OccurrenceId) -> None:
+        """Fence skipped/late lanes and coalesce a start at the true target."""
+        self._retire_sequence_lanes()
+        self.position = wanted
+        self._playclock.jump_to(wanted)
+        self._starved = True
+        self._request_sequence_active(wanted)
+
+    def _finish_sequence(self) -> None:
+        plan = self._sequence_plan
+        if plan is None:
+            return
+        was_playing = self.is_playing
+        self.position = float(plan.total_duration)
+        self._playclock.jump_to(self.position)
+        self.is_playing = False
+        self._timer.stop()
+        self._idle.stop()
+        self._retire_sequence_lanes()
+        if was_playing:
+            self.state_changed.emit(False)
+        self.ended.emit()
 
     # -- the paused native-frame window --------------------------------------
 
@@ -1020,6 +1392,9 @@ class PreviewPlayer(QObject):
         # publish timing after that lifecycle fence.
         if not self.is_playing:
             return
+        if self._sequence_plan is not None:
+            self._tick_sequence()
+            return
         wanted = self._playclock.advance(starved=self._starved)
         frame = self._pick(wanted)
         if frame is not None:
@@ -1032,6 +1407,72 @@ class PreviewPlayer(QObject):
             self._finish()
             return
         self.playback_tick.emit(wanted, self._starved)
+
+    def _tick_sequence(self) -> None:
+        plan = self._sequence_plan
+        if plan is None:
+            return
+        wanted = min(
+            self._playclock.advance(starved=self._starved),
+            float(plan.total_duration),
+        )
+        if wanted >= float(plan.total_duration) - 1e-9:
+            self.playback_tick.emit(float(plan.total_duration), False)
+            self._finish_sequence()
+            return
+
+        try:
+            location = plan.locate_output(wanted)
+        except SequencePlanError:
+            self._sequence_worker_failed(
+                self._sequence_active.generation
+                if self._sequence_active is not None else -1,
+                "The joined output clock no longer resolves",
+            )
+            return
+        if isinstance(location, SequenceTerminal):
+            self._finish_sequence()
+            return
+
+        active = self._sequence_active
+        if active is None:
+            self.position = wanted
+            self._starved = True
+            self._request_sequence_active(wanted)
+            self.playback_tick.emit(wanted, True)
+            return
+
+        if active.occurrence != location.occurrence:
+            if not self._promote_sequence_lane(location.occurrence):
+                self._retarget_sequence_tick(wanted, location.occurrence)
+                self.playback_tick.emit(wanted, True)
+                return
+            active = self._sequence_active
+            if active is None:
+                return
+
+        occurrence = plan.get_occurrence(active.occurrence)
+        remaining = float(occurrence.output.end) - wanted
+        if remaining <= SEQUENCE_PREROLL_SECONDS + 1e-9:
+            self._request_sequence_preroll()
+
+        frame, starved = self._pick_sequence(active, wanted)
+        self._starved = starved
+        self.position = wanted
+        if frame is not None:
+            output_seconds, source_seconds, data = frame
+            self.sequence_frame_ready.emit(
+                self._to_image(data), plan.revision, active.occurrence,
+                output_seconds, source_seconds)
+        elif active.ended and active.pending is None and active.frames.empty():
+            # A source ended before its nominal half-open occurrence boundary.
+            # Do not silently skip that material to the next row.
+            self._sequence_worker_failed(
+                active.generation,
+                "The joined preview source ended before its occurrence boundary",
+            )
+            return
+        self.playback_tick.emit(wanted, starved)
 
     def _pick(self, wanted: float) -> tuple[float, bytes] | None:
         """The newest queued frame that is not still in the future.
