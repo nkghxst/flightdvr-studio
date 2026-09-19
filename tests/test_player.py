@@ -1202,6 +1202,45 @@ def test_rapid_joined_seeks_wait_for_physical_capacity_and_coalesce(qt_app):
     assert p._streaming_workers_alive() == 0
 
 
+def test_joined_preroll_waits_for_a_lingering_source_decoder(qt_app):
+    from flightdvr.player import PreviewPlayer
+    made = []
+
+    def factory(*args, **kwargs):
+        worker = LingeringWorker(*args, **kwargs)
+        made.append(worker)
+        return worker
+
+    p = PreviewPlayer(TOOLS, clock=FakeClock(), worker_factory=factory,
+                      frame_worker_factory=FakeFrameWorker)
+    p.load(clip())
+    p.play()
+    source_worker = made[0]
+    complaints = []
+    p.failed.connect(complaints.append)
+    plan, clips = aba_sequence()
+
+    p.load_sequence(plan, clips)
+    source_worker.failed.emit(source_worker.generation, "obsolete source")
+    assert complaints == []
+    p.play()
+    assert len(made) == 2
+    assert p._streaming_workers_alive() == 2
+    p._request_sequence_preroll()
+    assert len(made) == 2
+    assert p._sequence_pending_start.role == "next"
+
+    source_worker.finish()
+    assert len(made) == 3
+    assert p._sequence_next.occurrence == plan.occurrences[1].id
+    assert p._streaming_workers_alive() == 2
+    p.stop()
+    for worker in made[1:]:
+        worker.finish()
+    p.shutdown()
+    assert p._streaming_workers_alive() == 0
+
+
 def test_joined_pause_resume_and_idle_release_keep_output_position(qt_app):
     fake = FakeClock()
     p, plan = sequence_player(fake)

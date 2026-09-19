@@ -805,6 +805,10 @@ class PreviewPlayer(QObject):
             resolved[occurrence.id] = clip
 
         self.stop()
+        # A stopped source DecodeWorker can report after its thread unwinds.
+        # Joined playback may be capacity-gated and therefore not create a new
+        # worker immediately, so fence the old source generation explicitly.
+        self._generation += 1
         self._clear_frame_cache()
         self.clip = None
         self._sequence_plan = plan
