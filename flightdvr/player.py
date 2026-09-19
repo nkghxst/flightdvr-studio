@@ -1096,24 +1096,32 @@ class PreviewPlayer(QObject):
         self._retired = [w for w in self._retired if w.isRunning()]
 
     def _streaming_workers_alive(self) -> int:
-        workers = []
+        # Current slots are reserved even in the small interval between
+        # QThread.start() and isRunning() becoming observable. Retired slots
+        # count only while their process-owning thread is physically alive.
+        current = []
         if self._worker is not None:
-            workers.append(self._worker)
+            current.append(self._worker)
         if self._sequence_active is not None:
-            workers.append(self._sequence_active.worker)
+            current.append(self._sequence_active.worker)
         if self._sequence_next is not None:
-            workers.append(self._sequence_next.worker)
-        workers.extend(self._retired)
+            current.append(self._sequence_next.worker)
         seen: set[int] = set()
-        alive = 0
-        for worker in workers:
+        occupied = 0
+        for worker in current:
+            identity = id(worker)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            occupied += 1
+        for worker in self._retired:
             identity = id(worker)
             if identity in seen:
                 continue
             seen.add(identity)
             if worker.isRunning():
-                alive += 1
-        return alive
+                occupied += 1
+        return occupied
 
     def _queue_sequence_start(self, request: _SequenceStart) -> None:
         # One slot is deliberate. Rapid seeks replace an obsolete request;
