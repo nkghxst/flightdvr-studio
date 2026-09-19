@@ -171,6 +171,13 @@ do not repeat empty polling. This is an internal procedure only: an outside
 contributor is not asked for an ACK, mention, floor, role, verdict owner or
 handoff template.
 
+Once the coordinator authorizes a correction, a reviewer-requested fix that
+stays within the existing maker scope and branch ownership proceeds without
+renewed coordinator approval; the same reviewer retains verdict ownership for
+the corrected head. Escalate before editing if the correction changes scope or
+ownership, requires new permissions, or touches a reserved decision. The
+coordinator retains merge and next-stage authority.
+
 Every handoff names the maker, independent verdict owner, exact commit, checks,
 outcome and remaining limits. A useful shape is:
 
