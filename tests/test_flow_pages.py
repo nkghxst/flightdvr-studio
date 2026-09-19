@@ -36,6 +36,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QThread, Qt
+from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -1363,6 +1364,46 @@ def test_reorder_revises_the_plan_and_refuses_old_scrubs_and_frames(
 
     window.preview_view.sequence_strip.request_position(0.0)
     assert loaded[-1] == (second, 2.0)
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_joined_precise_frame_cannot_become_source_trim_or_still_authority(
+        window, app, monkeypatch):
+    """The precise callback paints, but joined seconds stay out of source UI."""
+    make_aba_assembly(window, app)
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    monkeypatch.setattr(window.player, "load", lambda *a, **k: None)
+    monkeypatch.setattr(window.player, "seek", lambda *a, **k: None)
+    monkeypatch.setattr(window.player, "show_frame_at", lambda *a, **k: None)
+
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    window.preview_view.sequence_strip.request_position(3.0)
+    assert window._sequence_occurrence.ordinal == 1
+    assert window._sequence_source_seconds == 2.0
+    source_before = (
+        window._trim_clip,
+        window.clips[0].current,
+        window.trim_bar.in_point,
+        window.trim_bar.out_point,
+        window.trim_bar.playhead,
+    )
+
+    image = QImage(2, 2, QImage.Format.Format_RGB888)
+    image.fill(Qt.GlobalColor.red)
+    window._precise_frame_ready(image, 2.0, 17)
+
+    assert window._precise_frame_number is None
+    assert window._precise_frame_seconds is None
+    assert not window.still_button.isEnabled()
+    assert (
+        window._trim_clip,
+        window.clips[0].current,
+        window.trim_bar.in_point,
+        window.trim_bar.out_point,
+        window.trim_bar.playhead,
+    ) == source_before
     window.set_view_mode(Mode.CLASSIC)
 
 
