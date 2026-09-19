@@ -735,6 +735,33 @@ def test_joined_picture_ticks_never_service_source_monitoring(
     assert driven == []
 
 
+def test_each_joined_player_tick_services_one_output_sample_even_if_reentered(
+        window, monkeypatch):
+    """The joined picture clock is authority; source seconds never enter here."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(window, "_joined_assemble_active", lambda: True)
+    window._sequence_plan = SimpleNamespace(revision="joined-1")
+    window.player._sequence_plan = window._sequence_plan
+    window._monitor_snapshot = SimpleNamespace(
+        output_sample=lambda seconds: round(seconds * OUTPUT_RATE))
+    calls = []
+
+    def reentrant(sample):
+        calls.append(sample)
+        window._preview_playback_tick(13.0, False)
+
+    monkeypatch.setattr(window.live_preview, "tick", reentrant)
+    window.live_preview._playing = True
+    window.live_preview._stream = FakeStream(blocks=0)
+    window.live_preview._reason = ""
+
+    window._preview_playback_tick(1.0, False)
+
+    assert calls == [OUTPUT_RATE], (
+        "one output tick was serviced twice or used paused source second 13")
+
+
 def test_joined_picture_state_keeps_the_existing_monitor_fenced(
         window, monkeypatch):
     monkeypatch.setattr(window, "_joined_assemble_active", lambda: True)

@@ -37,6 +37,8 @@ from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import QApplication
 
 from flightdvr.audio_plan import AudioMode, AudioAsset, MusicChoice, SampleSpan
+from flightdvr.assembly import Item
+from flightdvr.flow_layout import Mode, Stage
 from flightdvr.jobs import Job, JobStatus
 from flightdvr.media import ClipInfo, Select
 from flightdvr.output_plan import OutputTarget
@@ -285,6 +287,79 @@ def warnings_from(monkeypatch) -> list:
     monkeypatch.setattr("flightdvr.ui.QMessageBox.warning",
                         staticmethod(lambda *a, **k: said.append(a[2])))
     return said
+
+
+def assembly_target(window, app) -> OutputTarget:
+    """Bind the literal A/B/A run to Flow's valid joined output."""
+    first, second = window.clips
+    first.selects = [Select(10.0, 13.0, "A", sid="a")]
+    second.selects = [Select(2.0, 4.0, "B", sid="b")]
+    window._store_assembly([
+        Item(first.fingerprint, "a"),
+        Item(second.fingerprint, "b"),
+        Item(first.fingerprint, "a"),
+    ])
+    window.set_view_mode(Mode.FLOW)
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+    return OutputTarget.assembly((
+        Item(first.fingerprint, "a"),
+        Item(second.fingerprint, "b"),
+        Item(first.fingerprint, "a"),
+    ))
+
+
+def test_valid_assembly_owns_one_editable_preview_choice(window, app):
+    target = assembly_target(window, app)
+
+    assert window._music_target == target
+    assert window.output_plan.selected_target == target
+    assert window.music_panel.mode_combo.isEnabled()
+    assert "Preview only" in window.music_panel.unsupported_label.text()
+    assert window._planned_music(target) == MusicChoice()
+
+
+def test_reorder_rekeys_only_the_tracked_assembly_choice(window, app):
+    old = assembly_target(window, app)
+    retained = MusicChoice(mode=AudioMode.NO_SOUND)
+    window._store_music(old, retained)
+    first, second = window.clips
+    current = OutputTarget.assembly((
+        Item(second.fingerprint, "b"),
+        Item(first.fingerprint, "a"),
+        Item(first.fingerprint, "a"),
+    ))
+
+    window._store_assembly(list(current.items))
+    app.processEvents()
+
+    assert window._music_target == current
+    assert window._planned_music(current) == retained
+    assert old not in window.output_plan.targets
+    assert all(window._planned_music(OutputTarget.clip_or_range(
+        item.fingerprint, item.sid)) != retained for item in current.items)
+
+    # A transient invalid run retains the last exact choice but offers no stream.
+    window._store_assembly([current.items[0]])
+    app.processEvents()
+    assert window._sequence_plan is None
+    assert window._music_target == current
+    assert window._planned_music(current) == retained
+    assert not window.live_preview.status.offered
+
+
+def test_joined_preview_choice_is_still_refused_before_queue_mutation(
+        window, app, monkeypatch):
+    target = assembly_target(window, app)
+    window._store_music(target, MusicChoice(mode=AudioMode.NO_SOUND))
+    window._sync_music_panel()
+    before = list(window.jobs)
+    said = warnings_from(monkeypatch)
+
+    window._add_to_queue()
+
+    assert window.jobs == before
+    assert said and "Assembly" in said[-1]
 
 
 # -- what a queued job carries -------------------------------------------------

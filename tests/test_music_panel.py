@@ -301,6 +301,19 @@ def test_a_supported_context_is_editable_and_says_nothing(panel):
     assert panel.mode_combo.isEnabled()
 
 
+def test_a_master_assembly_is_editable_for_preview_without_weakening_export(
+        panel):
+    """Audition is a separate capability; joined export still refuses."""
+    panel.load(MusicChoice(mode=AudioMode.NO_SOUND), target="Assembly",
+               joined=True, audition=True)
+
+    assert panel.mode_combo.isEnabled()
+    assert not panel.unsupported_label.isHidden()
+    assert "Preview only" in panel.unsupported_label.text()
+    assert "export" in panel.unsupported_label.text()
+    assert "Assembly" in MusicPanel._refusal("master", True, False)
+
+
 def test_the_panel_refuses_the_same_contexts_the_resolver_does(panel):
     """The wording is the panel's; the rule is the resolver's. If S2 ever
     accepted an Assembly, this would fail rather than the panel quietly
