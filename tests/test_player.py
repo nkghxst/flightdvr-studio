@@ -716,6 +716,80 @@ def test_a_frame_still_in_the_future_is_kept_for_its_moment(qt_app):
     assert p._pending is not None and p._pending[0] == pytest.approx(5.0)
 
 
+def test_playback_tick_advances_without_moving_the_painted_position(qt_app):
+    """The player clock services consumers even while the next frame is future."""
+    fake = FakeClock()
+    p = player(fake)
+    p.seek(12.0)
+    p.play(view_width=640)
+    fill(p, 12.0, 12.1)
+
+    shown = []
+    p.frame_ready.connect(lambda _image, when: shown.append(when))
+    p._tick()                            # paint 12.0 before observing service
+    timing = []
+    p.playback_tick.connect(
+        lambda wanted, starved: timing.append((wanted, starved)))
+
+    fake.tick(0.02)
+    p._tick()
+    fake.tick(0.02)
+    p._tick()
+
+    assert timing == [
+        (pytest.approx(12.02), False),
+        (pytest.approx(12.04), False),
+    ]
+    assert shown == [pytest.approx(12.0)]
+    assert p.position == pytest.approx(12.0)
+
+    fake.tick(0.06)
+    p._tick()                            # 12.1 is now due and paints once
+    assert timing[-1] == (pytest.approx(12.1), False)
+    assert len(timing) == 3, "a painted callback emitted timing twice"
+    assert shown[-1] == pytest.approx(12.1)
+
+
+def test_playback_tick_distinguishes_starvation_from_a_future_frame(qt_app):
+    fake = FakeClock()
+    starved = player(fake)
+    starved.play(view_width=640)
+    fill(starved, 0.0)
+    starved._tick()
+    dry = []
+    starved.playback_tick.connect(
+        lambda wanted, is_starved: dry.append((wanted, is_starved)))
+
+    fake.tick(0.02)
+    starved._tick()
+    fake.tick(0.02)
+    starved._tick()
+
+    assert dry == [
+        (pytest.approx(0.02), True),
+        (pytest.approx(0.02), True),
+    ], "a starved callback advanced the stalled picture clock"
+
+    fake = FakeClock()
+    future = player(fake)
+    future.play(view_width=640)
+    fill(future, 0.0, 0.1)
+    future._tick()
+    waiting = []
+    future.playback_tick.connect(
+        lambda wanted, is_starved: waiting.append((wanted, is_starved)))
+
+    fake.tick(0.02)
+    future._tick()
+    fake.tick(0.02)
+    future._tick()
+
+    assert waiting == [
+        (pytest.approx(0.02), False),
+        (pytest.approx(0.04), False),
+    ], "a future frame was mistaken for decoder starvation"
+
+
 def test_late_frames_are_dropped_rather_than_played_in_slow_motion(qt_app):
     """A repaint that overran must cost frames, not put the picture behind the
     clock for the rest of the clip."""
