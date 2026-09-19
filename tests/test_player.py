@@ -1128,6 +1128,41 @@ def test_joined_due_frames_cross_the_following_occurrence_seam_once(qt_app):
     assert p.position == pytest.approx(3.0)
 
 
+def test_joined_seam_retires_outgoing_worker_and_shutdown_owns_factory_list(
+        qt_app):
+    """Promotion must not lose a still-running decoder between lane slots."""
+    class WaitCompletesLingeringWorker(LingeringWorker):
+        def wait(self, _msecs=0) -> bool:
+            self.finish()
+            return True
+
+    fake = FakeClock()
+    p, plan = sequence_player(
+        fake, worker_type=WaitCompletesLingeringWorker)
+    p.play()
+    outgoing = p.workers[0]
+    fill_sequence_lane(p, p._sequence_active, 10.0)
+    p._tick()
+
+    fake.tick(2.3)
+    fill_sequence_lane(p, p._sequence_active, 12.3)
+    p._tick()
+    following = p._sequence_next
+    assert following is not None
+    assert following.occurrence == plan.occurrences[1].id
+    assert outgoing.isRunning()
+
+    fill_sequence_lane(p, following, 2.0)
+    fake.tick(0.7)
+    p._tick()
+
+    assert outgoing.stopped
+    assert outgoing.isRunning(), "the retired decoder still needs joining"
+    p.shutdown()
+    assert all(worker.stopped for worker in p.workers)
+    assert all(not worker.isRunning() for worker in p.workers)
+
+
 def test_joined_seek_uses_repeated_occurrence_identity_and_fences_old_frames(
         qt_app):
     fake = FakeClock()
