@@ -1143,6 +1143,40 @@ def test_outside_navigation_stays_video_only_until_explicit_rearm(
             "silence left previously presented PCM downstream")
 
 
+def test_sub_sample_position_rounding_to_terminal_refuses_without_raising(
+        window, monkeypatch):
+    """A rationally interior point can still quantize to the terminal sample."""
+    from fractions import Fraction
+    from flightdvr.media import Select
+
+    _absolute_source_reader(monkeypatch)
+    clip = next(iter(window.clip_by_path.values()))
+    clip.selects = [Select(12.0, 18.0, sid="focused")]
+    clip.current = 0
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    window.live_preview.set_listening(Listening.SOURCE)
+    window.player.seek = lambda seconds: setattr(window.player, "position", seconds)
+    window.player.position = 13.0
+    window.preview_view.listen_check.setChecked(True)
+    snapshot = window._monitor_snapshot
+    active_stream = window.live_preview._stream
+    near_end = 18.0 - 0.25 / OUTPUT_RATE
+
+    assert snapshot.samples == 288_000
+    assert snapshot.sequence.locate_source(
+        snapshot.occurrence, Fraction(str(near_end))) is not None
+    assert snapshot.output_sample(near_end) is None
+
+    window._jump(near_end)
+
+    assert window.player.position == pytest.approx(near_end)
+    assert not window.live_preview.status.offered
+    assert "outside the selected range" in window.live_preview.status.reason
+    assert window.preview_view.listen_check.isChecked()
+    assert active_stream._cancel.is_set()
+
+
 def test_trim_change_fences_old_snapshot_before_explicit_rearm(
         window, monkeypatch):
     from flightdvr.media import Select

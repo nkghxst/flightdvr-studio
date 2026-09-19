@@ -164,7 +164,15 @@ class _MonitorSnapshot:
                 self.occurrence, Fraction(str(numeric)))
         except (TypeError, ValueError, OverflowError, SequencePlanError):
             return None
-        return round_samples(location.output * OUTPUT_RATE)
+        output_sample = round_samples(location.output * OUTPUT_RATE)
+        # `locate_source` validates the rational half-open occurrence, but the
+        # device clock is integral. A point less than half a sample from the
+        # source end can therefore round to the terminal output coordinate.
+        # That coordinate is not playable: refuse it through the same silence
+        # and explicit-rearm path as the exact endpoint instead of clamping.
+        if output_sample < 0 or output_sample >= self.samples:
+            return None
+        return output_sample
 
 # The name item already uses UserRole for its path, and SortItem uses the next
 # role for ordering. This one records the current-settings export marker so the
