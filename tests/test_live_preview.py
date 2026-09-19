@@ -1054,6 +1054,66 @@ def test_filmstrip_keyboard_and_precise_resume_use_focused_output_positions(
     assert video_seeks[:2] == [17.0, 13.0]
 
 
+def test_player_timer_services_focused_audio_without_moving_painted_position(
+        window, monkeypatch):
+    """12.02/12.04 service output 960/1920 while 12.0 stays painted."""
+    import queue
+    from flightdvr.media import Select
+    from flightdvr.player import PlayClock
+
+    class TimerClock:
+        def __init__(self):
+            self.now = 100.0
+
+        def __call__(self):
+            return self.now
+
+        def advance(self, seconds):
+            self.now += seconds
+
+    _absolute_source_reader(monkeypatch)
+    clip = next(iter(window.clip_by_path.values()))
+    clip.selects = [Select(12.0, 18.0, sid="focused")]
+    clip.current = 0
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    window.live_preview.set_listening(Listening.SOURCE)
+    player = window.player
+    player.position = 12.0
+    player.is_playing = True
+    window.preview_view.listen_check.setChecked(True)
+
+    calls = []
+    window.live_preview.tick = lambda output_sample: calls.append(output_sample) or 0
+    clock = TimerClock()
+    player._playclock = PlayClock(origin=12.0, clock=clock)
+    player._playclock.start()
+    player._starved = False
+    player._stream_ended = False
+    player._pending = None
+    player._frames = queue.Queue(maxsize=4)
+    pixels = b"\0" * player.size.frame_bytes
+    player._frames.put((12.0, pixels))
+    player._frames.put((12.1, pixels))
+
+    player._tick()                      # paints source 12.0 and services once
+    calls.clear()
+    clock.advance(0.02)
+    player._tick()                      # 12.1 is still in the future
+    clock.advance(0.02)
+    player._tick()
+
+    assert calls == [960, 1_920]
+    assert player.position == pytest.approx(12.0)
+    assert window.trim_bar.playhead == pytest.approx(12.0)
+
+    clock.advance(0.06)
+    player._tick()                      # paints 12.1, still one service call
+    assert calls[-1] == 4_800
+    assert len(calls) == 3, "frame-ready and timer both serviced one callback"
+    assert player.position == pytest.approx(12.1)
+
+
 def test_second_unticked_range_and_open_endpoint_compile_exactly(window):
     from PySide6.QtCore import Qt
     from flightdvr.media import Select
@@ -1643,6 +1703,163 @@ def composed(*, accepts=(), max_queued_bytes: int = 1 << 20, blocks: int = 4,
     live.set_target(object())
     live.play()
     return live, stream, output, sink
+
+
+class TimerClock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def timer_driven_transport(window, monkeypatch, *, blocks: int = 1):
+    """Focused UI mapping over a real adapter, driven only by player ticks."""
+    import queue
+    from flightdvr.live_preview import LivePreview
+    from flightdvr.media import Select
+    from flightdvr.player import PlayClock
+
+    _absolute_source_reader(monkeypatch)
+    clip = next(iter(window.clip_by_path.values()))
+    clip.selects = [Select(12.0, 18.0, sid="focused")]
+    clip.current = 0
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    window.live_preview.set_listening(Listening.SOURCE)
+    assert window._monitor_snapshot is not None
+    window.live_preview.close()
+
+    sink = ShortSink(accepts=(0, 0))
+    output = AudioOutput(sink_factory=lambda: sink)
+    stream = NumberedStream(blocks=blocks)
+    live = LivePreview(stream_factory=lambda *a, **k: stream, output=output)
+    live.set_target(object())
+    live.set_muted(False)
+    live.play()
+    window.live_preview = live
+
+    player = window.player
+    player.clip = clip
+    player.position = 12.0
+    player.is_playing = True
+    clock = TimerClock()
+    player._playclock = PlayClock(origin=12.0, clock=clock)
+    player._playclock.start()
+    player._starved = False
+    player._stream_ended = False
+    player._pending = None
+    player._frames = queue.Queue(maxsize=4)
+    return player, clock, live, stream, output, sink
+
+
+@pytest.mark.parametrize("producer_state", ("buffering", "ended"))
+def test_player_timer_pumps_real_pending_bytes_without_a_new_frame(
+        window, monkeypatch, producer_state):
+    """Buffering/EOF cannot strand a suffix when no picture is repainted."""
+    player, clock, live, stream, output, sink = timer_driven_transport(
+        window, monkeypatch)
+    shown = []
+    player.frame_ready.connect(lambda *_: shown.append(True))
+
+    player._tick()
+    pending = output.queued_bytes
+    assert pending > 0, "the first player callback left no adapter suffix"
+    assert sink.received == b""
+    assert stream.handed_out, "the producer handed out no PCM"
+    if producer_state == "buffering":
+        stream.raises = Buffering()
+    else:
+        assert stream.remaining == 0
+
+    clock.advance(0.02)
+    player._tick()
+
+    assert output.queued_bytes < pending
+    assert sink.received, "the later player callback made no nonempty write"
+    assert bytes(sink.received) == expected_bytes(stream.handed_out)
+    assert shown == [], "the oracle accidentally depended on a painted frame"
+    assert player.is_playing and live.status.playing
+    assert stream.generation == output.generation
+    live.close()
+
+
+@pytest.mark.parametrize("fence", ("pause", "target", "failure", "close"))
+def test_obsolete_player_callbacks_cannot_revive_a_fenced_suffix(
+        window, monkeypatch, fence):
+    player, _clock, live, stream, output, sink = timer_driven_transport(
+        window, monkeypatch)
+    player._tick()
+    assert output.queued_bytes > 0, "the fixture left no suffix to fence"
+    handed = len(stream.handed_out)
+
+    if fence == "pause":
+        player.pause()
+    elif fence == "target":
+        live.set_target(object(), reason="the target changed")
+    elif fence == "failure":
+        player._worker_failed(player._generation, "decoder failed")
+    else:
+        window.close()
+
+    assert output.queued_bytes == 0
+    before = bytes(sink.received)
+    player._tick()                       # a timeout already queued before fence
+
+    assert bytes(sink.received) == before
+    assert len(stream.handed_out) == handed
+    assert not live.status.playing
+    assert not output.running
+
+
+def test_player_seek_fences_old_suffix_before_timer_services_new_generation(
+        window, monkeypatch):
+    player, clock, live, stream, output, sink = timer_driven_transport(
+        window, monkeypatch)
+    player._tick()
+    assert output.queued_bytes > 0
+    stale = list(stream.handed_out)
+    stream.handed_out.clear()
+
+    window._jump(13.0)
+
+    assert output.queued_bytes == 0
+    assert stream.generation == output.generation
+    clock.advance(0.02)
+    player._tick()
+    fresh = bytes(sink.received)
+    assert stream.handed_out, "the post-seek timer produced no new PCM"
+    assert fresh == expected_bytes(stream.handed_out)
+    for old in stale:
+        assert expected_bytes([old]) not in fresh
+    live.close()
+
+
+def test_actual_video_eof_fences_audio_before_any_final_timer_service(
+        window, monkeypatch):
+    player, _clock, live, stream, output, sink = timer_driven_transport(
+        window, monkeypatch)
+    timing = []
+    player.playback_tick.connect(lambda *_: timing.append(True))
+    player._tick()
+    assert output.queued_bytes > 0
+    before = len(timing)
+
+    player._stream_ended = True
+    player._tick()
+
+    assert not player.is_playing
+    assert not live.status.playing
+    assert output.queued_bytes == 0
+    assert bytes(sink.received) == b""
+    assert len(timing) == before, "video EOF published service after its fence"
+    player._tick()                       # obsolete timeout stays inert
+    assert len(timing) == before
+    assert not stream.stopped, (
+        "source EOF was mistaken for a decoder failure before video EOF")
 
 
 def test_a_block_the_adapter_only_partly_took_is_not_thrown_away():

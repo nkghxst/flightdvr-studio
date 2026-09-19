@@ -790,6 +790,19 @@ def test_playback_tick_distinguishes_starvation_from_a_future_frame(qt_app):
     ], "a future frame was mistaken for decoder starvation"
 
 
+def test_paused_or_precise_display_publishes_no_playback_timing(qt_app):
+    p = player(FakeClock())
+    timing = []
+    p.playback_tick.connect(lambda *event: timing.append(event))
+
+    p._tick()                            # a queued timeout after pause/stop
+    p._emit_precise(CachedFrame(0, 0.0, b"\0" * p._frame_size.frame_bytes))
+    p._tick()
+
+    assert timing == []
+    assert not p.is_playing
+
+
 def test_late_frames_are_dropped_rather_than_played_in_slow_motion(qt_app):
     """A repaint that overran must cost frames, not put the picture behind the
     clock for the rest of the clip."""

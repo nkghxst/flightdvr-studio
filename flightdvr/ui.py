@@ -317,6 +317,7 @@ class MainWindow(QMainWindow):
 
         self.player = PreviewPlayer(tools, self)
         self.player.frame_ready.connect(self._preview_frame_ready)
+        self.player.playback_tick.connect(self._preview_playback_tick)
         self.player.precise_frame_ready.connect(self._precise_frame_ready)
         self.player.precise_loading.connect(self._precise_loading)
         self.player.precise_failed.connect(self._precise_failed)
@@ -3265,9 +3266,13 @@ class MainWindow(QMainWindow):
         # I always means the picture on screen.
         self.trim_bar.set_playhead(seconds)
         self._update_trim_labels()
-        # The painted frame is the tick. Driving the sound from the picture
-        # that was actually shown, rather than from a clock running beside it,
-        # is what keeps one player in charge of both.
+
+    def _preview_playback_tick(self, seconds: float, _starved: bool) -> None:
+        """Service sound once from the video player's existing timer clock.
+
+        Painting deliberately remains separate: the public player position,
+        trim marker and still authority continue to name the frame on screen.
+        """
         self._drive_monitoring(seconds)
 
     def _precise_frame_ready(self, image, seconds: float,

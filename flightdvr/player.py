@@ -1015,6 +1015,11 @@ class PreviewPlayer(QObject):
     # -- the clock ------------------------------------------------------------
 
     def _tick(self) -> None:
+        # A timeout may already be queued when pause/stop/failure tears down
+        # playback. It belongs to the retired active interval and must not
+        # publish timing after that lifecycle fence.
+        if not self.is_playing:
+            return
         wanted = self._playclock.advance(starved=self._starved)
         frame = self._pick(wanted)
         if frame is not None:
