@@ -35,9 +35,11 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QThread
+from PySide6.QtCore import QPoint, QThread, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from flightdvr.assembly import Item
 from flightdvr.assembly_panel import ITEM_ROLE as ASSEMBLY_ITEM_ROLE
 from flightdvr.flow_layout import Mode, Stage
 from flightdvr.media import ClipInfo, Select
@@ -139,6 +141,19 @@ def counts(window) -> dict:
             1 for value in vars(window).values()
             if isinstance(value, LivePreview)),
     }
+
+
+def make_aba_assembly(window, app) -> None:
+    """Literal A/B/A clock: [10,13), [2,4), [10,13)."""
+    first, second = window.clips
+    first.selects = [Select(10.0, 13.0, "A", sid="a")]
+    second.selects = [Select(2.0, 4.0, "B", sid="b")]
+    window._store_assembly([
+        Item(first.fingerprint, "a"),
+        Item(second.fingerprint, "b"),
+        Item(first.fingerprint, "a"),
+    ])
+    app.processEvents()
 
 
 # -- Classic is the default ----------------------------------------------------
@@ -967,10 +982,9 @@ def test_the_music_band_keeps_its_panel_and_controls(window, app):
 
 # -- what the picture is allowed to say ----------------------------------------
 
-def test_assemble_and_output_say_the_picture_is_the_source(window, app):
-    """A source frame on a page headed Assemble reads as the assembly unless
-    the page says otherwise, and no label repairs a picture already believed."""
-    window.clips[0].selects = [Select(1.0, 5.0, "run in", sid="r-1")]
+def test_assemble_and_output_identify_what_the_picture_can_prove(window, app):
+    """Assemble names a paused joined position; Output stays source-honest."""
+    make_aba_assembly(window, app)
     tick(window, 0)
     window.table.setCurrentCell(0, 0)
     window._load_selected_clip()
@@ -980,8 +994,9 @@ def test_assemble_and_output_say_the_picture_is_the_source(window, app):
     window._show_stage(Stage.ASSEMBLE)
     app.processEvents()
     said = window.flow_source_note.text()
-    assert "Source" in said and "hdz_001.ts" in said
-    assert "not the joined result" in said
+    assert "Joined position" in said and "hdz_001.ts" in said
+    assert "not continuous playback" in said
+    assert "finished file" in said
 
     window._show_stage(Stage.OUTPUT)
     app.processEvents()
@@ -1085,8 +1100,9 @@ def test_choosing_another_assembly_row_moves_the_picture_and_the_caption(
     listing.setCurrentItem(second[0])
     app.processEvents()
 
-    assert window._trim_clip is window.clips[1]
+    assert window._trim_clip is window.clips[0], "joined scrub edited source focus"
     assert shown and shown[-1] is window.clips[1], shown
+    assert window._sequence_occurrence.ordinal == 1
     assert "hdz_002.ts" in window.flow_source_note.text(), (
         window.flow_source_note.text())
     window.set_view_mode(Mode.CLASSIC)
@@ -1111,8 +1127,10 @@ def test_choosing_a_second_range_of_the_same_recording_moves_the_picture(
     window._show_stage(Stage.ASSEMBLE)
     app.processEvents()
 
-    sought = []
-    monkeypatch.setattr(window.player, "seek", lambda at: sought.append(at))
+    loaded = []
+    monkeypatch.setattr(
+        window.player, "load",
+        lambda clip, position=0.0: loaded.append((clip, position)))
     listing = window.export_panel.assembly_panel.list
     rows_for = [listing.item(r) for r in range(listing.count())
                 if listing.item(r).data(ASSEMBLY_ITEM_ROLE).sid == "r-2"]
@@ -1120,8 +1138,9 @@ def test_choosing_a_second_range_of_the_same_recording_moves_the_picture(
     listing.setCurrentItem(rows_for[0])
     app.processEvents()
 
-    assert window.clips[0].current == 1
-    assert 6.0 in sought, sought
+    assert window.clips[0].current == 0, "joined scrub changed source range"
+    assert loaded and loaded[-1] == (window.clips[0], 6.0), loaded
+    assert window._sequence_occurrence.ordinal == 1
     assert "two" in window.flow_source_note.text(), (
         window.flow_source_note.text())
     window.set_view_mode(Mode.CLASSIC)
@@ -1157,7 +1176,8 @@ def test_arriving_on_assemble_with_a_row_selected_shows_that_row(window, app):
     window._show_stage(Stage.ASSEMBLE)
     app.processEvents()
 
-    assert window._trim_clip is window.clips[1]
+    assert window._trim_clip is window.clips[0], "joined scrub edited source focus"
+    assert window._sequence_occurrence.ordinal == 1
     assert "hdz_002.ts" in window.flow_source_note.text(), (
         window.flow_source_note.text())
     window.set_view_mode(Mode.CLASSIC)
@@ -1184,7 +1204,8 @@ def test_redrawing_the_assembly_does_not_steal_the_focus(window, app):
               == window.clips[1].fingerprint]
     listing.setCurrentItem(second[0])
     app.processEvents()
-    assert window._trim_clip is window.clips[1]
+    assert window._trim_clip is None, "joined row selection edited source focus"
+    assert window._sequence_occurrence.ordinal == 1
 
     window.table.setCurrentCell(0, 0)
     window._load_selected_clip()
@@ -1217,6 +1238,211 @@ def test_classic_is_not_given_the_new_assembly_behaviour(window, app):
     app.processEvents()
 
     assert window._trim_clip is None
+
+
+# -- the assembled clock and its source boundary ------------------------------
+
+def test_literal_aba_scrubs_following_occurrence_seams_and_terminal(
+        window, app, monkeypatch):
+    """2.999 stays in A; 3 and 5 choose following B/A; 8 decodes nothing."""
+    make_aba_assembly(window, app)
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    source_before = (
+        window._trim_clip,
+        window.clips[0].current,
+        [(one.start, one.end, one.sid) for one in window.clips[0].selects],
+        window.trim_bar.in_point,
+        window.trim_bar.out_point,
+        window.trim_bar.playhead,
+    )
+
+    loaded, sought, shown = [], [], []
+    monkeypatch.setattr(
+        window.player, "load",
+        lambda clip, position=0.0: loaded.append((clip, position)))
+    monkeypatch.setattr(window.player, "seek", lambda at: sought.append(at))
+    monkeypatch.setattr(window.player, "show_frame_at",
+                        lambda at: shown.append(at))
+
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+    strip = window.preview_view.sequence_strip
+    assert not strip.isHidden()
+    assert strip.seams == (0.0, 3.0, 5.0, 8.0)
+    loaded.clear()
+    sought.clear()
+    shown.clear()
+
+    strip.request_position(2.999)
+    window._sharpen_timer.stop()
+    window._sharpen()
+    assert window._sequence_occurrence.ordinal == 0
+    assert sought[-1] == 12.999
+    assert shown[-1] == 12.999
+
+    strip.request_position(3.0)
+    window._sharpen_timer.stop()
+    window._sharpen()
+    assert window._sequence_occurrence.ordinal == 1
+    assert loaded[-1] == (window.clips[1], 2.0)
+    assert shown[-1] == 2.0
+
+    strip.request_position(5.0)
+    window._sharpen_timer.stop()
+    window._sharpen()
+    assert window._sequence_occurrence.ordinal == 2
+    assert loaded[-1] == (window.clips[0], 10.0)
+    assert shown[-1] == 10.0
+
+    decoder_calls = (len(loaded), len(sought), len(shown))
+    strip.request_position(8.0)
+    assert window._sequence_occurrence is None
+    assert (len(loaded), len(sought), len(shown)) == decoder_calls
+    assert "terminal requests no source frame" in window.flow_source_note.text()
+
+    # The actual mouse route reaches the same output clock: with an 800 px
+    # inner track, its midpoint is output 4.0 and therefore B at source 3.0.
+    strip.resize(802, 42)
+    QTest.mouseClick(
+        strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+        QPoint(401, 21))
+    assert window._sequence_occurrence.ordinal == 1
+    assert loaded[-1] == (window.clips[1], 3.0)
+
+    source_after = (
+        window._trim_clip,
+        window.clips[0].current,
+        [(one.start, one.end, one.sid) for one in window.clips[0].selects],
+        window.trim_bar.in_point,
+        window.trim_bar.out_point,
+        window.trim_bar.playhead,
+    )
+    assert source_after == source_before, "joined scrubbing changed source trim"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_reorder_revises_the_plan_and_refuses_old_scrubs_and_frames(
+        window, app, monkeypatch):
+    make_aba_assembly(window, app)
+    loaded = []
+    monkeypatch.setattr(
+        window.player, "load",
+        lambda clip, position=0.0: loaded.append((clip, position)))
+    monkeypatch.setattr(window.player, "seek", lambda *_: None)
+    monkeypatch.setattr(window.player, "show_frame_at", lambda *_: None)
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+    old_revision = window._sequence_plan.revision
+
+    first, second = window.clips
+    window._store_assembly([
+        Item(second.fingerprint, "b"),
+        Item(first.fingerprint, "a"),
+        Item(first.fingerprint, "a"),
+    ])
+    app.processEvents()
+    current = window._sequence_plan
+    assert current.revision != old_revision
+    assert current.occurrences[0].fingerprint == second.fingerprint
+
+    loaded.clear()
+    window.preview_view.sequence_strip.scrub_requested.emit(old_revision, 0.0)
+    assert loaded == [], "an old drag was reinterpreted on the reordered plan"
+
+    # PreviewPlayer owns the callback fence.  A retired precise worker must
+    # not publish through the signal the window trusts.
+    published = []
+    window.player.precise_frame_ready.connect(
+        lambda *args: published.append(args))
+    window.player._frame_generation = 12
+    window.player._frame_window_ready(11, object())
+    assert published == []
+
+    window.preview_view.sequence_strip.request_position(0.0)
+    assert loaded[-1] == (second, 2.0)
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_joined_assemble_guards_source_edit_step_and_play_routes(
+        window, app, monkeypatch):
+    make_aba_assembly(window, app)
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+    before = [(one.start, one.end, one.sid)
+              for one in window.clips[0].selects]
+
+    calls = []
+    monkeypatch.setattr(window.player, "load",
+                        lambda *a, **k: calls.append("load"))
+    monkeypatch.setattr(window.player, "toggle",
+                        lambda *a, **k: calls.append("toggle"))
+    monkeypatch.setattr(window.player, "step_frames",
+                        lambda *a, **k: calls.append("step"))
+    monkeypatch.setattr(window.player, "seek",
+                        lambda *a, **k: calls.append("seek"))
+    monkeypatch.setattr(window.player, "play",
+                        lambda *a, **k: calls.append("play"))
+
+    window._toggle_play()
+    window._step_frames(1)
+    window._nudge(1.0)
+    window._jump(4.0)
+    window._set_in()
+    window._set_out()
+    window._add_select()
+    window._play_selected()
+    window._play_item(window.table.item(0, 0))
+
+    assert calls == []
+    assert [(one.start, one.end, one.sid)
+            for one in window.clips[0].selects] == before
+    assert window.live_preview.status.muted
+    assert not window.live_preview.status.playing
+    assert "return to Browse or Trim" in window.statusBar().currentMessage()
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_mixed_sources_are_inspected_nominally_and_browse_restores_source(
+        window, app, monkeypatch):
+    make_aba_assembly(window, app)
+    window.clips[1].width = 1920
+    window.clips[1].height = 1080
+    window.clips[1].fps = 90.0
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    source = window._trim_clip
+    source_position = window.trim_bar.playhead
+
+    loaded, toggled = [], []
+    monkeypatch.setattr(
+        window.player, "load",
+        lambda clip, position=0.0: loaded.append((clip, position)))
+    monkeypatch.setattr(window.player, "seek", lambda *_: None)
+    monkeypatch.setattr(window.player, "show_frame_at", lambda *_: None)
+    monkeypatch.setattr(window.player, "toggle",
+                        lambda *a, **k: toggled.append(True))
+
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+    assert window._sequence_plan is not None
+    window.preview_view.sequence_strip.request_position(3.0)
+    assert loaded[-1] == (window.clips[1], 2.0)
+    assert "source-frame inspection" in window.flow_source_note.text()
+
+    loaded.clear()
+    window._show_stage(Stage.BROWSE)
+    assert loaded[-1] == (source, source_position)
+    assert window.preview_view.sequence_strip.isHidden()
+    window._toggle_play()
+    assert toggled == [True], "Browse did not regain source playback"
+    window.set_view_mode(Mode.CLASSIC)
 
 
 def test_the_caption_follows_the_focused_range(window, app):
