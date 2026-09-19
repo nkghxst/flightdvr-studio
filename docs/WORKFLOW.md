@@ -171,7 +171,7 @@ do not repeat empty polling. This is an internal procedure only: an outside
 contributor is not asked for an ACK, mention, floor, role, verdict owner or
 handoff template.
 
-Once the coordinator authorizes a correction, a reviewer-requested fix that
+Within an already authorized assignment, a reviewer-requested fix that
 stays within the existing maker scope and branch ownership proceeds without
 renewed coordinator approval; the same reviewer retains verdict ownership for
 the corrected head. Escalate before editing if the correction changes scope or
