@@ -142,6 +142,15 @@ and `OUTCOME` messages, naming the maker, verdict owner, exact SHA, checks and
 limits. Use [docs/WORKFLOW.md](docs/WORKFLOW.md) for the exact templates and
 GitHub identity procedure.
 
+Internal maker-to-reviewer handoffs, reviewer-to-maker correction requests and
+corrected-head returns must contain an actual `@<live-recipient>` mention of the
+authenticated recipient. Take the recipient from the live identity breadcrumb;
+do not guess an alias or invent a special coordinator identity. A plain name or
+a GitHub review alone is not delivery. Verify that the send succeeded and,
+where supported, read back the stored message and recipient once; do not repeat
+empty polling. This internal ceremony does not apply to outside contributors;
+never ask them for it.
+
 An interrupted turn with unfinished work is a checkpoint, not completion.
 Record exact SHA, paths, checks, unresolved finding, blocker and next action.
 One bounded continuation may follow verified idle. Recovery preserves original
