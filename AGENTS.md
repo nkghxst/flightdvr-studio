@@ -47,6 +47,25 @@ not happen. Chat coordinates work; Git and the issue tracker preserve it.
   global workflow relaxation or reserved product decision is implied by a
   coding, review, connection or documentation floor.
 
+## Public coordination text
+
+Treat public text as durable external evidence: pull-request descriptions,
+reviews and inline comments, issue comments, issues, commit messages and any
+generated attribution footer.
+
+- Never publish a chat, session, share or transcript URL, session ID or
+  equivalent private-conversation reference in those surfaces unless Nk
+  explicitly approves that specific disclosure before publication. This
+  applies to generated text as well as text written by hand.
+- Use repository evidence links — commits, pull requests, reviews, issues, CI
+  runs and artifacts — and plain model attribution without a URL or session
+  identifier. Do not add real IDs or live session-link examples to committed
+  documentation.
+- Inspect the final outgoing text after templates, bots or generated footers
+  expand. Remove a forbidden link or ID before sending; if it cannot be
+  removed safely, stop and ask Nk. A private session link is not repository
+  evidence.
+
 ## Team and identity
 
 Role, authenticated sender and model are separate facts. Use the live identity

@@ -10,6 +10,16 @@ This file intentionally contains no separate role, GitHub-account or credential
 rules. Follow the live authenticated identity and the exact current task floor;
 do not infer authority from the fact that this file is named `CLAUDE.md`.
 
+## Public coordination text
+
+Apply the public-text rule in [AGENTS.md](AGENTS.md): never publish chat,
+session, share or transcript URLs, session IDs or equivalent private-conversation
+references in public pull requests, reviews, comments, issues, commits or
+generated attribution footers unless Nk explicitly approves that specific
+disclosure. Use repository evidence links and plain model attribution without
+URLs or session identifiers, and inspect final generated text before sending.
+Do not put real IDs or live session-link examples in committed documentation.
+
 **Check that this copy is current before you rely on it.** These files are read
 from the working directory when a session starts, so an old checkout hands you
 old governance without saying so. Fetch, compare what you are reading against
