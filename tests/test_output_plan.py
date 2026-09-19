@@ -105,6 +105,79 @@ def test_music_choice_rejects_an_empty_path_without_claiming_it_exists():
         MusicChoice("")
 
 
+def test_exact_assembly_rekey_retains_choice_order_and_selection():
+    plan = OutputPlan()
+    clip = OutputTarget.clip_or_range("clip-a", "range-a")
+    before = OutputTarget.assembly([
+        Item("clip-a", "range-a"), Item("clip-b", "range-b")])
+    after = OutputTarget.assembly([
+        Item("clip-b", "range-b"), Item("clip-a", "range-a")])
+    other = OutputTarget.clip_or_range("clip-c")
+    plan.set_choices(clip, "master", ExportSettings())
+    plan.set_choices(
+        before, "social", ExportSettings(social_crf=23),
+        MusicChoice(Path("assembly.wav")))
+    plan.set_choices(other, "master", ExportSettings())
+    retained = plan.select(before)
+
+    moved = plan.rekey(before, after)
+
+    assert plan.targets == (clip, after, other)
+    assert plan.selected_target == after
+    assert moved.target == after
+    assert moved.preset_key == retained.preset_key
+    assert moved.settings.social_crf == retained.settings.social_crf == 23
+    assert moved.music == retained.music
+    assert retained.target == before, "a prior defensive result was rewritten"
+    with pytest.raises(KeyError, match="not in this plan"):
+        plan.get(before)
+
+
+@pytest.mark.parametrize("failure", ["missing", "occupied", "equal", "clip"])
+def test_failed_assembly_rekey_is_atomic_and_never_fuzzy_or_overwrites(failure):
+    plan = OutputPlan()
+    clip = OutputTarget.clip_or_range("clip-a", "range-a")
+    before = OutputTarget.assembly([
+        Item("clip-a", "range-a"), Item("clip-b", "range-b")])
+    after = OutputTarget.assembly([
+        Item("clip-b", "range-b"), Item("clip-a", "range-a")])
+    fuzzy = OutputTarget.assembly([
+        Item("clip-a", "range-a"), Item("clip-c", "range-c")])
+    plan.set_choices(clip, "master", ExportSettings(social_crf=19))
+    plan.set_choices(
+        before, "master", ExportSettings(social_crf=21),
+        MusicChoice(Path("before.wav")))
+    if failure == "occupied":
+        plan.set_choices(
+            after, "master", ExportSettings(social_crf=31),
+            MusicChoice(Path("occupied.wav")))
+    plan.select(before)
+
+    targets = plan.targets
+    selected = plan.selected_target
+    values = tuple(plan.get(target) for target in targets)
+
+    if failure == "missing":
+        old, new = fuzzy, after
+        expected = KeyError
+    elif failure == "occupied":
+        old, new = before, after
+        expected = ValueError
+    elif failure == "equal":
+        old = new = before
+        expected = ValueError
+    else:
+        old, new = clip, after
+        expected = ValueError
+
+    with pytest.raises(expected):
+        plan.rekey(old, new)
+
+    assert plan.targets == targets
+    assert plan.selected_target == selected
+    assert tuple(plan.get(target) for target in targets) == values
+
+
 # -- what the queue would build (#84 sidebar) ----------------------------------
 
 def a_piece(name: str, ranges=(), current: int = 0):
