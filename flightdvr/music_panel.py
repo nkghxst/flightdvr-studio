@@ -262,7 +262,7 @@ class MusicPanel(QWidget):
 
     def load(self, choice: MusicChoice, *, target: str = "",
              preset_key: str = SUPPORTED_PRESET, joined: bool = False,
-             bundle: bool = False) -> None:
+             bundle: bool = False, audition: bool = False) -> None:
         """Show a choice. Emits nothing: the person has not chosen anything.
 
         The context arrives with the choice because whether music is offerable
@@ -273,7 +273,7 @@ class MusicPanel(QWidget):
         self._choice = choice
         self._asset = choice.asset
         self.set_context(target=target, preset_key=preset_key, joined=joined,
-                         bundle=bundle)
+                         bundle=bundle, audition=audition)
         self._show_choice()
 
     def capture(self) -> MusicChoice:
@@ -316,14 +316,22 @@ class MusicPanel(QWidget):
 
     def set_context(self, *, target: str = "",
                     preset_key: str = SUPPORTED_PRESET, joined: bool = False,
-                    bundle: bool = False) -> None:
-        """Name the output, and say whether music can be exported for it."""
+                    bundle: bool = False, audition: bool = False) -> None:
+        """Name the output and separate audition from export capability."""
         self.target_label.setText(
             f"Editing: {target}" if target else "No output selected")
         reason = self._refusal(preset_key, joined, bundle)
-        self._supported = reason == ""
-        self.unsupported_label.setText(reason)
-        self.unsupported_label.setVisible(bool(reason))
+        preview_only = bool(
+            audition and joined and not bundle
+            and preset_key == SUPPORTED_PRESET)
+        self._supported = reason == "" or preview_only
+        message = (
+            "Preview only: Assembly music can be auditioned here; joined "
+            "export remains unsupported."
+            if preview_only else reason
+        )
+        self.unsupported_label.setText(message)
+        self.unsupported_label.setVisible(bool(message))
         self._apply_enabled()
 
     @staticmethod

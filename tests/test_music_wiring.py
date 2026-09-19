@@ -311,10 +311,14 @@ def assembly_target(window, app) -> OutputTarget:
 
 def test_valid_assembly_owns_one_editable_preview_choice(window, app):
     target = assembly_target(window, app)
+    window._show_stage(Stage.MUSIC)
+    app.processEvents()
 
     assert window._music_target == target
     assert window.output_plan.selected_target == target
-    assert window.music_panel.mode_combo.isEnabled()
+    # The enclosing checkable band may be collapsed; locally, the control is
+    # editable as soon as that existing presentation control is opened.
+    assert window.music_panel.mode_combo.isEnabledTo(window.music_panel)
     assert "Preview only" in window.music_panel.unsupported_label.text()
     assert window._planned_music(target) == MusicChoice()
 
@@ -346,6 +350,34 @@ def test_reorder_rekeys_only_the_tracked_assembly_choice(window, app):
     assert window._music_target == current
     assert window._planned_music(current) == retained
     assert not window.live_preview.status.offered
+
+
+def test_reorder_stops_assembly_probe_and_late_result_cannot_land(
+        window, app, monkeypatch, tmp_path):
+    old = assembly_target(window, app)
+    track = tmp_path / "assembly.mp3"
+    probe = choose_track(window, monkeypatch, track)
+    generation = probe.generation
+    first, second = window.clips
+    current = OutputTarget.assembly((
+        Item(second.fingerprint, "b"),
+        Item(first.fingerprint, "a"),
+        Item(first.fingerprint, "a"),
+    ))
+
+    window._store_assembly(list(current.items))
+    app.processEvents()
+
+    assert probe.stopped
+    assert old not in window.output_plan.targets
+    assert window._planned_music(current).track == track
+    assert window._planned_music(current).asset is None
+    assert "Choose it again" in window._music_trouble[current]
+
+    # Model a callback already queued before stop: its old generation has no
+    # bound target now and therefore cannot validate the rekeyed choice.
+    window._music_ready(generation, an_asset(track))
+    assert window._planned_music(current).asset is None
 
 
 def test_joined_preview_choice_is_still_refused_before_queue_mutation(

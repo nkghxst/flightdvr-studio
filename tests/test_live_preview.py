@@ -762,7 +762,7 @@ def test_each_joined_player_tick_services_one_output_sample_even_if_reentered(
         "one output tick was serviced twice or used paused source second 13")
 
 
-def test_joined_picture_state_keeps_the_existing_monitor_fenced(
+def test_joined_picture_state_does_not_start_sound_without_listen_intent(
         window, monkeypatch):
     monkeypatch.setattr(window, "_joined_assemble_active", lambda: True)
     calls = []
@@ -773,7 +773,7 @@ def test_joined_picture_state_keeps_the_existing_monitor_fenced(
 
     window._preview_state_changed(True)
 
-    assert calls == ["pause", ("muted", True)]
+    assert calls == []
 
 
 # -- what the review found (#121) -----------------------------------------------
@@ -981,6 +981,382 @@ class AbsoluteFrameReader:
 
     def close(self) -> None:
         self.closed = True
+
+
+class TaggedFrameReader(AbsoluteFrameReader):
+    """Independent stereo signal for one exact source identity."""
+
+    def __init__(self, frames: int, base: float):
+        super().__init__(frames)
+        self.base = base
+        self.stop_calls = 0
+        self.close_calls = 0
+
+    def read(self, start: int, frames: int, cancelled) -> list[float]:
+        self.reads.append((start, frames))
+        values = []
+        for frame in range(start, start + frames):
+            left = self.base + (frame / OUTPUT_RATE) * 0.001
+            values.extend((left, left + 0.01))
+        return values
+
+    def request_stop(self) -> None:
+        self.stop_calls += 1
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.closed = True
+
+
+def _make_joined_window(window):
+    """Literal A[10,13), B[2,4), A[10,13) through the real UI binding."""
+    from datetime import datetime
+
+    from PySide6.QtWidgets import QApplication
+
+    from flightdvr.assembly import Item
+    from flightdvr.flow_layout import Mode, Stage
+    from flightdvr.media import ClipInfo, Select
+
+    first = window.clips[0]
+    second = ClipInfo(
+        path=first.path.parent / "hdz_002.ts", size=2048,
+        modified=datetime(2025, 10, 8, 18, 40), duration=30.0,
+        width=1280, height=720, fps=60.0, video_codec="hevc",
+        audio_codec="aac", pix_fmt="yuvj420p", color_range="pc")
+    window._add_clip(window._scan_generation, second)
+    first.selects = [Select(10.0, 13.0, "A", sid="a")]
+    second.selects = [Select(2.0, 4.0, "B", sid="b")]
+    items = (
+        Item(first.fingerprint, "a"),
+        Item(second.fingerprint, "b"),
+        Item(first.fingerprint, "a"),
+    )
+    window._store_assembly(items)
+    window.set_view_mode(Mode.FLOW)
+    window._show_stage(Stage.ASSEMBLE)
+    QApplication.processEvents()
+    return first, second, window._music_target
+
+
+def _pull_stream_at(stream, output_sample: int):
+    if stream.state.value == "ready":
+        stream.start()
+    else:
+        stream.pause()
+        stream.reprime(output_sample)
+    stream.resume()
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        try:
+            block = stream.pull()
+        except Buffering:
+            time.sleep(0.01)
+            continue
+        if block.output_start == output_sample:
+            return block
+    pytest.fail(f"stream produced no block at output sample {output_sample}")
+
+
+def test_ui_constructed_sequence_emits_exact_aba_origins_and_channels(
+        window, monkeypatch):
+    """The real UI factory emits A/B/A, including repeated unticked A."""
+    from flightdvr.audio_reader import FfmpegPcmReader
+    from flightdvr.audio_stream import AudioStream, SequencePcmReader
+
+    first, second, target = _make_joined_window(window)
+    made = {}
+
+    def source_factory(_cls, _tools, path, *, stream_index, timeline_frames):
+        key = str(path)
+        if key not in made:
+            base = 0.1 if key == str(first.path) else 0.2
+            made[key] = TaggedFrameReader(timeline_frames, base)
+        return made[key]
+
+    monkeypatch.setattr(
+        FfmpegPcmReader, "for_source", classmethod(source_factory))
+    window.live_preview.set_listening(Listening.SOURCE)
+    stream = window.live_preview._stream
+
+    assert isinstance(stream, AudioStream)
+    assert isinstance(stream._source_reader, SequencePcmReader)
+    assert tuple(one.output.start for one in stream._source_reader.segments) == (
+        0, 3 * OUTPUT_RATE, 5 * OUTPUT_RATE)
+    assert len(made) == 2, "the repeated A occurrence opened a second leaf"
+
+    expected = (
+        (0, 0.110, 0.120),
+        (3, 0.202, 0.212),
+        (5, 0.110, 0.120),
+    )
+    for second_at, left, right in expected:
+        block = _pull_stream_at(stream, second_at * OUTPUT_RATE)
+        assert block.planned[0] == pytest.approx(left, abs=2e-6)
+        assert block.planned[1] == pytest.approx(right, abs=2e-6)
+        assert block.planned[0] != 0.0
+    assert first not in window.selected_clips(), (
+        "the Assembly oracle accidentally depended on the browser checkbox")
+    stream.request_stop()
+    assert stream.wait_stopped(5.0)
+    assert made[str(first.path)].stop_calls == 1
+    assert made[str(first.path)].close_calls == 1
+
+
+def test_ui_constructed_sequence_emits_silence_for_one_silent_occurrence(
+        window, monkeypatch):
+    """A known silent B is explicit zeroes, never guessed A continuation."""
+    from flightdvr.audio_reader import FfmpegPcmReader
+
+    first, second, _target = _make_joined_window(window)
+    second.audio_codec = None
+    made = []
+
+    def source_factory(_cls, _tools, path, *, stream_index, timeline_frames):
+        assert str(path) == str(first.path), "the silent clip opened a decoder"
+        reader = TaggedFrameReader(timeline_frames, 0.1)
+        made.append(reader)
+        return reader
+
+    monkeypatch.setattr(
+        FfmpegPcmReader, "for_source", classmethod(source_factory))
+    window.live_preview.set_listening(Listening.SOURCE)
+    stream = window.live_preview._stream
+
+    assert stream._source_reader.segments[1].reader is None
+    before = _pull_stream_at(stream, 0)
+    silent = _pull_stream_at(stream, 3 * OUTPUT_RATE)
+    after = _pull_stream_at(stream, 5 * OUTPUT_RATE)
+    assert before.planned[:2] == pytest.approx((0.110, 0.120), abs=2e-6)
+    assert all(value == 0.0 for value in silent.planned)
+    assert after.planned[:2] == pytest.approx((0.110, 0.120), abs=2e-6)
+    assert len(made) == 1
+    stream.request_stop()
+    assert stream.wait_stopped(5.0)
+
+
+def test_ui_constructed_all_silent_sequence_needs_no_source_reader(
+        window, monkeypatch):
+    from flightdvr.audio_reader import FfmpegPcmReader
+
+    first, second, _target = _make_joined_window(window)
+    first.audio_codec = None
+    second.audio_codec = None
+    monkeypatch.setattr(
+        FfmpegPcmReader, "for_source",
+        classmethod(lambda *_a, **_k: pytest.fail("silent run opened a decoder")))
+
+    window.live_preview.set_listening(Listening.SOURCE)
+    stream = window.live_preview._stream
+
+    assert stream._source_reader is None
+    block = _pull_stream_at(stream, 3 * OUTPUT_RATE)
+    assert all(value == 0.0 for value in block.planned)
+    stream.request_stop()
+    assert stream.wait_stopped(5.0)
+
+
+def test_ui_constructed_mix_keeps_music_continuous_and_loops_at_six(
+        window, monkeypatch):
+    from fractions import Fraction
+
+    from flightdvr.audio_plan import (
+        AudioAsset, AudioMode, MusicChoice, SampleSpan, ShortTrackPolicy,
+    )
+    from flightdvr.audio_reader import FfmpegPcmReader
+
+    first, _second, target = _make_joined_window(window)
+    track = first.path.parent / "music.wav"
+    asset = AudioAsset(track, "c" * 64, 0, OUTPUT_RATE, 2, 10 * OUTPUT_RATE)
+    readers = {}
+
+    def source_factory(_cls, _tools, path, *, stream_index, timeline_frames):
+        key = str(path)
+        base = 0.1 if key == str(first.path) else 0.2
+        readers.setdefault(key, TaggedFrameReader(timeline_frames, base))
+        return readers[key]
+
+    music = TaggedFrameReader(10 * OUTPUT_RATE, 0.3)
+    monkeypatch.setattr(
+        FfmpegPcmReader, "for_source", classmethod(source_factory))
+    monkeypatch.setattr(
+        FfmpegPcmReader, "for_music",
+        classmethod(lambda _cls, _tools, _asset: music))
+    window._store_music(target, MusicChoice(
+        track=track, mode=AudioMode.MIX, asset=asset,
+        passage=SampleSpan(4 * OUTPUT_RATE, 10 * OUTPUT_RATE, OUTPUT_RATE),
+        short_track=ShortTrackPolicy.LOOP,
+        music_level=Fraction(1), dvr_level=Fraction(1),
+        fade_in_samples=0, fade_out_samples=0))
+    window._sync_music_panel()
+    window.live_preview.set_listening(Listening.MIX)
+    stream = window.live_preview._stream
+
+    for second_at, expected in (
+            (0, (0.110 + 0.304) / 2),
+            (3, (0.202 + 0.307) / 2),
+            (5, (0.110 + 0.309) / 2),
+            (6, (0.111 + 0.304) / 2)):
+        block = _pull_stream_at(stream, second_at * OUTPUT_RATE)
+        assert block.planned[0] == pytest.approx(expected, abs=2e-6)
+        assert block.planned[0] not in (0.0, 0.110, 0.202)
+    assert (4 * OUTPUT_RATE, 480) in music.reads
+    assert (7 * OUTPUT_RATE, 480) in music.reads
+    assert (9 * OUTPUT_RATE, 480) in music.reads
+    assert music.reads.count((4 * OUTPUT_RATE, 480)) >= 2, (
+        "loop six did not return to passage position four")
+    stream.request_stop()
+    assert stream.wait_stopped(5.0)
+
+
+def test_joined_construction_failure_closes_an_already_allocated_leaf(
+        window, monkeypatch):
+    from flightdvr.audio_reader import FfmpegPcmReader
+
+    first, _second, target = _make_joined_window(window)
+    allocated = TaggedFrameReader(13 * OUTPUT_RATE, 0.1)
+
+    def fail_after_a(_cls, _tools, path, *, stream_index, timeline_frames):
+        if str(path) == str(first.path):
+            return allocated
+        raise OSError("B cannot be opened")
+
+    monkeypatch.setattr(
+        FfmpegPcmReader, "for_source", classmethod(fail_after_a))
+
+    with pytest.raises(OSError, match="B cannot be opened"):
+        window._build_monitor_stream(target, Listening.SOURCE)
+    assert allocated.close_calls == 1
+    assert window._monitor_snapshot is None
+
+
+def test_joined_strip_seek_uses_output_one_not_paused_source_thirteen(
+        window, monkeypatch):
+    from flightdvr.audio_reader import FfmpegPcmReader
+
+    first, _second, _target = _make_joined_window(window)
+    monkeypatch.setattr(
+        FfmpegPcmReader, "for_source",
+        classmethod(lambda _cls, _tools, path, *, stream_index,
+                           timeline_frames: TaggedFrameReader(
+            timeline_frames, 0.1 if str(path) == str(first.path) else 0.2)))
+    window.live_preview.set_listening(Listening.SOURCE)
+    window.preview_view.listen_check.blockSignals(True)
+    window.preview_view.listen_check.setChecked(True)
+    window.preview_view.listen_check.blockSignals(False)
+    window._sequence_source_seconds = 13.0
+    sought = []
+    pauses = []
+    monkeypatch.setattr(window.live_preview, "seek", sought.append)
+    monkeypatch.setattr(window.live_preview, "pause",
+                        lambda: pauses.append(True))
+    plan = window._sequence_plan
+
+    window._on_sequence_scrub_requested(plan.revision, 1.0)
+    window._on_sequence_scrub_requested(plan.revision, 8.0)
+
+    assert sought == [OUTPUT_RATE]
+    assert sought != [13 * OUTPUT_RATE]
+    assert len(pauses) == 2
+    assert window._sequence_occurrence is None
+    assert window._sequence_source_seconds is None
+
+
+def test_joined_restart_transitions_once_and_preserves_both_intent_states(
+        window, monkeypatch):
+    from flightdvr.audio_reader import FfmpegPcmReader
+
+    first, _second, _target = _make_joined_window(window)
+    monkeypatch.setattr(
+        FfmpegPcmReader, "for_source",
+        classmethod(lambda _cls, _tools, path, *, stream_index,
+                           timeline_frames: TaggedFrameReader(
+            timeline_frames, 0.1 if str(path) == str(first.path) else 0.2)))
+    window.live_preview.set_listening(Listening.SOURCE)
+    stream = window.live_preview._stream
+    window.preview_view.listen_check.blockSignals(True)
+    window.preview_view.listen_check.setChecked(True)
+    window.preview_view.listen_check.blockSignals(False)
+    window.player._sequence_plan = window._sequence_plan
+    window.player.is_playing = True
+    picture_seeks = []
+    picture_plays = []
+    monkeypatch.setattr(window.player, "seek", picture_seeks.append)
+    monkeypatch.setattr(window.player, "play",
+                        lambda *_a, **_k: picture_plays.append(True))
+    window.live_preview.set_muted(False)
+    window.live_preview.play()
+    before = stream.generation
+
+    window._on_monitor_restart()
+
+    assert picture_seeks == [0.0]
+    assert picture_plays == [True]
+    assert stream.generation == before + 1
+    assert window.live_preview.status.playing
+    assert not window.live_preview.status.muted
+
+    window.player.is_playing = False
+    window.preview_view.listen_check.blockSignals(True)
+    window.preview_view.listen_check.setChecked(False)
+    window.preview_view.listen_check.blockSignals(False)
+    window.live_preview.pause()
+    window.live_preview.set_muted(True)
+    paused_before = stream.generation
+    window._on_monitor_restart()
+
+    assert picture_seeks == [0.0, 0.0]
+    assert picture_plays == [True]
+    assert stream.generation == paused_before + 1
+    assert not window.live_preview.status.playing
+    assert window.live_preview.status.muted
+    assert stream.paused
+
+
+def test_reorder_and_hot_removal_fence_old_joined_pcm_before_rebinding(
+        window, monkeypatch):
+    from flightdvr.assembly import Item
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from flightdvr.audio_reader import FfmpegPcmReader
+
+    first, second, old_target = _make_joined_window(window)
+    monkeypatch.setattr(
+        FfmpegPcmReader, "for_source",
+        classmethod(lambda _cls, _tools, path, *, stream_index,
+                           timeline_frames: TaggedFrameReader(
+            timeline_frames, 0.1 if str(path) == str(first.path) else 0.2)))
+    retained = MusicChoice(mode=AudioMode.NO_SOUND)
+    window._store_music(old_target, retained)
+    window.live_preview.set_listening(Listening.SOURCE)
+    old_stream = window.live_preview._stream
+    window.live_preview.set_muted(False)
+    window.live_preview.play()
+    reordered_items = (
+        Item(second.fingerprint, "b"),
+        Item(first.fingerprint, "a"),
+        Item(first.fingerprint, "a"),
+    )
+
+    window._store_assembly(reordered_items)
+
+    assert old_stream.wait_stopped(5.0)
+    reordered_target = window._sequence_target
+    assert reordered_target.items == reordered_items
+    assert window._planned_music(reordered_target) == retained
+    assert window.live_preview._stream is not old_stream
+    assert not window.live_preview.status.playing
+    assert window.live_preview.status.muted
+
+    rebound_stream = window.live_preview._stream
+    window.live_preview.set_muted(False)
+    window.live_preview.play()
+    window._store_assembly([reordered_items[0]])
+
+    assert rebound_stream.wait_stopped(5.0)
+    assert window._sequence_plan is None
+    assert not window.live_preview.status.offered
+    assert window.live_preview.status.muted
+    assert window._planned_music(reordered_target) == retained
 
 
 def _absolute_source_reader(monkeypatch, frames: int = 960_000):
