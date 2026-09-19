@@ -30,12 +30,17 @@ import pytest
 from PySide6.QtCore import QObject, Qt, Signal
 
 from flightdvr.media import ClipInfo, Tools
+from flightdvr.assembly import Item
+from flightdvr.audio_plan import OUTPUT_RATE, SampleSpan
 from flightdvr.player import (
     FRAME_CACHE_MAX_FRAMES, FRAME_CACHE_SIZE, PREVIEW_FPS, PREVIEW_SIZES,
     QUEUE_FRAMES, SEEK_LEAD_IN, CachedFrame, FrameCache, FrameWindow,
     PlayClock, PreviewSize, build_command, build_frame_window_command,
     choose_size, exact_timestamp, pair_precise_frames, plan_frame_window,
     read_frames, seconds_for_index, seek_pair, should_restart,
+)
+from flightdvr.sequence_plan import (
+    OccurrenceId, SequenceOccurrence, SequencePlan, TimeSpan,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -589,11 +594,13 @@ def qt_app():
 class FakeWorker(QObject):
     failed = Signal(int, str)
     ended = Signal(int)
+    finished = Signal()
 
     def __init__(self, tools, clip_info, start, size, generation, frames,
                  fps, parent=None):
         super().__init__(parent)
         self.start_at = start
+        self.clip = clip_info
         self.size = size
         self.generation = generation
         self.frames = frames
@@ -611,6 +618,21 @@ class FakeWorker(QObject):
 
     def wait(self, _msecs=0) -> bool:
         return True
+
+
+class LingeringWorker(FakeWorker):
+    """A stop request whose physical worker has not finished yet."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.finished_running = False
+
+    def isRunning(self) -> bool:  # noqa: N802
+        return self.started and not self.finished_running
+
+    def finish(self) -> None:
+        self.finished_running = True
+        self.finished.emit()
 
 
 class FakeFrameWorker(QObject):
@@ -673,6 +695,62 @@ def fill(instance, *times):
     assert len(times) <= QUEUE_FRAMES
     for when in times:
         instance._frames.put((when, b"\0" * instance.size.frame_bytes))
+
+
+def aba_sequence(revision="aba-1"):
+    first = clip(path=Path("a.ts"), duration=20.0)
+    second = clip(path=Path("b.ts"), duration=20.0)
+    sources = ((first, "a", 10, 13, 0, 3),
+               (second, "b", 2, 4, 3, 5),
+               (first, "a", 10, 13, 5, 8))
+    occurrences = []
+    for ordinal, (source, sid, source_in, source_out,
+                  output_in, output_out) in enumerate(sources):
+        occurrences.append(SequenceOccurrence(
+            OccurrenceId(revision, ordinal),
+            Item(source.fingerprint, sid),
+            str(source.path),
+            TimeSpan(source_in, source_out),
+            TimeSpan(output_in, output_out),
+            TimeSpan(output_in, output_out),
+            SampleSpan(output_in * OUTPUT_RATE,
+                       output_out * OUTPUT_RATE, OUTPUT_RATE),
+        ))
+    plan = SequencePlan(
+        revision,
+        tuple(occurrences),
+        (0, 3 * OUTPUT_RATE, 5 * OUTPUT_RATE, 8 * OUTPUT_RATE),
+    )
+    return plan, {
+        plan.occurrences[0].id: first,
+        plan.occurrences[1].id: second,
+        plan.occurrences[2].id: first,
+    }
+
+
+def sequence_player(fake_clock, worker_type=FakeWorker):
+    from flightdvr.player import PreviewPlayer
+    made = []
+
+    def factory(*args, **kwargs):
+        worker = worker_type(*args, **kwargs)
+        made.append(worker)
+        return worker
+
+    instance = PreviewPlayer(
+        TOOLS, clock=fake_clock, worker_factory=factory,
+        frame_worker_factory=FakeFrameWorker,
+    )
+    plan, clips = aba_sequence()
+    instance.load_sequence(plan, clips)
+    instance.workers = made
+    return instance, plan
+
+
+def fill_sequence_lane(instance, lane, *source_times):
+    assert len(source_times) <= QUEUE_FRAMES
+    for when in source_times:
+        lane.frames.put((when, b"\0" * instance.size.frame_bytes))
 
 
 def test_playing_starts_a_decoder_at_the_playhead(qt_app):
@@ -1008,6 +1086,287 @@ def test_a_frame_becomes_an_image_that_owns_its_pixels(qt_app):
     assert image.width() == 4 and image.height() == 2
     assert image.format() == QImage.Format.Format_RGB32
     assert image.pixelColor(0, 0).red() == 255
+
+
+# -- joined output-time playback --------------------------------------------
+
+def test_joined_due_frames_cross_the_following_occurrence_seam_once(qt_app):
+    """A deterministic due-frame fixture proves the seam, not live cadence."""
+    fake = FakeClock()
+    p, plan = sequence_player(fake)
+    events = []
+    p.sequence_frame_ready.connect(
+        lambda _image, revision, occurrence, output, source:
+        events.append((revision, occurrence, output, source)))
+    p.play(view_width=640)
+    assert p.workers[0].clip.path == Path("a.ts")
+    assert p.workers[0].start_at == pytest.approx(10.0)
+
+    fill_sequence_lane(p, p._sequence_active, 10.0)
+    p._tick()
+    assert events[-1][1] == plan.occurrences[0].id
+    assert events[-1][2:] == (pytest.approx(0.0), pytest.approx(10.0))
+
+    # Reach the bounded lead with one due A frame so the clock does not stall.
+    fake.tick(2.3)
+    fill_sequence_lane(p, p._sequence_active, 12.3)
+    p._tick()
+    assert p._sequence_next is not None
+    assert p._sequence_next.occurrence == plan.occurrences[1].id
+    assert len([w for w in p.workers if w.isRunning()]) == 2
+
+    fill_sequence_lane(p, p._sequence_next, 2.0)
+    fake.tick(0.7)
+    p._tick()
+
+    assert [event[1] for event in events] == [
+        plan.occurrences[0].id,
+        plan.occurrences[0].id,
+        plan.occurrences[1].id,
+    ]
+    assert events[-1][2:] == (pytest.approx(3.0), pytest.approx(2.0))
+    assert p.position == pytest.approx(3.0)
+
+
+def test_joined_seam_retires_outgoing_worker_and_shutdown_owns_factory_list(
+        qt_app):
+    """Promotion must not lose a still-running decoder between lane slots."""
+    class WaitCompletesLingeringWorker(LingeringWorker):
+        def wait(self, _msecs=0) -> bool:
+            self.finish()
+            return True
+
+    fake = FakeClock()
+    p, plan = sequence_player(
+        fake, worker_type=WaitCompletesLingeringWorker)
+    p.play()
+    outgoing = p.workers[0]
+    fill_sequence_lane(p, p._sequence_active, 10.0)
+    p._tick()
+
+    fake.tick(2.3)
+    fill_sequence_lane(p, p._sequence_active, 12.3)
+    p._tick()
+    following = p._sequence_next
+    assert following is not None
+    assert following.occurrence == plan.occurrences[1].id
+    assert outgoing.isRunning()
+
+    fill_sequence_lane(p, following, 2.0)
+    fake.tick(0.7)
+    p._tick()
+
+    assert outgoing.stopped
+    assert outgoing.isRunning(), "the retired decoder still needs joining"
+    p.shutdown()
+    assert all(worker.stopped for worker in p.workers)
+    assert all(not worker.isRunning() for worker in p.workers)
+
+
+def test_joined_seek_uses_repeated_occurrence_identity_and_fences_old_frames(
+        qt_app):
+    fake = FakeClock()
+    p, plan = sequence_player(fake)
+    p.play()
+    old = p._sequence_active
+    fill_sequence_lane(p, old, 10.0)
+
+    p.seek(5.0)
+    assert old.worker.stopped
+    assert p._sequence_active.occurrence == plan.occurrences[2].id
+    assert p._sequence_active.occurrence != plan.occurrences[0].id
+    assert p.workers[-1].clip.path == Path("a.ts")
+    assert p.workers[-1].start_at == pytest.approx(10.0)
+
+    events = []
+    p.sequence_frame_ready.connect(
+        lambda _image, revision, occurrence, output, source:
+        events.append((revision, occurrence, output, source)))
+    # The retired queue is deliberately still populated; only the new lane is
+    # reachable after the generation/occurrence fence.
+    fill_sequence_lane(p, p._sequence_active, 10.0)
+    p._tick()
+    old.ended = True
+    old.worker.ended.emit(old.generation)
+
+    assert len(events) == 1
+    assert events[0][1] == plan.occurrences[2].id
+    assert events[0][2:] == (pytest.approx(5.0), pytest.approx(10.0))
+
+
+def test_delayed_joined_tick_retargets_the_occurrence_it_actually_reached(
+        qt_app):
+    fake = FakeClock()
+    p, plan = sequence_player(fake)
+    p.play()
+    p._starved = False
+    fake.tick(5.25)                      # skips both seams in one UI delay
+    p._tick()
+
+    assert p.position == pytest.approx(5.25)
+    assert p._sequence_active.occurrence == plan.occurrences[2].id
+    assert p.workers[-1].start_at == pytest.approx(10.25)
+    assert p.workers[-1].clip.path == Path("a.ts")
+
+
+def test_rapid_joined_seeks_wait_for_physical_capacity_and_coalesce(qt_app):
+    fake = FakeClock()
+    p, plan = sequence_player(fake, worker_type=LingeringWorker)
+    p.play()
+    active = p._sequence_active
+    p._request_sequence_preroll()
+    following = p._sequence_next
+    assert active is not None and following is not None
+    assert p._streaming_workers_alive() == 2
+
+    p.seek(5.5)
+    p.seek(3.5)                          # replaces the first pending seek
+    assert len(p.workers) == 2, "a third physical decoder started early"
+    assert p._sequence_active is None
+    assert p._sequence_pending_start.occurrence == plan.occurrences[1].id
+
+    active.worker.finish()               # one slot becomes physically free
+    assert len(p.workers) == 3
+    assert p._sequence_active.occurrence == plan.occurrences[1].id
+    assert p.workers[-1].start_at == pytest.approx(2.5)
+    assert p._streaming_workers_alive() == 2
+
+    following.worker.finish()
+    p.stop()
+    p.workers[-1].finish()
+    assert p._streaming_workers_alive() == 0
+
+
+def test_joined_preroll_waits_for_a_lingering_source_decoder(qt_app):
+    from flightdvr.player import PreviewPlayer
+    made = []
+
+    def factory(*args, **kwargs):
+        worker = LingeringWorker(*args, **kwargs)
+        made.append(worker)
+        return worker
+
+    p = PreviewPlayer(TOOLS, clock=FakeClock(), worker_factory=factory,
+                      frame_worker_factory=FakeFrameWorker)
+    p.load(clip())
+    p.play()
+    source_worker = made[0]
+    complaints = []
+    p.failed.connect(complaints.append)
+    plan, clips = aba_sequence()
+
+    p.load_sequence(plan, clips)
+    source_worker.failed.emit(source_worker.generation, "obsolete source")
+    assert complaints == []
+    p.play()
+    assert len(made) == 2
+    assert p._streaming_workers_alive() == 2
+    p._request_sequence_preroll()
+    assert len(made) == 2
+    assert p._sequence_pending_start.role == "next"
+
+    source_worker.finish()
+    assert len(made) == 3
+    assert p._sequence_next.occurrence == plan.occurrences[1].id
+    assert p._streaming_workers_alive() == 2
+    p.stop()
+    for worker in made[1:]:
+        worker.finish()
+    p.shutdown()
+    assert p._streaming_workers_alive() == 0
+
+
+def test_joined_pause_resume_and_idle_release_keep_output_position(qt_app):
+    fake = FakeClock()
+    p, plan = sequence_player(fake)
+    p.seek(3.0)
+    p.play()
+    first = p._sequence_active
+    fill_sequence_lane(p, first, 2.0)
+    events = []
+    p.sequence_frame_ready.connect(
+        lambda _image, _revision, occurrence, output, source:
+        events.append((occurrence, output, source)))
+    p._tick()
+    p.pause()
+    p.play()
+    assert p._sequence_active is first
+    assert len(p.workers) == 1
+
+    p.pause()
+    p._release_idle()
+    assert p._sequence_active is None
+    assert p.position == pytest.approx(3.0)
+    p.play()
+    assert p._sequence_active.occurrence == plan.occurrences[1].id
+    fill_sequence_lane(p, p._sequence_active, 2.0)
+    p._tick()
+
+    assert events == [
+        (plan.occurrences[1].id, pytest.approx(3.0), pytest.approx(2.0)),
+        (plan.occurrences[1].id, pytest.approx(3.0), pytest.approx(2.0)),
+    ]
+
+
+def test_joined_terminal_holds_last_frame_and_starts_nothing_after_eight(qt_app):
+    fake = FakeClock()
+    p, plan = sequence_player(fake)
+    p.seek(7.9)
+    p.play()
+    fill_sequence_lane(p, p._sequence_active, 12.9)
+    frames, ended = [], []
+    p.sequence_frame_ready.connect(lambda *event: frames.append(event))
+    p.ended.connect(lambda: ended.append(True))
+    p._tick()
+    worker_count = len(p.workers)
+
+    fake.tick(0.1)
+    p._tick()
+
+    assert len(frames) == 1
+    assert ended == [True]
+    assert not p.is_playing
+    assert p.position == pytest.approx(8.0)
+    assert p._sequence_active is None and p._sequence_next is None
+    assert len(p.workers) == worker_count
+    p.play()                              # terminal itself never auto-restarts
+    assert len(p.workers) == worker_count
+
+
+def test_joined_load_cancels_precise_inspection_and_rejects_its_callback(qt_app):
+    p = player(FakeClock())
+    precise = []
+    p.precise_frame_ready.connect(lambda *event: precise.append(event))
+    p.show_frame_at(30.0)
+    old_worker = p._frame_worker
+    old_generation = p._frame_generation
+    assert old_worker is not None
+
+    plan, clips = aba_sequence()
+    p.load_sequence(plan, clips, 0.0)
+    assert old_worker.stopped
+    assert p._frame_generation != old_generation
+    p._frame_window_ready(old_generation, ())
+    assert precise == []
+
+
+def test_joined_failure_stop_and_shutdown_own_all_streaming_workers(qt_app):
+    p, _plan = sequence_player(FakeClock(), worker_type=LingeringWorker)
+    states, failures = [], []
+    p.state_changed.connect(states.append)
+    p.failed.connect(failures.append)
+    p.play()
+    p._request_sequence_preroll()
+    workers = list(p.workers)
+    workers[1].failed.emit(workers[1].generation, "broken next source")
+
+    assert failures == ["broken next source"]
+    assert states == [True, False]
+    assert all(worker.stopped for worker in workers)
+    for worker in workers:
+        worker.finish()
+    p.shutdown()
+    assert p._streaming_workers_alive() == 0
 
 
 # -- paused source-frame stepping --------------------------------------------
