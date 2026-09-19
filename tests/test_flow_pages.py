@@ -1407,7 +1407,7 @@ def test_joined_precise_frame_cannot_become_source_trim_or_still_authority(
     window.set_view_mode(Mode.CLASSIC)
 
 
-def test_joined_assemble_routes_joined_play_but_guards_source_edit_and_listen(
+def test_joined_assemble_routes_play_and_listen_but_guards_source_edits(
         window, app, monkeypatch):
     make_aba_assembly(window, app)
     window.table.setCurrentCell(0, 0)
@@ -1454,10 +1454,12 @@ def test_joined_assemble_routes_joined_play_but_guards_source_edit_and_listen(
     window._on_listening_changed("source")
     window._on_monitor_restart()
 
-    assert calls == ["sequence", "play", "stop"]
+    assert calls[:3] == ["sequence", "play", "stop"]
+    assert calls.count("monitor") == 1
+    assert "listen mode" in calls
+    assert "restart" in calls
     assert [(one.start, one.end, one.sid)
             for one in window.clips[0].selects] == before
-    assert window.live_preview.status.muted
     assert not window.live_preview.status.playing
     assert "return to Browse or Trim" in window.statusBar().currentMessage()
     window.set_view_mode(Mode.CLASSIC)
@@ -1513,7 +1515,8 @@ def test_joined_play_uses_output_ticks_and_never_promotes_source_authority(
         window.trim_bar.playhead,
     ) == source_before
     assert "playing joined picture" in window.flow_source_note.text()
-    assert "sound and the finished file are not previewed" in (
+    assert "sound is not active" in window.flow_source_note.text()
+    assert "finished exported file is not previewed" in (
         window.flow_source_note.text())
     window.set_view_mode(Mode.CLASSIC)
 

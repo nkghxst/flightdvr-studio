@@ -71,11 +71,14 @@ from .jobs import ExportWorker, Job, JobStatus, write_concat_file
 from .media import ClipInfo, Select, Tools, available_encoders
 from .audio_plan import (
     OUTPUT_RATE, AudioMode, MusicChoice, SampleSpan, resolve_audio_plan,
-    round_samples,
+    resolve_monitor_audio_plan, round_samples,
 )
 from .audio_device import AudioOutput
 from .audio_reader import FfmpegPcmReader, MusicAssetProbe
-from .audio_stream import AudioStream, LiveAudioMapping, MonitorState
+from .audio_stream import (
+    AudioStream, LiveAudioMapping, MonitorState, SequencePcmReader,
+    SequenceSourceSegment,
+)
 from .flow_layout import (
     Mode, Stage, first_stage as flow_first_stage, mode_from_stored,
     neighbours as flow_neighbours, offered_stages, stage_from_stored,
@@ -142,11 +145,11 @@ MONITOR_RANGE_CHANGED = (
 
 @dataclass(frozen=True)
 class _MonitorSnapshot:
-    """One focused occurrence, frozen in both source and output coordinates."""
+    """One immutable focused or joined output-to-source binding."""
 
     target: OutputTarget
     sequence: SequencePlan
-    occurrence: OccurrenceId
+    occurrence: OccurrenceId | None
     source: SampleSpan
 
     @property
@@ -154,16 +157,22 @@ class _MonitorSnapshot:
         return self.source.samples
 
     def output_sample(self, seconds: float) -> int | None:
-        """Map one half-open source position; terminal/outside stays invalid."""
+        """Map the authoritative half-open position onto the output clock."""
         try:
             numeric = float(seconds)
             if not math.isfinite(numeric):
                 return None
-            location = self.sequence.locate_source(
-                self.occurrence, Fraction(str(numeric)))
+            if self.target.is_assembly:
+                output_sample = round_samples(
+                    Fraction(str(numeric)) * OUTPUT_RATE)
+            else:
+                if self.occurrence is None:
+                    return None
+                location = self.sequence.locate_source(
+                    self.occurrence, Fraction(str(numeric)))
+                output_sample = round_samples(location.output * OUTPUT_RATE)
         except (TypeError, ValueError, OverflowError, SequencePlanError):
             return None
-        output_sample = round_samples(location.output * OUTPUT_RATE)
         # `locate_source` validates the rational half-open occurrence, but the
         # device clock is integral. A point less than half a sample from the
         # source end can therefore round to the terminal output coordinate.
@@ -246,6 +255,9 @@ class MainWindow(QMainWindow):
         # One plan, keyed by the identity the session and Assembly already use.
         self.output_plan = OutputPlan()
         self._music_target: OutputTarget | None = None
+        self._assembly_music_target: OutputTarget | None = None
+        self._sequence_target: OutputTarget | None = None
+        self._music_syncing = False
         # Acquisition is bound to the pair, not the counter alone: a late
         # success must reach the target it was started for and no other.
         self._music_generation = 0
@@ -262,6 +274,7 @@ class MainWindow(QMainWindow):
         self._monitor_snapshot: _MonitorSnapshot | None = None
         self._monitor_revision = 0
         self._monitor_rearm_required = False
+        self._monitor_tick_active = False
         # Presentation only. Both modes show the same panels over the same
         # session; nothing here is a second copy of anything.
         self._view_mode = Mode.CLASSIC
@@ -904,6 +917,9 @@ class MainWindow(QMainWindow):
 
     def _music_context(self) -> tuple[str, str, bool, bool]:
         """Target name, and the same triple `_run_job` resolves music under."""
+        if self._music_target is not None and self._music_target.is_assembly:
+            return (f"Assembly · {len(self._music_target.items)} rows",
+                    self._preset_key(), True, False)
         clip = self._trim_clip
         name = clip.path.name if clip is not None else ""
         ranges = clip.real_selects if clip is not None else []
@@ -911,6 +927,39 @@ class MainWindow(QMainWindow):
             chosen = ranges[min(clip.current, len(ranges) - 1)]
             name = f"{name} · {chosen.name or 'range'}"
         return name, self._preset_key(), self.export_panel.join_enabled(), False
+
+    def _assembly_working_output(self):
+        """The one exact valid joined output, without compiling a second plan."""
+        if not self.export_panel.join_enabled():
+            return None
+        pieces, gaps = self._assembly_export_pieces()
+        if gaps or len(pieces) < 2:
+            return None
+        outputs = working_outputs(pieces, joined=True)
+        return outputs[0] if len(outputs) == 1 else None
+
+    def _bind_assembly_music_target(self, target: OutputTarget) -> None:
+        """Create or exactly rekey the one Assembly-owned editing choice."""
+        if not isinstance(target, OutputTarget) or not target.is_assembly:
+            raise ValueError("Assembly music needs an exact Assembly target")
+        previous = self._assembly_music_target
+        if previous == target:
+            if target not in self.output_plan.targets:
+                raise KeyError("tracked Assembly music target is missing")
+            self.output_plan.select(target)
+            return
+        if previous is None:
+            if target in self.output_plan.targets:
+                raise ValueError("untracked Assembly music target is occupied")
+            self._store_music(target, MusicChoice())
+        else:
+            self.output_plan.rekey(previous, target)
+            if previous in self._music_reading:
+                self._music_reading[target] = self._music_reading.pop(previous)
+            if previous in self._music_trouble:
+                self._music_trouble[target] = self._music_trouble.pop(previous)
+        self._assembly_music_target = target
+        self.output_plan.select(target)
 
     def _planned_music(self, target: OutputTarget) -> MusicChoice:
         try:
@@ -923,25 +972,44 @@ class MainWindow(QMainWindow):
             target, self._preset_key(), self.current_settings(), choice)
 
     def _sync_music_panel(self) -> None:
-        """Show the focused range's music, without claiming it was chosen."""
-        target = self._music_target_for(self._trim_clip)
-        self._music_target = target
-        if target is None:
-            self.preview_view.show_track_status("")
-            self.export_panel.set_music_summary("")
+        """Show the exact output being edited, without inventing a fallback."""
+        if self._music_syncing:
             return
-        if target not in self.output_plan.targets:
-            self._store_music(target, MusicChoice())
-        self.output_plan.select(target)
-        choice = self._planned_music(target)
-        name, preset_key, joined, bundle = self._music_context()
-        self.music_panel.load(choice, target=name, preset_key=preset_key,
-                              joined=joined, bundle=bundle)
-        self.music_panel.set_asset(choice.asset)
-        self._show_music_state(target)
-        self._sync_live_preview()
-        self._refresh_sidebar()
-        self._show_source_note()
+        self._music_syncing = True
+        try:
+            assembly = (self._view_mode is Mode.FLOW
+                        and self.export_panel.join_enabled())
+            output = self._assembly_working_output() if assembly else None
+            audition = False
+            if assembly:
+                if output is not None:
+                    self._bind_assembly_music_target(output.target)
+                    audition = True
+                target = self._assembly_music_target
+            else:
+                target = self._music_target_for(self._trim_clip)
+                if target is not None and target not in self.output_plan.targets:
+                    self._store_music(target, MusicChoice())
+                if target is not None:
+                    self.output_plan.select(target)
+            self._music_target = target
+            if target is None:
+                self.preview_view.show_track_status("")
+                self.export_panel.set_music_summary("")
+                self._sync_live_preview()
+                return
+            choice = self._planned_music(target)
+            name, preset_key, joined, bundle = self._music_context()
+            self.music_panel.load(
+                choice, target=name, preset_key=preset_key,
+                joined=joined, bundle=bundle, audition=audition)
+            self.music_panel.set_asset(choice.asset)
+            self._show_music_state(target)
+            self._sync_live_preview()
+            self._refresh_sidebar()
+            self._show_source_note()
+        finally:
+            self._music_syncing = False
 
     def _show_music_state(self, target: OutputTarget) -> None:
         """One line about acquisition, and one about what the export will do."""
@@ -1105,6 +1173,24 @@ class MainWindow(QMainWindow):
         """
         if joined is None:
             joined = len(pieces) > 1 and self.export_panel.join_enabled()
+        if joined:
+            # Joined audition owns one Assembly choice.  Never fall back to a
+            # member clip's choice: that would display one decision and queue a
+            # different one.  An unconfigured Assembly preserves legacy export;
+            # a configured one remains an explicit S4 refusal before any Job.
+            target = self._assembly_music_target
+            if target is None:
+                return ""
+            choice = self._planned_music(target)
+            if not choice.configured:
+                return ""
+            if target in self._music_reading:
+                return ("Assembly: its music track is still being read. Wait "
+                        "for it to finish, or clear the choice.")
+            if target in self._music_trouble:
+                return f"Assembly: {self._music_trouble[target]}"
+            reason = MusicPanel._refusal(self._preset_key(), True, bundle)
+            return f"Assembly: {reason}" if reason else ""
         for piece in pieces:
             target = self._music_target_for(piece)
             if target is None:
@@ -1170,6 +1256,17 @@ class MainWindow(QMainWindow):
         if target in self._music_trouble:
             return self._music_trouble[target]
         _name, preset_key, joined, bundle = self._music_context()
+        if isinstance(target, OutputTarget) and target.is_assembly:
+            if bundle:
+                return MusicPanel._refusal(preset_key, joined, bundle)
+            if preset_key != "master":
+                return (f"Music/audio monitoring is not supported for the "
+                        f"{preset_key} preset yet.")
+            if (not self._joined_assemble_active()
+                    or self._sequence_plan is None
+                    or self._sequence_target != target):
+                return "Assembly monitoring is available on a valid Assemble stage."
+            return ""
         refusal = MusicPanel._refusal(preset_key, joined, bundle)
         if refusal:
             return refusal
@@ -1183,10 +1280,29 @@ class MainWindow(QMainWindow):
         at all. Reaching for the target's stored choice either way would leave
         the control rebuilding the same thing it already had.
         """
-        clip = self._trim_clip
-        if clip is None or target is None:
+        if target is None:
             return None, 0
         snapshot = self._new_monitor_snapshot(target)
+        if target.is_assembly:
+            clips = [self._sequence_clip(one)
+                     for one in snapshot.sequence.occurrences]
+            if any(clip is None for clip in clips):
+                raise ValueError("an Assembly source is no longer available")
+            source_has_audio = any(clip.has_audio for clip in clips)
+            if listening is Listening.SOURCE:
+                choice = MusicChoice(mode=AudioMode.ORIGINAL)
+            else:
+                choice = self._planned_music(target)
+                if not choice.configured:
+                    return None, 0
+            samples = snapshot.samples
+            return resolve_monitor_audio_plan(
+                choice, samples, source_has_audio=source_has_audio,
+                preset_key=self._preset_key()), samples
+
+        clip = self._trim_clip
+        if clip is None:
+            return None, 0
         if listening is Listening.SOURCE:
             if not clip.has_audio:
                 return None, 0          # nothing of its own to hear
@@ -1207,9 +1323,22 @@ class MainWindow(QMainWindow):
         ), samples
 
     def _new_monitor_snapshot(self, target: OutputTarget) -> _MonitorSnapshot:
-        """Freeze the exact focused range without consulting queue tick state."""
+        """Freeze the exact focused range or current compiled Assembly."""
+        if target is None:
+            raise ValueError("choose an output to monitor")
+        if target.is_assembly:
+            sequence = self._sequence_plan
+            if (not self._joined_assemble_active() or sequence is None
+                    or self._sequence_target != target):
+                raise ValueError("choose one valid compiled Assembly to monitor")
+            if tuple(one.item for one in sequence.occurrences) != target.items:
+                raise ValueError("the Assembly target changed after compilation")
+            return _MonitorSnapshot(
+                target, sequence, None,
+                SampleSpan(0, sequence.total_samples, OUTPUT_RATE))
+
         clip = self._trim_clip
-        if clip is None or target is None or target.is_assembly:
+        if clip is None:
             raise ValueError("choose one clip or range to monitor")
 
         # `ordinary_pieces` is the existing resolver for a clip's effective
@@ -1243,40 +1372,118 @@ class MainWindow(QMainWindow):
         Returns None rather than raising for the ordinary cases — a clip with
         no configured music has nothing to mix, and that is not a fault.
         """
-        clip = self._trim_clip
         self._monitor_snapshot = None
-        if clip is None:
+        if target is None:
             return None
         snapshot = self._new_monitor_snapshot(target)
-        if listening is Listening.SOURCE:
-            if not clip.has_audio:
-                return None
-            choice = MusicChoice(mode=AudioMode.ORIGINAL)
-        else:
-            choice = self._planned_music(target)
-            if not choice.configured:
-                return None
-        plan = resolve_audio_plan(
-            choice, snapshot.samples,
-            source_has_audio=clip.has_audio,
-            preset_key=self._preset_key(),
-            joined=self.export_panel.join_enabled(),
-            bundle=False,
-        )
-        mapping = LiveAudioMapping(
-            audio=plan, source=snapshot.source)
-        source_reader = None
-        if clip.has_audio:
-            source_reader = FfmpegPcmReader.for_source(
-                self.tools, clip.path, stream_index=0,
-                timeline_frames=snapshot.source.end)
-        music_reader = None
-        if plan.asset is not None:
-            music_reader = FfmpegPcmReader.for_music(self.tools, plan.asset)
-        stream = AudioStream(mapping, source_reader=source_reader,
-                             music_reader=music_reader,
-                             monitor=MonitorState(
-                                 level=self.live_preview.level, muted=True))
+        allocated = []
+
+        def cleanup() -> None:
+            seen = set()
+            for reader in reversed(allocated):
+                if reader is None or id(reader) in seen:
+                    continue
+                seen.add(id(reader))
+                try:
+                    reader.close()
+                except Exception:
+                    pass
+
+        try:
+            if target.is_assembly:
+                occurrence_sources = []
+                extents = {}
+                source_has_audio = False
+                for occurrence in snapshot.sequence.occurrences:
+                    clip = self._sequence_clip(occurrence)
+                    if clip is None:
+                        raise ValueError(
+                            f"Assembly occurrence {occurrence.id.ordinal + 1} "
+                            "is no longer available")
+                    if (clip.fingerprint != occurrence.fingerprint
+                            or str(clip.path) != occurrence.source_path):
+                        raise ValueError("an Assembly source changed after compilation")
+                    key = (occurrence.fingerprint, occurrence.source_path, 0)
+                    if clip.has_audio:
+                        source_has_audio = True
+                        origin = round_samples(
+                            occurrence.source.start * OUTPUT_RATE)
+                        needed = origin + occurrence.sample_span.samples
+                        extents[key] = max(extents.get(key, 0), needed)
+                        occurrence_sources.append((occurrence, key, clip))
+                    else:
+                        occurrence_sources.append((occurrence, None, clip))
+
+                if listening is Listening.SOURCE:
+                    choice = MusicChoice(mode=AudioMode.ORIGINAL)
+                else:
+                    choice = self._planned_music(target)
+                    if not choice.configured:
+                        return None
+                plan = resolve_monitor_audio_plan(
+                    choice, snapshot.samples,
+                    source_has_audio=source_has_audio,
+                    preset_key=self._preset_key())
+
+                leaves = {}
+                for occurrence, key, clip in occurrence_sources:
+                    if key is None or key in leaves:
+                        continue
+                    reader = FfmpegPcmReader.for_source(
+                        self.tools, clip.path, stream_index=0,
+                        timeline_frames=extents[key])
+                    allocated.append(reader)
+                    leaves[key] = reader
+                segments = tuple(
+                    SequenceSourceSegment.from_occurrence(
+                        occurrence, leaves.get(key) if key is not None else None)
+                    for occurrence, key, _clip in occurrence_sources
+                )
+                source_reader = (
+                    SequencePcmReader(segments) if source_has_audio else None)
+                if source_reader is not None:
+                    # The composite now owns every leaf; one cleanup entry
+                    # closes each distinct reader once even for repeated A.
+                    allocated[:] = [source_reader]
+            else:
+                clip = self._trim_clip
+                if clip is None:
+                    return None
+                if listening is Listening.SOURCE:
+                    if not clip.has_audio:
+                        return None
+                    choice = MusicChoice(mode=AudioMode.ORIGINAL)
+                else:
+                    choice = self._planned_music(target)
+                    if not choice.configured:
+                        return None
+                plan = resolve_audio_plan(
+                    choice, snapshot.samples,
+                    source_has_audio=clip.has_audio,
+                    preset_key=self._preset_key(),
+                    joined=self.export_panel.join_enabled(), bundle=False)
+                source_reader = None
+                if clip.has_audio:
+                    source_reader = FfmpegPcmReader.for_source(
+                        self.tools, clip.path, stream_index=0,
+                        timeline_frames=snapshot.source.end)
+                    allocated.append(source_reader)
+
+            mapping = LiveAudioMapping(audio=plan, source=snapshot.source)
+            music_reader = None
+            if plan.asset is not None:
+                music_reader = FfmpegPcmReader.for_music(self.tools, plan.asset)
+                allocated.append(music_reader)
+            stream = AudioStream(
+                mapping, source_reader=source_reader,
+                music_reader=music_reader,
+                monitor=MonitorState(
+                    level=self.live_preview.level, muted=True))
+        except Exception:
+            cleanup()
+            raise
+        # Ownership moved to AudioStream only after its constructor succeeded.
+        allocated.clear()
         self._monitor_snapshot = snapshot
         self._monitor_rearm_required = False
         return stream
@@ -1288,8 +1495,12 @@ class MainWindow(QMainWindow):
         target = self._music_target
         self._monitor_snapshot = None
         self._monitor_rearm_required = False
+        reason = self._monitor_refusal(target)
+        if (isinstance(target, OutputTarget) and target.is_assembly
+                and not self._joined_assemble_active()):
+            reason = "Assembly monitoring is available on the Assemble stage."
         self.live_preview.set_target(
-            target, reason=self._monitor_refusal(target))
+            target, reason=reason)
         self.live_preview.set_speed(
             2.0 if self._preset_key() == "slowmo" else 1.0)
         self._show_monitoring()
@@ -1303,7 +1514,15 @@ class MainWindow(QMainWindow):
         self.preview_view.show_monitoring(not status.muted, status.reason)
 
     def _on_listen_toggled(self, listening: bool) -> None:
-        if self._refuse_joined_source_action():
+        if self._joined_assemble_active():
+            position = self.preview_view.sequence_strip.position
+            if listening:
+                self._prepare_monitoring(
+                    position, play=self.player.is_playing)
+            else:
+                self.live_preview.set_muted(True)
+                self.live_preview.pause()
+            self._show_monitoring()
             return
         if listening:
             self._prepare_monitoring(
@@ -1315,9 +1534,18 @@ class MainWindow(QMainWindow):
 
     def _on_listening_changed(self, name: str) -> None:
         """A rebuilt mix begins at the picture, never at its own zero."""
+        self.live_preview.set_listening(Listening(name))
+        if self._joined_assemble_active():
+            position = self.preview_view.sequence_strip.position
+            if self.preview_view.listen_check.isChecked():
+                self._prepare_monitoring(
+                    position, play=self.player.is_playing)
+            else:
+                self._seek_monitoring(position)
+            self._show_monitoring()
+            return
         if self._refuse_joined_source_action():
             return
-        self.live_preview.set_listening(Listening(name))
         if self.preview_view.listen_check.isChecked():
             self._prepare_monitoring(
                 self.player.position, play=self.player.is_playing)
@@ -1327,10 +1555,36 @@ class MainWindow(QMainWindow):
 
     def _on_monitor_restart(self) -> None:
         """Return both sides once, preserving existing Play/Listen intentions."""
-        if self._refuse_joined_source_action():
-            return
         was_playing = self.player.is_playing
         was_listening = self.preview_view.listen_check.isChecked()
+        if self._joined_assemble_active():
+            plan = self._sequence_plan
+            if plan is None:
+                return
+            if (self._monitor_snapshot is None or self._monitor_rearm_required
+                    or not self.live_preview.status.offered):
+                self._sync_music_panel()
+            if self.player.sequence_revision != plan.revision:
+                self.player.load_sequence(
+                    plan, self._resolved_sequence_clips(plan), 0.0)
+            else:
+                self.player.seek(0.0)
+            self.preview_view.sequence_strip.set_position(0.0)
+            self._sequence_occurrence = None
+            self._sequence_source_seconds = None
+            self.live_preview.restart()
+            self._monitor_rearm_required = False
+            if was_listening:
+                self.live_preview.set_muted(False)
+                if was_playing:
+                    self.live_preview.play()
+            if was_playing:
+                self.player.play(self.frame_view.width())
+            self._show_monitoring()
+            self._show_source_note()
+            return
+        if self._refuse_joined_source_action():
+            return
         if (self._monitor_snapshot is None or self._monitor_rearm_required
                 or not self.live_preview.status.offered):
             self._sync_live_preview()
@@ -1648,6 +1902,7 @@ class MainWindow(QMainWindow):
             self._return_viewport()
             self._return_from_flow()
             self.splitter.show()
+            self._sync_music_panel()
         self.settings_store.setValue("view_mode", chosen.value)
         for name, action in self._view_actions.items():
             action.setChecked(name is chosen)
@@ -1668,7 +1923,8 @@ class MainWindow(QMainWindow):
             self._refresh_sequence_plan()
             self.play_button.setToolTip(
                 "Play or pause the assembled picture in joined output time.\n"
-                "Sound and the finished exported file are not previewed.")
+                "Listen previews its joined sound; the finished exported file "
+                "is not previewed.")
             # A row is an occurrence now, not an instruction to retarget the
             # source editor.  Its start is a useful joined position.
             self._on_assembly_choice()
@@ -1677,6 +1933,7 @@ class MainWindow(QMainWindow):
             self.play_button.setToolTip(
                 "Play the highlighted clip here in the window.\n"
                 "Space does the same once the picture has focus.")
+            self._sync_music_panel()
         self._show_source_note()
         back, forward = flow_neighbours(chosen, self._offered_stages)
         self.flow_back.setEnabled(back is not None)
@@ -1721,6 +1978,36 @@ class MainWindow(QMainWindow):
         return (self._view_mode is Mode.FLOW
                 and self._flow_stage is Stage.ASSEMBLE)
 
+    def _fence_joined_monitoring(self, reason: str, *, stop_probe: bool) -> None:
+        """Retire old joined PCM before another revision can be published."""
+        self._monitor_snapshot = None
+        self._monitor_rearm_required = True
+        if (stop_probe and self._music_probe_target is not None
+                and self._music_probe_target.is_assembly):
+            self._stop_music_probe(
+                "Assembly changed while the track was being read. Choose it again.")
+        if self.live_preview is not None:
+            self.live_preview.set_target(
+                self._assembly_music_target, reason=reason)
+            self.live_preview.set_muted(True)
+            self._show_monitoring()
+
+    def _invalidate_sequence_plan(self, reason: str) -> None:
+        """Offer no joined stream while retaining the last exact music choice."""
+        if self.player.sequence_revision is not None:
+            self.player.clear_sequence()
+        self._fence_joined_monitoring(reason, stop_probe=True)
+        self._sequence_plan = None
+        self._sequence_target = None
+        self._sequence_occurrence = None
+        self._sequence_source_seconds = None
+        self._sequence_loaded_clip = None
+        strip = self.preview_view.sequence_strip
+        strip.set_plan(None)
+        strip.show()
+        self._sync_music_panel()
+        self._show_source_note()
+
     def _refuse_joined_source_action(self) -> bool:
         """Keep source-edit and playback routes out of joined inspection."""
         if not self._joined_assemble_active():
@@ -1744,35 +2031,27 @@ class MainWindow(QMainWindow):
 
         pieces, gaps = self._assembly_export_pieces()
         if gaps or len(pieces) < 2:
-            self._sequence_plan = None
-            self._sequence_occurrence = None
-            self._sequence_source_seconds = None
-            self._sequence_loaded_clip = None
-            strip.set_plan(None)
-            strip.show()
-            self._show_source_note()
+            self._invalidate_sequence_plan(
+                "Assembly monitoring needs at least two resolved rows.")
             return
 
         outputs = working_outputs(pieces, joined=True)
         if len(outputs) != 1:
-            self._sequence_plan = None
-            strip.set_plan(None)
-            strip.show()
-            self._show_source_note()
+            self._invalidate_sequence_plan(
+                "Assembly monitoring needs one exact joined output.")
             return
+        output = outputs[0]
 
         next_revision = self._sequence_revision + 1
         try:
             plan = compile_sequence(
-                outputs[0], resolution=Resolution.success(),
+                output, resolution=Resolution.success(),
                 revision=f"flow-assemble-{next_revision}")
         except SequencePlanError as problem:
-            self._sequence_plan = None
-            strip.set_plan(None)
-            strip.show()
+            self._invalidate_sequence_plan(
+                f"Joined monitoring unavailable: {problem}")
             self.statusBar().showMessage(
                 f"Joined scrub unavailable: {problem}", 6000)
-            self._show_source_note()
             return
 
         old = self._sequence_plan
@@ -1784,24 +2063,40 @@ class MainWindow(QMainWindow):
                  one.output.start, one.output.end)
                 for one in value.occurrences)
         if old is not None and shape(old) == shape(plan):
+            self._bind_assembly_music_target(output.target)
+            self._sequence_target = output.target
             strip.show()
+            self._sync_music_panel()
             self._show_source_note()
             return
 
-        if (old is not None
-                and self.player.sequence_revision == old.revision):
+        if old is not None and self.player.sequence_revision == old.revision:
             # A revised order must fence both decoder lanes before its output
             # coordinates can be offered. Never reinterpret an old tick on
             # newly ordered material.
             self.player.clear_sequence()
 
+        self._fence_joined_monitoring(
+            "Assembly changed. Press Play or Listen to hear the new order.",
+            stop_probe=True)
+        try:
+            self._bind_assembly_music_target(output.target)
+        except (KeyError, TypeError, ValueError) as problem:
+            self._invalidate_sequence_plan(
+                f"Assembly music could not follow the exact target: {problem}")
+            self.statusBar().showMessage(
+                f"Joined monitoring unavailable: {problem}", 6000)
+            return
+
         self._sequence_revision = next_revision
         self._sequence_plan = plan
+        self._sequence_target = output.target
         self._sequence_occurrence = None
         self._sequence_source_seconds = None
         self._sequence_loaded_clip = None
         strip.set_plan(plan)
         strip.show()
+        self._sync_music_panel()
         self._show_source_note()
 
     def _sequence_clip(self, occurrence) -> ClipInfo | None:
@@ -1811,7 +2106,18 @@ class MainWindow(QMainWindow):
             return direct
         return next((clip for clip in self.clips
                      if (clip.fingerprint == occurrence.fingerprint
-                         and str(clip.path) == occurrence.source_path)), None)
+                          and str(clip.path) == occurrence.source_path)), None)
+
+    def _resolved_sequence_clips(self, plan: SequencePlan) -> dict:
+        """Resolve every immutable occurrence once, or refuse the whole run."""
+        resolved = {}
+        for occurrence in plan.occurrences:
+            clip = self._sequence_clip(occurrence)
+            if clip is None:
+                raise SequencePlanError(
+                    f"joined occurrence {occurrence.id.ordinal} is unresolved")
+            resolved[occurrence.id] = clip
+        return resolved
 
     def _on_sequence_scrub_requested(self, revision: str,
                                      output_seconds: float) -> None:
@@ -1833,7 +2139,13 @@ class MainWindow(QMainWindow):
             self.player.clear_sequence()
         if self.live_preview is not None:
             self.live_preview.pause()
-            self.live_preview.set_muted(True)
+            if not isinstance(location, SequenceTerminal):
+                # The strip is the authority here.  `_sequence_source_seconds`
+                # may name 13 while this output point is 1; never feed the
+                # paused source coordinate to the output-clock stream.
+                self._seek_monitoring(
+                    float(location.output),
+                    explicit=self.preview_view.listen_check.isChecked())
             self._show_monitoring()
         self._clear_precise_frame()
         self.preview_view.sequence_strip.set_position(float(location.output))
@@ -1893,7 +2205,18 @@ class MainWindow(QMainWindow):
         self._sequence_source_seconds = None
         self._sequence_loaded_clip = None
         self._clear_precise_frame()
-        self._sync_live_preview()
+        if (self._music_probe_target is not None
+                and self._music_probe_target.is_assembly):
+            self._stop_music_probe(
+                "Assembly preview was left while the track was being read. "
+                "Choose it again.")
+        self._monitor_snapshot = None
+        self._monitor_rearm_required = True
+        if self.live_preview is not None:
+            self.live_preview.set_target(
+                self._assembly_music_target,
+                reason="Assembly monitoring is available on the Assemble stage.")
+            self._show_monitoring()
 
     # -- the persistent picture ------------------------------------------------
 
@@ -1951,6 +2274,12 @@ class MainWindow(QMainWindow):
             position = self.preview_view.sequence_strip.position
             total = float(plan.total_duration)
             joined_transport = self.player.sequence_revision == plan.revision
+            monitoring = (self.live_preview is not None
+                          and self.live_preview.status.available
+                          and not self.live_preview.status.muted)
+            preview_claim = (
+                "joined picture and sound are previewed"
+                if monitoring else "joined picture is previewed; sound is not active")
             if self._sequence_occurrence is None:
                 if abs(position - total) < 1e-9:
                     return (
@@ -1962,8 +2291,8 @@ class MainWindow(QMainWindow):
                              else "paused joined picture")
                     return (
                         f"Joined position {human_duration(position)} of "
-                        f"{human_duration(total)} — {state}; sound and the "
-                        "finished file are not previewed.")
+                        f"{human_duration(total)} — {state}; {preview_claim}. "
+                        "The finished exported file is not previewed.")
                 return (
                     f"Joined position {human_duration(position)} of "
                     f"{human_duration(total)} — paused source-frame "
@@ -1988,8 +2317,8 @@ class MainWindow(QMainWindow):
                     f"{human_duration(total)} · occurrence "
                     f"{occurrence.id.ordinal + 1}: {name} at "
                     f"{human_duration(self._sequence_source_seconds or 0.0)} "
-                    f"— {state}; sound and the finished file are not "
-                    "previewed.")
+                    f"— {state}; {preview_claim}. The finished exported file "
+                    "is not previewed.")
             return (
                 f"Joined position {human_duration(position)} of "
                 f"{human_duration(total)} · occurrence "
@@ -3501,27 +3830,19 @@ class MainWindow(QMainWindow):
                 position = 0.0
                 self.preview_view.sequence_strip.set_position(position)
             if self.player.sequence_revision != plan.revision:
-                resolved = {}
-                for occurrence in plan.occurrences:
-                    clip = self._sequence_clip(occurrence)
-                    if clip is None:
-                        self.statusBar().showMessage(
-                            "Joined playback stopped: an Assembly source is "
-                            "no longer available", 6000)
-                        return
-                    resolved[occurrence.id] = clip
                 self._sharpen_timer.stop()
                 self._clear_precise_frame()
                 try:
-                    self.player.load_sequence(plan, resolved, position)
+                    self.player.load_sequence(
+                        plan, self._resolved_sequence_clips(plan), position)
                 except (TypeError, ValueError, SequencePlanError) as problem:
                     self.statusBar().showMessage(
                         f"Joined playback unavailable: {problem}", 6000)
                     return
-            if self.live_preview is not None:
-                self.live_preview.pause()
-                self.live_preview.set_muted(True)
-                self._show_monitoring()
+            if (self.preview_view.listen_check.isChecked()
+                    and (self._monitor_snapshot is None
+                         or not self.live_preview.status.offered)):
+                self._sync_music_panel()
             self._focus_player()
             self.player.play(self.frame_view.width())
             return
@@ -3626,11 +3947,27 @@ class MainWindow(QMainWindow):
         trim marker and still authority continue to name the frame on screen.
         """
         if self._joined_assemble_active():
+            if self._monitor_tick_active:
+                return
             plan = self._sequence_plan
             if (plan is not None
                     and self.player.sequence_revision == plan.revision):
-                self.preview_view.sequence_strip.set_position(seconds)
-                self._show_source_note()
+                self._monitor_tick_active = True
+                try:
+                    self.preview_view.sequence_strip.set_position(seconds)
+                    snapshot = self._monitor_snapshot
+                    if (snapshot is not None
+                            and self.live_preview.status.playing):
+                        output_sample = snapshot.output_sample(seconds)
+                        if output_sample is None:
+                            self.live_preview.pause()
+                            self._monitor_rearm_required = True
+                        elif not self._monitor_rearm_required:
+                            self.live_preview.tick(output_sample)
+                    self._show_monitoring()
+                    self._show_source_note()
+                finally:
+                    self._monitor_tick_active = False
             return
         self._drive_monitoring(seconds)
 
@@ -3811,8 +4148,14 @@ class MainWindow(QMainWindow):
     def _preview_state_changed(self, playing: bool) -> None:
         if self._joined_assemble_active():
             if self.live_preview is not None:
-                self.live_preview.pause()
-                self.live_preview.set_muted(True)
+                if (playing
+                        and self.preview_view.listen_check.isChecked()):
+                    if not self.live_preview.status.playing:
+                        self._prepare_monitoring(
+                            self.preview_view.sequence_strip.position,
+                            play=True)
+                elif not playing:
+                    self.live_preview.pause()
                 self._show_monitoring()
             if playing:
                 self._clear_precise_frame()
@@ -3835,11 +4178,20 @@ class MainWindow(QMainWindow):
         self.frame_view.set_message("could not play this clip")
         self.statusBar().showMessage(f"Preview: {message}", 8000)
         if self._joined_assemble_active():
+            self._fence_joined_monitoring(
+                "Joined playback failed; press Play or Listen to rebuild it.",
+                stop_probe=True)
             return
         self._show_frame(self.trim_bar.playhead)
 
     def _preview_ended(self) -> None:
         if self._joined_assemble_active():
+            if self.live_preview is not None:
+                # EOF is an immediate sink fence.  The terminal is not a
+                # playable sample and must never be passed to reprime.
+                self.live_preview.pause()
+                self._monitor_rearm_required = True
+                self._show_monitoring()
             plan = self._sequence_plan
             if plan is not None:
                 self.preview_view.sequence_strip.set_position(
@@ -4966,6 +5318,8 @@ class MainWindow(QMainWindow):
         # Fill left the ordinary cards standing — and my own docstring went
         # with it, displaced by the call that was put above it.
         self._refresh_sidebar()
+        if self._view_mode is Mode.FLOW and self.export_panel.join_enabled():
+            self._sync_music_panel()
 
     def _capture_assembly(self) -> None:
         """Take the order back from the list after somebody rearranged it."""
@@ -4975,6 +5329,8 @@ class MainWindow(QMainWindow):
         # Reordering and removing arrive here and nowhere else, so without
         # this a row taken out of the Assembly left its joined card standing.
         self._refresh_sidebar()
+        if self._view_mode is Mode.FLOW and self.export_panel.join_enabled():
+            self._sync_music_panel()
 
     def _refresh_assembly(self, items=None) -> None:
         """Resolve the stored list against the clips currently in front of us."""
