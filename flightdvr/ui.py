@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -26,7 +27,9 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace
 from datetime import date, datetime
+from fractions import Fraction
 from functools import partial
 from html import escape
 from pathlib import Path
@@ -66,8 +69,6 @@ from .format import (
 from .help_content import naming_help_html, release_links
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
 from .media import ClipInfo, Select, Tools, available_encoders
-from dataclasses import replace
-
 from .audio_plan import (
     OUTPUT_RATE, AudioMode, MusicChoice, SampleSpan, resolve_audio_plan,
     round_samples,
@@ -107,6 +108,10 @@ from .session import (
     missing_from, recent_sessions, remember,
 )
 from .shortcuts import SHORTCUT_GROUPS
+from .sequence_plan import (
+    OccurrenceId, Resolution, SequencePlan, SequencePlanError,
+    compile_sequence,
+)
 from .stills import StillRequest, StillWorker
 from .thumbs import THUMB_WIDTH, ThumbnailLoader
 from .trim import Filmstrip, FilmstripLoader, FlightAnalysisWorker
@@ -128,6 +133,46 @@ SIDEBAR_MINIMUM = 210
 
 SCAN_IN_PROGRESS = ("Still listing this folder — decisions can be made once "
                     "the scan finishes")
+MONITOR_OUTSIDE_RANGE = (
+    "Monitoring is silent outside the selected range. Press Play, Listen, or "
+    "Restart at a position inside it to listen again.")
+MONITOR_RANGE_CHANGED = (
+    "The selected range changed. Press Play, Listen, or Restart to listen to "
+    "the updated output.")
+
+
+@dataclass(frozen=True)
+class _MonitorSnapshot:
+    """One focused occurrence, frozen in both source and output coordinates."""
+
+    target: OutputTarget
+    sequence: SequencePlan
+    occurrence: OccurrenceId
+    source: SampleSpan
+
+    @property
+    def samples(self) -> int:
+        return self.source.samples
+
+    def output_sample(self, seconds: float) -> int | None:
+        """Map one half-open source position; terminal/outside stays invalid."""
+        try:
+            numeric = float(seconds)
+            if not math.isfinite(numeric):
+                return None
+            location = self.sequence.locate_source(
+                self.occurrence, Fraction(str(numeric)))
+        except (TypeError, ValueError, OverflowError, SequencePlanError):
+            return None
+        output_sample = round_samples(location.output * OUTPUT_RATE)
+        # `locate_source` validates the rational half-open occurrence, but the
+        # device clock is integral. A point less than half a sample from the
+        # source end can therefore round to the terminal output coordinate.
+        # That coordinate is not playable: refuse it through the same silence
+        # and explicit-rearm path as the exact endpoint instead of clamping.
+        if output_sample < 0 or output_sample >= self.samples:
+            return None
+        return output_sample
 
 # The name item already uses UserRole for its path, and SortItem uses the next
 # role for ordering. This one records the current-settings export marker so the
@@ -215,6 +260,9 @@ class MainWindow(QMainWindow):
         # Built once the preview view exists, because it wires that view's
         # controls. Monitoring only: nothing here reaches a job or a session.
         self.live_preview: LivePreview | None = None
+        self._monitor_snapshot: _MonitorSnapshot | None = None
+        self._monitor_revision = 0
+        self._monitor_rearm_required = False
         # Presentation only. Both modes show the same panels over the same
         # session; nothing here is a second copy of anything.
         self._view_mode = Mode.CLASSIC
@@ -1094,8 +1142,7 @@ class MainWindow(QMainWindow):
         view.listen_toggled.connect(self._on_listen_toggled)
         view.listen_level_changed.connect(
             lambda value: self.live_preview.set_level(value / 100.0))
-        view.listening_changed.connect(
-            lambda name: self.live_preview.set_listening(Listening(name)))
+        view.listening_changed.connect(self._on_listening_changed)
         view.restart_requested.connect(self._on_monitor_restart)
 
     def _monitor_refusal(self, target) -> str:
@@ -1128,6 +1175,7 @@ class MainWindow(QMainWindow):
         clip = self._trim_clip
         if clip is None or target is None:
             return None, 0
+        snapshot = self._new_monitor_snapshot(target)
         if listening is Listening.SOURCE:
             if not clip.has_audio:
                 return None, 0          # nothing of its own to hear
@@ -1136,8 +1184,7 @@ class MainWindow(QMainWindow):
             choice = self._planned_music(target)
             if not choice.configured:
                 return None, 0
-        samples = round_samples(
-            (clip.trimmed_duration or clip.duration) * OUTPUT_RATE)
+        samples = snapshot.samples
         if samples <= 0:
             return None, 0
         return resolve_audio_plan(
@@ -1148,6 +1195,37 @@ class MainWindow(QMainWindow):
             bundle=False,
         ), samples
 
+    def _new_monitor_snapshot(self, target: OutputTarget) -> _MonitorSnapshot:
+        """Freeze the exact focused range without consulting queue tick state."""
+        clip = self._trim_clip
+        if clip is None or target is None or target.is_assembly:
+            raise ValueError("choose one clip or range to monitor")
+
+        # `ordinary_pieces` is the existing resolver for a clip's effective
+        # ranges.  Resolve only the focused clip, then match the stable Item/SID
+        # exactly: `_working_outputs()` instead enumerates ticked queue material
+        # and would lose an unticked range which is still perfectly focusable.
+        outputs = working_outputs(ordinary_pieces([clip]))
+        matches = [output for output in outputs if output.target == target]
+        if len(matches) != 1:
+            raise ValueError("the focused clip or range no longer resolves exactly")
+
+        self._monitor_revision += 1
+        sequence = compile_sequence(
+            matches[0], resolution=Resolution.success(),
+            revision=f"monitor-{self._monitor_revision}")
+        if len(sequence.occurrences) != 1:
+            raise ValueError("monitoring requires one focused occurrence")
+        occurrence = sequence.occurrences[0]
+        source_start = round_samples(occurrence.source.start * OUTPUT_RATE)
+        # Quantise the origin once, then add the compiler's cumulative output
+        # length. Independently rounding both endpoints can violate the live
+        # mapping's required equal-length source/output intervals.
+        source = SampleSpan(
+            source_start, source_start + occurrence.sample_span.samples,
+            OUTPUT_RATE)
+        return _MonitorSnapshot(target, sequence, occurrence.id, source)
+
     def _build_monitor_stream(self, target, listening=Listening.MIX):
         """One `AudioStream` for what is being listened to, or None.
 
@@ -1155,29 +1233,50 @@ class MainWindow(QMainWindow):
         no configured music has nothing to mix, and that is not a fault.
         """
         clip = self._trim_clip
-        plan, samples = self._monitor_plan(target, listening)
-        if plan is None or clip is None:
+        self._monitor_snapshot = None
+        if clip is None:
             return None
+        snapshot = self._new_monitor_snapshot(target)
+        if listening is Listening.SOURCE:
+            if not clip.has_audio:
+                return None
+            choice = MusicChoice(mode=AudioMode.ORIGINAL)
+        else:
+            choice = self._planned_music(target)
+            if not choice.configured:
+                return None
+        plan = resolve_audio_plan(
+            choice, snapshot.samples,
+            source_has_audio=clip.has_audio,
+            preset_key=self._preset_key(),
+            joined=self.export_panel.join_enabled(),
+            bundle=False,
+        )
         mapping = LiveAudioMapping(
-            audio=plan, source=SampleSpan(0, samples, OUTPUT_RATE))
+            audio=plan, source=snapshot.source)
         source_reader = None
         if clip.has_audio:
             source_reader = FfmpegPcmReader.for_source(
                 self.tools, clip.path, stream_index=0,
-                timeline_frames=samples)
+                timeline_frames=snapshot.source.end)
         music_reader = None
         if plan.asset is not None:
             music_reader = FfmpegPcmReader.for_music(self.tools, plan.asset)
-        return AudioStream(mapping, source_reader=source_reader,
-                           music_reader=music_reader,
-                           monitor=MonitorState(
-                               level=self.live_preview.level, muted=True))
+        stream = AudioStream(mapping, source_reader=source_reader,
+                             music_reader=music_reader,
+                             monitor=MonitorState(
+                                 level=self.live_preview.level, muted=True))
+        self._monitor_snapshot = snapshot
+        self._monitor_rearm_required = False
+        return stream
 
     def _sync_live_preview(self) -> None:
         """Point the transport at whatever the band is now editing."""
         if self.live_preview is None:
             return
         target = self._music_target
+        self._monitor_snapshot = None
+        self._monitor_rearm_required = False
         self.live_preview.set_target(
             target, reason=self._monitor_refusal(target))
         self.live_preview.set_speed(
@@ -1194,23 +1293,51 @@ class MainWindow(QMainWindow):
 
     def _on_listen_toggled(self, listening: bool) -> None:
         if listening:
-            self.live_preview.set_muted(False)
-            if self.player.is_playing:
-                self.live_preview.play()
+            self._prepare_monitoring(
+                self.player.position, play=self.player.is_playing)
         else:
             self.live_preview.set_muted(True)
             self.live_preview.pause()
         self._show_monitoring()
 
-    def _on_monitor_restart(self) -> None:
-        """Both back to the start, because there is one transport.
+    def _on_listening_changed(self, name: str) -> None:
+        """A rebuilt mix begins at the picture, never at its own zero."""
+        self.live_preview.set_listening(Listening(name))
+        if self.preview_view.listen_check.isChecked():
+            self._prepare_monitoring(
+                self.player.position, play=self.player.is_playing)
+        else:
+            self._seek_monitoring(self.player.position)
+        self._show_monitoring()
 
-        Restarting the sound and leaving the picture where it was is the
-        drift the transport would then refuse to play, so this moves both.
-        """
+    def _on_monitor_restart(self) -> None:
+        """Return both sides once, preserving existing Play/Listen intentions."""
+        was_playing = self.player.is_playing
+        was_listening = self.preview_view.listen_check.isChecked()
+        if (self._monitor_snapshot is None or self._monitor_rearm_required
+                or not self.live_preview.status.offered):
+            self._sync_live_preview()
+        snapshot = self._monitor_snapshot
+        if snapshot is None:
+            self._show_monitoring()
+            return
+        occurrence = snapshot.sequence.get_occurrence(snapshot.occurrence)
+        source_start = float(occurrence.source.start)
+
+        # Do not compose `restart()` with `_on_playhead`: both reprime/reset the
+        # audio transport. The picture gets its one source seek here, and the
+        # stream gets its one output-zero restart below.
+        self._clear_precise_frame()
+        self.player.seek(source_start)
+        self.trim_bar.set_playhead(source_start)
+        self._show_frame(source_start)
+        self._update_trim_labels()
         self.live_preview.restart()
-        if self._trim_clip is not None:
-            self._on_playhead(self.trim_bar.in_point)
+        self._monitor_rearm_required = False
+        if was_listening:
+            self.live_preview.set_muted(False)
+            if was_playing:
+                self.live_preview.play()
         self._show_monitoring()
 
     def _follow_picture_state(self, playing: bool) -> None:
@@ -1223,17 +1350,74 @@ class MainWindow(QMainWindow):
         if self.live_preview is None:
             return
         if playing and self.preview_view.listen_check.isChecked():
-            self.live_preview.set_muted(False)
-            self.live_preview.play()
+            # Pause discards every downstream buffer while the producer may
+            # have run ahead. Resume therefore reprimes from the committed
+            # source picture rather than inheriting that producer cursor.
+            self._prepare_monitoring(self.player.position, play=True)
         elif not playing:
             self.live_preview.pause()
         self._show_monitoring()
+
+    def _silence_monitoring(self, reason: str, *, invalidate: bool = False) -> None:
+        """Fence the stream but preserve the person's checked Listen intent."""
+        if self.live_preview is None:
+            return
+        if invalidate:
+            self._monitor_snapshot = None
+        self._monitor_rearm_required = True
+        if (not self.live_preview.status.offered
+                and self.live_preview.status.reason == reason):
+            return
+        self.live_preview.set_target(self._music_target, reason=reason)
+        self._show_monitoring()
+
+    def _seek_monitoring(self, seconds: float, *, explicit: bool = False) -> bool:
+        """Convert one source seek to the active occurrence's output clock."""
+        if self.live_preview is None:
+            return False
+        if explicit and (self._monitor_snapshot is None
+                         or self._monitor_rearm_required
+                         or not self.live_preview.status.offered):
+            self._sync_live_preview()
+        snapshot = self._monitor_snapshot
+        if snapshot is None:
+            return False
+        output_sample = snapshot.output_sample(seconds)
+        if output_sample is None:
+            self._silence_monitoring(MONITOR_OUTSIDE_RANGE)
+            return False
+        if self._monitor_rearm_required and not explicit:
+            return False
+        if not self.live_preview.status.available:
+            return False
+        self.live_preview.seek(output_sample)
+        self._monitor_rearm_required = False
+        return True
+
+    def _prepare_monitoring(self, seconds: float, *, play: bool) -> bool:
+        """Explicit Play/Listen rearms a valid source position before resume."""
+        armed = self._seek_monitoring(seconds, explicit=True)
+        self.live_preview.set_muted(False)
+        if play:
+            # `LivePreview.play` is intentionally a no-op when no plan is on
+            # offer. Keep forwarding the picture's intent so the transport is
+            # the single authority on that refusal rather than duplicating it.
+            self.live_preview.play()
+        return armed
 
     def _drive_monitoring(self, seconds: float) -> None:
         """The picture is here. Hand over the sound that belongs there."""
         if self.live_preview is None or not self.live_preview.status.playing:
             return
-        self.live_preview.tick(round_samples(max(0.0, seconds) * OUTPUT_RATE))
+        snapshot = self._monitor_snapshot
+        output_sample = (snapshot.output_sample(seconds)
+                         if snapshot is not None else None)
+        if output_sample is None:
+            self._silence_monitoring(MONITOR_OUTSIDE_RANGE)
+            return
+        if self._monitor_rearm_required:
+            return
+        self.live_preview.tick(output_sample)
         self._show_monitoring()
 
     # -- view modes ------------------------------------------------------------
@@ -3002,12 +3186,7 @@ class MainWindow(QMainWindow):
         """The filmstrip was clicked or dragged."""
         self._clear_precise_frame()
         self.player.seek(seconds)
-        # The sound goes where the picture went. Without this it would carry
-        # on from where it was, which is the drift the transport would then
-        # correctly refuse to play.
-        if self.live_preview is not None:
-            self.live_preview.seek(
-                round_samples(max(0.0, seconds) * OUTPUT_RATE))
+        self._seek_monitoring(seconds)
         self._show_frame(seconds)
         self._update_trim_labels()
         self._sharpen_timer.start()
@@ -3074,6 +3253,7 @@ class MainWindow(QMainWindow):
         self._clear_precise_frame()
         seconds = max(0.0, min(seconds, clip.duration))
         self.player.seek(seconds)
+        self._seek_monitoring(seconds)
         self.trim_bar.set_playhead(seconds)
         self._show_frame(seconds)
         self._update_trim_labels()
@@ -3290,6 +3470,9 @@ class MainWindow(QMainWindow):
             clip.trim_in = in_point if in_point > 0.01 else 0.0
             clip.trim_out = (out_point if out_point < clip.duration - 0.01
                              else 0.0)
+        if self._music_target_for(clip) != self._music_target:
+            self._sync_music_panel()
+        self._silence_monitoring(MONITOR_RANGE_CHANGED, invalidate=True)
         self._show_frame(self.trim_bar.playhead)
         self._update_trim_labels()
         self._mark_trim_in_table(clip)
@@ -3478,6 +3661,7 @@ class MainWindow(QMainWindow):
         # still without moving the decoder left the picture showing one moment
         # and Play resuming from another.
         self.player.seek(chosen.start)
+        self._seek_monitoring(chosen.start)
         self._show_frame(chosen.start)
         self._update_trim_labels()
 
@@ -3549,6 +3733,8 @@ class MainWindow(QMainWindow):
         # being edited — otherwise Reset on a three-select clip leaves two.
         clip.selects = []
         clip.current = 0
+        self._sync_music_panel()
+        self._silence_monitoring(MONITOR_RANGE_CHANGED, invalidate=True)
         self.trim_bar.set_clip(clip.duration, 0.0, clip.duration)
         self._show_selects()
         self._update_trim_labels()

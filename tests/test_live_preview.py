@@ -904,6 +904,374 @@ def test_source_only_and_the_finished_mix_are_different_plans(window):
     assert source.music_gain == 0
 
 
+class AbsoluteFrameReader:
+    """A bounded reader whose PCM exposes the absolute frame requested."""
+
+    def __init__(self, frames: int):
+        self._frames = frames
+        self.reads = []
+        self.closed = False
+
+    @property
+    def frames(self) -> int:
+        return self._frames
+
+    def read(self, start: int, frames: int, cancelled) -> list[float]:
+        self.reads.append((start, frames))
+        values = []
+        for frame in range(start, start + frames):
+            values.extend((frame / OUTPUT_RATE, frame / OUTPUT_RATE))
+        return values
+
+    def request_stop(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _absolute_source_reader(monkeypatch, frames: int = 960_000):
+    from flightdvr.audio_reader import FfmpegPcmReader
+
+    reader = AbsoluteFrameReader(frames)
+    monkeypatch.setattr(
+        FfmpegPcmReader, "for_source",
+        classmethod(lambda _cls, _tools, _path, *, stream_index,
+                           timeline_frames: (
+            reader if timeline_frames <= reader.frames
+            else pytest.fail(f"reader extent was {timeline_frames}"))))
+    return reader
+
+
+def _drive_until_presented(window, output_sample: int):
+    output = window.live_preview._output
+    deadline = time.monotonic() + 5.0
+    while not output.presented and time.monotonic() < deadline:
+        window.live_preview.tick(output_sample)
+        time.sleep(0.01)
+    assert output.presented, "the real AudioStream handed the adapter no PCM"
+    return output.presented[0]
+
+
+def test_focused_range_uses_its_absolute_source_origin_and_reader_extent(
+        window, monkeypatch):
+    """[12,18) is source 576000..864000, not the first six seconds."""
+    from flightdvr.audio_reader import FfmpegPcmReader
+    from flightdvr.audio_stream import AudioStream
+    from flightdvr.media import Select
+
+    clip = next(iter(window.clip_by_path.values()))
+    clip.selects = [Select(12.0, 18.0, "flight", sid="range-12-18")]
+    clip.current = 0
+    reader = AbsoluteFrameReader(864_000)
+    monkeypatch.setattr(
+        FfmpegPcmReader, "for_source",
+        classmethod(lambda _cls, _tools, _path, *, stream_index,
+                           timeline_frames: (
+            reader if timeline_frames == reader.frames
+            else pytest.fail(f"reader extent was {timeline_frames}"))))
+
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    window.live_preview.set_listening(Listening.SOURCE)
+
+    stream = window.live_preview._stream
+    assert isinstance(stream, AudioStream)
+    assert stream._mapping.source.start == 576_000
+    assert stream._mapping.source.end == 864_000
+    assert stream._mapping.audio.output.start == 0
+    assert stream._mapping.audio.output.end == 288_000
+
+    stream.start()
+    stream.resume()
+    deadline = time.monotonic() + 5.0
+    block = None
+    while block is None and time.monotonic() < deadline:
+        try:
+            block = stream.pull()
+        except Buffering:
+            time.sleep(0.01)
+    assert block is not None, "the real AudioStream produced no focused PCM"
+    assert reader.reads and reader.reads[0][0] == 576_000
+    assert block.output_start == 0
+    assert block.planned[0] == pytest.approx(12.0)
+    stream.request_stop()
+    assert stream.wait_stopped(5.0)
+
+
+def test_filmstrip_keyboard_and_precise_resume_use_focused_output_positions(
+        window, monkeypatch):
+    """Actual UI routes re-prime real PCM at 17, 13 and precise 13.5 seconds."""
+    from flightdvr.media import Select
+
+    reader = _absolute_source_reader(monkeypatch)
+    clip = next(iter(window.clip_by_path.values()))
+    clip.selects = [Select(12.0, 18.0, "flight", sid="range-12-18")]
+    clip.current = 0
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    window.live_preview.set_listening(Listening.SOURCE)
+    video_seeks = []
+    window.player.seek = lambda seconds: (
+        video_seeks.append(seconds), setattr(window.player, "position", seconds))
+    window.player.position = 12.0
+    window.player.is_playing = True
+    window.preview_view.listen_check.setChecked(True)  # Listen during playback
+
+    first = _drive_until_presented(window, 0)
+    assert first.output_start == 0
+    assert first.planned[0] == pytest.approx(12.0)
+
+    previous = window.live_preview.generation
+    window._on_playhead(17.0)                  # filmstrip route
+    assert window.live_preview.generation == previous + 1
+    block = _drive_until_presented(window, 240_000)
+    assert block.output_start == 240_000
+    assert block.planned[0] == pytest.approx(17.0)
+
+    previous = window.live_preview.generation
+    window._jump(13.0)                         # keyboard route
+    assert window.live_preview.generation == previous + 1
+    block = _drive_until_presented(window, 48_000)
+    assert block.output_start == 48_000
+    assert block.planned[0] == pytest.approx(13.0)
+
+    # A native-rate precise result is paused and silent. Its reported PTS is
+    # the value Play later converts, not the frame number requested earlier.
+    window.player.is_playing = False
+    window._preview_state_changed(False)
+    window.player.position = 13.5
+    window.trim_bar.set_playhead(13.5)
+    window.player.is_playing = True
+    window.preview_view.listen_check.setChecked(True)
+    previous = window.live_preview.generation
+    window._preview_state_changed(True)
+    assert window.live_preview.generation == previous + 1
+    block = _drive_until_presented(window, 72_000)
+    assert block.output_start == 72_000
+    assert block.planned[0] == pytest.approx(13.5)
+    assert (624_000, 480) in reader.reads
+    assert video_seeks[:2] == [17.0, 13.0]
+
+
+def test_second_unticked_range_and_open_endpoint_compile_exactly(window):
+    from PySide6.QtCore import Qt
+    from flightdvr.media import Select
+
+    clip = next(iter(window.clip_by_path.values()))
+    clip.selects = [
+        Select(2.0, 4.0, "first", sid="first"),
+        Select(12.0, 0.0, "second", sid="second"),
+    ]
+    clip.current = 1
+    window.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    window.live_preview.set_listening(Listening.SOURCE)
+
+    snapshot = window._monitor_snapshot
+    assert snapshot.target.items[0].sid == "second"
+    assert snapshot.source.start == 576_000
+    assert snapshot.source.end == 1_440_000
+    assert snapshot.samples == 864_000
+    assert snapshot.output_sample(12.0) == 0
+    assert snapshot.output_sample(20.0) == 384_000
+    assert snapshot.output_sample(30.0) is None, "terminal became a reprime"
+
+    window._pick_select(0)
+    assert window._monitor_snapshot.target.items[0].sid == "first"
+    assert window._monitor_snapshot.source.start == 96_000
+    assert window._monitor_snapshot.source.end == 192_000
+
+
+def test_nonmaterial_row_is_whole_clip_but_invalid_spans_refuse(window):
+    from flightdvr.media import Select
+
+    clip = next(iter(window.clip_by_path.values()))
+    clip.duration = 20.0
+    clip.selects = [Select(0.0, 0.0, sid="editing-only")]
+    clip.current = 0
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    snapshot = window._new_monitor_snapshot(window._music_target)
+    assert snapshot.target.items[0].sid == ""
+    assert snapshot.source.start == 0
+    assert snapshot.source.end == 960_000
+
+    for bad in (
+            Select(12.0, 12.0, sid="empty"),
+            Select(float("nan"), 18.0, sid="unknown"),
+            Select(18.0, 12.0, sid="backwards")):
+        clip.selects = [bad]
+        clip.current = 0
+        target = window._music_target_for(clip)
+        with pytest.raises(ValueError):
+            window._new_monitor_snapshot(target)
+
+
+def test_outside_navigation_stays_video_only_until_explicit_rearm(
+        window, monkeypatch):
+    from flightdvr.media import Select
+
+    _absolute_source_reader(monkeypatch)
+    clip = next(iter(window.clip_by_path.values()))
+    clip.selects = [Select(12.0, 18.0, sid="focused")]
+    clip.current = 0
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    window.live_preview.set_listening(Listening.SOURCE)
+    window.preview_view.listen_check.setChecked(True)
+    window.player.seek = lambda seconds: setattr(window.player, "position", seconds)
+    window.player.is_playing = True
+    window.player.position = 13.0
+    window._preview_state_changed(True)
+    assert window.live_preview.status.playing
+    _drive_until_presented(window, 48_000)
+
+    for seconds in (18.0, 11.0, 19.0):
+        if not window.live_preview.status.offered:
+            window.player.position = 13.0
+            window._preview_state_changed(True)  # explicit valid Play rearm
+            assert window.live_preview.status.offered
+        active_stream = window.live_preview._stream
+        window._jump(seconds)
+        assert window.player.position == seconds
+        assert not window.live_preview.status.offered
+        assert "outside the selected range" in window.live_preview.status.reason
+        assert active_stream._cancel.is_set()
+        assert window.live_preview._output.presented == [], (
+            "silence left previously presented PCM downstream")
+
+
+def test_sub_sample_position_rounding_to_terminal_refuses_without_raising(
+        window, monkeypatch):
+    """A rationally interior point can still quantize to the terminal sample."""
+    from fractions import Fraction
+    from flightdvr.media import Select
+
+    _absolute_source_reader(monkeypatch)
+    clip = next(iter(window.clip_by_path.values()))
+    clip.selects = [Select(12.0, 18.0, sid="focused")]
+    clip.current = 0
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    window.live_preview.set_listening(Listening.SOURCE)
+    window.player.seek = lambda seconds: setattr(window.player, "position", seconds)
+    window.player.position = 13.0
+    window.preview_view.listen_check.setChecked(True)
+    snapshot = window._monitor_snapshot
+    active_stream = window.live_preview._stream
+    near_end = 18.0 - 0.25 / OUTPUT_RATE
+
+    assert snapshot.samples == 288_000
+    assert snapshot.sequence.locate_source(
+        snapshot.occurrence, Fraction(str(near_end))) is not None
+    assert snapshot.output_sample(near_end) is None
+
+    window._jump(near_end)
+
+    assert window.player.position == pytest.approx(near_end)
+    assert not window.live_preview.status.offered
+    assert "outside the selected range" in window.live_preview.status.reason
+    assert window.preview_view.listen_check.isChecked()
+    assert active_stream._cancel.is_set()
+
+
+def test_trim_change_fences_old_snapshot_before_explicit_rearm(
+        window, monkeypatch):
+    from flightdvr.media import Select
+
+    _absolute_source_reader(monkeypatch)
+    clip = next(iter(window.clip_by_path.values()))
+    clip.selects = [Select(12.0, 18.0, sid="focused")]
+    clip.current = 0
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    window.live_preview.set_listening(Listening.SOURCE)
+    window.player.seek = lambda seconds: setattr(window.player, "position", seconds)
+    old_snapshot = window._monitor_snapshot
+    old_stream = window.live_preview._stream
+
+    window._on_trim_changed(13.0, 17.0)
+
+    assert window._monitor_snapshot is None
+    assert not window.live_preview.status.offered
+    assert "selected range changed" in window.live_preview.status.reason
+    assert old_stream._cancel.is_set(), "old producer survived the trim edit"
+
+    window.player.position = 13.5
+    window.player.is_playing = True
+    window.preview_view.listen_check.setChecked(True)
+    window._preview_state_changed(True)
+    snapshot = window._monitor_snapshot
+    assert snapshot.sequence.revision != old_snapshot.sequence.revision
+    assert snapshot.source.start == 624_000
+    assert snapshot.source.end == 816_000
+    block = _drive_until_presented(window, 24_000)
+    assert block.output_start == 24_000
+    assert block.planned[0] == pytest.approx(13.5)
+    assert window.preview_view.listen_check.isChecked()
+
+    window._jump(13.0)
+    assert window.player.position == 13.0
+    assert window.live_preview.status.offered
+    assert window._monitor_snapshot is snapshot
+
+    before_resume = window.live_preview.generation
+    window._preview_state_changed(True)          # explicit Play/re-resume
+    assert window.live_preview.status.playing
+    assert window.live_preview.generation == before_resume + 1
+    block = _drive_until_presented(window, 0)
+    assert block.planned[0] == pytest.approx(13.0)
+
+    window._jump(18.0)
+    assert window.player.position == 18.0
+    assert not window.live_preview.status.offered
+    assert "outside the selected range" in window.live_preview.status.reason
+
+
+def test_music_passage_origin_stays_independent_of_dvr_source_origin(
+        window, monkeypatch):
+    from fractions import Fraction
+    from pathlib import Path
+    from flightdvr.audio_plan import AudioAsset, AudioMode, MusicChoice, SampleSpan
+    from flightdvr.audio_reader import FfmpegPcmReader
+    from flightdvr.media import Select
+
+    source = AbsoluteFrameReader(960_000)
+    music = AbsoluteFrameReader(600_000)
+    monkeypatch.setattr(
+        FfmpegPcmReader, "for_source",
+        classmethod(lambda _cls, *_a, **_k: source))
+    monkeypatch.setattr(
+        FfmpegPcmReader, "for_music",
+        classmethod(lambda _cls, *_a, **_k: music))
+    clip = next(iter(window.clip_by_path.values()))
+    clip.selects = [Select(12.0, 18.0, sid="focused")]
+    clip.current = 0
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    target = window._music_target
+    track = Path("song.wav")
+    asset = AudioAsset(track, "d" * 64, 0, OUTPUT_RATE, 2, 600_000)
+    window._store_music(target, MusicChoice(
+        track=track, mode=AudioMode.MIX, asset=asset,
+        passage=SampleSpan(240_000, 528_000, OUTPUT_RATE),
+        music_level=Fraction(1), dvr_level=Fraction(0),
+        fade_in_samples=0, fade_out_samples=0))
+    window._sync_live_preview()
+    stream = window.live_preview._stream
+
+    assert stream._mapping.source.start == 576_000
+    assert stream._mapping.music_origin == 240_000
+    window.live_preview.set_muted(False)
+    window.live_preview.play()
+    block = _drive_until_presented(window, 0)
+    assert source.reads[0][0] == 576_000
+    assert music.reads[0][0] == 240_000
+    assert block.planned[0] == pytest.approx(5.0)
+
+
 def test_source_only_on_a_silent_recording_has_nothing_to_offer(window,
                                                                monkeypatch):
     """`Original` on a clip with no sound of its own is silence. Offering it
@@ -1077,20 +1445,63 @@ def test_the_pictures_play_button_stays_silent_when_not_listening(window):
     assert played == [], "the sound started without being asked for"
 
 
-def test_start_from_the_beginning_moves_the_picture_as_well(window):
-    """Moving the sound alone is the drift the transport would then refuse."""
+def test_restart_moves_once_and_preserves_real_stream_play_listen_intentions(
+        window, monkeypatch):
+    """The low-level quiet restart is deliberately restored by the UI."""
+    from flightdvr.media import Select
+
+    _absolute_source_reader(monkeypatch)
+    clip = next(iter(window.clip_by_path.values()))
+    clip.selects = [Select(12.0, 18.0, sid="focused")]
+    clip.current = 0
     window.table.setCurrentCell(0, 0)
     window._load_selected_clip()
-    window.music_band.setChecked(True)          # the band a person opened
-    restarted = []
-    moved = []
-    window.live_preview.restart = lambda: restarted.append(True)
-    window._on_playhead = lambda seconds: moved.append(seconds)
+    window.live_preview.set_listening(Listening.SOURCE)
+    window.preview_view.listen_check.setChecked(True)
+    video_seeks = []
+    window.player.seek = lambda seconds: (
+        video_seeks.append(seconds), setattr(window.player, "position", seconds))
+    window.player.position = 17.0
+    window.player.is_playing = True
+    window._preview_state_changed(True)
+    stream = window.live_preview._stream
+    before = stream.generation
 
-    window.preview_view.restart_button.click()
+    window.preview_view.restart_requested.emit()
 
-    assert restarted, "the sound was not restarted"
-    assert moved, "the picture stayed where it was"
+    assert video_seeks == [12.0], "restart moved the picture more than once"
+    assert stream.generation == before + 1, "restart reprised sound more than once"
+    assert window.live_preview.status.playing
+    assert not window.live_preview.status.muted
+    assert not stream.paused
+    block = _drive_until_presented(window, 0)
+    assert block.output_start == 0
+    assert block.planned[0] == pytest.approx(12.0)
+
+
+def test_restart_keeps_a_paused_muted_real_stream_paused_and_muted(
+        window, monkeypatch):
+    from flightdvr.media import Select
+
+    _absolute_source_reader(monkeypatch)
+    clip = next(iter(window.clip_by_path.values()))
+    clip.selects = [Select(12.0, 18.0, sid="focused")]
+    clip.current = 0
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    window.live_preview.set_listening(Listening.SOURCE)
+    stream = window.live_preview._stream
+    window.player.seek = lambda seconds: setattr(window.player, "position", seconds)
+    window.player.position = 17.0
+    before = stream.generation
+
+    window._on_monitor_restart()
+
+    assert window.player.position == 12.0
+    assert stream.generation == before + 1
+    assert not window.live_preview.status.playing
+    assert window.live_preview.status.muted
+    assert stream.paused
 
 
 # -- the real adapter, composed: what the device actually received -------------
