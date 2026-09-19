@@ -97,7 +97,6 @@ from .player import PreviewPlayer, exact_timestamp
 from .preview_panel import PreviewView
 from .queue_panel import QueuePanel
 from .assembly import absent, default_items, export_piece, present, resolve
-from .assembly_panel import ITEM_ROLE as ASSEMBLY_ITEM_ROLE
 from .bundle import (
     Piece, collisions as bundle_collisions, frozen_settings, plan_bundle,
 )
@@ -109,7 +108,7 @@ from .session import (
 )
 from .shortcuts import SHORTCUT_GROUPS
 from .sequence_plan import (
-    OccurrenceId, Resolution, SequencePlan, SequencePlanError,
+    OccurrenceId, Resolution, SequencePlan, SequencePlanError, SequenceTerminal,
     compile_sequence,
 )
 from .stills import StillRequest, StillWorker
@@ -279,6 +278,13 @@ class MainWindow(QMainWindow):
         self._sidebar_building = False
         self._assembly_drawing = False
         self._sidebar_rebuilds = 0
+        # Flow Assemble inspects one immutable compiled output clock.  The
+        # source editor remains untouched underneath and is restored on exit.
+        self._sequence_plan: SequencePlan | None = None
+        self._sequence_revision = 0
+        self._sequence_occurrence: OccurrenceId | None = None
+        self._sequence_source_seconds: float | None = None
+        self._sequence_loaded_clip: ClipInfo | None = None
         # Classic's split, kept while Flow is holding its children. An empty
         # splitter serialises as an empty splitter, so saving in Flow without
         # this threw away the proportions the person had chosen.
@@ -790,6 +796,8 @@ class MainWindow(QMainWindow):
         view.set_out_requested.connect(self._set_out)
         view.reset_requested.connect(self._reset_trim)
         view.playhead_moved.connect(self._on_playhead)
+        view.sequence_scrub_requested.connect(
+            self._on_sequence_scrub_requested)
         view.trim_changed.connect(self._on_trim_changed)
         view.select_picked.connect(self._pick_select)
         view.select_added.connect(self._add_select)
@@ -1293,6 +1301,8 @@ class MainWindow(QMainWindow):
         self.preview_view.show_monitoring(not status.muted, status.reason)
 
     def _on_listen_toggled(self, listening: bool) -> None:
+        if self._refuse_joined_source_action():
+            return
         if listening:
             self._prepare_monitoring(
                 self.player.position, play=self.player.is_playing)
@@ -1303,6 +1313,8 @@ class MainWindow(QMainWindow):
 
     def _on_listening_changed(self, name: str) -> None:
         """A rebuilt mix begins at the picture, never at its own zero."""
+        if self._refuse_joined_source_action():
+            return
         self.live_preview.set_listening(Listening(name))
         if self.preview_view.listen_check.isChecked():
             self._prepare_monitoring(
@@ -1313,6 +1325,8 @@ class MainWindow(QMainWindow):
 
     def _on_monitor_restart(self) -> None:
         """Return both sides once, preserving existing Play/Listen intentions."""
+        if self._refuse_joined_source_action():
+            return
         was_playing = self.player.is_playing
         was_listening = self.preview_view.listen_check.isChecked()
         if (self._monitor_snapshot is None or self._monitor_rearm_required
@@ -1461,6 +1475,9 @@ class MainWindow(QMainWindow):
         viewport = QVBoxLayout(self.flow_viewport)
         viewport.setContentsMargins(0, 0, 0, 0)
         viewport.setSpacing(TIGHT)
+        # Flow-only output clock.  The picture itself is still the one Classic
+        # owns; this strip merely maps the compiled joined plan onto it.
+        viewport.addWidget(self.preview_view.sequence_strip)
         self.flow_source_note = dim(QLabel(""))
         self.flow_source_note.setWordWrap(True)
         viewport.addWidget(self.flow_source_note)
@@ -1608,6 +1625,10 @@ class MainWindow(QMainWindow):
             return
         if chosen is Mode.FLOW and not self._offered_stages:
             return
+        if (self._view_mode is Mode.FLOW
+                and self._flow_stage is Stage.ASSEMBLE
+                and chosen is not Mode.FLOW):
+            self._leave_sequence_scrub()
         # The mode is recorded first. The sidebar only does its work while
         # Flow is the mode, so refreshing before this was refreshing into a
         # guard that had every right to refuse — and the list arrived empty.
@@ -1635,14 +1656,19 @@ class MainWindow(QMainWindow):
         if stage is None or stage not in self._flow_slots:
             return
         chosen = Stage(stage)
+        if (self._flow_stage is Stage.ASSEMBLE
+                and chosen is not Stage.ASSEMBLE):
+            self._leave_sequence_scrub()
         self._flow_stage = chosen
         self.flow_stages.setCurrentWidget(self._flow_slots[chosen])
         self.settings_store.setValue("flow_stage", chosen.value)
         if chosen is Stage.ASSEMBLE:
-            # Arriving with a row already selected is the same claim as
-            # selecting one: the picture has to agree with it before the
-            # caption underneath says which range it is.
+            self._refresh_sequence_plan()
+            # A row is an occurrence now, not an instruction to retarget the
+            # source editor.  Its start is a useful joined position.
             self._on_assembly_choice()
+        else:
+            self.preview_view.sequence_strip.hide()
         self._show_source_note()
         back, forward = flow_neighbours(chosen, self._offered_stages)
         self.flow_back.setEnabled(back is not None)
@@ -1680,6 +1706,169 @@ class MainWindow(QMainWindow):
             # queue is about to refuse.
             return []
         return working_outputs(pieces, joined=joined)
+
+    # -- Flow Assemble joined-position inspection ----------------------------
+
+    def _joined_assemble_active(self) -> bool:
+        return (self._view_mode is Mode.FLOW
+                and self._flow_stage is Stage.ASSEMBLE)
+
+    def _refuse_joined_source_action(self) -> bool:
+        """Keep source-edit and playback routes out of joined inspection."""
+        if not self._joined_assemble_active():
+            return False
+        self.player.pause()
+        if self.live_preview is not None:
+            self.live_preview.pause()
+            self.live_preview.set_muted(True)
+            self._show_monitoring()
+        self.statusBar().showMessage(
+            "Joined scrubbing is paused; return to Browse or Trim for source "
+            "playback and trim controls.", 5000)
+        return True
+
+    def _refresh_sequence_plan(self) -> None:
+        """Compile the exact joined output already resolved for the queue."""
+        strip = self.preview_view.sequence_strip
+        if not self._joined_assemble_active():
+            strip.hide()
+            return
+
+        pieces, gaps = self._assembly_export_pieces()
+        if gaps or len(pieces) < 2:
+            self._sequence_plan = None
+            self._sequence_occurrence = None
+            self._sequence_source_seconds = None
+            self._sequence_loaded_clip = None
+            strip.set_plan(None)
+            strip.show()
+            self._show_source_note()
+            return
+
+        outputs = working_outputs(pieces, joined=True)
+        if len(outputs) != 1:
+            self._sequence_plan = None
+            strip.set_plan(None)
+            strip.show()
+            self._show_source_note()
+            return
+
+        next_revision = self._sequence_revision + 1
+        try:
+            plan = compile_sequence(
+                outputs[0], resolution=Resolution.success(),
+                revision=f"flow-assemble-{next_revision}")
+        except SequencePlanError as problem:
+            self._sequence_plan = None
+            strip.set_plan(None)
+            strip.show()
+            self.statusBar().showMessage(
+                f"Joined scrub unavailable: {problem}", 6000)
+            self._show_source_note()
+            return
+
+        old = self._sequence_plan
+
+        def shape(value):
+            return tuple(
+                (one.fingerprint, one.sid, one.source_path,
+                 one.source.start, one.source.end,
+                 one.output.start, one.output.end)
+                for one in value.occurrences)
+        if old is not None and shape(old) == shape(plan):
+            strip.show()
+            self._show_source_note()
+            return
+
+        self._sequence_revision = next_revision
+        self._sequence_plan = plan
+        self._sequence_occurrence = None
+        self._sequence_source_seconds = None
+        self._sequence_loaded_clip = None
+        strip.set_plan(plan)
+        strip.show()
+        self._show_source_note()
+
+    def _sequence_clip(self, occurrence) -> ClipInfo | None:
+        """Find the live clip captured by an occurrence without editing it."""
+        direct = self.clip_by_path.get(occurrence.source_path)
+        if direct is not None and direct.fingerprint == occurrence.fingerprint:
+            return direct
+        return next((clip for clip in self.clips
+                     if (clip.fingerprint == occurrence.fingerprint
+                         and str(clip.path) == occurrence.source_path)), None)
+
+    def _on_sequence_scrub_requested(self, revision: str,
+                                     output_seconds: float) -> None:
+        """Map a revision-bound output point onto the one existing player."""
+        plan = self._sequence_plan
+        if (not self._joined_assemble_active() or plan is None
+                or revision != plan.revision):
+            return
+        try:
+            location = plan.locate_output(output_seconds)
+        except (TypeError, ValueError, OverflowError, SequencePlanError):
+            return
+
+        self.player.pause()
+        if self.live_preview is not None:
+            self.live_preview.pause()
+            self.live_preview.set_muted(True)
+            self._show_monitoring()
+        self._clear_precise_frame()
+        self.preview_view.sequence_strip.set_position(float(location.output))
+
+        if isinstance(location, SequenceTerminal):
+            # The terminal is a boundary, not a source frame.  Keep the last
+            # painted picture and issue no decoder request.
+            self._sequence_occurrence = None
+            self._sequence_source_seconds = None
+            self._sharpen_timer.stop()
+            self._show_source_note()
+            return
+
+        try:
+            occurrence = plan.get_occurrence(location.occurrence)
+        except SequencePlanError:
+            return
+        clip = self._sequence_clip(occurrence)
+        if clip is None:
+            return
+
+        source_seconds = float(location.source)
+        if self._sequence_occurrence != occurrence.id:
+            # Loading on every occurrence transition also fences A/B/A: the
+            # last A is not conflated with the first just because its path is
+            # the same.
+            self.player.load(clip, position=source_seconds)
+        else:
+            self.player.seek(source_seconds)
+        self._sequence_occurrence = occurrence.id
+        self._sequence_source_seconds = source_seconds
+        self._sequence_loaded_clip = clip
+        if clip.width and clip.height:
+            self.frame_view.set_aspect(clip.width / clip.height)
+            self.preview_box.updateGeometry()
+        self._show_source_note()
+        self._sharpen_timer.start()
+
+    def _leave_sequence_scrub(self) -> None:
+        """Return the player to the unchanged source editor selection."""
+        self._sharpen_timer.stop()
+        self.preview_view.sequence_strip.hide()
+        if self._sequence_loaded_clip is not None and self._trim_clip is not None:
+            source_seconds = self.trim_bar.playhead
+            self.player.load(self._trim_clip, position=source_seconds)
+            if self._trim_clip.width and self._trim_clip.height:
+                self.frame_view.set_aspect(
+                    self._trim_clip.width / self._trim_clip.height)
+                self.preview_box.updateGeometry()
+            self._show_frame(source_seconds)
+        self._sequence_occurrence = None
+        self._sequence_source_seconds = None
+        self._sequence_loaded_clip = None
+        self._clear_precise_frame()
+        self._sync_live_preview()
 
     # -- the persistent picture ------------------------------------------------
 
@@ -1728,6 +1917,43 @@ class MainWindow(QMainWindow):
         """
         if stage not in (Stage.ASSEMBLE, Stage.OUTPUT):
             return ""
+        if stage is Stage.ASSEMBLE:
+            plan = self._sequence_plan
+            if plan is None:
+                return (
+                    "Joined scrub unavailable — add at least two resolved "
+                    "Assembly rows. No playback or finished file is shown.")
+            position = self.preview_view.sequence_strip.position
+            total = float(plan.total_duration)
+            if self._sequence_occurrence is None:
+                if abs(position - total) < 1e-9:
+                    return (
+                        f"Joined end {human_duration(total)} — last frame held; "
+                        "the terminal requests no source frame. This is not "
+                        "continuous playback or the finished file.")
+                return (
+                    f"Joined position {human_duration(position)} of "
+                    f"{human_duration(total)} — paused source-frame "
+                    "inspection, not continuous playback or the finished file.")
+            try:
+                occurrence = plan.get_occurrence(self._sequence_occurrence)
+            except SequencePlanError:
+                return "Joined scrub changed; choose a position again."
+            clip = self._sequence_clip(occurrence)
+            name = clip.path.name if clip is not None else Path(
+                occurrence.source_path).name
+            if clip is not None and occurrence.sid:
+                selected = next((one for one in clip.real_selects
+                                 if one.sid == occurrence.sid), None)
+                if selected is not None and selected.name:
+                    name = f"{name} · {selected.name}"
+            return (
+                f"Joined position {human_duration(position)} of "
+                f"{human_duration(total)} · occurrence "
+                f"{occurrence.id.ordinal + 1}: {name} at "
+                f"{human_duration(self._sequence_source_seconds or 0.0)} — "
+                "paused source-frame inspection, not continuous playback or "
+                "the finished file.")
         clip = self._focused_source()
         if clip is None:
             # No focus, so no claim. Naming some other target here would show
@@ -1741,8 +1967,6 @@ class MainWindow(QMainWindow):
             chosen = ranges[min(clip.current, len(ranges) - 1)]
             if chosen.name:
                 name = f"{name} · {chosen.name}"
-        if stage is Stage.ASSEMBLE:
-            return f"Source: {name} — not the joined result."
         return f"Source: {name} — not the finished file."
 
     def _focused_source(self) -> ClipInfo | None:
@@ -1862,6 +2086,8 @@ class MainWindow(QMainWindow):
             self.sidebar_submitted.setVisible(bool(self.jobs))
         finally:
             self._sidebar_building = False
+        if self._joined_assemble_active():
+            self._refresh_sequence_plan()
 
     def _on_sidebar_choice(self) -> None:
         """Open the chosen output for editing, through the ordinary handlers.
@@ -1871,6 +2097,8 @@ class MainWindow(QMainWindow):
         starts no sound: choosing something to edit is not asking to hear it.
         """
         if self._sidebar_building:
+            return
+        if self._refuse_joined_source_action():
             return
         items = self.sidebar_working.selectedItems()
         if not items:
@@ -1904,17 +2132,7 @@ class MainWindow(QMainWindow):
             return
 
     def _on_assembly_choice(self) -> None:
-        """Choosing a row on the Assemble stage moves the picture to it.
-
-        The stage borrows the assembly list whole, and that list already had a
-        selection of its own that meant nothing outside the panel. With a
-        picture above it the selection acquired a claim it could not keep:
-        choosing the second row left the frame and the caption on the first.
-
-        Only on that stage. The same panel sits in Classic's Output group,
-        where picking rows to move or remove has never loaded anything, and
-        this is not the slice that changes what Classic does.
-        """
+        """Choosing an Assembly occurrence scrubs to its joined start."""
         if self._assembly_drawing or self._view_mode is not Mode.FLOW:
             return
         if self._flow_stage is not Stage.ASSEMBLE:
@@ -1927,11 +2145,16 @@ class MainWindow(QMainWindow):
         if entry is None or not (entry.flags() & Qt.ItemFlag.ItemIsEnabled):
             # A row whose material is gone is a problem to resolve, not
             # something to show. Naming it would be the stale claim again.
+            if entry is None and self._sequence_plan is not None:
+                self.preview_view.sequence_strip.request_position(0.0)
             return
-        item = entry.data(ASSEMBLY_ITEM_ROLE)
-        if item is None:
+        plan = self._sequence_plan
+        row = listing.row(entry)
+        if plan is None or not 0 <= row < len(plan.occurrences):
             return
-        self._focus_piece(item.fingerprint, item.sid)
+        occurrence = plan.occurrences[row]
+        self.preview_view.sequence_strip.request_position(
+            float(occurrence.output.start))
 
     def _build_export_panel(self) -> QWidget:
         panel = self.export_panel = ExportPanel(self)
@@ -3185,6 +3408,8 @@ class MainWindow(QMainWindow):
 
     def _on_playhead(self, seconds: float) -> None:
         """The filmstrip was clicked or dragged."""
+        if self._refuse_joined_source_action():
+            return
         self._clear_precise_frame()
         self.player.seek(seconds)
         self._seek_monitoring(seconds)
@@ -3200,6 +3425,13 @@ class MainWindow(QMainWindow):
         the playhead moves, so nothing feels slower — this only arrives after
         the dragging stops, and replaces a 160px thumbnail with a real frame.
         """
+        if self._joined_assemble_active():
+            if (self.player.is_playing
+                    or self._sequence_source_seconds is None
+                    or self._sequence_occurrence is None):
+                return
+            self.player.show_frame_at(self._sequence_source_seconds)
+            return
         if self.player.is_playing or self._trim_clip is None:
             return
         self.player.show_frame_at(self.trim_bar.playhead)
@@ -3212,6 +3444,8 @@ class MainWindow(QMainWindow):
         self.frame_view.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _toggle_play(self) -> None:
+        if self._refuse_joined_source_action():
+            return
         clip = self._trim_clip
         if clip is None:
             self._load_selected_clip()
@@ -3223,6 +3457,8 @@ class MainWindow(QMainWindow):
         self.player.toggle(self.frame_view.width())
 
     def _stop_preview(self) -> None:
+        if self._refuse_joined_source_action():
+            return
         self.player.stop()
         self._show_frame(self.trim_bar.playhead)
 
@@ -3233,10 +3469,14 @@ class MainWindow(QMainWindow):
         the nearest filmstrip keyframe, and those are a second apart, so a
         single-frame step would move the playhead without changing the picture.
         """
+        if self._refuse_joined_source_action():
+            return
         self._jump(self.trim_bar.playhead + seconds)
 
     def _step_frames(self, frames: int) -> None:
         """Move by decoded source frames; comma/period use this path."""
+        if self._refuse_joined_source_action():
+            return
         clip = self._trim_clip
         if clip is None:
             self._load_selected_clip()
@@ -3248,6 +3488,8 @@ class MainWindow(QMainWindow):
         self.player.step_frames(frames)
 
     def _jump(self, seconds: float) -> None:
+        if self._refuse_joined_source_action():
+            return
         clip = self._trim_clip
         if clip is None:
             return
@@ -3262,6 +3504,8 @@ class MainWindow(QMainWindow):
     def _preview_frame_ready(self, image, seconds: float) -> None:
         self._clear_precise_frame()
         self.frame_view.set_image(image)
+        if self._joined_assemble_active():
+            return
         # From the frame that was painted, not from the clock, so that pressing
         # I always means the picture on screen.
         self.trim_bar.set_playhead(seconds)
@@ -3278,6 +3522,13 @@ class MainWindow(QMainWindow):
     def _precise_frame_ready(self, image, seconds: float,
                              frame_number: int) -> None:
         """Paint the exact source frame and make it the trim authority."""
+        if self._joined_assemble_active():
+            # PreviewPlayer's frame-generation fence proves this belongs to
+            # its current load/seek.  Do not promote a joined source frame to
+            # source-trim or still-capture authority.
+            self._clear_precise_frame()
+            self.frame_view.set_image(image)
+            return
         self._precise_frame_number = frame_number
         self._precise_frame_seconds = seconds
         self.frame_view.set_image(image)
@@ -3323,6 +3574,8 @@ class MainWindow(QMainWindow):
 
     def _grab_still(self) -> None:
         """Choose a PNG target, or make a second click cancel the first."""
+        if self._refuse_joined_source_action():
+            return
         if self._still_worker is not None:
             self._still_worker.stop()
             self._update_still_button(cancelling=True)
@@ -3425,16 +3678,29 @@ class MainWindow(QMainWindow):
         self._update_still_button()
 
     def _precise_loading(self, loading: bool) -> None:
+        if self._joined_assemble_active():
+            return
         if loading:
             self.trim_position.setText("reading exact frames…")
 
     def _precise_failed(self, message: str) -> None:
         self._clear_precise_frame()
         self.statusBar().showMessage(f"Precise frames: {message}", 8000)
+        if self._joined_assemble_active():
+            return
         self._show_frame(self.trim_bar.playhead)
         self._update_trim_labels()
 
     def _preview_state_changed(self, playing: bool) -> None:
+        if self._joined_assemble_active():
+            if playing:
+                self.player.pause()
+            if self.live_preview is not None:
+                self.live_preview.pause()
+                self.live_preview.set_muted(True)
+                self._show_monitoring()
+            self.play_button.setText("Play")
+            return
         self._follow_picture_state(playing)
         if playing:
             self._clear_precise_frame()
@@ -3450,12 +3716,18 @@ class MainWindow(QMainWindow):
         self._clear_precise_frame()
         self.frame_view.set_message("could not play this clip")
         self.statusBar().showMessage(f"Preview: {message}", 8000)
+        if self._joined_assemble_active():
+            return
         self._show_frame(self.trim_bar.playhead)
 
     def _preview_ended(self) -> None:
+        if self._joined_assemble_active():
+            return
         self._show_frame(self.trim_bar.playhead)
 
     def _on_trim_changed(self, in_point: float, out_point: float) -> None:
+        if self._refuse_joined_source_action():
+            return
         clip = self._trim_clip
         if clip is None:
             return
@@ -3652,6 +3924,8 @@ class MainWindow(QMainWindow):
                                        nameable=bool(clip.real_selects))
 
     def _pick_select(self, index: int) -> None:
+        if self._refuse_joined_source_action():
+            return
         clip = self._trim_clip
         if clip is None or not 0 <= index < len(clip.selects):
             return
@@ -3676,7 +3950,8 @@ class MainWindow(QMainWindow):
         Two seconds long rather than empty, because a zero-length select is
         not a range and would be dropped the moment it was written.
         """
-        if self._refuse_while_rebuilding():
+        if (self._refuse_joined_source_action()
+                or self._refuse_while_rebuilding()):
             return
         clip = self._trim_clip
         if clip is None:
@@ -3691,7 +3966,8 @@ class MainWindow(QMainWindow):
         self._touch_session()
 
     def _remove_select(self) -> None:
-        if self._refuse_while_rebuilding():
+        if (self._refuse_joined_source_action()
+                or self._refuse_while_rebuilding()):
             return
         clip = self._trim_clip
         if clip is None or len(clip.selects) < 2:
@@ -3704,7 +3980,8 @@ class MainWindow(QMainWindow):
         self._touch_session()
 
     def _rename_select(self, name: str) -> None:
-        if self._refuse_while_rebuilding():
+        if (self._refuse_joined_source_action()
+                or self._refuse_while_rebuilding()):
             return
         clip = self._trim_clip
         if clip is None or not clip.selects:
@@ -3713,7 +3990,9 @@ class MainWindow(QMainWindow):
         self._touch_session()
 
     def _set_in(self) -> None:
-        if self._trim_clip is None or self._refuse_while_rebuilding():
+        if (self._refuse_joined_source_action()
+                or self._trim_clip is None
+                or self._refuse_while_rebuilding()):
             return
         self.trim_bar.in_point = min(self.trim_bar.playhead,
                                      self.trim_bar.out_point - 0.5)
@@ -3721,7 +4000,9 @@ class MainWindow(QMainWindow):
         self._on_trim_changed(self.trim_bar.in_point, self.trim_bar.out_point)
 
     def _set_out(self) -> None:
-        if self._trim_clip is None or self._refuse_while_rebuilding():
+        if (self._refuse_joined_source_action()
+                or self._trim_clip is None
+                or self._refuse_while_rebuilding()):
             return
         self.trim_bar.out_point = max(self.trim_bar.playhead,
                                       self.trim_bar.in_point + 0.5)
@@ -3729,7 +4010,8 @@ class MainWindow(QMainWindow):
         self._on_trim_changed(self.trim_bar.in_point, self.trim_bar.out_point)
 
     def _reset_trim(self) -> None:
-        if self._refuse_while_rebuilding():
+        if (self._refuse_joined_source_action()
+                or self._refuse_while_rebuilding()):
             return
         clip = self._trim_clip
         if clip is None:
@@ -3817,6 +4099,8 @@ class MainWindow(QMainWindow):
 
     def _play_selected(self) -> None:
         """Ctrl+P: play here, rather than handing the file to another program."""
+        if self._refuse_joined_source_action():
+            return
         self._load_selected_clip()
         self._toggle_play()
 
@@ -3839,6 +4123,8 @@ class MainWindow(QMainWindow):
         means anywhere else. Handing the file to another program is still
         there, on the button and on Ctrl+Shift+P.
         """
+        if self._refuse_joined_source_action():
+            return
         clip = self.clip_by_path.get(
             self.table.item(item.row(), 0).data(Qt.ItemDataRole.UserRole)
         )

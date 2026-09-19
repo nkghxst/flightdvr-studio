@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from .music_panel import MusicPanel
 from .player import FrameView
+from .sequence_strip import SequenceStrip
 from .trim import TrimBar
 from .widgets import INNER, TIGHT, PreviewPanel as AspectPreviewBox, dim
 
@@ -111,6 +112,7 @@ class PreviewView(QObject):
     listen_level_changed = Signal(int)
     listening_changed = Signal(str)
     restart_requested = Signal()
+    sequence_scrub_requested = Signal(str, float)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -119,6 +121,10 @@ class PreviewView(QObject):
         # names, it does not own them.
         self._committed_name = ""
         self.preview_box = self._build_preview_box()
+        self.sequence_strip = SequenceStrip()
+        self.sequence_strip.scrub_requested.connect(
+            self.sequence_scrub_requested.emit)
+        self.sequence_strip.hide()
         self.trim_band = self._build_trim_band()
         self.music_band = self._build_music_band()
 
