@@ -39,10 +39,12 @@ from .media import (
 from .audio_plan import MusicChoice, OUTPUT_RATE, resolve_audio_plan, round_samples
 from .format import DEFAULT_TEMPLATE
 from .output_naming import NamingInputs, ResolvedOutput, resolve_output
+from .output_plan import OutputTarget
 from .presets import (
     PRESETS, ExportSettings, build_commands, join_problems, output_runtime,
     slow_problems, vertical_problems,
 )
+from .sequence_plan import SequencePlan
 
 # Pass 1 of a two-pass encode analyses without writing video, so it is quicker.
 PASS_WEIGHTS = (0.35, 0.65)
@@ -124,6 +126,8 @@ class Job:
     out_path: Path
     concat_file: Path | None = None
     audio: MusicChoice = MusicChoice()
+    target: OutputTarget | None = None
+    sequence: SequencePlan | None = None
 
     # Kept so a queued job can be re-targeted if the output settings change
     # before it runs. Without this, ticking the flight-date box after queueing
@@ -165,6 +169,8 @@ class Job:
         self.clips = deepcopy(self.clips)
         self.settings = deepcopy(self.settings)
         self.audio = deepcopy(self.audio)
+        self.target = deepcopy(self.target)
+        self.sequence = deepcopy(self.sequence)
         if self.out_dir is not None and self.naming is None:
             # Compatibility callers still hand over the old bare `stem`.
             # Capture it once: `apply_retarget` replaces `stem` with the newly
@@ -252,7 +258,11 @@ class Job:
         slow export would show 100% at the halfway mark and then sit there for
         as long again.
         """
-        footage = sum(c.trimmed_duration or c.duration for c in self.clips)
+        footage = (
+            float(self.sequence.total_duration)
+            if self.sequence is not None
+            else sum(c.trimmed_duration or c.duration for c in self.clips)
+        )
         return output_runtime(self.preset_key, footage)
 
 
@@ -366,12 +376,37 @@ class ExportWorker(QThread):
         audio_plan = None
         if job.audio.configured:
             try:
+                joined = len(job.clips) > 1
+                if joined:
+                    if (job.target is None or not job.target.is_assembly
+                            or job.sequence is None):
+                        raise ValueError(
+                            "joined configured audio needs its submitted "
+                            "Assembly target and sequence")
+                    if tuple(one.item for one in job.sequence.occurrences) != (
+                            job.target.items):
+                        raise ValueError(
+                            "submitted Assembly target and sequence disagree")
+                    if len(job.sequence.occurrences) != len(job.clips):
+                        raise ValueError(
+                            "submitted Assembly sequence and clips disagree")
+                    submitted_paths = tuple(
+                        one.source_path for one in job.sequence.occurrences)
+                    queued_paths = tuple(str(clip.path) for clip in job.clips)
+                    if submitted_paths != queued_paths:
+                        raise ValueError(
+                            "submitted Assembly sequence and source order "
+                            "disagree")
+                    output_samples = job.sequence.total_samples
+                else:
+                    output_samples = round_samples(
+                        job.total_duration * OUTPUT_RATE)
                 audio_plan = resolve_audio_plan(
                     job.audio,
-                    round_samples(job.total_duration * OUTPUT_RATE),
-                    source_has_audio=job.clips[0].has_audio,
+                    output_samples,
+                    source_has_audio=any(c.has_audio for c in job.clips),
                     preset_key=job.preset_key,
-                    joined=len(job.clips) > 1,
+                    joined=joined,
                     bundle=job.frozen,
                 )
                 from .audio_export import verify_music_asset
@@ -423,6 +458,7 @@ class ExportWorker(QThread):
                 # roughly the number of clips in it.
                 total_duration=job.total_duration,
                 audio_plan=audio_plan,
+                sequence=job.sequence,
             )
         except Exception as exc:  # pragma: no cover - defensive
             return False, f"Could not build command: {exc}"

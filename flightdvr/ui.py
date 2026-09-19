@@ -1174,14 +1174,10 @@ class MainWindow(QMainWindow):
         if joined is None:
             joined = len(pieces) > 1 and self.export_panel.join_enabled()
         if joined:
-            # Joined audition owns one Assembly choice.  Never fall back to a
-            # member clip's choice: that would display one decision and queue a
-            # different one.  An unconfigured Assembly preserves legacy export;
-            # a configured one remains an explicit S4 refusal before any Job.
-            target = self._assembly_music_target
-            if target is None:
-                return ""
-            choice = self._planned_music(target)
+            try:
+                target, choice, _sequence = self._assembly_audio_snapshot(pieces)
+            except ValueError as problem:
+                return f"Assembly: {problem}"
             if not choice.configured:
                 return ""
             if target in self._music_reading:
@@ -1190,7 +1186,16 @@ class MainWindow(QMainWindow):
             if target in self._music_trouble:
                 return f"Assembly: {self._music_trouble[target]}"
             reason = MusicPanel._refusal(self._preset_key(), True, bundle)
-            return f"Assembly: {reason}" if reason else ""
+            if reason:
+                return f"Assembly: {reason}"
+            if choice.mode in (AudioMode.REPLACE, AudioMode.MIX):
+                if choice.asset is None:
+                    return ("Assembly: its music track has not been read yet. "
+                            "Choose the track again.")
+                if choice.passage is None:
+                    return ("Assembly: its music track has no selected passage. "
+                            "Choose the track again, or select the passage to use.")
+            return ""
         for piece in pieces:
             target = self._music_target_for(piece)
             if target is None:
@@ -1219,6 +1224,32 @@ class MainWindow(QMainWindow):
                             "passage. Choose the track again, or select the "
                             "passage to use.")
         return ""
+
+    def _assembly_audio_snapshot(self, pieces):
+        """The exact submitted Assembly target, choice and compiled clock."""
+        outputs = working_outputs(pieces, joined=True)
+        if len(outputs) != 1:
+            raise ValueError("one exact joined output is required")
+        target = outputs[0].target
+        tracked = self._assembly_music_target
+        if tracked is not None and tracked != target:
+            if self._planned_music(tracked).configured:
+                raise ValueError(
+                    "the configured music belongs to an older Assembly")
+        choice = self._planned_music(target)
+        if not choice.configured:
+            return target, choice, None
+        sequence = self._sequence_plan
+        if (target != tracked or target != self._sequence_target
+                or sequence is None):
+            raise ValueError(
+                "reopen the valid Assemble stage before exporting its music")
+        if tuple(one.item for one in sequence.occurrences) != target.items:
+            raise ValueError(
+                "the compiled sequence no longer matches the Assembly")
+        if len(sequence.occurrences) != len(pieces):
+            raise ValueError("the compiled sequence no longer matches its pieces")
+        return target, choice, sequence
 
     def _music_for(self, piece) -> MusicChoice:
         """The immutable choice this piece is queued with."""
@@ -4947,6 +4978,15 @@ class MainWindow(QMainWindow):
             # Already resolved, in the order the list shows. The pieces that
             # were validated above are the pieces that get joined.
             ordered = pieces
+            try:
+                plan_target, audio, sequence = self._assembly_audio_snapshot(
+                    ordered)
+            except ValueError as problem:
+                QMessageBox.warning(
+                    self, "That Assembly changed",
+                    f"Nothing has been queued.\n\n{problem}",
+                )
+                return
 
             # Refused rather than exported wrongly. A join built from mismatched
             # clips does not fail; it produces a file that is silent after the
@@ -4998,7 +5038,11 @@ class MainWindow(QMainWindow):
                 self.jobs.append(Job(ordered, key, settings, target, concat_file=concat,
                                      out_dir=out_dir, stem=stem,
                                      subfolders=subfolders, naming=naming,
-                                     template=joined_template))
+                                     template=joined_template, audio=audio,
+                                     target=(plan_target
+                                             if audio.configured else None),
+                                     sequence=(sequence
+                                               if audio.configured else None)))
         else:
             # Every target is rendered before a single job is appended. Two
             # pieces of this one action landing on the same filename is not the

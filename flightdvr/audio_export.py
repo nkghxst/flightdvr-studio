@@ -61,17 +61,34 @@ def _decimal(value) -> str:
     return f"{float(value):.12g}"
 
 
-def audio_filter_args(plan: OutputAudioPlan, *, source_seek_samples: int = 0
-                      ) -> list[str]:
-    """Explicit graph/map for Replace or Mix; output is always exactly T."""
+def planned_audio_chains(
+    plan: OutputAudioPlan,
+    *,
+    music_input_index: int,
+    source_label: str | None = None,
+    source_seek_samples: int = 0,
+    output_label: str = "planned_audio",
+) -> tuple[list[str], str]:
+    """Graph chains for one finished-time Replace or Mix decision.
+
+    Input indices and the optional finished source label are explicit because
+    a joined output has several source inputs before its one music input.  The
+    caller owns video mapping and may compose these chains into an existing
+    filter graph.
+    """
     if plan.mode not in (AudioMode.REPLACE, AudioMode.MIX):
-        return []
+        raise ValueError("a planned music graph needs Replace or Mix")
+    if type(music_input_index) is not int or music_input_index < 0:
+        raise ValueError("music input index must be non-negative")
+    if not output_label or any(mark in output_label for mark in "[];"):
+        raise ValueError("audio output label is malformed")
     assert plan.asset is not None and plan.passage is not None
     stream = plan.asset.stream_index
     start, end = plan.passage.start, plan.passage.end
     total = plan.output.samples
     music = (
-        f"[1:a:{stream}]atrim=start_sample={start}:end_sample={end},"
+        f"[{music_input_index}:a:{stream}]"
+        f"atrim=start_sample={start}:end_sample={end},"
         f"asetpts=PTS-STARTPTS,aresample={plan.output.rate},"
         "aformat=sample_fmts=fltp:channel_layouts=stereo,"
         f"atrim=end_sample={plan.music_samples}"
@@ -95,9 +112,12 @@ def audio_filter_args(plan: OutputAudioPlan, *, source_seek_samples: int = 0
     music += "[music]"
     chains = [music]
     if plan.mode is AudioMode.MIX and plan.source_has_audio:
+        if not source_label or not source_label.startswith("["):
+            raise ValueError(
+                "Mix with source audio needs a finished source label")
         source_total = total + source_seek_samples
         dvr = (
-            f"[0:a:0]aresample={plan.output.rate}:async=1:first_pts=0,"
+            f"{source_label}aresample={plan.output.rate}:async=1:first_pts=0,"
             "aformat=sample_fmts=fltp:channel_layouts=stereo,"
             f"atrim=start_sample={source_seek_samples}:end_sample={source_total},"
             f"asetpts=PTS-STARTPTS,apad=whole_len={total},"
@@ -107,11 +127,23 @@ def audio_filter_args(plan: OutputAudioPlan, *, source_seek_samples: int = 0
         chains.append(dvr)
         chains.append(
             f"[music][dvr]amix=inputs=2:duration=longest:normalize=0,"
-            f"atrim=end_sample={total}[planned_audio]")
+            f"atrim=end_sample={total}[{output_label}]")
     else:
-        chains.append("[music]anull[planned_audio]")
+        chains.append(f"[music]anull[{output_label}]")
+    return chains, f"[{output_label}]"
+
+
+def audio_filter_args(plan: OutputAudioPlan, *, source_seek_samples: int = 0
+                      ) -> list[str]:
+    """Explicit single-source graph/map; output is always exactly T."""
+    if plan.mode not in (AudioMode.REPLACE, AudioMode.MIX):
+        return []
+    chains, output = planned_audio_chains(
+        plan, music_input_index=1, source_label="[0:a:0]",
+        source_seek_samples=source_seek_samples,
+    )
     return ["-filter_complex", ";".join(chains),
-            "-map", "0:v:0", "-map", "[planned_audio]"]
+            "-map", "0:v:0", "-map", output]
 
 
 def validate_expected_audio(tools: Tools, path: Path,

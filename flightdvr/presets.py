@@ -612,6 +612,9 @@ def join_filtergraph(
     tail: list[str] | None = None,
     vertical: bool = False,
     allow_audio: bool = True,
+    audio_plan=None,
+    sequence=None,
+    music_input_index: int | None = None,
 ) -> tuple[str, str, str]:
     """A filter_complex that normalises every clip and then joins them.
 
@@ -643,8 +646,21 @@ def join_filtergraph(
         fps = max((c.fps for c in clips if c.fps), default=60.0)
     else:
         width, height, fps = join_target_format(clips)
-    want_audio = (allow_audio and settings.keep_audio
-                  and any(c.has_audio for c in clips))
+    if sequence is not None:
+        if len(sequence.occurrences) != len(clips):
+            raise ValueError("joined sequence and source count disagree")
+        if (audio_plan is not None
+                and sequence.total_samples != audio_plan.output.samples):
+            raise ValueError("joined sequence and audio extent disagree")
+    if audio_plan is None:
+        want_source_audio = (allow_audio and settings.keep_audio
+                             and any(c.has_audio for c in clips))
+    else:
+        mode = audio_plan.mode.value
+        want_source_audio = (
+            allow_audio and mode in ("original", "mix")
+            and audio_plan.source_has_audio
+        )
 
     chains: list[str] = []
     labels: list[str] = []
@@ -691,35 +707,75 @@ def join_filtergraph(
         chains.append(f"[{index}:v]{','.join(video)}[v{index}]")
         labels.append(f"[v{index}]")
 
-        if not want_audio:
+        if not want_source_audio:
             continue
         if clip.has_audio:
             audio = [f"atrim=start={start:.3f}:duration={duration:.3f}",
                      "asetpts=PTS-STARTPTS",
-                     f"aresample={JOIN_SAMPLE_RATE}:async=1:first_pts=0"]
+                     f"aresample={JOIN_SAMPLE_RATE}:async=1:first_pts=0",
+                     "aformat=sample_fmts=fltp:channel_layouts=stereo"]
+            if sequence is not None:
+                samples = sequence.occurrences[index].sample_span.samples
+                audio += [
+                    f"apad=whole_len={samples}",
+                    f"atrim=end_sample={samples}",
+                ]
             chains.append(f"[{index}:a]{','.join(audio)}[a{index}]")
         else:
             # Silence of exactly this clip's length, so the ones that do have
             # sound keep theirs instead of the whole join being silenced.
+            if sequence is not None:
+                extent = (
+                    f"atrim=end_sample="
+                    f"{sequence.occurrences[index].sample_span.samples}"
+                )
+            else:
+                extent = f"atrim=duration={duration:.3f}"
             chains.append(
                 f"anullsrc=channel_layout={JOIN_CHANNELS}:"
                 f"sample_rate={JOIN_SAMPLE_RATE},"
-                f"atrim=duration={duration:.3f},asetpts=PTS-STARTPTS[a{index}]"
+                "aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                f"{extent},"
+                f"asetpts=PTS-STARTPTS[a{index}]"
             )
         labels.append(f"[a{index}]")
 
-    streams = "1" if want_audio else "0"
+    streams = "1" if want_source_audio else "0"
+    joined_audio_label = (
+        "[ja_raw]" if want_source_audio and sequence is not None
+        else "[ja]" if want_source_audio else ""
+    )
     chains.append(
         f"{''.join(labels)}concat=n={len(clips)}:v=1:a={streams}"
-        f"[jv]{'[ja]' if want_audio else ''}"
+        f"[jv]{joined_audio_label}"
     )
+    if want_source_audio and sequence is not None:
+        chains.append(
+            f"[ja_raw]apad=whole_len={sequence.total_samples},"
+            f"atrim=end_sample={sequence.total_samples}[ja]"
+        )
 
     video_label = "[jv]"
     if tail:
         chains.append(f"[jv]{','.join(tail)}[vout]")
         video_label = "[vout]"
 
-    return ";".join(chains), video_label, "[ja]" if want_audio else ""
+    audio_label = "[ja]" if want_source_audio else ""
+    if (audio_plan is not None
+            and audio_plan.mode.value in ("replace", "mix")):
+        if music_input_index is None:
+            raise ValueError("joined configured audio needs its music input index")
+        from .audio_export import planned_audio_chains
+        planned, audio_label = planned_audio_chains(
+            audio_plan,
+            music_input_index=music_input_index,
+            source_label=audio_label or None,
+        )
+        chains.extend(planned)
+    elif audio_plan is not None and audio_plan.mode.value == "no_sound":
+        audio_label = ""
+
+    return ";".join(chains), video_label, audio_label
 
 
 def slow_problems(clips: list[ClipInfo]) -> list[str]:
@@ -957,6 +1013,7 @@ def build_commands(
     total_duration: float = 0.0,
     clips: list[ClipInfo] | None = None,
     audio_plan=None,
+    sequence=None,
 ) -> list[list[str]]:
     """Full ffmpeg command list. Two entries when a two-pass encode is needed.
 
@@ -986,16 +1043,22 @@ def build_commands(
     else:
         head = ([ff, "-hide_banner", "-nostdin", "-y"]
                 + _input_args(sources, None, clip))
+    music_input_index = None
     if audio_plan is not None and audio_plan.mode.value in ("replace", "mix"):
         from .audio_export import music_input_args
         # `_input_args` puts the accurate seek and duration after source input.
         # Additional inputs belong before those output options, or FFmpeg reads
         # them as input options for the music and advances the track by the DVR
         # in point.
-        source_i = head.index("-i")
-        after_source = source_i + 2
-        head = (head[:after_source] + music_input_args(audio_plan)
-                + head[after_source:])
+        if joined:
+            music_input_index = len(clips)
+            head += music_input_args(audio_plan)
+        else:
+            music_input_index = 1
+            source_i = head.index("-i")
+            after_source = source_i + 2
+            head = (head[:after_source] + music_input_args(audio_plan)
+                    + head[after_source:])
 
     def picture(
         pix_fmt: str,
@@ -1017,6 +1080,9 @@ def build_commands(
             graph, video_label, audio_label = join_filtergraph(
                 clips, settings, pix_fmt, tail, vertical=vertical,
                 allow_audio=allow_audio,
+                audio_plan=audio_plan,
+                sequence=sequence,
+                music_input_index=music_input_index,
             )
             args = ["-filter_complex", graph, "-map", video_label]
             if audio_label:
@@ -1071,7 +1137,7 @@ def build_commands(
                 "-c:v", "libx264", "-preset", settings.master_speed,
                 "-crf", str(settings.master_crf), "-profile:v", "high",
             ]
-        if audio_plan is not None:
+        if audio_plan is not None and not joined:
             from .audio_export import audio_filter_args
             if audio_plan.mode.value in ("replace", "mix"):
                 seek = round(max(0.0, clip.trim_in) * audio_plan.output.rate)
