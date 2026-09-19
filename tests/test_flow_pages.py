@@ -1388,6 +1388,14 @@ def test_joined_assemble_guards_source_edit_step_and_play_routes(
                         lambda *a, **k: calls.append("seek"))
     monkeypatch.setattr(window.player, "play",
                         lambda *a, **k: calls.append("play"))
+    monkeypatch.setattr(window.player, "stop",
+                        lambda *a, **k: calls.append("stop"))
+    monkeypatch.setattr(window, "_prepare_monitoring",
+                        lambda *a, **k: calls.append("monitor"))
+    monkeypatch.setattr(window.live_preview, "restart",
+                        lambda *a, **k: calls.append("restart"))
+    monkeypatch.setattr(window.live_preview, "set_listening",
+                        lambda *a, **k: calls.append("listen mode"))
 
     window._toggle_play()
     window._step_frames(1)
@@ -1398,6 +1406,10 @@ def test_joined_assemble_guards_source_edit_step_and_play_routes(
     window._add_select()
     window._play_selected()
     window._play_item(window.table.item(0, 0))
+    window._stop_preview()
+    window._on_listen_toggled(True)
+    window._on_listening_changed("source")
+    window._on_monitor_restart()
 
     assert calls == []
     assert [(one.start, one.end, one.sid)

@@ -1301,6 +1301,8 @@ class MainWindow(QMainWindow):
         self.preview_view.show_monitoring(not status.muted, status.reason)
 
     def _on_listen_toggled(self, listening: bool) -> None:
+        if self._refuse_joined_source_action():
+            return
         if listening:
             self._prepare_monitoring(
                 self.player.position, play=self.player.is_playing)
@@ -1311,6 +1313,8 @@ class MainWindow(QMainWindow):
 
     def _on_listening_changed(self, name: str) -> None:
         """A rebuilt mix begins at the picture, never at its own zero."""
+        if self._refuse_joined_source_action():
+            return
         self.live_preview.set_listening(Listening(name))
         if self.preview_view.listen_check.isChecked():
             self._prepare_monitoring(
@@ -1321,6 +1325,8 @@ class MainWindow(QMainWindow):
 
     def _on_monitor_restart(self) -> None:
         """Return both sides once, preserving existing Play/Listen intentions."""
+        if self._refuse_joined_source_action():
+            return
         was_playing = self.player.is_playing
         was_listening = self.preview_view.listen_check.isChecked()
         if (self._monitor_snapshot is None or self._monitor_rearm_required
@@ -3451,6 +3457,8 @@ class MainWindow(QMainWindow):
         self.player.toggle(self.frame_view.width())
 
     def _stop_preview(self) -> None:
+        if self._refuse_joined_source_action():
+            return
         self.player.stop()
         self._show_frame(self.trim_bar.playhead)
 
