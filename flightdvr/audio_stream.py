@@ -37,7 +37,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from enum import Enum
 from fractions import Fraction
-from typing import Callable, Protocol, Sequence
+from typing import TYPE_CHECKING, Callable, Protocol, Sequence
 
 from .audio_plan import (
     AudioMode,
@@ -48,6 +48,9 @@ from .audio_plan import (
     ShortTrackPolicy,
     round_samples,
 )
+
+if TYPE_CHECKING:
+    from .sequence_plan import OccurrenceId, SequenceOccurrence
 
 
 BLOCK_FRAMES = 480
@@ -83,6 +86,192 @@ class PcmReader(Protocol):
     def request_stop(self) -> None: ...
 
     def close(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class SequenceSourceSegment:
+    """One compiled occurrence mapped onto one normalised source reader.
+
+    ``output`` is copied from ``SequenceOccurrence.sample_span``.  Its length
+    is therefore the compiler's cumulative integral answer, never a separately
+    rounded duration.  ``reader=None`` is the explicit representation of a
+    source known to have no audio; reader failures are never converted to it.
+    """
+
+    occurrence: OccurrenceId
+    output: SampleSpan
+    source_start: int
+    reader: PcmReader | None
+
+    def __post_init__(self) -> None:
+        from .sequence_plan import OccurrenceId
+
+        if not isinstance(self.occurrence, OccurrenceId):
+            raise TypeError("a sequence source segment needs an OccurrenceId")
+        if not isinstance(self.output, SampleSpan):
+            raise TypeError("a sequence source segment needs a SampleSpan")
+        if self.output.rate != OUTPUT_RATE:
+            raise ValueError("sequence source segments use the 48 kHz clock")
+        if type(self.source_start) is not int or self.source_start < 0:
+            raise ValueError("sequence source origin must be a non-negative integer")
+        if self.reader is not None:
+            extent = self.reader.frames
+            if type(extent) is not int or extent <= 0:
+                raise ValueError("sequence source reader extent must be positive")
+            if self.source_start + self.output.samples > extent:
+                raise ValueError(
+                    "sequence source mapping extends beyond its normalised reader")
+
+    @classmethod
+    def from_occurrence(
+        cls,
+        occurrence: SequenceOccurrence,
+        reader: PcmReader | None,
+    ) -> "SequenceSourceSegment":
+        """Capture the compiler's occurrence identity, samples and origin."""
+        from .sequence_plan import SequenceOccurrence
+
+        if not isinstance(occurrence, SequenceOccurrence):
+            raise TypeError("sequence source mapping needs a compiled occurrence")
+        source_start = round_samples(occurrence.source.start * OUTPUT_RATE)
+        return cls(
+            occurrence.id, occurrence.sample_span, source_start, reader)
+
+
+class SequencePcmReader:
+    """Expose compiled occurrences as one reader on finished-output time."""
+
+    def __init__(self, segments: Sequence[SequenceSourceSegment]) -> None:
+        if isinstance(segments, (str, bytes)):
+            raise TypeError("sequence source segments must be values")
+        found = tuple(segments)
+        if not found:
+            raise ValueError("a sequence source reader needs at least one segment")
+
+        revision = None
+        cursor = 0
+        seen = set()
+        for index, segment in enumerate(found):
+            if not isinstance(segment, SequenceSourceSegment):
+                raise TypeError("sequence source entries must be segments")
+            occurrence = segment.occurrence
+            if revision is None:
+                revision = occurrence.revision
+            if (occurrence.revision != revision
+                    or occurrence.ordinal != index
+                    or occurrence in seen):
+                raise ValueError(
+                    "sequence source occurrence order must match one revision")
+            if segment.output.start != cursor:
+                message = ("sequence source output must start at zero" if index == 0
+                           else "sequence source output has a gap or overlap")
+                raise ValueError(message)
+            seen.add(occurrence)
+            cursor = segment.output.end
+
+        readers = []
+        reader_ids = set()
+        for segment in found:
+            reader = segment.reader
+            if reader is not None and id(reader) not in reader_ids:
+                reader_ids.add(id(reader))
+                readers.append(reader)
+        self._segments = found
+        self._frames = cursor
+        self._readers = tuple(readers)
+        self._lock = threading.Lock()
+        self._stop_requested = False
+        self._closed = False
+
+    @property
+    def frames(self) -> int:
+        return self._frames
+
+    @property
+    def segments(self) -> tuple[SequenceSourceSegment, ...]:
+        return self._segments
+
+    def read(
+        self,
+        start: int,
+        frames: int,
+        cancelled: Callable[[], bool],
+    ) -> Sequence[float]:
+        if type(start) is not int or start < 0:
+            raise ValueError("read start must be a non-negative integer")
+        if type(frames) is not int or not 0 < frames <= BLOCK_FRAMES:
+            raise ValueError(f"read size must be from 1 to {BLOCK_FRAMES} frames")
+        if start + frames > self.frames:
+            raise ValueError("read extends beyond the sequence source")
+        with self._lock:
+            if self._stop_requested or self._closed:
+                raise RuntimeError("sequence source reader is stopping")
+
+        result: list[float] = []
+        position = start
+        requested_end = start + frames
+        for segment in self._segments:
+            if position >= requested_end:
+                break
+            if position >= segment.output.end:
+                continue
+            if position < segment.output.start:
+                raise ValueError("sequence source output has a gap or overlap")
+            if cancelled():
+                raise RuntimeError("sequence source read was cancelled")
+            count = min(requested_end, segment.output.end) - position
+            if segment.reader is None:
+                values = (0.0,) * (count * OUTPUT_CHANNELS)
+            else:
+                source = segment.source_start + position - segment.output.start
+                values = tuple(float(value) for value in segment.reader.read(
+                    source, count, cancelled))
+                if len(values) != count * OUTPUT_CHANNELS:
+                    raise ValueError(
+                        "PCM reader returned a truncated stereo block")
+                if not all(math.isfinite(value) for value in values):
+                    raise ValueError("PCM reader returned a non-finite sample")
+            if cancelled():
+                raise RuntimeError("sequence source read was cancelled")
+            result.extend(values)
+            position += count
+        if position != requested_end:
+            raise ValueError("sequence source output has a gap or overlap")
+        return tuple(result)
+
+    def request_stop(self) -> None:
+        """Promptly request every distinct leaf once, without joining it."""
+        with self._lock:
+            if self._stop_requested:
+                return
+            self._stop_requested = True
+            readers = self._readers
+        problem = None
+        for reader in readers:
+            try:
+                reader.request_stop()
+            except Exception as exc:  # finish signalling the remaining leaves
+                if problem is None:
+                    problem = exc
+        if problem is not None:
+            raise problem
+
+    def close(self) -> None:
+        """Close every distinct leaf once after its owner settles the worker."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            readers = self._readers
+        problem = None
+        for reader in readers:
+            try:
+                reader.close()
+            except Exception as exc:  # attempt every cleanup before reporting
+                if problem is None:
+                    problem = exc
+        if problem is not None:
+            raise problem
 
 
 class StreamState(str, Enum):

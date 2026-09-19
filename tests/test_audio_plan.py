@@ -20,7 +20,8 @@ import pytest
 
 from flightdvr.audio_plan import (
     AudioAsset, AudioMode, MusicChoice, OUTPUT_RATE, SampleSpan,
-    ShortTrackPolicy, resolve_audio_plan, round_samples,
+    ShortTrackPolicy, resolve_audio_plan, resolve_monitor_audio_plan,
+    round_samples,
 )
 
 
@@ -138,3 +139,47 @@ def test_unconfigured_choice_is_reserved_for_the_unchanged_legacy_path():
     assert not MusicChoice().configured
     with pytest.raises(ValueError, match="legacy export path"):
         resolve(MusicChoice())
+
+
+# -- S3a: one calculation, separate preview/export authority ------------------
+
+def test_monitor_plan_reuses_the_sample_exact_music_calculation_without_joined_export():
+    choice = music(
+        start=4 * 44_100,
+        end=8 * 44_100,
+        mode=AudioMode.MIX,
+        music_level=Fraction(3, 4),
+        dvr_level=Fraction(1, 4),
+        fade_in=17,
+        fade_out=29,
+    )
+
+    monitor = resolve_monitor_audio_plan(
+        choice, 8 * OUTPUT_RATE,
+        source_has_audio=True, preset_key="master")
+    ordinary_export = resolve_audio_plan(
+        choice, 8 * OUTPUT_RATE,
+        source_has_audio=True, preset_key="master")
+
+    assert monitor == ordinary_export
+    assert monitor.output == SampleSpan(0, 8 * OUTPUT_RATE, OUTPUT_RATE)
+    assert monitor.passage == choice.passage
+    assert monitor.music_position(0) == 0
+    assert monitor.music_position(4 * OUTPUT_RATE) == 0
+    assert (monitor.fade_in_samples, monitor.fade_out_samples) == (17, 29)
+
+    with pytest.raises(ValueError, match="Assembly"):
+        resolve_audio_plan(
+            choice, 8 * OUTPUT_RATE, source_has_audio=True,
+            preset_key="master", joined=True)
+
+
+def test_monitor_plan_does_not_create_a_nonmaster_or_legacy_audio_path():
+    with pytest.raises(ValueError, match="social"):
+        resolve_monitor_audio_plan(
+            music(), OUTPUT_RATE,
+            source_has_audio=True, preset_key="social")
+    with pytest.raises(ValueError, match="legacy export path"):
+        resolve_monitor_audio_plan(
+            MusicChoice(), OUTPUT_RATE,
+            source_has_audio=True, preset_key="master")

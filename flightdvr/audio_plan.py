@@ -251,23 +251,21 @@ def _effective_fades(audible: int, fade_in: int, fade_out: int) -> tuple[int, in
     return effective_in, audible - effective_in
 
 
-def resolve_audio_plan(
-    choice: MusicChoice,
-    output_samples: int,
-    *,
-    source_has_audio: bool,
-    preset_key: str,
-    joined: bool = False,
-    bundle: bool = False,
-) -> OutputAudioPlan:
-    """Resolve choices for the bounded S2 one-range Master export."""
+def _validate_plan_request(choice: MusicChoice, output_samples: int) -> None:
+    """Validate the inputs shared by export and monitor resolution."""
     if not choice.configured:
         raise ValueError("an unconfigured audio choice uses the legacy export path")
     if type(output_samples) is not int or output_samples <= 0:
         raise ValueError("finished output must contain a positive integer sample count")
-    if preset_key != "master" or joined or bundle:
-        context = "delivery bundle" if bundle else "Assembly" if joined else preset_key
-        raise ValueError(f"music/audio choices are not supported for {context} in S2")
+
+
+def _resolve_configured_audio(
+    choice: MusicChoice,
+    output_samples: int,
+    *,
+    source_has_audio: bool,
+) -> OutputAudioPlan:
+    """One sample-exact calculation after a caller establishes authority."""
     output = SampleSpan(0, output_samples, OUTPUT_RATE)
     mode = AudioMode(choice.mode)
     if mode is AudioMode.ORIGINAL:
@@ -296,3 +294,44 @@ def resolve_audio_plan(
         choice.short_track, music_samples, audible, fade_in, fade_out,
         music_gain, dvr_gain,
     )
+
+
+def resolve_monitor_audio_plan(
+    choice: MusicChoice,
+    output_samples: int,
+    *,
+    source_has_audio: bool,
+    preset_key: str,
+) -> OutputAudioPlan:
+    """Resolve an audition without granting a joined export capability.
+
+    A monitor can be bound to a compiled multi-occurrence output in S3, while
+    the export path remains deliberately bounded to one range until S4.  This
+    entry point shares the actual sample calculation; it does not accept the
+    export-only ``joined`` or ``bundle`` switches and therefore cannot weaken
+    their refusal by accident.
+    """
+    _validate_plan_request(choice, output_samples)
+    if preset_key != "master":
+        raise ValueError(
+            f"music/audio choices are not supported for {preset_key} monitoring")
+    return _resolve_configured_audio(
+        choice, output_samples, source_has_audio=source_has_audio)
+
+
+def resolve_audio_plan(
+    choice: MusicChoice,
+    output_samples: int,
+    *,
+    source_has_audio: bool,
+    preset_key: str,
+    joined: bool = False,
+    bundle: bool = False,
+) -> OutputAudioPlan:
+    """Resolve choices for the bounded S2 one-range Master export."""
+    _validate_plan_request(choice, output_samples)
+    if preset_key != "master" or joined or bundle:
+        context = "delivery bundle" if bundle else "Assembly" if joined else preset_key
+        raise ValueError(f"music/audio choices are not supported for {context} in S2")
+    return _resolve_configured_audio(
+        choice, output_samples, source_has_audio=source_has_audio)
