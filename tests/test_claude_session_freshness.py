@@ -537,3 +537,221 @@ def test_the_hook_is_wired_to_this_helper():
             assert '"${CLAUDE_PROJECT_DIR}/tools/' in hook["command"]
             assert isinstance(hook.get("timeout"), int)
             assert hook["timeout"] > freshness.FETCH_TIMEOUT_SECONDS
+
+
+# -- what a failure is allowed to say ------------------------------------------
+#
+# A fetch error is the remote's own text. It quotes the URL, so a credential in
+# a path or query would be repeated into session context, and it arrives in
+# whatever encoding the remote chose, which is the other way the ASCII-only
+# promise above gets broken. These pin the reason to a fixed set instead.
+
+DUMMY_TOKEN = "NOT_A_REAL_TOKEN_0000"
+DUMMY_REMOTE = f"http://user:{DUMMY_TOKEN}@127.0.0.1:1/repo?token={DUMMY_TOKEN}"
+
+
+def failing_git(monkeypatch, *, code: int, stderr: str):
+    """Make every git call fail the same way, without running git.
+
+    The point is the value `refresh` returns, not git's behaviour, and a real
+    remote is not needed to settle it — nor wanted, since the whole subject is
+    text arriving from outside this machine.
+    """
+    calls = []
+
+    def fake(args, cwd, timeout):
+        calls.append(list(args))
+        return code, ""
+    monkeypatch.setattr(freshness, "_git", fake)
+    # Kept so a reader can see what git would have printed on this path. It is
+    # deliberately not returned: `_git` has no stderr channel any more, which
+    # is the point of `test_git_hands_back_no_channel_for_what_git_printed`.
+    assert stderr
+    return calls
+
+
+def test_a_fetch_failure_never_repeats_what_git_printed(monkeypatch):
+    """The defect: the last stderr line was returned verbatim, and a fetch
+    error quotes the remote URL — credentials and all."""
+    failing_git(monkeypatch, code=128,
+                stderr=f"fatal: unable to access '{DUMMY_REMOTE}': refused")
+
+    reason = freshness.refresh("/repo")
+
+    assert DUMMY_TOKEN not in reason, reason
+    assert "127.0.0.1" not in reason, reason
+    assert "http" not in reason, reason
+    assert reason == "git fetch exited 128"
+
+
+def test_the_warning_a_session_sees_carries_no_secret(monkeypatch):
+    """End of the same path: whatever `refresh` returns is interpolated into
+    the line a session reads, so the assertion belongs there too."""
+    failing_git(monkeypatch, code=128,
+                stderr=f"fatal: unable to access '{DUMMY_REMOTE}': refused")
+    reason = freshness.refresh("/repo")
+
+    for lines in (
+        freshness.report("/repo", fetch_error=reason, behind=0,
+                         differ=[], unknown=[]),
+        freshness.report("/repo", fetch_error=reason, behind=2,
+                         differ=["CLAUDE.md"], unknown=[]),
+        freshness.report("/repo", fetch_error=reason, behind=None,
+                         differ=[], unknown=["AGENTS.md"]),
+    ):
+        said = "\n".join(lines)
+        assert said, "this branch printed nothing to check"
+        assert DUMMY_TOKEN not in said, said
+        assert "127.0.0.1" not in said, said
+
+
+def test_a_non_ascii_fetch_error_cannot_reach_the_output(monkeypatch):
+    """Git's stderr is not ASCII by any promise of git's. The committed ASCII
+    test only ever supplied ASCII fixtures, so it could not catch this."""
+    failing_git(monkeypatch, code=128,
+                stderr="fatal: " + chr(0x4E2D) + chr(0x6587))
+
+    reason = freshness.refresh("/repo")
+
+    reason.encode("ascii")                 # raises if stderr got through
+    lines = freshness.report("/repo", fetch_error=reason, behind=1,
+                             differ=["CLAUDE.md"], unknown=[])
+    assert lines
+    for line in lines:
+        line.encode("ascii")
+
+
+def test_each_way_git_fails_to_run_has_its_own_named_reason(monkeypatch):
+    """A code is something a reader can act on. It is also an integer, which
+    is what makes it safe to print."""
+    seen = {}
+    for code in (freshness.TIMED_OUT, freshness.CANNOT_RUN,
+                 freshness.NOT_FOUND, 128, 1):
+        failing_git(monkeypatch, code=code, stderr=DUMMY_REMOTE)
+        seen[code] = freshness.refresh("/repo")
+
+    assert seen[freshness.TIMED_OUT] == "the fetch timed out"
+    assert seen[freshness.CANNOT_RUN] == "git could not be run"
+    assert seen[freshness.NOT_FOUND] == "git was not found"
+    assert seen[128] == "git fetch exited 128"
+    assert seen[1] == "git fetch exited 1"
+    assert len(set(seen.values())) == len(seen), (
+        "two different failures gave the same reason")
+
+
+def test_a_refusal_to_run_git_at_all_says_nothing_about_the_path(monkeypatch):
+    """`_git`'s own OSError branch fed the same warning with `str(exc)`, and
+    an OS error names the path it failed on."""
+    def explode(*args, **kwargs):
+        raise OSError(f"cannot execute {DUMMY_REMOTE}")
+    monkeypatch.setattr(freshness.subprocess, "run", explode)
+
+    returned = freshness._git(["fetch"], os.getcwd(), 1.0)
+
+    assert returned[0] == freshness.CANNOT_RUN
+    assert not any(DUMMY_TOKEN in str(value) for value in returned), returned
+    assert freshness.refresh(os.getcwd()) == "git could not be run"
+
+
+def test_git_hands_back_no_channel_for_what_git_printed(monkeypatch):
+    """Structural, not a promise anybody has to keep. Stderr is captured so it
+    stays off the console and then dropped, so no caller can forward it even
+    by mistake — which is how the last one got in."""
+    class Done:
+        returncode = 128
+        stdout = "out"
+        stderr = f"fatal: unable to access '{DUMMY_REMOTE}'"
+
+    monkeypatch.setattr(freshness.subprocess, "run",
+                        lambda *a, **k: Done())
+
+    returned = freshness._git(["fetch"], os.getcwd(), 1.0)
+
+    assert len(returned) == 2, (
+        f"_git still offers a channel for git's own text: {returned!r}")
+    assert not any(DUMMY_TOKEN in str(value) for value in returned), returned
+
+
+def test_the_last_resort_handler_reports_the_type_not_the_message(capsys):
+    """The entrypoint's own catch interpolated `{exc}`, the one place left
+    that could print anything it was handed.
+
+    Driving `report_failure` rather than restating it. Written the other way
+    round first, this test rebuilt the line itself and would have passed
+    against the very code it was meant to pin.
+    """
+    class Failure(Exception):
+        pass
+
+    code = freshness.report_failure(Failure(f"leaked {DUMMY_REMOTE}"))
+
+    said = capsys.readouterr().out
+    assert code == 0, "the last-resort handler must still exit zero"
+    assert DUMMY_TOKEN not in said, said
+    assert "127.0.0.1" not in said, said
+    assert "Failure" in said, said
+    said.encode("ascii")
+
+
+def test_the_entrypoint_is_wired_to_that_handler(monkeypatch, capsys):
+    """`main` raising must reach `report_failure`, not a bare traceback."""
+    def explode(*args, **kwargs):
+        raise RuntimeError(f"leaked {DUMMY_REMOTE}")
+    monkeypatch.setattr(freshness, "main", explode)
+
+    try:
+        freshness.main()
+    except Exception as exc:                      # noqa: BLE001
+        assert freshness.report_failure(exc) == 0
+    said = capsys.readouterr().out
+    assert DUMMY_TOKEN not in said, said
+    assert "RuntimeError" in said, said
+
+
+def test_plain_ascii_survives_a_name_that_is_not_ascii():
+    """A class name is allowed to be non-ASCII, and the handler prints one."""
+    rendered = freshness.plain_ascii("Fehler" + chr(0x4E2D))
+
+    rendered.encode("ascii")
+    assert "Fehler" in rendered
+
+
+def test_it_exits_zero_on_a_failed_fetch_under_a_strict_ascii_console(
+        tmp_path):
+    """The executable, as the hook runs it, on a console that cannot encode
+    anything but ASCII — with a fetch that fails and nothing reachable.
+
+    The remote shape is load-bearing and was got wrong first. A nonexistent
+    local path also fails, but git puts the path on an early stderr line and
+    ends with "and the repository exists."; the old code took the *last* line,
+    so that fixture passed against the very defect it was written for. A URL
+    fails on one line, with the URL on it.
+
+    `127.0.0.1:1` is refused by the local stack — nothing leaves the machine,
+    no endpoint is contacted, and the proxy and credential helper are disabled
+    for this repository so neither is consulted.
+    `PYTHONIOENCODING=ascii:strict` makes `print` raise on the first non-ASCII
+    character, so a leaked diagnostic is a non-zero exit rather than a quiet
+    pass.
+    """
+    checkout = a_repository(tmp_path / "checkout", DOCS)
+    git(checkout, "remote", "add", "origin",
+        f"http://user:{DUMMY_TOKEN}@127.0.0.1:1/repo?token={DUMMY_TOKEN}")
+    git(checkout, "config", "http.proxy", "")
+    git(checkout, "config", "credential.helper", "")
+
+    environment = dict(os.environ)
+    environment["PYTHONIOENCODING"] = "ascii:strict"
+    environment["PYTHONPATH"] = str(Path(freshness.__file__).parents[1])
+    done = subprocess.run(
+        [sys.executable, freshness.__file__],
+        input=json.dumps({"cwd": str(checkout)}),
+        capture_output=True, text=True, env=environment,
+        cwd=str(checkout), timeout=180, shell=False)
+
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip(), "a failed refresh said nothing at all"
+    assert DUMMY_TOKEN not in done.stdout, done.stdout
+    assert "127.0.0.1" not in done.stdout, done.stdout
+    assert "Traceback" not in done.stderr, done.stderr
+    done.stdout.encode("ascii")

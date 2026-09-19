@@ -54,6 +54,33 @@ REMOTE_REF = f"refs/remotes/{REMOTE}/{BRANCH}"
 FETCH_TIMEOUT_SECONDS = 20.0
 QUERY_TIMEOUT_SECONDS = 10.0
 
+# Return codes this module gives itself for the things that stop git running
+# at all. Real git never returns them, and each one names a case a reader can
+# act on without being told anything git wrote.
+TIMED_OUT, CANNOT_RUN, NOT_FOUND = 124, 126, 127
+
+# What a failed refresh is allowed to say. A fixed set, because git's own
+# stderr is not safe to repeat: a fetch error quotes the remote URL, so a
+# credential in its path or query would land in session context, and the text
+# is arbitrary and in whatever encoding the remote chose — which is also how
+# the ASCII-only promise below gets broken. `LC_ALL=C` settles the language
+# of a diagnostic, not the URL inside it.
+FETCH_REASONS = {
+    TIMED_OUT: "the fetch timed out",
+    CANNOT_RUN: "git could not be run",
+    NOT_FOUND: "git was not found",
+}
+
+
+def plain_ascii(text: object) -> str:
+    """Whatever this is, rendered so a legacy console can print it.
+
+    Used only where the value comes from outside this module. Everything this
+    module writes itself is ASCII already, and putting this on those strings
+    would be a guard nothing can trip.
+    """
+    return str(text).encode("ascii", "replace").decode("ascii")
+
 
 def _quiet_git_env() -> dict:
     """Git's environment with every interactive prompt refused.
@@ -72,12 +99,18 @@ def _quiet_git_env() -> dict:
     return env
 
 
-def _git(args: list[str], cwd: str, timeout: float) -> tuple[int, str, str]:
-    """Run one git command. Never raises, whatever goes wrong.
+def _git(args: list[str], cwd: str, timeout: float) -> tuple[int, str]:
+    """Run one git command. Never raises, and never hands back what git said.
 
     The argument list is passed through without a shell, so a repository path
     containing spaces — or anything else — is an argument rather than
     something to quote.
+
+    Only the return code and stdout come back. Stderr is captured so it does
+    not reach the console and then **dropped here**, which is what makes it
+    impossible for a caller to forward it into a session warning: a fetch
+    error quotes the remote URL, credentials and all. Nothing above needed it,
+    and a channel nobody reads is one somebody later repeats by accident.
     """
     try:
         done = subprocess.run(
@@ -91,12 +124,14 @@ def _git(args: list[str], cwd: str, timeout: float) -> tuple[int, str, str]:
             stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
-        return 124, "", f"timed out after {timeout:g}s"
+        return TIMED_OUT, ""
     except FileNotFoundError:
-        return 127, "", "git was not found"
-    except OSError as exc:                       # pragma: no cover - rare
-        return 126, "", str(exc)
-    return done.returncode, done.stdout.strip(), done.stderr.strip()
+        return NOT_FOUND, ""
+    except OSError:
+        # An OS error's message names the path it failed on, so it is not
+        # carried either. The code says which case this was.
+        return CANNOT_RUN, ""
+    return done.returncode, done.stdout.strip()
 
 
 def working_directory(payload) -> str:
@@ -134,8 +169,8 @@ def read_payload(stream) -> object:
 
 
 def repository_root(cwd: str) -> str | None:
-    code, out, _ = _git(["rev-parse", "--show-toplevel"], cwd,
-                        QUERY_TIMEOUT_SECONDS)
+    code, out = _git(["rev-parse", "--show-toplevel"], cwd,
+                     QUERY_TIMEOUT_SECONDS)
     return out or None if code == 0 else None
 
 
@@ -147,16 +182,20 @@ def refresh(root: str) -> str:
     run against whatever `origin/main` is already known, and saying the refs
     may be stale is more use than saying nothing.
     """
-    code, _, err = _git(["fetch", "--quiet", REMOTE, BRANCH], root,
-                        FETCH_TIMEOUT_SECONDS)
+    code, _ = _git(["fetch", "--quiet", REMOTE, BRANCH], root,
+                   FETCH_TIMEOUT_SECONDS)
     if code == 0:
         return ""
-    return err.splitlines()[-1] if err else f"git fetch exited {code}"
+    # The code, never what git printed. A return code says which of these
+    # happened, which is what a reader can do something about; the stderr
+    # behind it is the remote's own text and is not repeated. Anything else
+    # is named by its number rather than guessed at.
+    return FETCH_REASONS.get(code, f"git fetch exited {code}")
 
 
 def commits_behind(root: str) -> int | None:
-    code, out, _ = _git(["rev-list", "--count", f"HEAD..{REMOTE_REF}"], root,
-                        QUERY_TIMEOUT_SECONDS)
+    code, out = _git(["rev-list", "--count", f"HEAD..{REMOTE_REF}"], root,
+                     QUERY_TIMEOUT_SECONDS)
     if code != 0:
         return None
     try:
@@ -281,6 +320,19 @@ def report(root: str | None, *, fetch_error: str = "", behind: int | None,
     return lines
 
 
+def report_failure(exc: BaseException) -> int:
+    """The last line this can ever print, and always a zero exit.
+
+    A function rather than a few lines inside `__main__`, so what it says can
+    be driven by a test instead of restated by one. The exception's **type**,
+    never its message: an exception carries whatever it was handed — a path, a
+    URL — and this is about to be printed into session context.
+    """
+    print("Session freshness: the check itself failed "
+          f"({plain_ascii(type(exc).__name__)}).")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Always zero. A freshness check that blocked a session would be worse
     than the staleness it reports."""
@@ -308,5 +360,4 @@ if __name__ == "__main__":                        # pragma: no cover
     except Exception as exc:                      # noqa: BLE001
         # Nothing above is expected to raise, and a session start is the worst
         # possible place to be wrong about that.
-        print(f"Session freshness: the check itself failed ({exc}).")
-        sys.exit(0)
+        sys.exit(report_failure(exc))
