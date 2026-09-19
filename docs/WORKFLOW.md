@@ -161,11 +161,28 @@ agents reply. Put detailed evidence in the job or PR; use `#general` only for a
 concise `CLAIM`, `STATUS`, `HANDOFF`, `REVIEW` or `OUTCOME` message with a
 `reply_to` where useful. No reminder or ACK loop is progress.
 
+For an internal maker-to-reviewer handoff, reviewer-to-maker correction request
+or corrected-head return, put an actual `@<live-recipient>` mention in the
+canonical message. Take the recipient from the live authenticated room
+identity; do not guess aliases or invent a special coordinator identity. A
+plain name or a GitHub review alone is not delivery. Verify that sending
+succeeded and, where supported, read back the stored message and recipient once;
+do not repeat empty polling. This is an internal procedure only: an outside
+contributor is not asked for an ACK, mention, floor, role, verdict owner or
+handoff template.
+
+Within an already authorized assignment, a reviewer-requested fix that
+stays within the existing maker scope and branch ownership proceeds without
+renewed coordinator approval; the same reviewer retains verdict ownership for
+the corrected head. Escalate before editing if the correction changes scope or
+ownership, requires new permissions, or touches a reserved decision. The
+coordinator retains merge and next-stage authority.
+
 Every handoff names the maker, independent verdict owner, exact commit, checks,
 outcome and remaining limits. A useful shape is:
 
 ```text
-HANDOFF — Maker <name>; verdict owner <name>; exact base <SHA>, head <SHA>.
+HANDOFF — @<live-recipient> Maker <name>; verdict owner <name>; exact base <SHA>, head <SHA>.
 Paths: <exact list>. Outcome/checks: <observed results>. Remaining: <named
 evidence gaps and limits>. Review only <bounded delta>; only Nk merges.
 ```
