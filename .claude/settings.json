@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/tools/claude_session_freshness.py\"",
+            "timeout": 40,
+            "statusMessage": "Checking the operating documents are current..."
+          }
+        ]
+      },
+      {
+        "matcher": "resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/tools/claude_session_freshness.py\"",
+            "timeout": 40,
+            "statusMessage": "Checking the operating documents are current..."
+          }
+        ]
+      }
+    ]
+  }
+}
