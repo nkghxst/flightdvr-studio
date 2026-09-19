@@ -170,6 +170,43 @@ class OutputPlan:
             raise KeyError("output target is not in this plan") from None
         return deepcopy(planned)
 
+    def rekey(self, previous: OutputTarget,
+              current: OutputTarget) -> PlannedOutput:
+        """Move one exact Assembly choice to its new exact ordered identity.
+
+        Reordering changes an Assembly target because its ordered Items *are*
+        its identity.  This operation is explicit rather than a fuzzy lookup:
+        both keys must be Assembly targets, the old key must exist, and the new
+        key must not.  Every check and the replacement value are completed
+        before state changes, so a failed move cannot partially alter order,
+        selection or choices.
+        """
+        if not isinstance(previous, OutputTarget) or not isinstance(
+                current, OutputTarget):
+            raise TypeError("rekey needs OutputTarget values")
+        if not previous.is_assembly or not current.is_assembly:
+            raise ValueError("only Assembly output targets can be rekeyed")
+        if previous == current:
+            raise ValueError("an Assembly rekey needs a different exact target")
+        if previous not in self._outputs:
+            raise KeyError("output target is not in this plan")
+        if current in self._outputs:
+            raise ValueError("the replacement output target already exists")
+
+        retained = self._outputs[previous]
+        replacement = PlannedOutput(
+            current, retained.preset_key, retained.settings, retained.music)
+        moved = {
+            (current if target == previous else target):
+                (replacement if target == previous else planned)
+            for target, planned in self._outputs.items()
+        }
+        selected = current if self._selected == previous else self._selected
+        self._outputs = moved
+        self._selected = selected
+        return self.get(current)
+
+
 @dataclass(frozen=True)
 class WorkingOutput:
     """One output this session would build, and the identity it is keyed by.

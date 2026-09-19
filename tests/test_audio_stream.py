@@ -599,6 +599,85 @@ def test_finished_time_music_crosses_seams_and_loops_at_six_seconds_in_emitted_p
         stop(stream)
 
 
+def test_dvr_twelve_to_eighteen_and_music_four_to_ten_keep_independent_origins():
+    occurrence = sequence_occurrence(0, 12, 6, 0, "DVR")
+    source = FakeReader(
+        frames=20 * OUTPUT_RATE,
+        value=lambda frame, channel: source_signal(0.1, frame, channel))
+    sequence = SequencePcmReader((
+        SequenceSourceSegment.from_occurrence(occurrence, source),))
+    passage = SampleSpan(4 * OUTPUT_RATE, 10 * OUTPUT_RATE, OUTPUT_RATE)
+    asset = AudioAsset(
+        Path("music.wav"), DIGEST, 0, OUTPUT_RATE, 2, 12 * OUTPUT_RATE)
+    choice = MusicChoice(
+        asset.track, AudioMode.MIX, asset, passage,
+        ShortTrackPolicy.LOOP, Fraction(1, 2), Fraction(1, 2), 0, 0)
+    plan = resolve_monitor_audio_plan(
+        choice, 6 * OUTPUT_RATE,
+        source_has_audio=True, preset_key="master")
+    music = FakeReader(
+        frames=12 * OUTPUT_RATE,
+        value=lambda frame, channel: source_signal(0.4, frame, channel))
+    stream = AudioStream(
+        LiveAudioMapping(
+            plan, SampleSpan(0, 6 * OUTPUT_RATE, OUTPUT_RATE)),
+        source_reader=sequence, music_reader=music,
+        monitor=MonitorState(level=1, muted=False),
+    )
+    try:
+        stream.start()
+        for output_second, dvr_second, music_second in (
+                (0, 12, 4), (1, 13, 5), (5, 17, 9)):
+            block = emitted_at(stream, output_second * OUTPUT_RATE)
+            expected_left = (
+                source_signal(0.1, dvr_second * OUTPUT_RATE, 0)
+                + source_signal(0.4, music_second * OUTPUT_RATE, 0)
+            ) / 2
+            expected_right = (
+                source_signal(0.1, dvr_second * OUTPUT_RATE, 1)
+                + source_signal(0.4, music_second * OUTPUT_RATE, 1)
+            ) / 2
+            assert block.planned[0] == pytest.approx(expected_left)
+            assert block.planned[1] == pytest.approx(expected_right)
+            assert block.planned[0] != 0.0
+    finally:
+        stop(stream)
+
+
+def test_sequence_segments_preserve_compiler_cumulative_sample_boundaries():
+    from flightdvr.assembly import Item
+    from flightdvr.sequence_plan import (
+        OccurrenceId, SequenceOccurrence, SequencePlan, TimeSpan,
+    )
+
+    duration = Fraction(7, 5 * OUTPUT_RATE)  # 1.4 samples per occurrence
+    first_output = TimeSpan(Fraction(0), duration)
+    second_output = TimeSpan(duration, 2 * duration)
+    first = SequenceOccurrence(
+        OccurrenceId("cumulative", 0), Item("A", "first"), "A.ts",
+        TimeSpan(Fraction(0), duration), first_output, first_output,
+        SampleSpan(0, 1, OUTPUT_RATE))
+    second = SequenceOccurrence(
+        OccurrenceId("cumulative", 1), Item("B", "second"), "B.ts",
+        TimeSpan(Fraction(1), Fraction(1) + duration),
+        second_output, second_output, SampleSpan(1, 3, OUTPUT_RATE))
+    compiled = SequencePlan("cumulative", (first, second), (0, 1, 3))
+    a = FakeReader(frames=10)
+    b = FakeReader(frames=OUTPUT_RATE + 10)
+
+    reader = SequencePcmReader(tuple(
+        SequenceSourceSegment.from_occurrence(occurrence, leaf)
+        for occurrence, leaf in zip(compiled.occurrences, (a, b))))
+
+    assert [(segment.output.start, segment.output.end)
+            for segment in reader.segments] == [(0, 1), (1, 3)]
+    assert reader.frames == compiled.total_samples == 3
+    assert len(reader.read(0, 3, lambda: False)) == 6
+    assert a.reads == [(0, 1)]
+    assert b.reads == [(OUTPUT_RATE, 2)], (
+        "the second occurrence was independently rounded back to one sample")
+
+
 def test_sequence_reader_allows_only_explicit_known_silence():
     from flightdvr.sequence_plan import OccurrenceId
 
@@ -704,3 +783,25 @@ def test_sequence_reader_stops_and_closes_each_distinct_leaf_once():
 
     assert a.stop_requests == a.close_requests == 1
     assert b.stop_requests == b.close_requests == 1
+
+
+def test_sequence_reader_stop_unblocks_a_leaf_and_wait_remains_separate():
+    occurrence = sequence_occurrence(0, 0, 1, 0, "blocked")
+    leaf = BlockingReader(frames=OUTPUT_RATE)
+    source = SequencePcmReader((
+        SequenceSourceSegment.from_occurrence(occurrence, leaf),))
+    plan = resolve_monitor_audio_plan(
+        MusicChoice(mode=AudioMode.ORIGINAL), OUTPUT_RATE,
+        source_has_audio=True, preset_key="master")
+    stream = AudioStream(
+        LiveAudioMapping(plan, SampleSpan(0, OUTPUT_RATE, OUTPUT_RATE)),
+        source_reader=source)
+    stream.start()
+    assert leaf.read_started.wait(1)
+
+    stream.request_stop()
+
+    assert leaf.stop_requests == 1
+    assert stream.state in (StreamState.STOPPING, StreamState.STOPPED)
+    assert stream.wait_stopped(2)
+    assert leaf.close_requests == 1
