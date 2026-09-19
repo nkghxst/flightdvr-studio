@@ -676,6 +676,7 @@ class PreviewPlayer(QObject):
     """
 
     frame_ready = Signal(object, float)   # QImage, seconds into the clip
+    playback_tick = Signal(float, bool)   # wanted source seconds, starved now
     precise_frame_ready = Signal(object, float, int)  # image, seconds, source frame
     precise_loading = Signal(bool)
     precise_failed = Signal(str)
@@ -1014,15 +1015,23 @@ class PreviewPlayer(QObject):
     # -- the clock ------------------------------------------------------------
 
     def _tick(self) -> None:
+        # A timeout may already be queued when pause/stop/failure tears down
+        # playback. It belongs to the retired active interval and must not
+        # publish timing after that lifecycle fence.
+        if not self.is_playing:
+            return
         wanted = self._playclock.advance(starved=self._starved)
         frame = self._pick(wanted)
         if frame is not None:
             when, data = frame
             self.position = when
             self.frame_ready.emit(self._to_image(data), when)
+            self.playback_tick.emit(wanted, self._starved)
             return
         if self._stream_ended and self._pending is None and self._frames.empty():
             self._finish()
+            return
+        self.playback_tick.emit(wanted, self._starved)
 
     def _pick(self, wanted: float) -> tuple[float, bytes] | None:
         """The newest queued frame that is not still in the future.
