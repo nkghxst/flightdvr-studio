@@ -904,6 +904,78 @@ def test_source_only_and_the_finished_mix_are_different_plans(window):
     assert source.music_gain == 0
 
 
+class AbsoluteFrameReader:
+    """A bounded reader whose PCM exposes the absolute frame requested."""
+
+    def __init__(self, frames: int):
+        self._frames = frames
+        self.reads = []
+        self.closed = False
+
+    @property
+    def frames(self) -> int:
+        return self._frames
+
+    def read(self, start: int, frames: int, cancelled) -> list[float]:
+        self.reads.append((start, frames))
+        values = []
+        for frame in range(start, start + frames):
+            values.extend((frame / OUTPUT_RATE, frame / OUTPUT_RATE))
+        return values
+
+    def request_stop(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_focused_range_uses_its_absolute_source_origin_and_reader_extent(
+        window, monkeypatch):
+    """[12,18) is source 576000..864000, not the first six seconds."""
+    from flightdvr.audio_reader import FfmpegPcmReader
+    from flightdvr.audio_stream import AudioStream
+    from flightdvr.media import Select
+
+    clip = next(iter(window.clip_by_path.values()))
+    clip.selects = [Select(12.0, 18.0, "flight", sid="range-12-18")]
+    clip.current = 0
+    reader = AbsoluteFrameReader(864_000)
+    monkeypatch.setattr(
+        FfmpegPcmReader, "for_source",
+        classmethod(lambda _cls, _tools, _path, *, stream_index,
+                           timeline_frames: (
+            reader if timeline_frames == reader.frames
+            else pytest.fail(f"reader extent was {timeline_frames}"))))
+
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    window.live_preview.set_listening(Listening.SOURCE)
+
+    stream = window.live_preview._stream
+    assert isinstance(stream, AudioStream)
+    assert stream._mapping.source.start == 576_000
+    assert stream._mapping.source.end == 864_000
+    assert stream._mapping.audio.output.start == 0
+    assert stream._mapping.audio.output.end == 288_000
+
+    stream.start()
+    stream.resume()
+    deadline = time.monotonic() + 5.0
+    block = None
+    while block is None and time.monotonic() < deadline:
+        try:
+            block = stream.pull()
+        except Buffering:
+            time.sleep(0.01)
+    assert block is not None, "the real AudioStream produced no focused PCM"
+    assert reader.reads and reader.reads[0][0] == 576_000
+    assert block.output_start == 0
+    assert block.planned[0] == pytest.approx(12.0)
+    stream.request_stop()
+    assert stream.wait_stopped(5.0)
+
+
 def test_source_only_on_a_silent_recording_has_nothing_to_offer(window,
                                                                monkeypatch):
     """`Original` on a clip with no sound of its own is silence. Offering it

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -26,7 +27,9 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace
 from datetime import date, datetime
+from fractions import Fraction
 from functools import partial
 from html import escape
 from pathlib import Path
@@ -66,8 +69,6 @@ from .format import (
 from .help_content import naming_help_html, release_links
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
 from .media import ClipInfo, Select, Tools, available_encoders
-from dataclasses import replace
-
 from .audio_plan import (
     OUTPUT_RATE, AudioMode, MusicChoice, SampleSpan, resolve_audio_plan,
     round_samples,
@@ -107,6 +108,10 @@ from .session import (
     missing_from, recent_sessions, remember,
 )
 from .shortcuts import SHORTCUT_GROUPS
+from .sequence_plan import (
+    OccurrenceId, Resolution, SequencePlan, SequencePlanError,
+    compile_sequence,
+)
 from .stills import StillRequest, StillWorker
 from .thumbs import THUMB_WIDTH, ThumbnailLoader
 from .trim import Filmstrip, FilmstripLoader, FlightAnalysisWorker
@@ -128,6 +133,32 @@ SIDEBAR_MINIMUM = 210
 
 SCAN_IN_PROGRESS = ("Still listing this folder — decisions can be made once "
                     "the scan finishes")
+
+
+@dataclass(frozen=True)
+class _MonitorSnapshot:
+    """One focused occurrence, frozen in both source and output coordinates."""
+
+    target: OutputTarget
+    sequence: SequencePlan
+    occurrence: OccurrenceId
+    source: SampleSpan
+
+    @property
+    def samples(self) -> int:
+        return self.source.samples
+
+    def output_sample(self, seconds: float) -> int | None:
+        """Map one half-open source position; terminal/outside stays invalid."""
+        try:
+            numeric = float(seconds)
+            if not math.isfinite(numeric):
+                return None
+            location = self.sequence.locate_source(
+                self.occurrence, Fraction(str(numeric)))
+        except (TypeError, ValueError, OverflowError, SequencePlanError):
+            return None
+        return round_samples(location.output * OUTPUT_RATE)
 
 # The name item already uses UserRole for its path, and SortItem uses the next
 # role for ordering. This one records the current-settings export marker so the
@@ -215,6 +246,9 @@ class MainWindow(QMainWindow):
         # Built once the preview view exists, because it wires that view's
         # controls. Monitoring only: nothing here reaches a job or a session.
         self.live_preview: LivePreview | None = None
+        self._monitor_snapshot: _MonitorSnapshot | None = None
+        self._monitor_revision = 0
+        self._monitor_rearm_required = False
         # Presentation only. Both modes show the same panels over the same
         # session; nothing here is a second copy of anything.
         self._view_mode = Mode.CLASSIC
@@ -1128,6 +1162,7 @@ class MainWindow(QMainWindow):
         clip = self._trim_clip
         if clip is None or target is None:
             return None, 0
+        snapshot = self._new_monitor_snapshot(target)
         if listening is Listening.SOURCE:
             if not clip.has_audio:
                 return None, 0          # nothing of its own to hear
@@ -1136,8 +1171,7 @@ class MainWindow(QMainWindow):
             choice = self._planned_music(target)
             if not choice.configured:
                 return None, 0
-        samples = round_samples(
-            (clip.trimmed_duration or clip.duration) * OUTPUT_RATE)
+        samples = snapshot.samples
         if samples <= 0:
             return None, 0
         return resolve_audio_plan(
@@ -1148,6 +1182,37 @@ class MainWindow(QMainWindow):
             bundle=False,
         ), samples
 
+    def _new_monitor_snapshot(self, target: OutputTarget) -> _MonitorSnapshot:
+        """Freeze the exact focused range without consulting queue tick state."""
+        clip = self._trim_clip
+        if clip is None or target is None or target.is_assembly:
+            raise ValueError("choose one clip or range to monitor")
+
+        # `ordinary_pieces` is the existing resolver for a clip's effective
+        # ranges.  Resolve only the focused clip, then match the stable Item/SID
+        # exactly: `_working_outputs()` instead enumerates ticked queue material
+        # and would lose an unticked range which is still perfectly focusable.
+        outputs = working_outputs(ordinary_pieces([clip]))
+        matches = [output for output in outputs if output.target == target]
+        if len(matches) != 1:
+            raise ValueError("the focused clip or range no longer resolves exactly")
+
+        self._monitor_revision += 1
+        sequence = compile_sequence(
+            matches[0], resolution=Resolution.success(),
+            revision=f"monitor-{self._monitor_revision}")
+        if len(sequence.occurrences) != 1:
+            raise ValueError("monitoring requires one focused occurrence")
+        occurrence = sequence.occurrences[0]
+        source_start = round_samples(occurrence.source.start * OUTPUT_RATE)
+        # Quantise the origin once, then add the compiler's cumulative output
+        # length. Independently rounding both endpoints can violate the live
+        # mapping's required equal-length source/output intervals.
+        source = SampleSpan(
+            source_start, source_start + occurrence.sample_span.samples,
+            OUTPUT_RATE)
+        return _MonitorSnapshot(target, sequence, occurrence.id, source)
+
     def _build_monitor_stream(self, target, listening=Listening.MIX):
         """One `AudioStream` for what is being listened to, or None.
 
@@ -1155,23 +1220,42 @@ class MainWindow(QMainWindow):
         no configured music has nothing to mix, and that is not a fault.
         """
         clip = self._trim_clip
-        plan, samples = self._monitor_plan(target, listening)
-        if plan is None or clip is None:
+        self._monitor_snapshot = None
+        if clip is None:
             return None
+        snapshot = self._new_monitor_snapshot(target)
+        if listening is Listening.SOURCE:
+            if not clip.has_audio:
+                return None
+            choice = MusicChoice(mode=AudioMode.ORIGINAL)
+        else:
+            choice = self._planned_music(target)
+            if not choice.configured:
+                return None
+        plan = resolve_audio_plan(
+            choice, snapshot.samples,
+            source_has_audio=clip.has_audio,
+            preset_key=self._preset_key(),
+            joined=self.export_panel.join_enabled(),
+            bundle=False,
+        )
         mapping = LiveAudioMapping(
-            audio=plan, source=SampleSpan(0, samples, OUTPUT_RATE))
+            audio=plan, source=snapshot.source)
         source_reader = None
         if clip.has_audio:
             source_reader = FfmpegPcmReader.for_source(
                 self.tools, clip.path, stream_index=0,
-                timeline_frames=samples)
+                timeline_frames=snapshot.source.end)
         music_reader = None
         if plan.asset is not None:
             music_reader = FfmpegPcmReader.for_music(self.tools, plan.asset)
-        return AudioStream(mapping, source_reader=source_reader,
-                           music_reader=music_reader,
-                           monitor=MonitorState(
-                               level=self.live_preview.level, muted=True))
+        stream = AudioStream(mapping, source_reader=source_reader,
+                             music_reader=music_reader,
+                             monitor=MonitorState(
+                                 level=self.live_preview.level, muted=True))
+        self._monitor_snapshot = snapshot
+        self._monitor_rearm_required = False
+        return stream
 
     def _sync_live_preview(self) -> None:
         """Point the transport at whatever the band is now editing."""
