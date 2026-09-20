@@ -319,6 +319,22 @@ def resolve_monitor_audio_plan(
         choice, output_samples, source_has_audio=source_has_audio)
 
 
+def configured_audio_export_supported(
+    preset_key: str,
+    *,
+    joined: bool = False,
+    bundle: bool = False,
+) -> bool:
+    """Whether one configured choice can be rendered by this output route.
+
+    Joined Master output is still the nominal 1x sequence contract: presets
+    which change crop, cadence or time remain outside this capability.  Keep
+    this decision shared with the panel so controls and worker authority cannot
+    drift into a silent drop.
+    """
+    return preset_key == "master" and not bundle
+
+
 def resolve_audio_plan(
     choice: MusicChoice,
     output_samples: int,
@@ -328,10 +344,11 @@ def resolve_audio_plan(
     joined: bool = False,
     bundle: bool = False,
 ) -> OutputAudioPlan:
-    """Resolve choices for the bounded S2 one-range Master export."""
+    """Resolve choices for a bounded nominal-1x Master export."""
     _validate_plan_request(choice, output_samples)
-    if preset_key != "master" or joined or bundle:
+    if not configured_audio_export_supported(
+            preset_key, joined=joined, bundle=bundle):
         context = "delivery bundle" if bundle else "Assembly" if joined else preset_key
-        raise ValueError(f"music/audio choices are not supported for {context} in S2")
+        raise ValueError(f"music/audio choices are not supported for {context}")
     return _resolve_configured_audio(
         choice, output_samples, source_has_audio=source_has_audio)

@@ -278,7 +278,6 @@ def test_levels_stay_exact_fractions(panel):
 
 
 @pytest.mark.parametrize("context,fragment", [
-    (dict(joined=True), "Assembly"),
     (dict(bundle=True), "delivery bundle"),
     (dict(preset_key="social"), "social"),
 ])
@@ -301,17 +300,21 @@ def test_a_supported_context_is_editable_and_says_nothing(panel):
     assert panel.mode_combo.isEnabled()
 
 
-def test_a_master_assembly_is_editable_for_preview_without_weakening_export(
-        panel):
-    """Audition is a separate capability; joined export still refuses."""
-    panel.load(MusicChoice(mode=AudioMode.NO_SOUND), target="Assembly",
+def test_a_master_assembly_is_editable_and_retains_its_choice(panel):
+    """Joined Master export exposes the same configured choice it will use."""
+    asset = an_asset()
+    choice = MusicChoice(track=TRACK, mode=AudioMode.REPLACE, asset=asset,
+                         passage=SampleSpan(0, asset.decoded_samples,
+                                            asset.sample_rate),
+                         music_level=Fraction(3, 5))
+    panel.load(choice, target="Assembly",
                joined=True, audition=True)
 
     assert panel.mode_combo.isEnabled()
-    assert not panel.unsupported_label.isHidden()
-    assert "Preview only" in panel.unsupported_label.text()
-    assert "export" in panel.unsupported_label.text()
-    assert "Assembly" in MusicPanel._refusal("master", True, False)
+    assert panel.music_level.isEnabled()
+    assert panel.unsupported_label.isHidden()
+    assert MusicPanel._refusal("master", True, False) == ""
+    assert panel.capture() == choice
 
 
 def test_a_non_master_assembly_audition_stays_refused(panel):
@@ -339,12 +342,18 @@ def test_a_bundle_audition_stays_refused(panel):
 
 
 def test_the_panel_refuses_the_same_contexts_the_resolver_does(panel):
-    """The wording is the panel's; the rule is the resolver's. If S2 ever
-    accepted an Assembly, this would fail rather than the panel quietly
-    continuing to refuse it."""
-    choice = MusicChoice(track=TRACK, mode=AudioMode.REPLACE, asset=an_asset())
-    for context in (dict(joined=True), dict(bundle=True),
-                    dict(preset_key="social")):
+    """The panel and resolver share joined-Master support and refusals."""
+    asset = an_asset()
+    choice = MusicChoice(
+        track=TRACK, mode=AudioMode.REPLACE, asset=asset,
+        passage=SampleSpan(0, asset.decoded_samples, asset.sample_rate))
+    joined_plan = resolve_audio_plan(
+        choice, OUTPUT_RATE, source_has_audio=True, preset_key="master",
+        joined=True)
+    assert joined_plan.mode is AudioMode.REPLACE
+    assert joined_plan.output.samples == OUTPUT_RATE
+
+    for context in (dict(bundle=True), dict(preset_key="social")):
         with pytest.raises(ValueError):
             resolve_audio_plan(choice, OUTPUT_RATE, source_has_audio=True,
                                preset_key=context.get("preset_key", "master"),

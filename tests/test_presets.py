@@ -23,13 +23,19 @@ from __future__ import annotations
 
 import sys
 from datetime import date, datetime
+from fractions import Fraction
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from flightdvr.media import ClipInfo, Tools  # noqa: E402
+from flightdvr.audio_plan import (  # noqa: E402
+    AudioAsset, AudioMode, MusicChoice, OUTPUT_RATE, SampleSpan,
+    resolve_audio_plan,
+)
 from flightdvr.presets import (  # noqa: E402
     LEVELS, PASSTHROUGH, PRESET_ORDER, REC709, SEEK_LEAD_IN, ExportSettings,
     build_commands, colour_filters, estimate_output_size, output_path,
@@ -714,6 +720,73 @@ def test_each_clip_in_a_join_is_trimmed_accurately():
     assert "42.000" in command, "no fast seek to a lead-in before the in point"
     graph = command[command.index("-filter_complex") + 1]
     assert "trim=start=2.000:duration=60.000" in graph
+
+
+def _joined_audio_case(mode: AudioMode):
+    first = boxpro_clip(path=Path("a.ts"), duration=3.0)
+    middle = boxpro_clip(path=Path("b.ts"), duration=2.0, audio_codec="")
+    third = boxpro_clip(path=Path("a.ts"), duration=3.0)
+    clips = [first, middle, third]
+    spans = (
+        SampleSpan(0, 144_000, OUTPUT_RATE),
+        SampleSpan(144_000, 240_000, OUTPUT_RATE),
+        SampleSpan(240_000, 384_000, OUTPUT_RATE),
+    )
+    sequence = SimpleNamespace(
+        occurrences=tuple(SimpleNamespace(sample_span=span) for span in spans),
+        total_samples=384_000,
+    )
+    if mode in (AudioMode.REPLACE, AudioMode.MIX):
+        asset = AudioAsset(
+            Path("music.wav"), "a" * 64, 0, 44_100, 2, 8 * 44_100)
+        choice = MusicChoice(
+            asset=asset, passage=SampleSpan(44_100, 3 * 44_100, 44_100),
+            mode=mode, music_level=Fraction(3, 4),
+            dvr_level=Fraction(1, 4))
+    else:
+        choice = MusicChoice(mode=mode)
+    plan = resolve_audio_plan(
+        choice, 384_000, source_has_audio=True,
+        preset_key="master", joined=True)
+    command = build_commands(
+        TOOLS, first, "master", ExportSettings(), Path("out.mp4"),
+        Path("work"), clips=clips, audio_plan=plan, sequence=sequence,
+    )[0]
+    graph = command[command.index("-filter_complex") + 1]
+    return command, graph
+
+
+def test_joined_music_follows_every_source_and_uses_its_real_input_index():
+    command, graph = _joined_audio_case(AudioMode.MIX)
+    inputs = [command[index + 1] for index, token in enumerate(command)
+              if token == "-i"]
+    assert inputs == ["a.ts", "b.ts", "a.ts", "music.wav"]
+    assert "[0:v]" in graph and "[1:v]" in graph and "[2:v]" in graph
+    assert "[3:a:0]" in graph
+    assert "[1:a:0]atrim=start_sample" not in graph
+    assert command.count("-filter_complex") == 1
+
+
+@pytest.mark.parametrize("mode", list(AudioMode))
+def test_joined_audio_modes_have_explicit_finished_time_graphs(mode):
+    command, graph = _joined_audio_case(mode)
+    if mode is AudioMode.NO_SOUND:
+        assert "-an" in command
+        assert "[planned_audio]" not in graph and "[ja]" not in graph
+    elif mode is AudioMode.ORIGINAL:
+        assert "[ja]" in graph and "[planned_audio]" not in graph
+        assert "anullsrc" in graph
+    elif mode is AudioMode.REPLACE:
+        assert "[planned_audio]" in graph and "[ja]" not in graph
+        assert "anullsrc" not in graph
+    else:
+        assert "[ja]" in graph and "[planned_audio]" in graph
+        assert "[music][dvr]amix=" in graph
+        assert "anullsrc" in graph
+
+    if mode in (AudioMode.ORIGINAL, AudioMode.MIX):
+        for samples in (144_000, 96_000):
+            assert f"atrim=end_sample={samples}" in graph
 
 
 # -- size targeting -----------------------------------------------------------

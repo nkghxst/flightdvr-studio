@@ -126,7 +126,7 @@ def test_plan_identity_changes_with_timing_or_content_but_is_stable_for_a_copy()
 
 @pytest.mark.parametrize("preset,joined,bundle", [
     ("social", False, False), ("slowmo", False, False),
-    ("master", True, False), ("master", False, True),
+    ("master", False, True), ("master", True, True),
 ])
 def test_unsupported_music_contexts_fail_instead_of_dropping_the_track(
         preset, joined, bundle):
@@ -143,7 +143,7 @@ def test_unconfigured_choice_is_reserved_for_the_unchanged_legacy_path():
 
 # -- S3a: one calculation, separate preview/export authority ------------------
 
-def test_monitor_plan_reuses_the_sample_exact_music_calculation_without_joined_export():
+def test_monitor_plan_reuses_the_sample_exact_music_calculation():
     choice = music(
         start=4 * 44_100,
         end=8 * 44_100,
@@ -168,10 +168,29 @@ def test_monitor_plan_reuses_the_sample_exact_music_calculation_without_joined_e
     assert monitor.music_position(4 * OUTPUT_RATE) == 0
     assert (monitor.fade_in_samples, monitor.fade_out_samples) == (17, 29)
 
-    with pytest.raises(ValueError, match="Assembly"):
-        resolve_audio_plan(
-            choice, 8 * OUTPUT_RATE, source_has_audio=True,
-            preset_key="master", joined=True)
+def test_joined_master_reuses_the_same_finished_time_audio_calculation():
+    choice = music(
+        start=4 * 44_100,
+        end=8 * 44_100,
+        mode=AudioMode.MIX,
+        music_level=Fraction(3, 4),
+        dvr_level=Fraction(1, 4),
+        fade_in=17,
+        fade_out=29,
+    )
+
+    joined = resolve_audio_plan(
+        choice, 8 * OUTPUT_RATE,
+        source_has_audio=True, preset_key="master", joined=True)
+    ordinary = resolve_audio_plan(
+        choice, 8 * OUTPUT_RATE,
+        source_has_audio=True, preset_key="master")
+
+    assert joined == ordinary
+    assert joined.output == SampleSpan(0, 8 * OUTPUT_RATE, OUTPUT_RATE)
+    assert joined.music_position(0) == 0
+    assert joined.music_position(4 * OUTPUT_RATE) == 0
+    assert (joined.fade_in_samples, joined.fade_out_samples) == (17, 29)
 
 
 def test_monitor_plan_does_not_create_a_nonmaster_or_legacy_audio_path():

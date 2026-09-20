@@ -319,7 +319,7 @@ def test_valid_assembly_owns_one_editable_preview_choice(window, app):
     # The enclosing checkable band may be collapsed; locally, the control is
     # editable as soon as that existing presentation control is opened.
     assert window.music_panel.mode_combo.isEnabledTo(window.music_panel)
-    assert "Preview only" in window.music_panel.unsupported_label.text()
+    assert window.music_panel.unsupported_label.text() == ""
     assert window._planned_music(target) == MusicChoice()
 
 
@@ -380,18 +380,39 @@ def test_reorder_stops_assembly_probe_and_late_result_cannot_land(
     assert window._planned_music(current).asset is None
 
 
-def test_joined_preview_choice_is_still_refused_before_queue_mutation(
+def test_joined_master_queues_the_exact_target_sequence_and_choice_snapshot(
         window, app, monkeypatch):
     target = assembly_target(window, app)
     window._store_music(target, MusicChoice(mode=AudioMode.NO_SOUND))
     window._sync_music_panel()
-    before = list(window.jobs)
     said = warnings_from(monkeypatch)
 
     window._add_to_queue()
 
-    assert window.jobs == before
-    assert said and "Assembly" in said[-1]
+    assert said == []
+    assert len(window.jobs) == 1
+    queued = window.jobs[0]
+    assert queued.target == target
+    assert queued.sequence is not None
+    assert tuple(one.item for one in queued.sequence.occurrences) == target.items
+    assert queued.audio == MusicChoice(mode=AudioMode.NO_SOUND)
+
+    submitted_sequence = queued.sequence
+    submitted_clips = tuple(clip.path for clip in queued.clips)
+    first, second = window.clips
+    changed = OutputTarget.assembly((
+        Item(second.fingerprint, "b"),
+        Item(first.fingerprint, "a"),
+        Item(first.fingerprint, "a"),
+    ))
+    window._store_assembly(list(changed.items))
+    app.processEvents()
+    window._store_music(changed, MusicChoice(mode=AudioMode.ORIGINAL))
+
+    assert queued.target == target
+    assert queued.sequence == submitted_sequence
+    assert tuple(clip.path for clip in queued.clips) == submitted_clips
+    assert queued.audio == MusicChoice(mode=AudioMode.NO_SOUND)
 
 
 # -- what a queued job carries -------------------------------------------------

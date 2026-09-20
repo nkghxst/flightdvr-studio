@@ -136,6 +136,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller pytest
 
+      - name: Prove joined Master audio on the oldest packaged-system ffmpeg
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          ffmpeg -version | head -n 1
+          python -m pytest -q tests/test_sequence_music_export_media.py -rs
+
       - name: Build
         run: packaging/build-appimage.sh
 
@@ -206,6 +213,22 @@ jobs:
           $folder = ./packaging/fetch-ffmpeg.ps1 -Into "$env:RUNNER_TEMP/ffmpeg" |
             Select-Object -Last 1
           "dir=$folder" >> $env:GITHUB_OUTPUT
+
+      - name: Prove joined Master audio on the pinned bundled ffmpeg
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $folder = "${{ steps.ffmpeg.outputs.dir }}"
+          $env:PATH = "$folder;$env:PATH"
+          $pin = Get-Content packaging/ffmpeg-build.json -Raw | ConvertFrom-Json
+          $selected = & (Join-Path $folder "ffmpeg.exe") -version |
+            Select-Object -First 1
+          Write-Output $selected
+          if ($selected -notlike "*$($pin.version)*") {
+            throw "Selected ffmpeg is not the pinned $($pin.version) build."
+          }
+          python -m pytest -q tests/test_sequence_music_export_media.py -rs
 
       # The same script the maintainer runs, so there is one build rather than
       # two that can drift. It verifies the binaries against the pin again,

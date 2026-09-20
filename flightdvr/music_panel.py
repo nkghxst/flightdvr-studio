@@ -61,7 +61,7 @@ from PySide6.QtWidgets import (
 
 from .audio_plan import (
     OUTPUT_RATE, AudioAsset, AudioMode, MusicChoice, SampleSpan,
-    ShortTrackPolicy,
+    ShortTrackPolicy, configured_audio_export_supported,
 )
 from .widgets import INNER, TIGHT, dim
 
@@ -84,9 +84,9 @@ SHORT_TRACK_LABELS: list[tuple[ShortTrackPolicy, str]] = [
     (ShortTrackPolicy.PLAY_ONCE, "Play once"),
 ]
 
-# S2 exports music for one 1x range on Master only. Anything else raises in
-# `resolve_audio_plan`, so the panel says so rather than offering controls that
-# would fail at commit time.
+# Configured audio belongs to nominal-1x Master outputs. The resolver owns the
+# capability rule; this panel only explains a refusal rather than duplicating
+# a subtly different matrix.
 SUPPORTED_PRESET = "master"
 
 
@@ -322,7 +322,7 @@ class MusicPanel(QWidget):
             f"Editing: {target}" if target else "No output selected")
         reason = self._refusal(preset_key, joined, bundle)
         preview_only = bool(
-            audition and joined and not bundle
+            reason and audition and joined and not bundle
             and preset_key == SUPPORTED_PRESET)
         self._supported = reason == "" or preview_only
         message = (
@@ -341,12 +341,12 @@ class MusicPanel(QWidget):
         Worded as what is not built yet rather than as an error, because the
         person has not done anything wrong by selecting an Assembly.
         """
+        if configured_audio_export_supported(
+                preset_key, joined=joined, bundle=bundle):
+            return ""
         if bundle:
             return ("Music is not exported for a delivery bundle yet. Each "
                     "member would need its own choice.")
-        if joined:
-            return ("Music is not exported for an Assembly yet. Only a single "
-                    "range can carry it.")
         if preset_key != SUPPORTED_PRESET:
             return (f"Music is not exported for the {preset_key} preset yet. "
                     "Master is the one that carries it.")
