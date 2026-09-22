@@ -25,6 +25,8 @@ from __future__ import annotations
 import pytest
 
 from flightdvr.flow_layout import (
+    Clock, Domain, OccurrenceSource, SelectedContext,
+    material_revision, nothing_selected, occurrences_of,
     STAGE_ORDER, Mode, Stage, first_stage, mode_from_stored, neighbours,
     offered_stages, stage_from_stored, title,
 )
@@ -126,3 +128,129 @@ def test_a_remembered_stage_that_is_gone_falls_back_to_the_first():
 
 def test_with_nothing_offered_there_is_no_stage_to_open():
     assert stage_from_stored("browse", ()) is None
+
+
+# -- the one selected context every page reads ---------------------------------
+#
+# No window is built here on purpose. W5's picture recipe consumes this same
+# value, and a contract that needed a QApplication to be checked would be a
+# contract W5 could only test by building the thing it is meant to be
+# independent of.
+
+
+def an_occurrence(ordinal=0, fingerprint="fp-a", sid="r-1", path="A.ts"):
+    return OccurrenceSource(ordinal, fingerprint, sid, path)
+
+
+def a_working(occurrences=(), **kwargs):
+    chosen = tuple(occurrences) or (an_occurrence(),)
+    fields = dict(
+        domain=Domain.WORKING,
+        revision=material_revision(Domain.WORKING, chosen),
+        target=object(),
+        occurrences=chosen,
+        preset_key="master",
+    )
+    fields.update(kwargs)
+    return SelectedContext(**fields)
+
+
+def test_an_unresolved_context_must_say_why_in_words():
+    with pytest.raises(ValueError):
+        SelectedContext(domain=Domain.NOTHING, revision="r")
+    said = nothing_selected("choose a recording or an output")
+    assert said.refusal
+    assert not said.resolved and not said.editable
+
+
+def test_an_output_needs_its_exact_target_and_a_job_needs_its_identity():
+    with pytest.raises(ValueError):
+        SelectedContext(domain=Domain.WORKING, revision="r")
+    with pytest.raises(ValueError):
+        SelectedContext(domain=Domain.SUBMITTED, revision="r", target=object())
+    with pytest.raises(ValueError):
+        SelectedContext(domain=Domain.SOURCE, revision="r")
+
+
+def test_only_a_working_output_is_editable():
+    assert a_working().editable
+    assert not SelectedContext(
+        domain=Domain.SUBMITTED, revision="r", target=object(),
+        submitted="job-1").editable
+    assert not SelectedContext(
+        domain=Domain.SOURCE, revision="r", source_path="A.ts").editable
+    assert not nothing_selected("nothing here").editable
+
+
+def test_an_ordinary_single_range_output_still_keeps_the_output_clock():
+    """The trap this property exists for: one range is still an output, and
+    its first sample is output zero while the recording is at 12 seconds."""
+    assert a_working().clock is Clock.OUTPUT
+    assert SelectedContext(
+        domain=Domain.SUBMITTED, revision="r", target=object(),
+        submitted="job-1").clock is Clock.OUTPUT
+    assert SelectedContext(
+        domain=Domain.SOURCE, revision="r",
+        source_path="A.ts").clock is Clock.SOURCE
+
+
+def test_the_revision_moves_for_material_and_not_for_an_edit():
+    first = (an_occurrence(0, "fp-a", "r-1", "A.ts"),
+             an_occurrence(1, "fp-b", "r-2", "B.ts"))
+    reordered = (an_occurrence(0, "fp-b", "r-2", "B.ts"),
+                 an_occurrence(1, "fp-a", "r-1", "A.ts"))
+    retrimmed = (an_occurrence(0, "fp-a", "r-9", "A.ts"),
+                 an_occurrence(1, "fp-b", "r-2", "B.ts"))
+    moved = (an_occurrence(0, "fp-a", "r-1", "MOVED.ts"),
+             an_occurrence(1, "fp-b", "r-2", "B.ts"))
+
+    base = material_revision(Domain.WORKING, first)
+    assert material_revision(Domain.WORKING, reordered) != base, "reorder"
+    assert material_revision(Domain.WORKING, retrimmed) != base, "retrim"
+    assert material_revision(Domain.WORKING, moved) != base, "source changed"
+    assert material_revision(Domain.WORKING, first) == base, "not stable"
+
+    # Settings and music are edits to the same material. Fencing a decoder for
+    # them would restart the picture every time somebody moved a slider.
+    plain = a_working(first, preset_key="master", settings="A", music="X")
+    edited = a_working(first, preset_key="social", settings="B", music="Y")
+    assert edited.revision == plain.revision
+
+
+def test_a_callback_from_superseded_material_is_not_ours():
+    first = a_working((an_occurrence(0, "fp-a", "r-1", "A.ts"),))
+    second = a_working((an_occurrence(0, "fp-a", "r-9", "A.ts"),))
+
+    assert first.same_material(first)
+    assert not first.same_material(second)
+    assert not first.same_material(None)
+
+
+def test_the_occurrence_snapshot_is_values_and_not_a_live_alias():
+    """Held by value so material cannot change under a context that calls
+    itself immutable."""
+    class Mutable:
+        def __init__(self):
+            self.id = type("Id", (), {"ordinal": 0})()
+            self.fingerprint = "fp-a"
+            self.sid = "r-1"
+            self.source_path = "A.ts"
+
+    live = Mutable()
+    plan = type("Plan", (), {"occurrences": (live,)})()
+    snapshot = occurrences_of(plan)
+    live.sid = "r-changed"
+    live.source_path = "OTHER.ts"
+
+    assert snapshot[0].sid == "r-1"
+    assert snapshot[0].source_path == "A.ts"
+
+
+def test_a_snapshot_that_does_not_match_its_sequence_is_refused():
+    plan = type("Plan", (), {"occurrences": (object(), object())})()
+    with pytest.raises(ValueError):
+        a_working((an_occurrence(),), sequence=plan)
+
+
+def test_occurrences_of_nothing_is_empty_rather_than_an_error():
+    assert occurrences_of(None) == ()

@@ -30,6 +30,8 @@ user revision, `flow_user.py:36`:
 
 from __future__ import annotations
 
+import hashlib
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -126,3 +128,186 @@ def stage_from_stored(value, offered) -> Stage | None:
 
 def title(stage: Stage) -> str:
     return TITLES[Stage(stage)]
+
+
+# -- what is selected, and everything that follows from it ---------------------
+#
+# One value answers "what is being looked at", and the pages read it. It is
+# deliberately here rather than in the shell: W5's picture recipe has to consume
+# the same value, and a recipe that needed a window to find out what it was
+# rendering would be a second authority by construction.
+#
+# `Stage` does not appear below on purpose. Navigation changes geometry and
+# labels; it does not choose material. A page that derived its clock from its
+# own name would flip from source to output seconds merely because somebody
+# pressed Next, which is the same wrong-target defect as editing the output you
+# were not looking at, reached by a different route.
+
+
+class Domain(str, Enum):
+    """What kind of thing is selected."""
+
+    SOURCE = "source"        # a recording, inspected on its own time
+    WORKING = "working"      # an editable planned output
+    SUBMITTED = "submitted"  # a committed job, read-only for ever
+    NOTHING = "nothing"      # nothing resolves; carries the reason why
+
+
+class Clock(str, Enum):
+    """Which time the transport and strips are asserting."""
+
+    SOURCE = "source"
+    OUTPUT = "output"
+
+
+@dataclass(frozen=True)
+class OccurrenceSource:
+    """One occurrence and the recording it reads, held by value.
+
+    Primitive strings rather than a live `ClipInfo`: this travels into a
+    revision and into W5, and an alias to a mutable object would let the
+    material change underneath a context that claims to be immutable.
+    """
+
+    ordinal: int
+    fingerprint: str
+    sid: str
+    source_path: str
+
+    def __post_init__(self) -> None:
+        if type(self.ordinal) is not int or self.ordinal < 0:
+            raise ValueError("an occurrence ordinal is a non-negative integer")
+        for name in ("fingerprint", "sid", "source_path"):
+            if not isinstance(getattr(self, name), str):
+                raise TypeError(f"occurrence {name} must be a string")
+
+
+def occurrences_of(sequence) -> tuple[OccurrenceSource, ...]:
+    """Snapshot a compiled plan's occurrences as primitives, in order."""
+    if sequence is None:
+        return ()
+    return tuple(
+        OccurrenceSource(
+            one.id.ordinal, one.fingerprint, one.sid, one.source_path)
+        for one in sequence.occurrences
+    )
+
+
+def material_revision(
+    domain: Domain,
+    occurrences: tuple[OccurrenceSource, ...] = (),
+    *,
+    submitted: str = "",
+    source_path: str = "",
+) -> str:
+    """A stable identity for the *material*, derived rather than remembered.
+
+    Order, range and source identity go in; settings and music deliberately do
+    not. Changing a preset or a track is an edit to the same material and must
+    not fence a decoder mid-play; reordering an Assembly or retrimming a range
+    is different material and must.
+
+    Derived, because a revision somebody has to remember to bump is a revision
+    that eventually is not bumped — and the symptom is a stale frame or a stale
+    PCM block painted against new material, which looks like a glitch rather
+    than like the bookkeeping error it is.
+    """
+    parts = [Domain(domain).value, submitted, source_path]
+    parts.extend(
+        f"{one.ordinal}:{one.fingerprint}:{one.sid}:{one.source_path}"
+        for one in occurrences
+    )
+    digest = hashlib.sha1("\u0000".join(parts).encode("utf-8"))
+    return digest.hexdigest()[:20]
+
+
+@dataclass(frozen=True)
+class SelectedContext:
+    """The one thing every Flow page reads to know what it is showing.
+
+    Sol's field list from `SOL_PREVIEW_CONTRACT_FEEDBACK_20260922.md`, adopted
+    whole so W1 and W5 cannot grow parallel answers to the same question.
+    """
+
+    domain: Domain
+    revision: str
+    target: object | None = None          # exact OutputTarget when it is an output
+    sequence: object | None = None        # resolved SequencePlan, when there is one
+    occurrences: tuple[OccurrenceSource, ...] = ()
+    preset_key: str = ""
+    settings: object | None = None        # defensive snapshot, never a live alias
+    music: object | None = None           # defensive snapshot
+    submitted: str = ""                   # job identity, when committed
+    source_path: str = ""                 # the recording, when the domain is source
+    refusal: str = ""                     # why nothing can be shown, in words
+
+    def __post_init__(self) -> None:
+        domain = Domain(self.domain)
+        object.__setattr__(self, "domain", domain)
+        object.__setattr__(self, "occurrences", tuple(self.occurrences))
+        if not isinstance(self.revision, str) or not self.revision:
+            raise ValueError("a selected context needs a revision")
+        if domain is Domain.NOTHING:
+            if not self.refusal:
+                raise ValueError(
+                    "an unresolved context must say why, in words somebody "
+                    "can read")
+            return
+        if domain in (Domain.WORKING, Domain.SUBMITTED) and self.target is None:
+            raise ValueError(f"a {domain.value} context needs its exact target")
+        if domain is Domain.SUBMITTED and not self.submitted:
+            raise ValueError("a submitted context needs its job identity")
+        if domain is Domain.SOURCE and not self.source_path:
+            raise ValueError("a source context needs the recording it reads")
+        if self.sequence is not None and len(self.occurrences) != len(
+                self.sequence.occurrences):
+            raise ValueError(
+                "occurrence snapshot does not match the compiled sequence")
+
+    # -- what the pages ask it -------------------------------------------------
+
+    @property
+    def resolved(self) -> bool:
+        return self.domain is not Domain.NOTHING and not self.refusal
+
+    @property
+    def editable(self) -> bool:
+        """Only a working output, and only while it resolves.
+
+        A submitted job is read-only for ever: its settings are the ones it was
+        made with, and the queue's own note says editing the plan it came from
+        does not reach it.
+        """
+        return self.domain is Domain.WORKING and self.resolved
+
+    @property
+    def clock(self) -> Clock:
+        """Source time, or the finished output's time.
+
+        An ordinary single-range output is still an output: its first sample is
+        output zero while the recording is somewhere else entirely, and reading
+        one as the other is the defect this property exists to make impossible
+        to reach by accident.
+        """
+        if self.domain is Domain.SOURCE:
+            return Clock.SOURCE
+        if self.domain is Domain.NOTHING:
+            return Clock.SOURCE
+        return Clock.OUTPUT
+
+    @property
+    def bound_to_sequence(self) -> bool:
+        return self.sequence is not None
+
+    def same_material(self, other: "SelectedContext | None") -> bool:
+        """Whether a callback from `other` still belongs to this context."""
+        return other is not None and other.revision == self.revision
+
+
+def nothing_selected(reason: str) -> SelectedContext:
+    """No material, and the reason a person can read."""
+    return SelectedContext(
+        domain=Domain.NOTHING,
+        revision=material_revision(Domain.NOTHING),
+        refusal=reason,
+    )
