@@ -5135,6 +5135,12 @@ class MainWindow(QMainWindow):
                        if output.target == target)
             self._show_estimate(list(own.pieces), joined=target.is_assembly)
             return
+        if self._view_mode is Mode.FLOW:
+            # Nothing chosen is not everything chosen. Sizing every ticked
+            # piece under the defaults promised a batch nobody had set up.
+            self.export_panel.set_estimate(
+                "Choose an output to see its estimated size.")
+            return
         if self.export_panel.join_enabled():
             pieces, gaps = self._assembly_export_pieces()
             if gaps or len(pieces) < 2:

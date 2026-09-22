@@ -2450,6 +2450,39 @@ def test_output_estimates_the_output_that_would_be_queued(window, app):
     window.set_view_mode(Mode.CLASSIC)
 
 
+def test_with_no_output_chosen_output_estimates_nothing(window, app):
+    """Found natively: with the selection gone, Output fell back to sizing
+    every ticked piece under the defaults — "17 files, about 68 MB" beside a
+    button that queues nothing. No selection never means all of them, in the
+    estimate any more than in the queue."""
+    planned_pair(window, app)
+    assert window._sidebar_target is None
+    window._update_estimate()
+
+    said = window.export_panel.estimate_label.text()
+
+    assert "file" not in said and "MB" not in said, repr(said)
+    assert "Choose an output" in said, repr(said)
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_for_says_what_to_do_when_nothing_is_chosen(window, app):
+    """Found natively: a blank For: box above live controls reads as broken."""
+    first, _second = planned_pair(window, app)
+    window._select_working_target(first)
+    app.processEvents()
+    window.clips[0].selects = [Select(8.0, 12.0, "later", sid="r-9")]
+    window._refresh_sidebar()
+    app.processEvents()
+    combo = window.export_panel.target_combo
+
+    assert window._sidebar_target is None, "the vanished output stayed chosen"
+    assert combo.currentIndex() == -1
+    assert combo.placeholderText() == "Choose an output", (
+        repr(combo.placeholderText()))
+    window.set_view_mode(Mode.CLASSIC)
+
+
 def test_music_edits_the_selected_output_not_the_last_inspected_one(window,
                                                                     app):
     """The same divergence as Output's, on the page where it writes.

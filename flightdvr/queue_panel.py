@@ -62,7 +62,10 @@ class QueuePanel(QWidget):
         self.overall_bar.setValue(0)
         self.overall_bar.setTextVisible(True)
         self.overall_bar.setFormat("idle")
-        self.overall_bar.setMinimumWidth(220)
+        # A floor, not a size: it stretches wherever there is room. At 220 the
+        # header alone held Flow's Queue page past the 1060px compact width
+        # once a job's count lengthened the toggle beside it.
+        self.overall_bar.setMinimumWidth(140)
         header.addWidget(self.overall_bar, 1)
         self.overall_label = QLabel("")
         self.overall_label.setMinimumWidth(210)

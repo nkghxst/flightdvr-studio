@@ -190,3 +190,30 @@ def test_steps_disable_at_the_ends(shell):
     shell.set_steps(False, True)
     assert not shell.back_button.isEnabled()
     assert shell.next_button.isEnabled()
+
+
+def test_a_page_left_behind_does_not_size_the_one_being_shown(shell):
+    """Measured natively: once Assemble had been visited, every page kept its
+    780px minimum, and Flow could not go below 1088px wide because the stack
+    took the widest page nobody was looking at. At the compact size that
+    pushed the window past the screen."""
+    from PySide6.QtWidgets import QWidget
+
+    def settled():
+        QApplication.processEvents()
+        return shell.pages.minimumSizeHint()
+
+    shell.show()                      # hints are not kept for an unshown shell
+    shell.set_stage(Stage.BROWSE)
+    small = settled()
+    tall = QWidget()
+    tall.setMinimumSize(900, 800)
+    shell.host(Stage.ASSEMBLE, Region.PANEL).layout().addWidget(tall)
+
+    shell.set_stage(Stage.ASSEMBLE)
+    assert settled().height() >= 800, (
+        "the fixture never made Assemble tall")
+    shell.set_stage(Stage.BROWSE)
+
+    assert settled() == small, (
+        "the page left behind still sets the size of the one on show")

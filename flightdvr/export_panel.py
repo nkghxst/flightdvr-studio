@@ -120,6 +120,9 @@ class ExportPanel(QWidget):
         self.target_combo.setToolTip(
             "Choose which planned output you are editing. Choosing one does "
             "not change any setting and does not queue anything.")
+        # Shown whenever nothing is chosen; a blank box above live controls
+        # reads as broken rather than as a question.
+        self.target_combo.setPlaceholderText("Choose an output")
         self.target_combo.currentIndexChanged.connect(self._on_target_index)
         line.addWidget(self.target_combo, 1)
         column.addLayout(line)

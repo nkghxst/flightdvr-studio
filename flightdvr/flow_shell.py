@@ -47,8 +47,11 @@ from .flow_layout import Region, Stage, regions_for, title
 from .widgets import INNER, TIGHT
 
 # The sidebar is a working list, not a strip of decoration: below this it stops
-# being readable and the cards start wrapping into nonsense.
-SIDEBAR_MINIMUM = 280
+# being readable and the cards start wrapping into nonsense. Measured natively,
+# 280 held Queue at 1088px wide, past the 1060px compact size; Queue's own
+# header needs 782px of its own. With the 3:1 share the sidebar gets about
+# 258px at the compact width anyway, so this floor only binds on Queue.
+SIDEBAR_MINIMUM = 240
 
 # Browse's list is the page's subject. It gets the space; the picture column
 # beside it stays narrow enough that the list is still the thing you read.
@@ -176,13 +179,16 @@ class FlowShell(QWidget):
         self.sidebar_scroll.setWidget(self.sidebar_body)
         layout.addWidget(self.sidebar_scroll, 1)
 
-        actions = QHBoxLayout()
+        # One above the other. Side by side, at the compact width, "Queue all
+        # planned (24)" was cut to "Queue all planned (2" — a count that reads
+        # as the wrong number is worse than no count.
+        actions = QVBoxLayout()
         actions.setSpacing(TIGHT)
         self.primary_button = QPushButton("Commit to render")
         self.primary_button.clicked.connect(self.primary_activated.emit)
         self.secondary_button = QPushButton("Cancel")
         self.secondary_button.clicked.connect(self.secondary_activated.emit)
-        actions.addWidget(self.primary_button, 1)
+        actions.addWidget(self.primary_button)
         actions.addWidget(self.secondary_button)
         layout.addLayout(actions)
         return column
@@ -202,7 +208,16 @@ class FlowShell(QWidget):
         if chosen not in self._pages:
             return
         self._stage = chosen
+        # A stack is as large as its largest page, shown or not. Measured
+        # natively, a visited Assemble held every page at 780px and Output's
+        # controls held Flow at 1088px wide, past the compact size. Pages not
+        # on show stop counting.
+        for stage_key, page in self._pages.items():
+            policy = (QSizePolicy.Policy.Preferred if stage_key is chosen
+                      else QSizePolicy.Policy.Ignored)
+            page.setSizePolicy(policy, policy)
         self.pages.setCurrentWidget(self._pages[chosen])
+        self.pages.updateGeometry()
         for stage_key, button in self.stage_buttons.items():
             blocked = button.blockSignals(True)
             button.setChecked(stage_key is chosen)
