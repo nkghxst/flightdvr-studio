@@ -80,9 +80,10 @@ from .audio_stream import (
     SequenceSourceSegment,
 )
 from .flow_layout import (
-    Mode, Stage, first_stage as flow_first_stage, mode_from_stored,
-    neighbours as flow_neighbours, offered_stages, stage_from_stored,
-    title as flow_title,
+    Domain, Mode, SelectedContext, Stage,
+    first_stage as flow_first_stage, material_revision, mode_from_stored,
+    neighbours as flow_neighbours, occurrences_of, offered_stages,
+    stage_from_stored, title as flow_title,
 )
 from .live_preview import Listening, LivePreview
 from .music_panel import MusicPanel
@@ -960,6 +961,66 @@ class MainWindow(QMainWindow):
                 self._music_trouble[target] = self._music_trouble.pop(previous)
         self._assembly_music_target = target
         self.output_plan.select(target)
+
+    # -- the one answer to "what is being looked at" --------------------------
+
+    def context_for_job(self, job) -> SelectedContext:
+        """A submitted job, read from its own frozen values and nothing else.
+
+        Deliberately does not consult the working plan. A job carries the
+        target, sequence, settings and music it was committed with, and the
+        queue's own note promises that editing the plan it came from does not
+        reach it — a context assembled from live state would quietly break
+        that promise while looking identical.
+        """
+        occurrences = occurrences_of(job.sequence)
+        identity = str(job.out_path)
+        return SelectedContext(
+            domain=Domain.SUBMITTED,
+            revision=material_revision(
+                Domain.SUBMITTED, occurrences, submitted=identity),
+            target=job.target,
+            sequence=job.sequence,
+            occurrences=occurrences,
+            preset_key=job.preset_key,
+            settings=job.settings,
+            music=job.audio,
+            submitted=identity,
+        )
+
+    def context_for_working(self, target: OutputTarget) -> SelectedContext:
+        """One editable planned output, with its own settings and music.
+
+        The preset, settings and music come from the plan entry for *this*
+        target rather than from whatever the panels happen to be showing, which
+        is what makes an A to B to A round trip give A back unchanged.
+        """
+        sequence = (self._sequence_plan
+                    if target == self._sequence_target else None)
+        occurrences = occurrences_of(sequence)
+        return SelectedContext(
+            domain=Domain.WORKING,
+            revision=material_revision(Domain.WORKING, occurrences),
+            target=target,
+            sequence=sequence,
+            occurrences=occurrences,
+            preset_key=self._preset_key(),
+            settings=self.export_panel.capture(),
+            music=self._planned_music(target),
+        )
+
+    def context_for_source(self, clip) -> SelectedContext:
+        """A recording being inspected, on its own time.
+
+        Browse and Trim are allowed to look at source without disturbing which
+        planned output is selected, so this deliberately carries no target.
+        """
+        path = str(clip.path)
+        return SelectedContext(
+            domain=Domain.SOURCE,
+            revision=material_revision(Domain.SOURCE, source_path=path),
+            source_path=path,
+        )
 
     def _planned_music(self, target: OutputTarget) -> MusicChoice:
         try:

@@ -42,7 +42,9 @@ from PySide6.QtWidgets import QApplication
 
 from flightdvr.assembly import Item
 from flightdvr.assembly_panel import ITEM_ROLE as ASSEMBLY_ITEM_ROLE
+from flightdvr.audio_plan import AudioMode, MusicChoice
 from flightdvr.flow_layout import Mode, Stage
+from flightdvr.jobs import Job
 from flightdvr.media import ClipInfo, Select
 
 
@@ -1714,3 +1716,87 @@ def test_a_round_trip_with_the_picture_hoisted_changes_nothing(window, app):
     app.processEvents()
 
     assert snapshot(window) == before
+
+
+# -- the one answer to "what is being looked at" -------------------------------
+
+
+def two_planned_targets(window, app):
+    """Two ordinary planned outputs, each with its own music."""
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    window.clips[1].selects = [Select(2.0, 6.0, "two", sid="r-2")]
+    tick(window, 0)
+    tick(window, 1)
+    app.processEvents()
+    outputs = window._working_outputs()
+    assert len(outputs) == 2, outputs
+    return outputs[0].target, outputs[1].target
+
+
+def test_a_to_b_to_a_gives_a_back_unchanged(window, app):
+    """Settings belong to this output. If a context read whatever the panels
+    were showing, B's music would come back as A's and the next commit would
+    render something nobody chose."""
+    first, second = two_planned_targets(window, app)
+    window._store_music(first, MusicChoice(mode=AudioMode.NO_SOUND))
+    window._store_music(second, MusicChoice(mode=AudioMode.ORIGINAL))
+
+    there = window.context_for_working(second)
+    back = window.context_for_working(first)
+
+    assert back.music.mode is AudioMode.NO_SOUND, "A did not come back as A"
+    assert there.music.mode is AudioMode.ORIGINAL
+    assert back.target == first and there.target == second
+    assert back.editable and there.editable
+
+
+def test_a_submitted_context_keeps_its_own_values_after_the_plan_moves_on(
+        window, app):
+    """The queue's promise, made structural: editing the plan a job came from
+    does not reach the job."""
+    first, _second = two_planned_targets(window, app)
+    window._store_music(first, MusicChoice(mode=AudioMode.NO_SOUND))
+    job = Job(
+        [window.clips[0]], "master", window.current_settings(),
+        Path(window.export_panel.out_edit.currentText()) / "committed.mp4",
+        audio=MusicChoice(mode=AudioMode.ORIGINAL), target=first)
+    submitted = window.context_for_job(job)
+
+    window._store_music(first, MusicChoice(mode=AudioMode.NO_SOUND))
+    window.export_panel.preset_buttons["social"].click()
+    app.processEvents()
+
+    after = window.context_for_job(job)
+    assert after.music.mode is AudioMode.ORIGINAL, "a later edit reached it"
+    assert after.preset_key == "master", "the job's preset followed the panel"
+    assert not after.editable and after.submitted
+
+
+def test_a_source_context_does_not_impersonate_a_planned_selection(window, app):
+    """Browse and Trim may inspect a recording without changing which output
+    is selected — so a source context carries no target at all."""
+    first, _second = two_planned_targets(window, app)
+    # A planned output really is selected, or the assertion below would hold
+    # for the wrong reason: with nothing selected, a context that leaked the
+    # selection would still report None.
+    window._sidebar_target = first
+    window.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    app.processEvents()
+    assert window._sidebar_target == first
+
+    looking = window.context_for_source(window._trim_clip)
+
+    assert looking.target is None, "source inspection took the planned target"
+    assert not looking.editable
+    assert looking.clock.value == "source"
+    assert window.context_for_working(first).clock.value == "output"
+
+
+def test_an_ordinary_planned_output_is_not_read_on_source_time(window, app):
+    """The trap: one range is still an output. Its first sample is output
+    zero while the recording is somewhere else entirely."""
+    first, _second = two_planned_targets(window, app)
+
+    assert window.context_for_working(first).clock.value == "output"
+    assert window.context_for_working(first).bound_to_sequence is False
