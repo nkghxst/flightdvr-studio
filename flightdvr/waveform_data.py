@@ -59,10 +59,10 @@ class WaveformRequest:
     def __post_init__(self) -> None:
         if type(self.generation) is not int or self.generation < 0:
             raise ValueError("waveform generation must be a non-negative integer")
-        if not str(self.request_key).strip():
+        if not isinstance(self.request_key, str) or not self.request_key.strip():
             raise ValueError("waveform request key cannot be empty")
-        if type(self.max_bins) is not int or self.max_bins <= 0:
-            raise ValueError("waveform bin limit must be positive")
+        if type(self.max_bins) is not int or not 0 < self.max_bins <= MAX_BINS:
+            raise ValueError(f"waveform bin limit must be from 1 to {MAX_BINS}")
         if type(self.leaf_frames) is not int or self.leaf_frames <= 0:
             raise ValueError("waveform leaf width must be positive")
 
@@ -179,8 +179,8 @@ class WaveformEnvelope:
     def coarsen(self, max_bins: int) -> "WaveformEnvelope":
         """Return a coarser view without reacquiring or re-decoding PCM."""
 
-        if type(max_bins) is not int or max_bins <= 0:
-            raise ValueError("waveform bin limit must be positive")
+        if type(max_bins) is not int or not 0 < max_bins <= MAX_BINS:
+            raise ValueError(f"waveform bin limit must be from 1 to {MAX_BINS}")
         if len(self.bins) <= max_bins:
             return self
         bins = list(self.bins)
@@ -290,8 +290,8 @@ class WaveformAccumulator:
     ) -> None:
         if type(channels) is not int or channels <= 0:
             raise ValueError("waveform channel count must be positive")
-        if type(max_bins) is not int or max_bins <= 0:
-            raise ValueError("waveform bin limit must be positive")
+        if type(max_bins) is not int or not 0 < max_bins <= MAX_BINS:
+            raise ValueError(f"waveform bin limit must be from 1 to {MAX_BINS}")
         if type(leaf_frames) is not int or leaf_frames <= 0:
             raise ValueError("waveform leaf width must be positive")
         self.channels = channels
@@ -336,17 +336,36 @@ class WaveformAccumulator:
             return
         if not data:
             return
-        self._partial.extend(data)
-        complete_bytes = len(self._partial) - (len(self._partial) % self._frame_bytes)
-        if complete_bytes == 0:
-            return
-        payload = bytes(self._partial[:complete_bytes])
-        del self._partial[:complete_bytes]
-        for values in struct.iter_unpack(self._format, payload):
-            if not all(math.isfinite(value) for value in values):
-                self._error = "decoded PCM contains a non-finite sample"
-                return
-            self._consume_frame(values)
+        try:
+            incoming = memoryview(data).cast("B")
+            offset = 0
+            if self._partial:
+                needed = self._frame_bytes - len(self._partial)
+                take = min(needed, len(incoming))
+                self._partial.extend(incoming[:take])
+                offset = take
+                if len(self._partial) == self._frame_bytes:
+                    values = struct.unpack(self._format, self._partial)
+                    self._partial.clear()
+                    if not all(math.isfinite(value) for value in values):
+                        self._error = "decoded PCM contains a non-finite sample"
+                        return
+                    self._consume_frame(values)
+            complete_bytes = len(incoming) - offset
+            complete_bytes -= complete_bytes % self._frame_bytes
+            if complete_bytes:
+                payload = incoming[offset:offset + complete_bytes]
+                for values in struct.iter_unpack(self._format, payload):
+                    if not all(math.isfinite(value) for value in values):
+                        self._error = "decoded PCM contains a non-finite sample"
+                        return
+                    self._consume_frame(values)
+                offset += complete_bytes
+            if offset < len(incoming):
+                self._partial.extend(incoming[offset:])
+        except MemoryError:
+            self._partial.clear()
+            self._error = "waveform storage unavailable"
 
     def _consume_frame(self, values: Iterable[float]) -> None:
         values = tuple(values)

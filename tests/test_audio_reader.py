@@ -33,9 +33,16 @@ from flightdvr.audio_reader import (
     FfmpegPcmReader,
     MAX_READ_BYTES,
     MusicAssetProbe,
+    inspect_music_asset_with_waveform,
     inspect_music_asset,
 )
 from flightdvr.media import Tools
+from flightdvr.waveform_data import (
+    WaveformAccumulator,
+    WaveformAssetKey,
+    WaveformRequest,
+    WaveformStatus,
+)
 
 
 DIGEST = "a" * 64
@@ -445,6 +452,72 @@ def test_inspection_returns_existing_asset_with_full_hash_and_native_count(
     assert found.sha256 == hashlib.sha256(track.read_bytes()).hexdigest()
 
 
+def test_native_count_sink_is_one_pass_and_preserves_decoder_command(
+        monkeypatch, tmp_path):
+    track = tmp_path / "music.wav"
+    process = FakeProcess(floats(0.1, -0.2, 0.3, -0.4), pieces=(3, 5, 2))
+    commands = install_processes(monkeypatch, [process])
+    sink = WaveformAccumulator(2, leaf_frames=1)
+
+    assert reader_module._count_native_samples(
+        TOOLS, track, 44_100, 2, lambda: False, lambda proc: None,
+        sink=sink) == 2
+    assert sink.decoded_frames == 2
+    command = commands[0][0]
+    assert command[command.index("-ar") + 1] == "44100"
+    assert command[command.index("-ac") + 1] == "2"
+    assert command[command.index("-f") + 1:command.index("pipe:1") + 1] == [
+        "f32le", "pipe:1"]
+
+
+def test_combined_inspection_publishes_one_asset_keyed_waveform_result(
+        monkeypatch, tmp_path):
+    track = tmp_path / "music.wav"
+    track.write_bytes(b"stable fixture")
+    request = WaveformRequest(
+        generation=6, request_key="selection-6", max_bins=4, leaf_frames=1)
+    calls = []
+
+    monkeypatch.setattr(reader_module, "_probe_first_audio",
+                        lambda *args: (48_000, 2))
+
+    def count(*args, **kwargs):
+        calls.append(kwargs["sink"])
+        kwargs["sink"].consume(floats(-0.5, 0.0, 0.25, 0.75))
+        return 2
+
+    monkeypatch.setattr(reader_module, "_count_native_samples", count)
+    found = inspect_music_asset_with_waveform(TOOLS, track, request)
+
+    assert len(calls) == 1
+    assert found.request == request
+    assert found.status is WaveformStatus.READY
+    assert found.envelope is not None
+    assert found.envelope.asset == WaveformAssetKey.from_asset(found.asset)
+    assert found.envelope.bins[0].minimum == (-0.5, 0.0)
+
+
+def test_combined_nonfinite_waveform_keeps_valid_asset_without_silence(
+        monkeypatch, tmp_path):
+    track = tmp_path / "music.wav"
+    track.write_bytes(b"stable fixture")
+    request = WaveformRequest(generation=7, request_key="selection-7")
+    monkeypatch.setattr(reader_module, "_probe_first_audio",
+                        lambda *args: (48_000, 2))
+
+    def count(*args, **kwargs):
+        kwargs["sink"].consume(floats(float("nan"), 0.0))
+        return 1
+
+    monkeypatch.setattr(reader_module, "_count_native_samples", count)
+    found = inspect_music_asset_with_waveform(TOOLS, track, request)
+
+    assert found.status is WaveformStatus.WAVEFORM_UNAVAILABLE
+    assert found.envelope is None
+    assert found.asset.decoded_samples == 1
+    assert "non-finite" in (found.reason or "")
+
+
 def test_inspection_rejects_a_file_changed_during_the_operation(
         monkeypatch, tmp_path):
     track = tmp_path / "music.wav"
@@ -531,6 +604,31 @@ def test_probe_work_runs_off_caller_and_stop_emits_no_late_outcome(
     assert worker_idents[0] != caller_ident
     assert process.terminated == 1
     assert ready == []
+    assert failed == []
+
+
+def test_waveform_probe_emits_only_the_combined_success_signal(
+        monkeypatch, tmp_path):
+    track = tmp_path / "music.wav"
+    made_asset = asset(track, rate=48_000, samples=2)
+    request = WaveformRequest(generation=12, request_key="selection-12")
+    made = reader_module.WaveformInspection.unavailable(
+        request, made_asset, "test unavailable")
+    monkeypatch.setattr(reader_module, "inspect_music_asset_with_waveform",
+                        lambda *args, **kwargs: made)
+    probe = MusicAssetProbe(
+        TOOLS, track, 12, waveform_request=request)
+    legacy = []
+    combined = []
+    failed = []
+    probe.ready.connect(lambda *args: legacy.append(args))
+    probe.waveform_ready.connect(lambda result: combined.append(result))
+    probe.failed.connect(lambda *args: failed.append(args))
+
+    probe.run()
+
+    assert legacy == []
+    assert combined == [made]
     assert failed == []
 
 
