@@ -158,6 +158,19 @@ def test_balanced_coarsening_has_literal_levels_and_chunk_invariance():
     assert whole.bins[1].minimum == (32.0, -32.0)
 
 
+def test_future_bins_widen_and_keep_final_resolution_balanced():
+    frames = [(float(index), -float(index)) for index in range(96)]
+    result = _envelope(frames, max_bins=4, leaf_frames=2)
+    widths = [item.end_frame - item.start_frame for item in result.bins]
+
+    assert [(item.start_frame, item.end_frame) for item in result.bins] == [
+        (0, 32),
+        (32, 64),
+        (64, 96),
+    ]
+    assert max(widths) <= 2 * min(widths)
+
+
 def test_nonfinite_pcm_is_unavailable_data_not_fabricated_silence():
     accumulator = WaveformAccumulator(2)
     accumulator.consume(struct.pack("<ff", float("nan"), 0.0))
@@ -204,6 +217,20 @@ def test_presentation_coarsening_reuses_the_immutable_envelope():
     assert len(original.bins) == 8
     assert len(coarser.bins) == 2
     assert original.bins[0].minimum == (0.0, -1.0)
+
+
+def test_presentation_coarsening_preserves_peaks_in_the_right_bin():
+    frames = [
+        (0.0, 0.0),
+        (0.75, -0.5),
+        (0.0, 0.0),
+        (0.0, 0.0),
+    ]
+    original = _envelope(frames, leaf_frames=1)
+    coarser = original.coarsen(2)
+
+    assert coarser.bins[0].minimum == (0.0, -0.5)
+    assert coarser.bins[0].maximum == (0.75, 0.0)
 
 
 def test_combined_result_requires_the_envelope_key_of_its_new_asset():
