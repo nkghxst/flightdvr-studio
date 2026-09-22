@@ -123,7 +123,15 @@ class ExportPanel(QWidget):
         self.target_combo.currentIndexChanged.connect(self._on_target_index)
         line.addWidget(self.target_combo, 1)
         column.addLayout(line)
-        self.target_note = dim(QLabel("Settings belong to this output."))
+        # Worded for what is true today, not for the mock. Music is kept per
+        # output; the preset and export settings below are still one set that
+        # every planned output is committed with. Saying "settings belong to
+        # this output" would promise that choosing B and changing the preset
+        # leaves A alone — and on commit A would render with B's preset.
+        self.target_note = dim(QLabel(
+            "Music belongs to this output. The preset and settings below "
+            "apply to every planned output."))
+        self.target_note.setWordWrap(True)
         column.addWidget(self.target_note)
         self.target_row.hide()
         return self.target_row

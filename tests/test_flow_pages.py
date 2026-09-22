@@ -2039,3 +2039,18 @@ def test_filling_for_announces_nothing(window, app):
     window.export_panel.show_targets([("two", second)], second)
 
     assert heard == [], f"filling the list announced a choice: {heard}"
+
+
+def test_for_does_not_promise_per_output_settings_it_cannot_keep(window, app):
+    """Only music is kept per output; the queue still commits every planned
+    output with the one preset and settings on screen. A note claiming
+    "settings belong to this output" would be believed, and on commit one
+    output would quietly render with another's preset."""
+    two_planned_targets(window, app)
+    in_flow(window, app)
+    said = window.export_panel.target_note.text()
+
+    assert "Music belongs to this output" in said
+    assert "Settings belong to this output" not in said
+    assert "every planned output" in said
+    window.set_view_mode(Mode.CLASSIC)
