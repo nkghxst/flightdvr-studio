@@ -39,6 +39,13 @@ from PySide6.QtCore import QThread, Signal
 from .audio_plan import AudioAsset, OUTPUT_CHANNELS, OUTPUT_RATE, round_samples
 from .audio_stream import BLOCK_FRAMES
 from .media import NO_WINDOW, Tools, request_stop, stop_process
+from .waveform_data import (
+    WaveformAccumulator,
+    WaveformAssetKey,
+    WaveformDataError,
+    WaveformInspection,
+    WaveformRequest,
+)
 
 
 FLOAT_BYTES = 4
@@ -210,6 +217,8 @@ def _count_native_samples(
     channels: int,
     cancelled: Callable[[], bool],
     register_process: Callable[[subprocess.Popen | None], None],
+    *,
+    sink: WaveformAccumulator | None = None,
 ) -> int:
     command = [
         str(tools.ffmpeg), "-hide_banner", "-loglevel", "error", "-xerror",
@@ -238,6 +247,8 @@ def _count_native_samples(
             if not block:
                 break
             total += len(block)
+            if sink is not None:
+                sink.consume(block)
         code = proc.wait()
         _check_cancelled(cancelled)
     finally:
@@ -269,13 +280,14 @@ def _file_sha256(path: Path, cancelled: Callable[[], bool]) -> str:
     return digest.hexdigest()
 
 
-def inspect_music_asset(
+def _inspect_music_asset(
     tools: Tools,
     track: Path,
     *,
     cancelled: Callable[[], bool] = lambda: False,
     register_process: Callable[[subprocess.Popen | None], None] = lambda proc: None,
-) -> AudioAsset:
+    waveform_request: WaveformRequest | None = None,
+) -> AudioAsset | WaveformInspection:
     """Validate and identify one file, for use only away from the UI thread."""
     path = _absolute(track)
     _check_cancelled(cancelled)
@@ -285,8 +297,22 @@ def inspect_music_asset(
         raise AudioAssetError(f"music file cannot be read: {exc}") from exc
     rate, channels = _probe_first_audio(
         tools, path, cancelled, register_process)
-    samples = _count_native_samples(
-        tools, path, rate, channels, cancelled, register_process)
+    waveform = None
+    if waveform_request is not None:
+        waveform = WaveformAccumulator(
+            channels,
+            max_bins=waveform_request.max_bins,
+            leaf_frames=waveform_request.leaf_frames,
+        )
+    if waveform is None:
+        # Keep the established call shape for the legacy route. In particular,
+        # existing callers and tests must not acquire a waveform sink.
+        samples = _count_native_samples(
+            tools, path, rate, channels, cancelled, register_process)
+    else:
+        samples = _count_native_samples(
+            tools, path, rate, channels, cancelled, register_process,
+            sink=waveform)
     digest = _file_sha256(path, cancelled)
     try:
         after = path.stat()
@@ -295,21 +321,77 @@ def inspect_music_asset(
     if (before.st_size, before.st_mtime_ns) != (
             after.st_size, after.st_mtime_ns):
         raise AudioAssetError("music file changed while it was being read")
-    return AudioAsset(path, digest, 0, rate, channels, samples)
+    asset = AudioAsset(path, digest, 0, rate, channels, samples)
+    if waveform is None:
+        return asset
+    try:
+        envelope = waveform.finish(WaveformAssetKey.from_asset(asset))
+    except (WaveformDataError, MemoryError) as exc:
+        # A valid asset remains usable by the existing playback route even if
+        # the optional overview cannot be retained or contains bad samples.
+        return WaveformInspection.unavailable(
+            waveform_request, asset, f"waveform unavailable: {exc}")
+    return WaveformInspection.ready(waveform_request, asset, envelope)
+
+
+def inspect_music_asset(
+    tools: Tools,
+    track: Path,
+    *,
+    cancelled: Callable[[], bool] = lambda: False,
+    register_process: Callable[[subprocess.Popen | None], None] = lambda proc: None,
+) -> AudioAsset:
+    """Validate and identify one file, for use only away from the UI thread."""
+    result = _inspect_music_asset(
+        tools,
+        track,
+        cancelled=cancelled,
+        register_process=register_process,
+    )
+    assert isinstance(result, AudioAsset)
+    return result
+
+
+def inspect_music_asset_with_waveform(
+    tools: Tools,
+    track: Path,
+    request: WaveformRequest,
+    *,
+    cancelled: Callable[[], bool] = lambda: False,
+    register_process: Callable[[subprocess.Popen | None], None] = lambda proc: None,
+) -> WaveformInspection:
+    """Opt-in one-pass inspection returning one atomic asset/waveform result."""
+    if not isinstance(request, WaveformRequest):
+        raise TypeError("waveform inspection needs a WaveformRequest")
+    result = _inspect_music_asset(
+        tools,
+        track,
+        cancelled=cancelled,
+        register_process=register_process,
+        waveform_request=request,
+    )
+    assert isinstance(result, WaveformInspection)
+    return result
 
 
 class MusicAssetProbe(QThread):
     """Asynchronously turn a selected path into the existing ``AudioAsset``."""
 
     ready = Signal(int, object)
+    waveform_ready = Signal(object)
     failed = Signal(int, str)
 
     def __init__(self, tools: Tools, track: Path,
-                 generation: int, parent=None):
+                 generation: int, parent=None, *,
+                 waveform_request: WaveformRequest | None = None):
         super().__init__(parent)
+        if (waveform_request is not None
+                and waveform_request.generation != generation):
+            raise ValueError("waveform request generation disagrees with probe")
         self.tools = tools
         self.track = Path(track)
         self.generation = generation
+        self.waveform_request = waveform_request
         self._cancel = threading.Event()
         self._lock = threading.Lock()
         self._process: subprocess.Popen | None = None
@@ -329,6 +411,28 @@ class MusicAssetProbe(QThread):
             request_stop(proc)
 
     def run(self) -> None:  # noqa: D102
+        if self.waveform_request is not None:
+            try:
+                result = inspect_music_asset_with_waveform(
+                    self.tools, self.track, self.waveform_request,
+                    cancelled=self._cancel.is_set,
+                    register_process=self._register,
+                )
+            except AudioOperationCancelled:
+                return
+            except (AudioAssetError, OSError, subprocess.SubprocessError) as exc:
+                with self._lock:
+                    if not self._cancel.is_set():
+                        self.failed.emit(
+                            self.generation, str(exc)[:ERROR_MESSAGE_CHARS])
+                return
+            with self._lock:
+                if not self._cancel.is_set():
+                    # The opt-in route has exactly one success signal. The
+                    # legacy ``ready`` signal remains untouched and is not
+                    # emitted for a combined result.
+                    self.waveform_ready.emit(result)
+            return
         try:
             asset = inspect_music_asset(
                 self.tools, self.track,
