@@ -44,7 +44,7 @@ from flightdvr.assembly import Item
 from flightdvr.assembly_panel import ITEM_ROLE as ASSEMBLY_ITEM_ROLE
 from flightdvr.audio_plan import AudioMode, MusicChoice
 from flightdvr.flow_layout import Mode, Region, Stage
-from flightdvr.jobs import Job
+from flightdvr.jobs import Job, JobStatus
 from flightdvr.media import ClipInfo, Select
 
 
@@ -1827,8 +1827,9 @@ def test_an_ordinary_planned_output_is_not_read_on_source_time(window, app):
 
 
 def test_the_fixed_actions_say_what_this_page_can_do(window, app):
-    """Queue's action is to stop the render in front of you, not start
-    another — so the primary is off there and the secondary is renamed."""
+    """All versus one must be unmistakable, and neither is called "render":
+    queued work waits for Start. Queue's own page cannot queue more, and
+    Cancel is off while nothing is running."""
     window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
     tick(window, 0)
     app.processEvents()
@@ -1837,16 +1838,20 @@ def test_the_fixed_actions_say_what_this_page_can_do(window, app):
     window._show_stage(Stage.OUTPUT)
     app.processEvents()
     shell = window.flow_shell
-    assert shell.primary_button.text() == "Commit to render"
-    assert shell.primary_button.isEnabled(), "nothing planned to commit"
-    assert shell.secondary_button.text() == "Cancel"
+    assert shell.primary_button.text() == "Queue all planned (1)"
+    assert shell.primary_button.isEnabled(), "nothing planned to queue"
+    assert "render" not in shell.primary_button.text().lower()
+    assert window.export_panel.add_button.text() == "Queue this output"
+    assert not shell.secondary_button.isEnabled(), "Cancel with nothing running"
 
     window._show_stage(Stage.QUEUE)
     app.processEvents()
 
-    assert not shell.primary_button.isEnabled(), "Queue offered a commit"
+    assert not shell.primary_button.isEnabled(), "Queue offered to queue more"
     assert shell.secondary_button.text() == "Cancel this render"
     window.set_view_mode(Mode.CLASSIC)
+    assert window.export_panel.add_button.text() == "Add to queue", (
+        "Classic lost its own wording")
 
 
 def test_commit_is_offered_only_when_there_is_something_to_commit(window, app):
@@ -2159,4 +2164,278 @@ def test_inspecting_another_recording_does_not_move_the_selected_output(
 
     assert window._active_context(Stage.OUTPUT).target == first, (
         "Output followed the inspected recording instead of the selection")
+    window.set_view_mode(Mode.CLASSIC)
+
+
+# -- each output keeps its own preset and settings -----------------------------
+#
+# Expected values are what each test *sets*, never read back through the code
+# under test. Outputs are addressed by target, never by row position, so a
+# selector letting its first row stand in for a choice cannot pass by luck.
+
+
+def silence_dialogs(monkeypatch):
+    said = []
+    monkeypatch.setattr(
+        "flightdvr.ui.QMessageBox.warning",
+        lambda _parent, title, text, *a, **k: said.append((title, text)))
+    return said
+
+
+def planned_pair(window, app):
+    """Two outputs from two recordings, and Flow open."""
+    first, second = two_planned_targets(window, app)
+    in_flow(window, app)
+    return first, second
+
+
+def choose(window, app, target, preset, **fields):
+    """Select an output, then make genuine edits through the panel."""
+    window._select_working_target(target)
+    app.processEvents()
+    window.export_panel.preset_buttons[preset].setChecked(True)
+    app.processEvents()
+    if "size_mb" in fields:
+        window.export_panel.social_size.setValue(fields["size_mb"])
+        app.processEvents()
+
+
+def jobs_by_source(window):
+    return {job.clips[0].fingerprint: job for job in window.jobs}
+
+
+def test_each_output_keeps_its_own_preset_across_a_b_a(window, app):
+    first, second = planned_pair(window, app)
+    choose(window, app, first, "social", size_mb=25)
+    choose(window, app, second, "master")
+
+    window._select_working_target(first)
+    app.processEvents()
+
+    assert window.export_panel.preset_key() == "social"
+    assert window.export_panel.social_size.value() == 25
+    assert window.output_plan.get(second).preset_key == "master"
+    assert window.output_plan.get(first).settings.social_size_mb == 25
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_loading_an_output_writes_nothing_to_the_plan(window, app,
+                                                      monkeypatch):
+    """Load is not edit: a pure A to B to A navigation records no choice."""
+    first, second = planned_pair(window, app)
+    choose(window, app, first, "social")
+    choose(window, app, second, "master")
+    writes = []
+    real = window.output_plan.set_choices
+    monkeypatch.setattr(window.output_plan, "set_choices",
+                        lambda *a, **k: (writes.append(a), real(*a, **k))[1])
+
+    for target in (first, second, first):
+        window._select_working_target(target)
+        app.processEvents()
+
+    assert writes == [], f"loading recorded {len(writes)} choice(s)"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_queue_all_planned_gives_each_job_its_own_choices(window, app,
+                                                          monkeypatch):
+    silence_dialogs(monkeypatch)
+    first, second = planned_pair(window, app)
+    choose(window, app, first, "social", size_mb=25)
+    choose(window, app, second, "master")
+
+    window.flow_shell.primary_button.click()
+    app.processEvents()
+
+    jobs = jobs_by_source(window)
+    a = jobs[first.items[0].fingerprint]
+    b = jobs[second.items[0].fingerprint]
+    assert (a.preset_key, b.preset_key) == ("social", "master")
+    assert a.settings.social_size_mb == 25
+    assert "_social" in a.out_path.name and "_master" in b.out_path.name
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_queue_this_output_queues_only_that_output(window, app, monkeypatch):
+    silence_dialogs(monkeypatch)
+    first, second = planned_pair(window, app)
+    choose(window, app, second, "master")
+    choose(window, app, first, "social")
+    b_before = window.output_plan.get(second)
+
+    window.export_panel.add_button.click()
+    app.processEvents()
+
+    assert [job.preset_key for job in window.jobs] == ["social"]
+    assert window.jobs[0].clips[0].fingerprint == first.items[0].fingerprint
+    assert second in window._active_targets(), "B stopped being planned"
+    assert window.output_plan.get(second) == b_before, "B's choices moved"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_a_queued_job_does_not_follow_later_edits(window, app, monkeypatch):
+    silence_dialogs(monkeypatch)
+    first, _second = planned_pair(window, app)
+    choose(window, app, first, "social", size_mb=25)
+    window.export_panel.add_button.click()
+    app.processEvents()
+    job = window.jobs[0]
+
+    window.export_panel.social_size.setValue(40)
+    window.export_panel.preset_buttons["upload"].setChecked(True)
+    app.processEvents()
+
+    assert (job.preset_key, job.settings.social_size_mb) == ("social", 25)
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_a_mixed_batch_queues_nothing_and_names_what_failed(window, app,
+                                                            monkeypatch):
+    """A valid B must not be queued alone because A beside it failed."""
+    said = silence_dialogs(monkeypatch)
+    first, second = planned_pair(window, app)
+    narrow = next(clip for clip in window.clips
+                  if clip.fingerprint == first.items[0].fingerprint)
+    narrow.width, narrow.height = 300, 720      # too narrow for 9:16
+    choose(window, app, first, "vertical")
+    choose(window, app, second, "master")
+
+    window.flow_shell.primary_button.click()
+    app.processEvents()
+
+    assert window.jobs == [], "part of a failing batch was queued"
+    assert said and narrow.path.name in said[-1][1], said
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_two_outputs_that_would_share_a_file_queue_nothing(window, app,
+                                                           monkeypatch):
+    """Across presets too: two names that collide mean one file survives."""
+    said = silence_dialogs(monkeypatch)
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1"),
+                               Select(6.0, 9.0, "two", sid="r-2")]
+    tick(window, 0)
+    app.processEvents()
+    in_flow(window, app)
+    first, second = [one.target for one in window._working_outputs()]
+    window.export_panel.template_edit.setText("{clip}")
+    # Without per-preset subfolders, so both genuinely land in one folder.
+    # With them on, Social and Upload write to different folders and do not
+    # collide — which is correct, and made the first version of this test
+    # prove nothing.
+    window.export_panel.subfolder_check.setChecked(False)
+    choose(window, app, first, "social")
+    choose(window, app, second, "upload")
+
+    window.flow_shell.primary_button.click()
+    app.processEvents()
+
+    assert window.jobs == []
+    assert said and "same name" in said[-1][0], said
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_an_unplanned_output_leaves_the_batch_and_comes_back_with_its_choices(
+        window, app, monkeypatch):
+    from PySide6.QtCore import Qt
+
+    silence_dialogs(monkeypatch)
+    first, second = planned_pair(window, app)
+    choose(window, app, second, "upload")
+    choose(window, app, first, "social")
+    row = next(r for r in range(window.table.rowCount())
+               if window.clip_by_path[window.table.item(r, 0).data(
+                   Qt.ItemDataRole.UserRole)].fingerprint
+               == second.items[0].fingerprint)
+
+    window.table.item(row, 0).setCheckState(Qt.CheckState.Unchecked)
+    app.processEvents()
+    window.flow_shell.primary_button.click()
+    app.processEvents()
+    assert [job.preset_key for job in window.jobs] == ["social"], (
+        "a retained, unplanned output was queued")
+
+    window.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+    app.processEvents()
+    assert window.output_plan.get(second).preset_key == "upload"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_classic_queues_every_ticked_output_with_its_one_preset(window, app,
+                                                                monkeypatch):
+    """The existing batch path, unchanged: per-output choices made in Flow do
+    not reach it, and leaving Flow puts Classic's own choices back."""
+    silence_dialogs(monkeypatch)
+    first, second = planned_pair(window, app)
+    choose(window, app, first, "social")
+    choose(window, app, second, "upload")
+
+    window.set_view_mode(Mode.CLASSIC)
+    app.processEvents()
+    assert window.export_panel.preset_key() == "master", (
+        "leaving Flow left an output's preset in Classic")
+    window.export_panel.add_button.click()
+    app.processEvents()
+
+    assert sorted(job.preset_key for job in window.jobs) == ["master", "master"]
+
+
+def test_choosing_nothing_queues_nothing(window, app, monkeypatch):
+    """No selection never means the first output, or all of them."""
+    said = silence_dialogs(monkeypatch)
+    planned_pair(window, app)
+    assert window._sidebar_target is None
+
+    window.export_panel.add_button.click()
+    app.processEvents()
+
+    assert window.jobs == []
+    assert said and "No output chosen" in said[-1][0], said
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_a_new_output_starts_from_the_defaults_not_the_open_one(window, app):
+    """Seeded once from explicit defaults. A repaint while A is open must not
+    hand A's settings to an output appearing for the first time."""
+    first, _second = two_planned_targets(window, app)
+    in_flow(window, app)
+    choose(window, app, first, "social")
+    window.clips[0].selects = window.clips[0].selects + [
+        Select(7.0, 9.0, "late", sid="r-late")]
+    window._refresh_sidebar()
+    app.processEvents()
+
+    late = next(one.target for one in window._working_outputs()
+                if one.target.items[0].sid == "r-late")
+    assert window.output_plan.get(late).preset_key == "master"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_a_music_change_keeps_the_outputs_own_preset(window, app):
+    """A music-only write used to stamp the panel's preset onto the output."""
+    first, _second = planned_pair(window, app)
+    choose(window, app, first, "social")
+    window.set_view_mode(Mode.CLASSIC)
+    app.processEvents()
+    assert window.export_panel.preset_key() == "master"
+
+    window._store_music(first, MusicChoice(mode=AudioMode.NO_SOUND))
+
+    assert window.output_plan.get(first).preset_key == "social"
+    assert window.output_plan.get(first).music.mode is AudioMode.NO_SOUND
+
+
+def test_queueing_starts_no_render(window, app, monkeypatch):
+    silence_dialogs(monkeypatch)
+    first, _second = planned_pair(window, app)
+    choose(window, app, first, "social")
+
+    window.flow_shell.primary_button.click()
+    window.export_panel.add_button.click()
+    app.processEvents()
+
+    assert window.jobs, "nothing was queued to check"
+    assert window.worker is None or not window.worker.isRunning()
+    assert all(job.status is JobStatus.PENDING for job in window.jobs)
     window.set_view_mode(Mode.CLASSIC)

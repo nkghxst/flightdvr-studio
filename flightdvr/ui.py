@@ -92,7 +92,8 @@ from .live_preview import Listening, LivePreview
 from .music_panel import MusicPanel
 from .output_naming import naming_inputs, resolve_output
 from .output_plan import (
-    OutputPlan, OutputTarget, ordinary_pieces, working_outputs,
+    OutputPlan, OutputTarget, ordinary_pieces, target_for_piece,
+    working_outputs,
 )
 from .presets import (
     PRESET_ORDER, PRESETS, ExportSettings, describe_join_problems,
@@ -292,9 +293,6 @@ class MainWindow(QMainWindow):
         self.sidebar_working = None
         self.sidebar_submitted = None
         self._sidebar_target: OutputTarget | None = None
-        # Loading an output's own choices into the panel is not an edit, and
-        # this is set for exactly as long as that load takes.
-        self._loading_target = False
         # What a newly planned output starts with in Flow: the panel as it
         # stood on entering Flow, or as edited with nothing selected. Never
         # whichever output happened to be loaded when a list was repainted.
@@ -1095,12 +1093,14 @@ class MainWindow(QMainWindow):
         return [output.target for output in self._working_outputs()]
 
     def _apply_choices(self, preset: str, settings: ExportSettings) -> None:
-        """Show choices in the panel as a load, never as an edit."""
-        self._loading_target = True
-        try:
-            self.export_panel.load_choices(preset, settings)
-        finally:
-            self._loading_target = False
+        """Show choices in the panel as a load, never as an edit.
+
+        The one fence is `load_choices` emitting nothing. A second flag here
+        was removed: with the panel's signals blocked, capture is never even
+        called during a load, so the flag could not be reached and no test
+        could tell it apart from its absence.
+        """
+        self.export_panel.load_choices(preset, settings)
         if not self._ready:
             return
         # What an edit would have refreshed, minus recording it as a choice.
@@ -1121,7 +1121,7 @@ class MainWindow(QMainWindow):
         honestly belong to, and falling back to the first output would write
         to one nobody chose.
         """
-        if self._loading_target or self._view_mode is not Mode.FLOW:
+        if self._view_mode is not Mode.FLOW:
             return
         preset, settings = self._preset_key(), self.current_settings()
         target = self._sidebar_target
@@ -1323,7 +1323,7 @@ class MainWindow(QMainWindow):
             self._show_music_state(target)
 
     def _music_refusal(self, pieces, *, joined: bool | None = None,
-                       bundle: bool = False) -> str:
+                       bundle: bool = False, preset_for=None) -> str:
         """Why this action cannot be queued, asked before anything is queued.
 
         Configured music that cannot be exported refuses the whole action. It
@@ -1349,7 +1349,9 @@ class MainWindow(QMainWindow):
                         "for it to finish, or clear the choice.")
             if target in self._music_trouble:
                 return f"Assembly: {self._music_trouble[target]}"
-            reason = MusicPanel._refusal(self._preset_key(), True, bundle)
+            preset = (preset_for(pieces[0]) if preset_for is not None
+                      else self._preset_key())
+            reason = MusicPanel._refusal(preset, True, bundle)
             if reason:
                 return f"Assembly: {reason}"
             if choice.mode in (AudioMode.REPLACE, AudioMode.MIX):
@@ -1373,7 +1375,9 @@ class MainWindow(QMainWindow):
                         "read. Wait for it to finish, or clear the choice.")
             if target in self._music_trouble:
                 return f"{piece.path.name}: {self._music_trouble[target]}"
-            reason = MusicPanel._refusal(self._preset_key(), joined, bundle)
+            preset = (preset_for(piece) if preset_for is not None
+                      else self._preset_key())
+            reason = MusicPanel._refusal(preset, joined, bundle)
             if reason:
                 return f"{piece.path.name}: {reason}"
             if choice.mode in (AudioMode.REPLACE, AudioMode.MIX):
@@ -1928,6 +1932,8 @@ class MainWindow(QMainWindow):
             lambda value: self._show_stage(Stage(value)))
         shell.back_requested.connect(lambda: self._step_stage(-1))
         shell.next_requested.connect(lambda: self._step_stage(1))
+        shell.primary_activated.connect(self._commit_all_planned)
+        shell.secondary_activated.connect(self._cancel)
         layout.addWidget(shell, 1)
 
         # The established lending machinery addresses stages by slot. Pointing
@@ -2066,6 +2072,8 @@ class MainWindow(QMainWindow):
         # Output's "For:" belongs to Flow; Classic keeps its familiar single
         # set of controls.
         self.export_panel.set_target_selector_visible(chosen is Mode.FLOW)
+        self.export_panel.set_add_label(
+            "Queue this output" if chosen is Mode.FLOW else "Add to queue")
         if chosen is Mode.FLOW:
             # Classic's one set of choices becomes the defaults new outputs
             # start from, and is what the panel returns to on the way out.
@@ -2154,21 +2162,26 @@ class MainWindow(QMainWindow):
         self.flow_viewport.show()
 
     def _show_page_actions(self, stage: Stage) -> None:
-        """Name the two fixed actions for the page showing now.
+        """Name the fixed actions so all-versus-one cannot be mistaken.
 
-        On Queue the thing you can do is stop the render in front of you, not
-        start another, so the primary is off and the secondary is renamed.
+        "Queue all planned" queues every output planned now, each with its own
+        choices; Output's own button queues only the output open in it.
+        Neither starts a render — queued work waits for Start, as it always
+        has — so neither is called "render". Cancel stops the render that is
+        running, from any page, and is off when nothing is.
         """
+        running = bool(self.worker and self.worker.isRunning())
+        planned = len(self._active_targets())
         if stage is Stage.QUEUE:
             self.flow_shell.set_actions(
-                primary="Commit to render", primary_enabled=False,
-                secondary="Cancel this render")
+                primary=f"Queue all planned ({planned})",
+                primary_enabled=False,
+                secondary="Cancel this render", secondary_enabled=running)
             return
         self.flow_shell.set_actions(
-            primary="Commit to render",
-            primary_enabled=bool(self._working_outputs()),
-            secondary="Cancel")
-
+            primary=f"Queue all planned ({planned})",
+            primary_enabled=planned > 0,
+            secondary="Cancel render", secondary_enabled=running)
     def _step_stage(self, direction: int) -> None:
         back, forward = flow_neighbours(self._flow_stage, self._offered_stages)
         self._show_stage(forward if direction > 0 else back)
@@ -2819,7 +2832,7 @@ class MainWindow(QMainWindow):
         # Wait until the edit is committed. Retargeting on every keystroke
         # would turn a temporarily incomplete template into a modal warning.
         panel.template_edit.editingFinished.connect(self._on_output_changed)
-        panel.add_requested.connect(self._add_to_queue)
+        panel.add_requested.connect(self._on_add_requested)
         panel.bundle_requested.connect(self._add_bundle)
         return panel
 
@@ -5137,7 +5150,47 @@ class MainWindow(QMainWindow):
 
     # -- queue ----------------------------------------------------------------
 
-    def _add_to_queue(self) -> None:
+    def _on_add_requested(self) -> None:
+        """Output's own button: the open output in Flow, the batch in Classic."""
+        if self._view_mode is Mode.FLOW:
+            self._commit_selected()
+        else:
+            self._add_to_queue()
+
+    def _commit_all_planned(self) -> None:
+        """Every output planned now, each with its own preset and settings.
+
+        Retained entries for outputs that are no longer planned are not part
+        of the batch; they are remembered, not queued.
+        """
+        self._add_to_queue(choices=self._choices_for)
+        self._show_page_actions(self._flow_stage or Stage.OUTPUT)
+
+    def _commit_selected(self) -> None:
+        """Only the output open in the panel — and nothing if there is none.
+
+        No selection never means "the first one" or "all of them": both would
+        queue something the person did not choose.
+        """
+        target = self._sidebar_target
+        if target is None or target not in self._active_targets():
+            QMessageBox.warning(
+                self, "No output chosen",
+                "Nothing has been queued. Choose the output to queue from the "
+                "list or from For:, or use Queue all planned.")
+            return
+        self._add_to_queue(choices=self._choices_for, only=target)
+        self._show_page_actions(self._flow_stage or Stage.OUTPUT)
+
+    def _add_to_queue(self, *, choices=None, only=None) -> None:
+        """Queue the planned outputs, all or nothing. Never starts a render.
+
+        ``choices`` maps an output target to that output's own ``(preset,
+        settings)``; when it is None every piece uses the panel, which is
+        Classic's single batch path exactly as it always was. ``only`` limits
+        the action to one output — and if that output is not planned, nothing
+        is queued: it never falls back to the first output, or to all of them.
+        """
         # A filled assembly names its own material, so it is resolved once,
         # here, and the same pieces then answer every question below —
         # validation, estimate, runtime and the queue itself. Deriving any of
@@ -5173,13 +5226,43 @@ class MainWindow(QMainWindow):
             # point and one out point.
             pieces = ordinary_pieces(clips)
 
+        joined_target = (working_outputs(pieces, joined=True)[0].target
+                         if assembling else None)
+        if only is not None:
+            if assembling:
+                chosen = joined_target == only
+            else:
+                pieces = [piece for piece in pieces
+                          if target_for_piece(piece) == only]
+                chosen = bool(pieces)
+            if not chosen:
+                QMessageBox.warning(
+                    self, "That output is not planned",
+                    "Nothing has been queued. The output you chose is no "
+                    "longer planned — choose one from the list again.")
+                return
+        keep = ({target_for_piece(piece) for piece in pieces}
+                if not assembling and only is not None else None)
+
         out_dir = Path(self.export_panel.output_text().strip())
         if not str(out_dir).strip():
             QMessageBox.warning(self, "No output folder", "Choose where the exports should go.")
             return
 
-        key = self._preset_key()
-        settings = self.current_settings()
+        # One answer to "which preset and settings does this piece render
+        # with". Classic passes no choices, so every piece takes the panel —
+        # the one batch it has always had. Flow passes each output's own.
+        panel_choice = (self._preset_key(), self.current_settings())
+
+        def own(target):
+            if choices is None or target is None:
+                return panel_choice
+            return choices(target)
+
+        def piece_choice(piece):
+            return own(joined_target if assembling else target_for_piece(piece))
+
+        key, settings = own(joined_target) if assembling else panel_choice
         subfolders = self.export_panel.subfolders_enabled()
         stamp = self.flight_date()
 
@@ -5195,8 +5278,10 @@ class MainWindow(QMainWindow):
         # repeats this named check because jobs can reach it by another route,
         # but a pilot choosing Vertical should hear about a narrow source now,
         # not after it has waited for the queue to reach the front.
-        if key == "vertical":
-            problems = vertical_problems(pieces)
+        vertical = [piece for piece in pieces
+                    if piece_choice(piece)[0] == "vertical"]
+        if vertical:
+            problems = vertical_problems(vertical)
             if problems:
                 QMessageBox.warning(
                     self, "These clips cannot be made vertical",
@@ -5209,7 +5294,8 @@ class MainWindow(QMainWindow):
         # single job exists. Music that cannot be exported refuses the
         # whole action rather than being dropped: the person asked for it,
         # and a silent file with no explanation is the worst of both.
-        refusal = self._music_refusal(pieces)
+        refusal = self._music_refusal(
+            pieces, preset_for=lambda piece: piece_choice(piece)[0])
         if refusal:
             QMessageBox.warning(
                 self, "That music cannot be exported yet",
@@ -5310,8 +5396,10 @@ class MainWindow(QMainWindow):
             # small — on a 90 fps recording it dropped 119 frames of 360 and
             # reported success. The joined branch asks the same question
             # through join_problems.
-            if key == "slowmo":
-                unslowable = slow_problems(clips)
+            slowed = [piece for piece in pieces
+                      if piece_choice(piece)[0] == "slowmo"]
+            if slowed:
+                unslowable = slow_problems(slowed)
                 if unslowable:
                     QMessageBox.warning(
                         self, "These clips cannot be slowed",
@@ -5326,10 +5414,17 @@ class MainWindow(QMainWindow):
                 for clip in clips:
                     parts = clip.for_export()
                     for index, piece in enumerate(parts):
+                        # Numbered within the whole recording even when only
+                        # one output is being queued: a range's name must not
+                        # change because its siblings stayed behind.
+                        if (keep is not None
+                                and target_for_piece(piece) not in keep):
+                            continue
                         naming = naming_inputs(
                             piece, index, len(parts), session_name)
                         resolved = resolve_output(
-                            naming, key, out_dir, template, subfolders, stamp)
+                            naming, piece_choice(piece)[0], out_dir, template,
+                            subfolders, stamp)
                         planned.append((piece, naming, resolved))
             except BadTemplate as exc:
                 QMessageBox.warning(
@@ -5367,7 +5462,8 @@ class MainWindow(QMainWindow):
                 if output_key(target) in already:
                     continue
                 already.add(output_key(target))
-                self.jobs.append(Job([piece], key, settings, target,
+                piece_key, piece_settings = piece_choice(piece)
+                self.jobs.append(Job([piece], piece_key, piece_settings, target,
                                      out_dir=out_dir, stem=stem,
                                      subfolders=subfolders, naming=naming,
                                      template=template,
