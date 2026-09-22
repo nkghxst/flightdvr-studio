@@ -925,10 +925,25 @@ class MainWindow(QMainWindow):
         return OutputTarget.clip_or_range(clip.fingerprint, sid)
 
     def _music_context(self) -> tuple[str, str, bool, bool]:
-        """Target name, and the same triple `_run_job` resolves music under."""
-        if self._music_target is not None and self._music_target.is_assembly:
-            return (f"Assembly · {len(self._music_target.items)} rows",
-                    self._preset_key(), True, False)
+        """Target name, and the same triple the queue resolves music under.
+
+        Named and judged by the output being edited. In Flow that output keeps
+        its own preset, and the music panel's editability depends on it —
+        reading the panel's preset, or naming the focused clip, would describe
+        a different output from the one the choice is written to.
+        """
+        target = self._music_target
+        if target is not None and target.is_assembly:
+            return (f"Assembly · {len(target.items)} rows",
+                    self._choices_for(target)[0]
+                    if self._view_mode is Mode.FLOW else self._preset_key(),
+                    True, False)
+        if self._view_mode is Mode.FLOW and target is not None:
+            label = next((output.label for output in self._working_outputs()
+                          if output.target == target), "")
+            if label:
+                return (label, self._choices_for(target)[0],
+                        self.export_panel.join_enabled(), False)
         clip = self._trim_clip
         name = clip.path.name if clip is not None else ""
         ranges = clip.real_selects if clip is not None else []
@@ -936,7 +951,6 @@ class MainWindow(QMainWindow):
             chosen = ranges[min(clip.current, len(ranges) - 1)]
             name = f"{name} · {chosen.name or 'range'}"
         return name, self._preset_key(), self.export_panel.join_enabled(), False
-
     def _assembly_working_output(self):
         """The one exact valid joined output, without compiling a second plan."""
         if not self.export_panel.join_enabled():
@@ -1151,7 +1165,17 @@ class MainWindow(QMainWindow):
                     audition = True
                 target = self._assembly_music_target
             else:
-                target = self._music_target_for(self._trim_clip)
+                # In Flow the selected output is the one being edited, on
+                # every page that edits. Browse moves the focused clip to
+                # inspect a recording without changing that — so deriving the
+                # target from the focus edited whatever was looked at last.
+                selected = self._sidebar_target
+                if (self._view_mode is Mode.FLOW and selected is not None
+                        and not selected.is_assembly
+                        and selected in self._active_targets()):
+                    target = selected
+                else:
+                    target = self._music_target_for(self._trim_clip)
                 if target is not None and target not in self.output_plan.targets:
                     self._store_music(target, MusicChoice())
                 if target is not None:

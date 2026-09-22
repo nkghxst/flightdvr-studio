@@ -2448,3 +2448,38 @@ def test_output_estimates_the_output_that_would_be_queued(window, app):
 
     assert "25" in said and "1 file" in said, repr(said)
     window.set_view_mode(Mode.CLASSIC)
+
+
+def test_music_edits_the_selected_output_not_the_last_inspected_one(window,
+                                                                    app):
+    """The same divergence as Output's, on the page where it writes.
+
+    Select A, inspect a different recording in Browse, open Music: the music
+    panel must be editing A. Following the focused clip, it edited whatever
+    was inspected last — a music change landing on an output nobody chose.
+    """
+    from PySide6.QtCore import Qt
+
+    first, _second = planned_pair(window, app)
+    window._select_working_target(first)
+    app.processEvents()
+
+    window._show_stage(Stage.BROWSE)
+    other = next(
+        row for row in range(window.table.rowCount())
+        if window.clip_by_path[window.table.item(row, 0).data(
+            Qt.ItemDataRole.UserRole)].fingerprint != first.items[0].fingerprint)
+    window.table.setCurrentCell(other, 0)
+    window._load_selected_clip()
+    app.processEvents()
+
+    window._show_stage(Stage.MUSIC)
+    app.processEvents()
+
+    assert window._music_target == first, (
+        "the music panel is editing the recording last inspected")
+    label = next(one.label for one in window._working_outputs()
+                 if one.target == first)
+    assert label in window.music_panel.target_label.text(), (
+        "the music panel names a different output from the one it edits")
+    window.set_view_mode(Mode.CLASSIC)
