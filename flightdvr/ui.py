@@ -79,8 +79,9 @@ from .audio_stream import (
     AudioStream, LiveAudioMapping, MonitorState, SequencePcmReader,
     SequenceSourceSegment,
 )
+from .flow_shell import FlowShell
 from .flow_layout import (
-    Domain, Mode, SelectedContext, Stage,
+    Domain, Mode, Region, SelectedContext, Stage,
     first_stage as flow_first_stage, material_revision, mode_from_stored,
     neighbours as flow_neighbours, occurrences_of, offered_stages,
     stage_from_stored, title as flow_title,
@@ -1805,74 +1806,53 @@ class MainWindow(QMainWindow):
         }
 
     def _build_flow_host(self) -> QWidget:
-        """The Flow page: a stage bar, one stage at a time, and Back/Next.
+        """The Flow page, arranged by the shell and filled by this window.
 
-        It owns no panel. Panels are lent to it when the mode changes and go
-        home when it changes back, so there is exactly one of each and nothing
-        is reconnected.
+        It owns no panel. Panels are lent into the shell's regions when the
+        mode changes and go home when it changes back, so there is exactly one
+        of each and nothing is reconnected.
+
+        The shell decides arrangement only. Which stage is shown, whether a
+        move is allowed and what the fixed actions do stay here, because only
+        the window knows what is selected and what committing means.
         """
         host = QWidget()
         layout = QVBoxLayout(host)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(INNER)
+        layout.setSpacing(0)
 
-        # The picture is persistent, as the approved revision places it: every
-        # page that decides something you can only judge by looking has it, and
-        # there is one of it. It is the same `PreviewView` Classic uses.
+        shell = self.flow_shell = FlowShell(self._offered_stages)
+        shell.stage_chosen.connect(
+            lambda value: self._show_stage(Stage(value)))
+        shell.back_requested.connect(lambda: self._step_stage(-1))
+        shell.next_requested.connect(lambda: self._step_stage(1))
+        layout.addWidget(shell, 1)
+
+        # The established lending machinery addresses stages by slot. Pointing
+        # those names at the shell's panel regions keeps the splitter/index
+        # bookkeeping that already gets Classic's layout back exactly, rather
+        # than rewriting it alongside a new arrangement.
+        self._flow_slots = {
+            stage: shell.host(stage, Region.PANEL)
+            for stage in self._offered_stages
+        }
+        self.flow_stage_buttons = shell.stage_buttons
+        self.flow_back = shell.back_button
+        self.flow_next = shell.next_button
+
+        # Flow-only output clock and the honest caption about what the picture
+        # is. Both travel with the picture into whichever region has it.
         self.flow_viewport = QWidget()
         viewport = QVBoxLayout(self.flow_viewport)
         viewport.setContentsMargins(0, 0, 0, 0)
         viewport.setSpacing(TIGHT)
-        # Flow-only output clock.  The picture itself is still the one Classic
-        # owns; this strip merely maps the compiled joined plan onto it.
         viewport.addWidget(self.preview_view.sequence_strip)
         self.flow_source_note = dim(QLabel(""))
         self.flow_source_note.setWordWrap(True)
         viewport.addWidget(self.flow_source_note)
-        layout.addWidget(self.flow_viewport)
 
-        self.flow_stage_bar = QWidget()
-        bar = QHBoxLayout(self.flow_stage_bar)
-        bar.setContentsMargins(0, 0, 0, 0)
-        bar.setSpacing(TIGHT)
-        self.flow_stage_buttons = {}
-        for stage in self._offered_stages:
-            button = QPushButton(flow_title(stage))
-            button.setCheckable(True)
-            button.clicked.connect(
-                lambda _checked=False, chosen=stage: self._show_stage(chosen))
-            bar.addWidget(button)
-            self.flow_stage_buttons[stage] = button
-        bar.addStretch(1)
-        layout.addWidget(self.flow_stage_bar)
-
-        self.flow_stages = QStackedWidget()
-        self._flow_slots = {}
-        for stage in self._offered_stages:
-            slot = QWidget()
-            slot_layout = QVBoxLayout(slot)
-            slot_layout.setContentsMargins(0, 0, 0, 0)
-            slot_layout.setSpacing(INNER)
-            self._flow_slots[stage] = slot
-            self.flow_stages.addWidget(slot)
-        body = QHBoxLayout()
-        body.setSpacing(INNER)
-        body.addWidget(self.flow_stages, 3)
         self._sidebar = self._build_sidebar()
-        self._sidebar.setMinimumWidth(SIDEBAR_MINIMUM)
-        body.addWidget(self._sidebar, 1)
-        layout.addLayout(body, 1)
-
-        steps = QHBoxLayout()
-        steps.setSpacing(TIGHT)
-        self.flow_back = QPushButton("Back")
-        self.flow_back.clicked.connect(lambda: self._step_stage(-1))
-        self.flow_next = QPushButton("Next")
-        self.flow_next.clicked.connect(lambda: self._step_stage(1))
-        steps.addStretch(1)
-        steps.addWidget(self.flow_back)
-        steps.addWidget(self.flow_next)
-        layout.addLayout(steps)
+        shell.adopt_sidebar(self._sidebar)
         return host
 
     def _lend_to_flow(self) -> None:
@@ -2009,7 +1989,10 @@ class MainWindow(QMainWindow):
                 and chosen is not Stage.ASSEMBLE):
             self._leave_sequence_scrub()
         self._flow_stage = chosen
-        self.flow_stages.setCurrentWidget(self._flow_slots[chosen])
+        self.flow_shell.set_stage(chosen)
+        # The picture goes where this page keeps it, or nowhere: Queue has no
+        # viewport region at all, so nothing is left hidden behind its jobs.
+        self._place_viewport(chosen)
         self.settings_store.setValue("flow_stage", chosen.value)
         if chosen is Stage.ASSEMBLE:
             self._refresh_sequence_plan()
@@ -2028,12 +2011,45 @@ class MainWindow(QMainWindow):
             self._sync_music_panel()
         self._show_source_note()
         back, forward = flow_neighbours(chosen, self._offered_stages)
-        self.flow_back.setEnabled(back is not None)
-        self.flow_next.setEnabled(forward is not None)
-        for offered, button in self.flow_stage_buttons.items():
-            blocked = button.blockSignals(True)
-            button.setChecked(offered is chosen)
-            button.blockSignals(blocked)
+        self.flow_shell.set_steps(back is not None, forward is not None)
+        self._show_page_actions(chosen)
+
+    def _place_viewport(self, stage: Stage) -> None:
+        """Put the one picture in this page's region, or take it away.
+
+        Moved rather than duplicated, and taken out entirely where the page
+        has no region for it: a hidden viewport would keep a decoder alive for
+        a page that shows nothing, which is how Queue would get its space
+        without earning it.
+        """
+        host = self.flow_shell.host(stage, Region.VIEWPORT)
+        box = self.preview_view.preview_box
+        if host is None:
+            for widget in (box, self.flow_viewport):
+                if widget.parentWidget() is not None:
+                    widget.setParent(None)
+            return
+        if box.parentWidget() is not host:
+            host.layout().addWidget(box, 1)
+            host.layout().addWidget(self.flow_viewport)
+        box.show()
+        self.flow_viewport.show()
+
+    def _show_page_actions(self, stage: Stage) -> None:
+        """Name the two fixed actions for the page showing now.
+
+        On Queue the thing you can do is stop the render in front of you, not
+        start another, so the primary is off and the secondary is renamed.
+        """
+        if stage is Stage.QUEUE:
+            self.flow_shell.set_actions(
+                primary="Commit to render", primary_enabled=False,
+                secondary="Cancel this render")
+            return
+        self.flow_shell.set_actions(
+            primary="Commit to render",
+            primary_enabled=bool(self._working_outputs()),
+            secondary="Cancel")
 
     def _step_stage(self, direction: int) -> None:
         back, forward = flow_neighbours(self._flow_stage, self._offered_stages)
@@ -2313,23 +2329,21 @@ class MainWindow(QMainWindow):
     # -- the persistent picture ------------------------------------------------
 
     def _lend_viewport(self) -> None:
-        """Hoist the picture above the stages, remembering where it lives.
+        """Record where the picture lives in Classic before Flow borrows it.
 
-        It cannot be lent to a stage. A widget is in one place at a time, and
-        the approved design has it on Browse, Trim, Assemble and Output — so it
-        goes above them, which is also what makes it one picture rather than
-        four.
+        Only the home is taken here. Where it *goes* is the current page's
+        business — each page keeps the picture in its own region and Queue has
+        no region for it, so hoisting it to one fixed place would put it above
+        a page that is meant not to have it.
         """
         box = self.preview_view.preview_box
         home = self._left_column.layout() if self._left_column else None
-        if home is None or self.flow_viewport is None:
+        if home is None:
             return
         index = home.indexOf(box)
         if index < 0:
             return
         self._viewport_home = (home, index)
-        self.flow_viewport.layout().insertWidget(0, box, 1)
-        box.show()
 
     def _return_viewport(self) -> None:
         """Put it back in the column, at the index it came from."""
@@ -2338,8 +2352,12 @@ class MainWindow(QMainWindow):
         home, index = self._viewport_home
         self._viewport_home = None
         box = self.preview_view.preview_box
-        if self.flow_viewport is not None and self.flow_viewport.layout():
-            self.flow_viewport.layout().removeWidget(box)
+        # It may be in any page's region, or in none at all after Queue, so it
+        # is detached by parent rather than removed from one known layout.
+        if box.parentWidget() is not None:
+            box.setParent(None)
+        if self.flow_viewport is not None and self.flow_viewport.parentWidget():
+            self.flow_viewport.setParent(None)
         home.insertWidget(index, box)
         box.show()
 

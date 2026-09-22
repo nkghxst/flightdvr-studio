@@ -43,7 +43,7 @@ from PySide6.QtWidgets import QApplication
 from flightdvr.assembly import Item
 from flightdvr.assembly_panel import ITEM_ROLE as ASSEMBLY_ITEM_ROLE
 from flightdvr.audio_plan import AudioMode, MusicChoice
-from flightdvr.flow_layout import Mode, Stage
+from flightdvr.flow_layout import Mode, Region, Stage
 from flightdvr.jobs import Job
 from flightdvr.media import ClipInfo, Select
 
@@ -939,9 +939,14 @@ def test_classic_gets_the_assembly_back_at_its_own_index(window, app):
     assert home.indexOf(owned) == index, "the assembly came back elsewhere"
 
 
-def test_the_picture_is_one_object_above_every_stage(window, app):
-    """One picture, one player, one decoder — it is hoisted above the stages
-    rather than lent to one, because a widget is in one place at a time."""
+def test_the_picture_is_one_object_in_each_page_that_has_one(window, app):
+    """One picture, one player, one decoder.
+
+    The approved design no longer hoists it above every stage: each page keeps
+    it in its own region, and Queue has no region for it. What has to stay
+    true is that it is the *same* object wherever it appears — the claim the
+    old "above every stage" assertion was really protecting.
+    """
     box = window.preview_view.preview_box
     in_flow(window, app)
 
@@ -949,10 +954,19 @@ def test_the_picture_is_one_object_above_every_stage(window, app):
     for stage in window._offered_stages:
         window._show_stage(stage)
         app.processEvents()
+        host = window.flow_shell.host(stage, Region.VIEWPORT)
+        if stage is Stage.QUEUE:
+            assert host is None, "Queue grew a viewport region"
+            assert box.parentWidget() is None, (
+                "the picture followed the page that has no region for it")
+            continue
+        assert host is not None
         seen.append(window.preview_view.preview_box)
-        assert box.parentWidget() is window.flow_viewport
+        assert box.parentWidget() is host, (
+            f"{stage.value} did not receive the one picture")
 
-    assert all(one is box for one in seen)
+    assert seen, "no page took the picture at all"
+    assert all(one is box for one in seen), "a second picture was made"
     window.set_view_mode(Mode.CLASSIC)
 
 
@@ -1800,3 +1814,43 @@ def test_an_ordinary_planned_output_is_not_read_on_source_time(window, app):
 
     assert window.context_for_working(first).clock.value == "output"
     assert window.context_for_working(first).bound_to_sequence is False
+
+
+def test_the_fixed_actions_say_what_this_page_can_do(window, app):
+    """Queue's action is to stop the render in front of you, not start
+    another — so the primary is off there and the secondary is renamed."""
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    tick(window, 0)
+    app.processEvents()
+    in_flow(window, app)
+
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+    shell = window.flow_shell
+    assert shell.primary_button.text() == "Commit to render"
+    assert shell.primary_button.isEnabled(), "nothing planned to commit"
+    assert shell.secondary_button.text() == "Cancel"
+
+    window._show_stage(Stage.QUEUE)
+    app.processEvents()
+
+    assert not shell.primary_button.isEnabled(), "Queue offered a commit"
+    assert shell.secondary_button.text() == "Cancel this render"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_commit_is_offered_only_when_there_is_something_to_commit(window, app):
+    """An enabled action that refuses is worse than a disabled one."""
+    in_flow(window, app)
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+    assert not window.flow_shell.primary_button.isEnabled()
+
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    tick(window, 0)
+    app.processEvents()
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+
+    assert window.flow_shell.primary_button.isEnabled()
+    window.set_view_mode(Mode.CLASSIC)
