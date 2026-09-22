@@ -80,6 +80,7 @@ from .audio_stream import (
     SequenceSourceSegment,
 )
 from .flow_shell import FlowShell
+from .output_sidebar import Card, OutputSidebar
 from .flow_layout import (
     Domain, Mode, Region, SelectedContext, Stage,
     first_stage as flow_first_stage, material_revision, mode_from_stored,
@@ -2476,33 +2477,24 @@ class MainWindow(QMainWindow):
         self.flow_source_note.setVisible(bool(text))
 
     def _build_sidebar(self) -> QWidget:
-        """Working outputs above, submitted jobs below. Flow only."""
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(INNER)
-
-        layout.addWidget(QLabel("Working outputs"))
-        self.sidebar_working = QListWidget()
-        self.sidebar_working.setToolTip(
-            "What Add to queue would build now. Choosing one opens it for "
-            "editing; it does not play anything."
+        """What you are making: planned above, committed below. Flow only."""
+        sidebar = self.output_sidebar = OutputSidebar()
+        sidebar.planned.setToolTip(
+            "What Commit to render would build now. Choosing one opens it "
+            "for editing; it does not play anything."
         )
-        self.sidebar_working.itemSelectionChanged.connect(
-            self._on_sidebar_choice)
-        layout.addWidget(self.sidebar_working, 1)
-
-        self.sidebar_submitted_title = dim(QLabel("Submitted"))
-        layout.addWidget(self.sidebar_submitted_title)
-        self.sidebar_submitted = QListWidget()
-        self.sidebar_submitted.setSelectionMode(
-            QListWidget.SelectionMode.NoSelection)
-        self.sidebar_submitted.setToolTip(
-            "Already queued. Their settings are fixed; start, cancel and "
+        sidebar.committed.setToolTip(
+            "Already committed. Their settings are frozen; start, cancel and "
             "progress stay on the queue."
         )
-        layout.addWidget(self.sidebar_submitted)
-        return panel
+        sidebar.chosen.connect(self._on_sidebar_choice)
+        # The established names still address the two lists, so the existing
+        # selection and refresh behaviour keeps its tests rather than being
+        # rewritten beside a new arrangement.
+        self.sidebar_working = sidebar.planned
+        self.sidebar_submitted = sidebar.committed
+        self.sidebar_submitted_title = sidebar.committed_title
+        return sidebar
 
     def _music_line(self, target) -> str:
         """One truthful line about sound, or nothing at all.
@@ -2545,47 +2537,42 @@ class MainWindow(QMainWindow):
         self._sidebar_building = True
         self._sidebar_rebuilds += 1
         try:
-            chosen = self._sidebar_target
-            self.sidebar_working.clear()
             preset = PRESETS[self._preset_key()].label
-            outputs = self._working_outputs()
-            for output in outputs:
-                music = self._music_line(output.target)
-                lines = [output.label, preset]
-                if music:
-                    lines.append(music)
-                item = QListWidgetItem("\n".join(lines))
-                item.setData(Qt.ItemDataRole.UserRole, output.target)
-                self.sidebar_working.addItem(item)
-                if output.target == chosen:
-                    item.setSelected(True)
-
-            self.sidebar_submitted.clear()
-            for job in self.jobs:
-                self.sidebar_submitted.addItem(
-                    f"{job.name}\n{job.preset_label} · {job.status.value}")
-            self.sidebar_submitted_title.setVisible(bool(self.jobs))
-            self.sidebar_submitted.setVisible(bool(self.jobs))
+            planned = [
+                Card(key=output.target, title=output.label, detail=preset,
+                     sound=self._music_line(output.target), status="Planned")
+                for output in self._working_outputs()
+            ]
+            committed = [
+                Card(key=id(job), title=job.name, detail=job.preset_label,
+                     status=job.status.value)
+                for job in self.jobs
+            ]
+            self.output_sidebar.show_cards(planned, committed)
+            if self._sidebar_target is not None:
+                self.output_sidebar.select(self._sidebar_target)
         finally:
             self._sidebar_building = False
         if self._joined_assemble_active():
             self._refresh_sequence_plan()
 
-    def _on_sidebar_choice(self) -> None:
+    def _on_sidebar_choice(self, target=None) -> None:
         """Open the chosen output for editing, through the ordinary handlers.
 
-        Selecting a row does what clicking that clip in the table does, so
+        Selecting a card does what clicking that clip in the table does, so
         there are not two ways to be focused for them to disagree about. It
         starts no sound: choosing something to edit is not asking to hear it.
+
+        The sidebar hands the target over rather than being asked for its
+        selection afterwards, so the window and the list cannot end up
+        disagreeing about which output was chosen.
         """
         if self._sidebar_building:
             return
         if self._refuse_joined_source_action():
             return
-        items = self.sidebar_working.selectedItems()
-        if not items:
-            return
-        target = items[0].data(Qt.ItemDataRole.UserRole)
+        if target is None:
+            target = self.output_sidebar.selected_key
         if target is None:
             return
         self._sidebar_target = target

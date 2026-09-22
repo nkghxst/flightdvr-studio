@@ -1854,3 +1854,56 @@ def test_commit_is_offered_only_when_there_is_something_to_commit(window, app):
 
     assert window.flow_shell.primary_button.isEnabled()
     window.set_view_mode(Mode.CLASSIC)
+
+
+def test_the_sidebar_says_where_editing_stops_reaching(window, app):
+    """The committed half and its line appear together with a real job, and
+    not before — an empty heading says a thing exists and is broken."""
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    tick(window, 0)
+    app.processEvents()
+    in_flow(window, app)
+    sidebar = window.output_sidebar
+    assert rows(sidebar.planned), "nothing planned to show"
+    assert sidebar.committed_note.isHidden(), "the boundary showed with no job"
+
+    window.jobs.append(Job(
+        [window.clips[0]], "master", window.current_settings(),
+        Path(window.export_panel.out_edit.currentText()) / "committed.mp4"))
+    window._rebuild_queue()
+    app.processEvents()
+
+    assert not sidebar.committed_note.isHidden()
+    assert "does not reach" in sidebar.committed_note.text()
+    assert len(rows(sidebar.committed)) == 1
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_a_round_trip_keeps_the_output_you_were_editing_selected(window, app):
+    """Leaving Flow and coming back must not quietly change which output is
+    selected: the next edit would land somewhere nobody chose.
+
+    The sidebar restores a surviving selection of its own, but a round trip
+    builds its lists from empty, so the window has to say which target it is
+    still on.
+    """
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    window.clips[1].selects = [Select(2.0, 6.0, "two", sid="r-2")]
+    tick(window, 0)
+    tick(window, 1)
+    app.processEvents()
+    in_flow(window, app)
+    second = window._working_outputs()[1].target
+    window._on_sidebar_choice(second)
+    app.processEvents()
+    assert window.output_sidebar.selected_key == second
+
+    window.set_view_mode(Mode.CLASSIC)
+    app.processEvents()
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+
+    assert window._sidebar_target == second
+    assert window.output_sidebar.selected_key == second, (
+        "the round trip lost which output was being edited")
+    window.set_view_mode(Mode.CLASSIC)
