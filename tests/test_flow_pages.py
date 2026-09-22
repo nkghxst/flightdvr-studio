@@ -2054,3 +2054,99 @@ def test_for_does_not_promise_per_output_settings_it_cannot_keep(window, app):
     assert "Settings belong to this output" not in said
     assert "every planned output" in said
     window.set_view_mode(Mode.CLASSIC)
+
+
+# -- the context decides the caption, not the page's name ----------------------
+
+
+def test_music_says_its_picture_is_not_the_finished_file(window, app):
+    """Music decides things about an output, and until W5 the picture under
+    it is still the source. Keyed on a list of page names, Music was left
+    uncaptioned — a source frame under a page about the finished output, with
+    nothing saying so."""
+    first, _second = two_planned_targets(window, app)
+    in_flow(window, app)
+    window._select_working_target(first)
+    app.processEvents()
+
+    window._show_stage(Stage.MUSIC)
+    app.processEvents()
+
+    said = window.flow_source_note.text()
+    assert "not the finished file" in said, repr(said)
+    assert not window.flow_source_note.isHidden()
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_source_inspection_stays_uncaptioned_with_an_output_selected(window,
+                                                                      app):
+    """Browse and Trim request a source context on purpose, and keep the
+    planned selection while they do. Source shown as source needs no line."""
+    first, _second = two_planned_targets(window, app)
+    in_flow(window, app)
+    window._select_working_target(first)
+    app.processEvents()
+
+    for stage in (Stage.BROWSE, Stage.TRIM):
+        window._show_stage(stage)
+        app.processEvents()
+        assert window._active_context(stage).clock.value == "source"
+        assert window.flow_source_note.text() == "", stage
+    assert window._sidebar_target == first, "inspecting source lost the output"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_moving_between_output_pages_keeps_the_same_output_and_clock(window,
+                                                                      app):
+    """Next changes the page, not the material: Output and Music both show the
+    selected output on its own clock."""
+    first, second = two_planned_targets(window, app)
+    in_flow(window, app)
+    window._select_working_target(second)
+    app.processEvents()
+
+    seen = []
+    for stage in (Stage.MUSIC, Stage.OUTPUT):
+        window._show_stage(stage)
+        app.processEvents()
+        context = window._active_context(stage)
+        seen.append((context.target, context.clock.value))
+
+    assert seen == [(second, "output"), (second, "output")], seen
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_inspecting_another_recording_does_not_move_the_selected_output(
+        window, app):
+    """Source focus and the planned selection may legitimately differ.
+
+    Select output A, go to Browse and inspect a *different* recording, come
+    back to Output: Output must still be showing A. Anything that took the
+    target from the focused clip would silently show — and let you edit —
+    the output belonging to whatever you last looked at.
+    """
+    from PySide6.QtCore import Qt
+
+    first, _second = two_planned_targets(window, app)
+    in_flow(window, app)
+    window._select_working_target(first)
+    app.processEvents()
+
+    window._show_stage(Stage.BROWSE)
+    other_row = next(
+        row for row in range(window.table.rowCount())
+        if window.clip_by_path[window.table.item(row, 0).data(
+            Qt.ItemDataRole.UserRole)].fingerprint
+        != first.items[0].fingerprint)
+    window.table.setCurrentCell(other_row, 0)
+    window._load_selected_clip()
+    app.processEvents()
+    assert window._trim_clip.fingerprint != first.items[0].fingerprint, (
+        "the fixture never moved focus to another recording")
+
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+
+    assert window._active_context(Stage.OUTPUT).target == first, (
+        "Output followed the inspected recording instead of the selection")
+    window.set_view_mode(Mode.CLASSIC)

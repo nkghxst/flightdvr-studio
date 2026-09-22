@@ -82,9 +82,10 @@ from .audio_stream import (
 from .flow_shell import FlowShell
 from .output_sidebar import Card, OutputSidebar
 from .flow_layout import (
-    Domain, Mode, Region, SelectedContext, Stage,
+    Clock, Domain, Mode, Region, SelectedContext, Stage,
     first_stage as flow_first_stage, material_revision, mode_from_stored,
-    neighbours as flow_neighbours, occurrences_of, offered_stages,
+    neighbours as flow_neighbours, nothing_selected, occurrences_of,
+    offered_stages,
     stage_from_stored, title as flow_title,
 )
 from .live_preview import Listening, LivePreview
@@ -2377,8 +2378,17 @@ class MainWindow(QMainWindow):
         Browse and Trim already show source and are not captioned: a line
         under every page is a line nobody reads.
         """
-        if stage not in (Stage.ASSEMBLE, Stage.OUTPUT):
-            return ""
+        if stage is not Stage.ASSEMBLE:
+            context = self._active_context(stage)
+            # The context decides, not the page's name. Source inspection is
+            # source and is not captioned; anything on the output clock is
+            # being decided on behalf of a file that does not exist yet, and
+            # until W5 the picture under it is still the source.
+            if context.clock is Clock.SOURCE and context.resolved:
+                return ""
+            if not context.resolved and stage not in (Stage.OUTPUT,
+                                                      Stage.MUSIC):
+                return ""
         if stage is Stage.ASSEMBLE:
             plan = self._sequence_plan
             if plan is None:
@@ -2471,6 +2481,27 @@ class MainWindow(QMainWindow):
         if not any(c.fingerprint == clip.fingerprint for c in self.clips):
             return None
         return clip
+
+    def _active_context(self, stage) -> SelectedContext:
+        """The context a page is showing, derived in one place.
+
+        Browse and Trim deliberately request a *source* context — they are
+        where a recording is inspected and trimmed — without disturbing which
+        planned output stays selected. Every other page shows the selected
+        output. The clock then comes from that context, never from the page's
+        name, so pressing Next cannot turn source seconds into output seconds.
+        """
+        clip = self._focused_source()
+        if stage in (Stage.BROWSE, Stage.TRIM):
+            if clip is not None:
+                return self.context_for_source(clip)
+            return nothing_selected("choose a recording to inspect it")
+        target = self._sidebar_target
+        if target is None and clip is not None:
+            target = self._music_target_for(clip)
+        if target is not None:
+            return self.context_for_working(target)
+        return nothing_selected("choose an output to see it")
 
     def _show_source_note(self) -> None:
         if self.flow_source_note is None:
