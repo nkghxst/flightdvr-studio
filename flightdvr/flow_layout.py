@@ -130,6 +130,57 @@ def title(stage: Stage) -> str:
     return TITLES[Stage(stage)]
 
 
+# -- what each page is made of -------------------------------------------------
+
+
+class Region(str, Enum):
+    """The parts a page can be built from.
+
+    Named rather than implied so the geometry can be checked without a window,
+    and so "Queue has no picture" is a fact a test can read rather than
+    something you confirm by looking at a screenshot.
+    """
+
+    LIST = "list"          # the tall recordings table
+    VIEWPORT = "viewport"  # the one shared picture and its transport
+    PANEL = "panel"        # this page's own panel
+
+
+REGIONS: dict[Stage, tuple[Region, ...]] = {
+    # The recordings list is tall and *beside* a narrower picture column, which
+    # is the whole point of the approved Browse: a list you can read without
+    # the picture sitting on top of it.
+    Stage.BROWSE: (Region.LIST, Region.VIEWPORT, Region.PANEL),
+    Stage.TRIM: (Region.VIEWPORT, Region.PANEL),
+    Stage.ASSEMBLE: (Region.VIEWPORT, Region.PANEL),
+    Stage.MUSIC: (Region.VIEWPORT, Region.PANEL),
+    Stage.OUTPUT: (Region.VIEWPORT, Region.PANEL),
+    # Queue has no viewport, and that is settled rather than pending. The only
+    # picture available for a committed job would be its *source*, which this
+    # release refuses to dress as output, and a partial file is never played.
+    # So the body goes to the jobs and to what they were submitted with.
+    Stage.QUEUE: (Region.PANEL,),
+}
+
+
+def regions_for(stage: Stage) -> tuple[Region, ...]:
+    return REGIONS[Stage(stage)]
+
+
+def shows_viewport(stage: Stage) -> bool:
+    """Whether this page borrows the one picture at all.
+
+    Borrows, never owns: a page that hid a viewport it still held would keep a
+    decoder alive for a page that shows nothing, which is how Queue would get
+    its space dishonestly.
+    """
+    return Region.VIEWPORT in regions_for(stage)
+
+
+def shows_list(stage: Stage) -> bool:
+    return Region.LIST in regions_for(stage)
+
+
 # -- what is selected, and everything that follows from it ---------------------
 #
 # One value answers "what is being looked at", and the pages read it. It is
