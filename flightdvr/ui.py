@@ -292,6 +292,13 @@ class MainWindow(QMainWindow):
         self.sidebar_working = None
         self.sidebar_submitted = None
         self._sidebar_target: OutputTarget | None = None
+        # Loading an output's own choices into the panel is not an edit, and
+        # this is set for exactly as long as that load takes.
+        self._loading_target = False
+        # What a newly planned output starts with in Flow: the panel as it
+        # stood on entering Flow, or as edited with nothing selected. Never
+        # whichever output happened to be loaded when a list was repainted.
+        self._flow_defaults: tuple[str, ExportSettings] | None = None
         self._sidebar_building = False
         self._assembly_drawing = False
         self._sidebar_rebuilds = 0
@@ -1032,8 +1039,101 @@ class MainWindow(QMainWindow):
             return MusicChoice()
 
     def _store_music(self, target: OutputTarget, choice: MusicChoice) -> None:
-        self.output_plan.set_choices(
-            target, self._preset_key(), self.current_settings(), choice)
+        """Record a music choice without touching the output's other choices.
+
+        A music write used to stamp the panel's preset and settings onto the
+        output as a side effect. With per-output settings that is a quiet
+        overwrite: change the track on A while the panel shows something else
+        — in Classic, say — and A's own preset is replaced by it.
+        """
+        if target in self.output_plan.targets:
+            planned = self.output_plan.get(target)
+            self.output_plan.set_choices(
+                target, planned.preset_key, planned.settings, choice)
+            return
+        preset, settings = self._seed_defaults()
+        self.output_plan.set_choices(target, preset, settings, choice)
+
+    # -- each output's own preset and settings ---------------------------------
+
+    def _seed_defaults(self) -> tuple[str, ExportSettings]:
+        """The explicit starting choices for an output seen for the first time.
+
+        In Flow these are the recorded defaults, not the panel: the panel is
+        showing whichever output is loaded, and seeding B from A's settings
+        because a list happened to repaint while A was open is exactly the
+        leak this avoids. Classic has one set of choices, so it uses them.
+        """
+        if self._view_mode is Mode.FLOW and self._flow_defaults is not None:
+            return self._flow_defaults
+        return self._preset_key(), self.current_settings()
+
+    def _ensure_target_choices(self, target: OutputTarget) -> None:
+        """Give an output its own entry the first time it exists. Once only.
+
+        Not for an Assembly. Its entry is created and rekeyed by its own
+        tracked binding, which deliberately refuses to adopt an entry it did
+        not create — that refusal is what stops a reordered Assembly
+        inheriting a stale or foreign choice, and seeding here would trip it.
+        """
+        if target in self.output_plan.targets or target.is_assembly:
+            return
+        preset, settings = self._seed_defaults()
+        self.output_plan.set_choices(target, preset, settings, MusicChoice())
+
+    def _choices_for(self, target: OutputTarget) -> tuple[str, ExportSettings]:
+        """An output's own preset and settings, or the explicit defaults if it
+        has none yet. Never the panel's ambient state."""
+        if target in self.output_plan.targets:
+            planned = self.output_plan.get(target)
+            return planned.preset_key, planned.settings
+        return self._seed_defaults()
+
+    def _active_targets(self) -> list[OutputTarget]:
+        """The planned outputs that exist now. Retained, unticked entries are
+        remembered but are not part of any batch."""
+        return [output.target for output in self._working_outputs()]
+
+    def _apply_choices(self, preset: str, settings: ExportSettings) -> None:
+        """Show choices in the panel as a load, never as an edit."""
+        self._loading_target = True
+        try:
+            self.export_panel.load_choices(preset, settings)
+        finally:
+            self._loading_target = False
+        if not self._ready:
+            return
+        # What an edit would have refreshed, minus recording it as a choice.
+        self.trim_note.setVisible(preset == "remux")
+        self._refresh_vertical_overlay()
+        self._refresh_export_markers()
+        self._update_estimate()
+
+    def _load_target(self, target: OutputTarget) -> None:
+        self._ensure_target_choices(target)
+        self._apply_choices(*self._choices_for(target))
+
+    def _capture_choices(self) -> None:
+        """A genuine edit in Flow: record it where it belongs.
+
+        With an output selected it is that output's. With none, it edits the
+        defaults new outputs start from — there is nothing else it could
+        honestly belong to, and falling back to the first output would write
+        to one nobody chose.
+        """
+        if self._loading_target or self._view_mode is not Mode.FLOW:
+            return
+        preset, settings = self._preset_key(), self.current_settings()
+        target = self._sidebar_target
+        if target is not None and target in self._active_targets():
+            if target not in self.output_plan.targets and target.is_assembly:
+                # Created by its owner, never adopted.
+                self._bind_assembly_music_target(target)
+            music = (self.output_plan.get(target).music
+                     if target in self.output_plan.targets else MusicChoice())
+            self.output_plan.set_choices(target, preset, settings, music)
+        elif target is None:
+            self._flow_defaults = (preset, settings)
 
     def _sync_music_panel(self) -> None:
         """Show the exact output being edited, without inventing a fallback."""
@@ -1967,7 +2067,14 @@ class MainWindow(QMainWindow):
         # set of controls.
         self.export_panel.set_target_selector_visible(chosen is Mode.FLOW)
         if chosen is Mode.FLOW:
+            # Classic's one set of choices becomes the defaults new outputs
+            # start from, and is what the panel returns to on the way out.
+            self._flow_defaults = (self._preset_key(), self.current_settings())
             self._refresh_sidebar()
+            # Coming back to an output that is still planned shows its own
+            # choices again rather than Classic's.
+            if self._sidebar_target in self._active_targets():
+                self._load_target(self._sidebar_target)
             self._lend_to_flow()
             self._lend_viewport()
             self.splitter.hide()
@@ -1975,6 +2082,12 @@ class MainWindow(QMainWindow):
             self._show_stage(self._flow_stage or
                              flow_first_stage(self._offered_stages))
         else:
+            if self._flow_defaults is not None:
+                # Classic has one set of choices. Leaving Flow with an output's
+                # own settings still showing would make them Classic's by
+                # accident, and its batch would then render with them.
+                self._apply_choices(*self._flow_defaults)
+                self._flow_defaults = None
             self._flow_host.hide()
             self._return_viewport()
             self._return_from_flow()
@@ -2571,11 +2684,25 @@ class MainWindow(QMainWindow):
         self._sidebar_building = True
         self._sidebar_rebuilds += 1
         try:
-            preset = PRESETS[self._preset_key()].label
+            outputs = self._working_outputs()
+            for output in outputs:
+                self._ensure_target_choices(output.target)
+            active = [output.target for output in outputs]
+            if (self._sidebar_target is not None
+                    and self._sidebar_target not in active):
+                # The chosen output stopped existing. Nothing is chosen now —
+                # not the first remaining one — and the panel goes back to the
+                # defaults rather than keeping choices that belong to nobody.
+                self._sidebar_target = None
+                if self._flow_defaults is not None:
+                    self._apply_choices(*self._flow_defaults)
             planned = [
-                Card(key=output.target, title=output.label, detail=preset,
+                Card(key=output.target, title=output.label,
+                     # Its own preset, not the panel's: the panel is showing
+                     # whichever output is open.
+                     detail=PRESETS[self._choices_for(output.target)[0]].label,
                      sound=self._music_line(output.target), status="Planned")
-                for output in self._working_outputs()
+                for output in outputs
             ]
             committed = [
                 Card(key=id(job), title=job.name, detail=job.preset_label,
@@ -2620,6 +2747,7 @@ class MainWindow(QMainWindow):
         self._sidebar_target = target
         self.output_sidebar.select(target)
         self.export_panel.select_target(target)
+        self._load_target(target)
         self._focus_piece(target.items[0].fingerprint, target.items[0].sid)
 
     def _focus_piece(self, fingerprint: str, sid: str) -> None:
@@ -4782,6 +4910,8 @@ class MainWindow(QMainWindow):
         return self.export_panel.preset_key()
 
     def _on_preset_changed(self, key: str | None = None) -> None:
+        if self._ready:
+            self._capture_choices()
         self._refresh_sidebar()
         if not self._ready:
             return
@@ -4793,6 +4923,8 @@ class MainWindow(QMainWindow):
 
     def _on_export_settings_changed(self) -> None:
         """Refresh both the estimate and any source-space preview guidance."""
+        if self._ready:
+            self._capture_choices()
         self._refresh_vertical_overlay()
         self._update_estimate()
 

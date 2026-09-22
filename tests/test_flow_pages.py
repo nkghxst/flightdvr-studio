@@ -732,18 +732,28 @@ def test_unticking_a_clip_while_flow_is_open_removes_its_card(window, app):
     window.set_view_mode(Mode.CLASSIC)
 
 
-def test_changing_the_preset_while_flow_is_open_relabels_every_card(
+def test_changing_the_preset_relabels_only_the_output_being_edited(
         window, app):
-    tick(window, 0)
-    app.processEvents()
+    """Was "relabels every card", which described one global preset. With
+    each output owning its choices, a change belongs to the output open in the
+    panel — the card that follows it is that one, and the others keep theirs.
+    Relabelling every card would now be a visible lie about what each renders.
+    """
+    first, second = two_planned_targets(window, app)
     listing = in_flow(window, app)
-    before = rows(listing)[0]
+    window._select_working_target(first)
+    app.processEvents()
+    label = {row: listing.item(row).text() for row in range(listing.count())}
 
     window.export_panel.preset_buttons["upload"].setChecked(True)
     app.processEvents()
 
-    after = rows(listing)[0]
-    assert after != before, "the preset on the card did not follow the choice"
+    changed = [row for row in range(listing.count())
+               if listing.item(row).text() != label[row]]
+    assert len(changed) == 1, f"expected one card to change, got {changed}"
+    assert listing.item(changed[0]).data(
+        __import__("flightdvr.output_sidebar", fromlist=["KEY_ROLE"]
+                   ).KEY_ROLE) == first
     window.set_view_mode(Mode.CLASSIC)
 
 

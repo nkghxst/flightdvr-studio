@@ -334,7 +334,7 @@ class ExportPanel(QWidget):
         self.estimate_label.setWordWrap(True)
         layout.addWidget(self.estimate_label)
 
-        add = QPushButton("Add to queue")
+        add = self.add_button = QPushButton("Add to queue")
         add.setMinimumHeight(30)
         add.clicked.connect(lambda *_: self.add_requested.emit())
         layout.addWidget(add)
@@ -662,6 +662,46 @@ class ExportPanel(QWidget):
         for key, check in self._check_settings():
             values[key] = check.isChecked()
         return values
+
+    # ExportSettings field -> the key `capture`/`apply` already use for it.
+    # Output folder, template, subfolders and bundle are deliberately absent:
+    # they are batch-wide, and loading one output's choices must never move
+    # where files go or what they are called.
+    _SETTINGS_KEYS = (
+        ("colour", "colour"), ("edit_codec", "edit_codec"),
+        ("master_crf", "master_quality"), ("master_speed", "master_speed"),
+        ("slow_crf", "slow_quality"), ("vertical_crf", "vertical_quality"),
+        ("vertical_speed", "vertical_speed"),
+        ("vertical_position", "vertical_position"),
+        ("social_mode", "social_mode"), ("social_size_mb", "social_size_mb"),
+        ("social_crf", "social_quality"), ("social_height", "social_height"),
+        ("social_fps", "social_fps"), ("upload_height", "upload_height"),
+        ("upload_crf", "upload_quality"), ("upload_speed", "upload_speed"),
+        ("keep_audio", "keep_audio"), ("use_gpu", "use_gpu"),
+    )
+
+    def load_choices(self, preset_key: str, settings: ExportSettings) -> None:
+        """Show one output's own preset and settings, and announce nothing.
+
+        Loading is not editing. The controls change, and the panel's own
+        show/hide logic runs so the right controls are visible, but no
+        `preset_changed` or `settings_changed` leaves the panel — so nothing
+        downstream records it as a choice, and nothing retargets a name or a
+        destination. `hw_encoder` is not a choice: it describes this machine,
+        and is left to whoever asks for `settings()`.
+        """
+        values = {"preset": preset_key}
+        for field, key in self._SETTINGS_KEYS:
+            values[key] = getattr(settings, field)
+        blocked = self.blockSignals(True)
+        try:
+            self.apply(values)
+        finally:
+            self.blockSignals(blocked)
+
+    def set_add_label(self, text: str) -> None:
+        """Say what the add button will queue from here: one output, or all."""
+        self.add_button.setText(text)
 
     def apply(self, values: dict) -> None:
         """Put stored choices back. A key that is absent leaves its control be.
