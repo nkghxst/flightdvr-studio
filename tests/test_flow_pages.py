@@ -1907,3 +1907,135 @@ def test_a_round_trip_keeps_the_output_you_were_editing_selected(window, app):
     assert window.output_sidebar.selected_key == second, (
         "the round trip lost which output was being edited")
     window.set_view_mode(Mode.CLASSIC)
+
+
+# -- both selectors, one answer ------------------------------------------------
+
+
+def test_choosing_in_for_moves_the_sidebar_to_the_same_output(window, app):
+    """The second output, not the first: a selector that let its first row
+    stand in for the choice would pass a test that only ever picked row 0."""
+    first, second = two_planned_targets(window, app)
+    in_flow(window, app)
+    combo = window.export_panel.target_combo
+    assert combo.count() == 2
+
+    combo.setCurrentIndex(1)
+    app.processEvents()
+
+    assert window._sidebar_target == second
+    assert window.output_sidebar.selected_key == second, (
+        "the sidebar still points at a different output")
+    assert window.export_panel.selected_target() == second
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_choosing_a_card_moves_for_to_the_same_output(window, app):
+    first, second = two_planned_targets(window, app)
+    in_flow(window, app)
+
+    window.output_sidebar.planned.item(1).setSelected(True)
+    app.processEvents()
+
+    assert window._sidebar_target == second
+    assert window.export_panel.selected_target() == second, (
+        "Output's For: still names a different output")
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_choosing_an_output_is_loading_not_editing(window, app):
+    """Choosing changes no setting and queues nothing."""
+    first, second = two_planned_targets(window, app)
+    window._store_music(first, MusicChoice(mode=AudioMode.NO_SOUND))
+    window._store_music(second, MusicChoice(mode=AudioMode.ORIGINAL))
+    in_flow(window, app)
+    before = snapshot(window)
+
+    window.export_panel.target_combo.setCurrentIndex(1)
+    app.processEvents()
+    window.export_panel.target_combo.setCurrentIndex(0)
+    app.processEvents()
+
+    after = snapshot(window)
+    assert after["music"] == before["music"], "choosing rewrote a choice"
+    assert after["jobs"] == before["jobs"] == [], "choosing queued something"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_for_is_a_flow_control_and_classic_is_unchanged(window, app):
+    two_planned_targets(window, app)
+    row = window.export_panel.target_row
+    assert row.isHidden(), "Classic grew a For: selector"
+
+    in_flow(window, app)
+    assert not row.isHidden()
+
+    window.set_view_mode(Mode.CLASSIC)
+    assert row.isHidden()
+
+
+def test_for_shows_no_choice_rather_than_a_stand_in(window, app):
+    """When the chosen output no longer exists, the list must not quietly
+    offer its first row as though that had been picked."""
+    from PySide6.QtCore import Qt
+
+    two_planned_targets(window, app)
+    in_flow(window, app)
+    # Pick the output that belongs to table row 1, whatever the sort order,
+    # so unticking that row genuinely removes the output that is selected.
+    path = window.table.item(1, 0).data(Qt.ItemDataRole.UserRole)
+    doomed = next(one.target for one in window._working_outputs()
+                  if one.target.items[0].fingerprint
+                  == window.clip_by_path[path].fingerprint)
+    window._select_working_target(doomed)
+    app.processEvents()
+    assert window.export_panel.selected_target() == doomed
+
+    window.table.item(1, 0).setCheckState(Qt.CheckState.Unchecked)
+    window._refresh_sidebar()
+    app.processEvents()
+
+    assert window.export_panel.target_combo.count() == 1
+    assert window.export_panel.selected_target() is None, (
+        "the first remaining output stood in for a choice nobody made")
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_the_handler_tells_both_selectors_itself(window, app, monkeypatch):
+    """Each selector is told the answer by the one handler, not by whatever
+    happens to refresh afterwards.
+
+    Checked with the focus step stubbed out on purpose. Choosing an output
+    usually loads a clip, and loading a clip usually refreshes the sidebar,
+    which re-syncs both lists as a side effect — so a handler that forgot to
+    tell the other selector passed every end-to-end test. That refresh does
+    not happen when the chosen recording is already the one loaded, which is
+    exactly when the two selectors would be left disagreeing.
+    """
+    first, second = two_planned_targets(window, app)
+    in_flow(window, app)
+    monkeypatch.setattr(window, "_focus_piece", lambda *a, **k: None)
+
+    window.export_panel.target_combo.setCurrentIndex(1)
+    app.processEvents()
+    assert window.output_sidebar.selected_key == second, (
+        "choosing in For: did not tell the sidebar")
+
+    window.output_sidebar.planned.item(0).setSelected(True)
+    app.processEvents()
+    assert window.export_panel.selected_target() == first, (
+        "choosing a card did not tell For:")
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_filling_for_announces_nothing(window, app):
+    """The panel's own fence, exercised outside a sidebar rebuild — inside one
+    the window's fence would absorb the emit and hide the panel's."""
+    first, second = two_planned_targets(window, app)
+    heard = []
+    window.export_panel.target_chosen.connect(heard.append)
+
+    window.export_panel.show_targets([("one", first), ("two", second)], None)
+    window.export_panel.show_targets([("two", second)], second)
+
+    assert heard == [], f"filling the list announced a choice: {heard}"

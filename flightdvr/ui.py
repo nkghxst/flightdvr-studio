@@ -1962,6 +1962,9 @@ class MainWindow(QMainWindow):
         # Flow is the mode, so refreshing before this was refreshing into a
         # guard that had every right to refuse — and the list arrived empty.
         self._view_mode = chosen
+        # Output's "For:" belongs to Flow; Classic keeps its familiar single
+        # set of controls.
+        self.export_panel.set_target_selector_visible(chosen is Mode.FLOW)
         if chosen is Mode.FLOW:
             self._refresh_sidebar()
             self._lend_to_flow()
@@ -2551,31 +2554,41 @@ class MainWindow(QMainWindow):
             self.output_sidebar.show_cards(planned, committed)
             if self._sidebar_target is not None:
                 self.output_sidebar.select(self._sidebar_target)
+            # Same rows, same selection: the "For:" list is never built from
+            # a second derivation of what the outputs are.
+            self.export_panel.show_targets(
+                [(card.title, card.key) for card in planned],
+                self._sidebar_target)
         finally:
             self._sidebar_building = False
         if self._joined_assemble_active():
             self._refresh_sequence_plan()
 
     def _on_sidebar_choice(self, target=None) -> None:
-        """Open the chosen output for editing, through the ordinary handlers.
+        """A card was chosen in the sidebar."""
+        if target is None:
+            target = self.output_sidebar.selected_key
+        self._select_working_target(target)
 
-        Selecting a card does what clicking that clip in the table does, so
-        there are not two ways to be focused for them to disagree about. It
-        starts no sound: choosing something to edit is not asking to hear it.
+    def _select_working_target(self, target) -> None:
+        """The one way a planned output becomes the one being edited.
 
-        The sidebar hands the target over rather than being asked for its
-        selection afterwards, so the window and the list cannot end up
-        disagreeing about which output was chosen.
+        Both selectors — the sidebar card and Output's "For:" — come through
+        here and nowhere else, and each is told the answer rather than asked
+        for its own afterwards. Two selectors that each decided for themselves
+        could disagree, and the symptom would be an edit landing on an output
+        the person was not looking at.
+
+        Choosing is loading, not editing: it changes no setting, queues
+        nothing and starts no sound.
         """
-        if self._sidebar_building:
+        if self._sidebar_building or target is None:
             return
         if self._refuse_joined_source_action():
             return
-        if target is None:
-            target = self.output_sidebar.selected_key
-        if target is None:
-            return
         self._sidebar_target = target
+        self.output_sidebar.select(target)
+        self.export_panel.select_target(target)
         self._focus_piece(target.items[0].fingerprint, target.items[0].sid)
 
     def _focus_piece(self, fingerprint: str, sid: str) -> None:
@@ -2628,6 +2641,7 @@ class MainWindow(QMainWindow):
     def _build_export_panel(self) -> QWidget:
         panel = self.export_panel = ExportPanel(self)
         panel.preset_changed.connect(self._on_preset_changed)
+        panel.target_chosen.connect(self._select_working_target)
         panel.settings_changed.connect(self._on_export_settings_changed)
         panel.assembly_panel.fill_requested.connect(self._fill_assembly)
         panel.assembly_panel.order_changed.connect(self._capture_assembly)

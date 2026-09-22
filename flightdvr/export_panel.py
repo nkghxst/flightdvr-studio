@@ -68,11 +68,13 @@ class ExportPanel(QWidget):
     date_changed = Signal()
     add_requested = Signal()
     bundle_requested = Signal()
+    target_chosen = Signal(object)    # a planned output, chosen by a person
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._ready = False
         self._bundle: list[str] = []
+        self._filling_targets = False
         self._build()
         self._ready = True
         self._on_preset_changed()
@@ -101,10 +103,83 @@ class ExportPanel(QWidget):
         layout.addWidget(self._build_actions())
         self.setMinimumWidth(330)
 
+    def _build_target_row(self) -> QWidget:
+        """Which output these settings belong to. Flow only.
+
+        Hidden in Classic, which keeps its familiar single set of controls.
+        Given worded rows and hands back a key, like the sidebar, so the panel
+        never needs to know what an output target is — and so the window stays
+        the one place that decides which output is selected.
+        """
+        self.target_row = QWidget()
+        column = QVBoxLayout(self.target_row)
+        column.setContentsMargins(0, 0, 0, 0)
+        line = QHBoxLayout()
+        line.addWidget(QLabel("For:"))
+        self.target_combo = QComboBox()
+        self.target_combo.setToolTip(
+            "Choose which planned output you are editing. Choosing one does "
+            "not change any setting and does not queue anything.")
+        self.target_combo.currentIndexChanged.connect(self._on_target_index)
+        line.addWidget(self.target_combo, 1)
+        column.addLayout(line)
+        self.target_note = dim(QLabel("Settings belong to this output."))
+        column.addWidget(self.target_note)
+        self.target_row.hide()
+        return self.target_row
+
+    def show_targets(self, rows, selected=None) -> None:
+        """Offer these outputs, keeping ``selected`` chosen if it is one of them.
+
+        Fenced, because filling a combo emits index changes and answering them
+        would report a choice nobody made.
+        """
+        self._filling_targets = True
+        try:
+            self.target_combo.clear()
+            for label, key in rows:
+                self.target_combo.addItem(label, key)
+            self._set_target_index(selected)
+        finally:
+            self._filling_targets = False
+
+    def select_target(self, key) -> None:
+        """Agree with a choice made elsewhere, without announcing it."""
+        self._filling_targets = True
+        try:
+            self._set_target_index(key)
+        finally:
+            self._filling_targets = False
+
+    def selected_target(self):
+        index = self.target_combo.currentIndex()
+        return self.target_combo.itemData(index) if index >= 0 else None
+
+    def set_target_selector_visible(self, visible: bool) -> None:
+        self.target_row.setVisible(bool(visible))
+
+    def _set_target_index(self, key) -> None:
+        for index in range(self.target_combo.count()):
+            if self.target_combo.itemData(index) == key:
+                self.target_combo.setCurrentIndex(index)
+                return
+        # Nothing that matches: show no choice rather than let the first row
+        # stand in for an output nobody picked.
+        self.target_combo.setCurrentIndex(-1)
+
+    def _on_target_index(self, index: int) -> None:
+        if self._filling_targets or index < 0:
+            return
+        key = self.target_combo.itemData(index)
+        if key is not None:
+            self.target_chosen.emit(key)
+
     def _build_controls(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
+
+        layout.addWidget(self._build_target_row())
 
         preset_box = QGroupBox("Export preset")
         preset_layout = QVBoxLayout(preset_box)
