@@ -2056,22 +2056,18 @@ def test_filling_for_announces_nothing(window, app):
     assert heard == [], f"filling the list announced a choice: {heard}"
 
 
-def test_for_does_not_promise_per_output_settings_it_cannot_keep(window, app):
-    """Only music is kept per output; the queue still commits every planned
-    output with the one preset and settings on screen. A note claiming
-    "settings belong to this output" would be believed, and on commit one
-    output would quietly render with another's preset."""
+def test_for_promises_per_output_settings_only_now_they_are_kept(window, app):
+    """Was pinned the other way while the queue used one preset for every
+    output. The promise is made now because the batch builds each output from
+    its own entry — and the folder and names, which really are batch-wide,
+    are said to be."""
     two_planned_targets(window, app)
     in_flow(window, app)
     said = window.export_panel.target_note.text()
 
-    assert "Music belongs to this output" in said
-    assert "Settings belong to this output" not in said
-    assert "every planned output" in said
+    assert "Settings belong to this output" in said
+    assert "every planned output" in said, "batch-wide choices not stated"
     window.set_view_mode(Mode.CLASSIC)
-
-
-# -- the context decides the caption, not the page's name ----------------------
 
 
 def test_music_says_its_picture_is_not_the_finished_file(window, app):
@@ -2438,4 +2434,17 @@ def test_queueing_starts_no_render(window, app, monkeypatch):
     assert window.jobs, "nothing was queued to check"
     assert window.worker is None or not window.worker.isRunning()
     assert all(job.status is JobStatus.PENDING for job in window.jobs)
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_output_estimates_the_output_that_would_be_queued(window, app):
+    """"Queue this output" queues one output with its own choices, so that is
+    what the estimate measures — not every ticked piece under its preset."""
+    first, second = planned_pair(window, app)
+    choose(window, app, second, "social", size_mb=10)
+    choose(window, app, first, "social", size_mb=25)
+
+    said = window.export_panel.estimate_label.text()
+
+    assert "25" in said and "1 file" in said, repr(said)
     window.set_view_mode(Mode.CLASSIC)

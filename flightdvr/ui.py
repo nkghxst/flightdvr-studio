@@ -5099,6 +5099,18 @@ class MainWindow(QMainWindow):
         # than none: it reads as a promise about the job you are about to
         # queue. When there is an assembly, it is the job, so it is what gets
         # measured — ticks included nothing and excluded nothing.
+        #
+        # In Flow the panel is showing one output's own choices, and "Queue
+        # this output" queues that output alone — so that is what is measured.
+        # Summing every ticked piece under one output's preset would promise a
+        # size for a batch that does not render with these settings.
+        target = self._sidebar_target
+        if (self._view_mode is Mode.FLOW and target is not None
+                and target in self._active_targets()):
+            own = next(output for output in self._working_outputs()
+                       if output.target == target)
+            self._show_estimate(list(own.pieces), joined=target.is_assembly)
+            return
         if self.export_panel.join_enabled():
             pieces, gaps = self._assembly_export_pieces()
             if gaps or len(pieces) < 2:
