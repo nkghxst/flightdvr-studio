@@ -92,7 +92,9 @@ from .flow_layout import (
 from .live_preview import Listening, LivePreview
 from .music_edit import EditKind, rational_fps
 from .music_panel import MusicPanel
-from .music_timeline import LiveMusicBinding, Presentation
+from .music_timeline import (
+    LiveMusicBinding, MusicEditor, MusicTimeline, Presentation,
+)
 from .output_naming import naming_inputs, resolve_output
 from .output_plan import (
     OutputPlan, OutputTarget, ordinary_pieces, piece_label, target_for_piece,
@@ -1542,14 +1544,17 @@ class MainWindow(QMainWindow):
     # -- the waveform: W2's result, fenced, never a second decode -------------
 
     def _show_music_envelope(self, asset) -> None:
+        self._show_editor_envelope(self.music_editor, asset)
+
+    def _show_editor_envelope(self, editor, asset) -> None:
         if asset is None:
-            self.music_editor.set_envelope(None, "")
+            editor.set_envelope(None, "")
             return
         key = WaveformAssetKey.from_asset(asset)
         envelope = self._music_envelopes.get(key)
         note = "" if envelope is not None else self._envelope_notes.get(
             key, "Reading the waveform…")
-        self.music_editor.set_envelope(envelope, note)
+        editor.set_envelope(envelope, note)
 
     def _take_envelope(self, key, inspection) -> None:
         if inspection.status is WaveformStatus.READY:
@@ -1624,11 +1629,13 @@ class MainWindow(QMainWindow):
 
     def _refresh_shown_envelope(self, key) -> None:
         target = self._music_target
-        if target is None:
-            return
-        asset = self._planned_music(target).asset
-        if asset is not None and WaveformAssetKey.from_asset(asset) == key:
-            self._show_music_envelope(asset)
+        if target is not None:
+            asset = self._planned_music(target).asset
+            if asset is not None and WaveformAssetKey.from_asset(asset) == key:
+                self._show_music_envelope(asset)
+        shown = self._submitted_editor.stored.asset
+        if shown is not None and WaveformAssetKey.from_asset(shown) == key:
+            self._show_editor_envelope(self._submitted_editor, shown)
 
     def _stop_envelope_probe(self) -> None:
         probe, self._envelope_probe = self._envelope_probe, None
@@ -3409,6 +3416,12 @@ class MainWindow(QMainWindow):
         panel.about_requested.connect(self._show_about)
         panel.item_activated.connect(self._open_finished_job)
         panel.job_selected.connect(self._show_submitted)
+        # A queued job's music, read-only: the same presentation code, fed
+        # only from the job's own frozen choice.
+        self._submitted_editor = MusicEditor(self)
+        self._submitted_music = MusicTimeline(self._submitted_editor)
+        self._submitted_music.set_presentation(Presentation.SUBMITTED)
+        panel.adopt_details_music(self._submitted_music)
         return panel
 
     def _show_submitted(self, job) -> None:
@@ -3419,6 +3432,31 @@ class MainWindow(QMainWindow):
         self.queue_panel.show_details(
             f"Submitted settings — {job.out_path.name}",
             submitted_lines(job))
+        self._show_submitted_music(job)
+
+    def _show_submitted_music(self, job) -> None:
+        """The job's music as it was submitted. Nothing here can change it,
+        and nothing plays: there is no submitted-job audition."""
+        audio = job.audio
+        has_music = (audio.mode in (AudioMode.REPLACE, AudioMode.MIX)
+                     and audio.asset is not None)
+        if not has_music:
+            self.queue_panel.show_details_music(False)
+            return
+        if job.sequence is not None:
+            samples = job.sequence.total_samples
+        else:
+            seconds = job.clips[0].trimmed_duration
+            samples = round_samples(Fraction(str(seconds)) * OUTPUT_RATE)
+        editor = self._submitted_editor
+        editor.load(audio, output_samples=samples,
+                    label=job.out_path.name, read_only=True)
+        self._show_editor_envelope(editor, audio.asset)
+        # Read once if it is not held; that read writes no choice, and never
+        # the job's.
+        self._acquire_envelope(audio.asset)
+        self.queue_panel.show_details_music(
+            True, "Playing a submitted job is not available here.")
 
     def _on_queue_toggled(self, open_: bool) -> None:
         self.queue_panel._on_toggled(open_)

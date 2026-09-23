@@ -736,8 +736,12 @@ class MusicTimeline(QWidget):
         compact = mode is Presentation.COMPACT
         classic = mode is Presentation.CLASSIC
         folded = compact and not self._more
-        for widget in (self.output_caption, self.picture_caption, self.picture):
-            widget.setVisible(not classic)
+        submitted = mode is Presentation.SUBMITTED
+        # A job's picture is its finished file, which is not shown here; the
+        # music is what this presentation is for.
+        for widget in (self.picture_caption, self.picture):
+            widget.setVisible(not classic and not submitted)
+        self.output_caption.setVisible(not classic)
         for widget in (self.more_button, self.more_note):
             widget.setVisible(compact)
         self.more_note.setVisible(folded)

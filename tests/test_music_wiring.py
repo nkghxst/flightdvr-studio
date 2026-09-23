@@ -33,7 +33,7 @@ from fractions import Fraction
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtWidgets import QApplication
 
 from flightdvr.audio_plan import AudioMode, AudioAsset, MusicChoice, SampleSpan
@@ -1188,3 +1188,86 @@ def test_a_waveform_is_held_only_while_something_uses_its_track(
     app.processEvents()
 
     assert key not in window._music_envelopes
+
+
+# -- W3: a submitted job's music, shown and never edited ----------------------------
+
+def queued_with_music(window, monkeypatch, tmp_path, app):
+    target = with_track(window, monkeypatch, tmp_path, app)
+    tick(window, 0)
+    said = warnings_from(monkeypatch)
+    window._add_to_queue()
+    app.processEvents()
+    assert said == [] and len(window.jobs) == 1
+    return target, window.jobs[0]
+
+
+def test_a_submitted_job_shows_its_own_music_read_only(
+        window, monkeypatch, tmp_path, app):
+    _target, job = queued_with_music(window, monkeypatch, tmp_path, app)
+    frozen = job.audio
+
+    window._show_submitted(job)
+    app.processEvents()
+    editor = window._submitted_editor
+
+    assert editor.stored == frozen
+    assert not editor.editable and not editor.begin_gesture()
+    assert not window.queue_panel.details_music.isHidden()
+    assert window.queue_panel.details_playback.text() == (
+        "Playing a submitted job is not available here.")
+
+
+def test_working_edits_never_reach_the_submitted_music(
+        window, monkeypatch, tmp_path, app):
+    _target, job = queued_with_music(window, monkeypatch, tmp_path, app)
+    frozen = job.audio
+    window._show_submitted(job)
+    app.processEvents()
+
+    window.music_editor.commit(replace(window.music_editor.stored,
+                                       music_level=Fraction(1, 5)))
+    app.processEvents()
+    window._show_submitted(job)            # shown again, after the edit
+    app.processEvents()
+
+    assert job.audio == frozen
+    assert window._submitted_editor.stored == frozen
+    assert window._submitted_editor.stored.music_level == 1
+
+
+def test_reading_a_submitted_track_s_waveform_never_touches_the_job(
+        window, monkeypatch, tmp_path, app, probes):
+    _target, job = queued_with_music(window, monkeypatch, tmp_path, app)
+    frozen = job.audio
+    window._music_envelopes.clear()
+    window._envelope_tried.clear()
+    window._show_submitted(job)
+    app.processEvents()
+    reader = probes[-1]
+    assert reader.waveform_request is not None, "no waveform read was started"
+
+    reader.deliver_waveform(WaveformInspection.ready(
+        reader.waveform_request, frozen.asset, an_envelope(frozen.asset)))
+    app.processEvents()
+
+    assert job.audio is frozen and job.audio == frozen
+    assert window._submitted_editor.envelope is not None
+
+
+def test_a_job_without_music_shows_no_music(window, monkeypatch, tmp_path,
+                                           app):
+    """After a job with music, one without must not keep showing it."""
+    _target, with_music = queued_with_music(window, monkeypatch, tmp_path, app)
+    focus(window, 1)
+    tick(window, 1)
+    window.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    window._add_to_queue()
+    app.processEvents()
+    without = next(job for job in window.jobs if job is not with_music)
+    assert without.audio.mode is None or without.audio.asset is None
+
+    window._show_submitted(with_music)
+    assert not window.queue_panel.details_music.isHidden()
+    window._show_submitted(without)
+    assert window.queue_panel.details_music.isHidden()

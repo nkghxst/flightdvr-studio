@@ -164,6 +164,17 @@ class QueuePanel(QWidget):
         self.details_body.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         details.addWidget(self.details_body)
+        # The submitted music, shown and never edited. The window lends the
+        # presentation; this only gives it a place under the words.
+        self.details_music = QWidget()
+        music = QVBoxLayout(self.details_music)
+        music.setContentsMargins(0, TIGHT, 0, 0)
+        music.setSpacing(TIGHT)
+        self.details_playback = dim(QLabel(""))
+        self.details_playback.setWordWrap(True)
+        music.addWidget(self.details_playback)
+        details.addWidget(self.details_music)
+        self.details_music.hide()
         # As tall as what it says: the page's slack goes below, not between
         # its lines.
         self.details.setSizePolicy(QSizePolicy.Policy.Preferred,
@@ -246,7 +257,16 @@ class QueuePanel(QWidget):
         self._shown_job = None
         self.details_title.setText("")
         self.details_body.setText("")
+        self.details_music.hide()
         self.details.hide()
+
+    def adopt_details_music(self, widget: QWidget) -> None:
+        """Hold the read-only music presentation, above the playback note."""
+        self.details_music.layout().insertWidget(0, widget)
+
+    def show_details_music(self, shown: bool, playback: str = "") -> None:
+        self.details_playback.setText(playback)
+        self.details_music.setVisible(shown)
 
     def _on_toggled(self, open_: bool) -> None:
         self.body.setVisible(open_)
