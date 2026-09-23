@@ -665,6 +665,9 @@ class PreviewView(QObject):
         self.music_panel = MusicPanel()
         self.music_panel.changed.connect(lambda: self.music_changed.emit())
         body.addWidget(self.music_panel)
+        # Spare height goes below everything, not between the rows: spread
+        # out, the rows pushed the song overview to the band's bottom edge.
+        body.addStretch(1)
 
         # Measured before it was built this way: the controls stack to a 625px
         # minimum, which made the whole window refuse to be shorter than

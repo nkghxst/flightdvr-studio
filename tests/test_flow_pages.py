@@ -3097,3 +3097,26 @@ def test_on_music_the_picture_yields_its_room_to_the_lanes(window, app):
         "the picture kept more than it needs on Music")
     assert on_output > frame.height(), "the fixture gave the picture no slack"
     window.set_view_mode(Mode.CLASSIC)
+
+
+def test_the_music_band_keeps_its_rows_together(window, app):
+    """Natively the band's spare height went between its rows, pushing the
+    song overview to the bottom edge. It goes below them."""
+    first, _second = planned_pair(window, app)
+    window.show()
+    window.resize(1402, 1400)
+    settled(app)
+    window._select_working_target(first)
+    window._show_stage(Stage.MUSIC)
+    settled(app)
+    view = window.preview_view
+    view.music_panel.hide()
+    settled(app)
+    timeline = view.music_timeline
+    button = view.track_button
+    gap = timeline.mapTo(view.music_content, timeline.rect().topLeft()).y() - (
+        button.mapTo(view.music_content, button.rect().bottomLeft()).y())
+    spare = view.music_content.height() - view.music_content.sizeHint().height()
+    assert spare > 60, "the fixture left no spare height to place"
+    assert gap < 120, f"{gap}px between the track row and the lanes"
+    window.set_view_mode(Mode.CLASSIC)
