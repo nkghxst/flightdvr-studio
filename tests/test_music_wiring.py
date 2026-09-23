@@ -149,13 +149,16 @@ class _FakeProbe(QThread):
     """
 
     ready = Signal(int, object)
+    waveform_ready = Signal(object)
     failed = Signal(int, str)
     made: list["_FakeProbe"] = []
 
-    def __init__(self, tools, track, generation, parent=None):
+    def __init__(self, tools, track, generation, parent=None, *,
+                 waveform_request=None):
         super().__init__(parent)
         self.track = Path(track)
         self.generation = generation
+        self.waveform_request = waveform_request
         self.stopped = False
         self.running = True
         type(self).made.append(self)
@@ -183,6 +186,13 @@ class _FakeProbe(QThread):
         self.running = False
         if was:
             self.finished.emit()
+
+    def deliver_waveform(self, inspection) -> None:
+        """The combined read's one success signal, then the thread ends."""
+        if self.stopped:
+            return
+        self.waveform_ready.emit(inspection)
+        self._finish()
 
     def deliver(self, asset=None, reason: str = "") -> None:
         """What the real worker does when it finishes, and only then."""
@@ -890,3 +900,275 @@ def test_a_bundle_with_no_music_is_untouched_by_the_new_check(
     window._add_bundle()
 
     assert opened, f"the bundle was refused before its confirmation: {said}"
+
+
+# -- W3: one commit path, gestures, and the waveform ----------------------------
+
+from dataclasses import replace  # noqa: E402
+
+from flightdvr.waveform_data import (  # noqa: E402
+    WaveformAssetKey, WaveformBin, WaveformEnvelope, WaveformInspection,
+    WaveformRequest,
+)
+
+
+def with_track(window, monkeypatch, tmp_path, app):
+    """Clip 0 focused, a track chosen and read: the ordinary starting point."""
+    focus(window, 0)
+    target = window._music_target
+    track = tmp_path / "song.mp3"
+    probe = choose_track(window, monkeypatch, track)
+    probe.deliver(an_asset(track))
+    app.processEvents()
+    return target
+
+
+def counting(window, monkeypatch):
+    """Count stores, stream preparations and stream builds."""
+    counts = {"stores": 0, "syncs": 0, "builds": 0}
+    real_store = window._store_music
+    real_sync = window._sync_live_preview
+
+    def store(target, choice):
+        counts["stores"] += 1
+        real_store(target, choice)
+
+    def sync():
+        counts["syncs"] += 1
+        real_sync()
+
+    monkeypatch.setattr(window, "_store_music", store)
+    monkeypatch.setattr(window, "_sync_live_preview", sync)
+    real_make = window.live_preview._make_stream
+
+    def make(*args):
+        counts["builds"] += 1
+        return real_make(*args)
+
+    window.live_preview._make_stream = make
+    return counts
+
+
+def an_envelope(asset):
+    key = WaveformAssetKey.from_asset(asset)
+    return WaveformEnvelope(key, 0, asset.decoded_samples, (WaveformBin(
+        0, asset.decoded_samples, (-0.5, -0.5), (0.5, 0.5)),))
+
+
+def test_a_released_fade_is_stored_once_and_prepares_nothing(
+        window, monkeypatch, tmp_path, app):
+    """Correction 4: a parameter commit never falls through to a rebuild,
+    and with nothing playing it starts nothing."""
+    target = with_track(window, monkeypatch, tmp_path, app)
+    counts = counting(window, monkeypatch)
+    editor = window.music_editor
+
+    assert editor.begin_gesture()
+    for fade in (800, 1_600, 2_400):
+        editor.draft(replace(editor.choice, fade_in_samples=fade))
+    editor.end_gesture()
+
+    assert counts == {"stores": 1, "syncs": 0, "builds": 0}
+    assert window._planned_music(target).fade_in_samples == 2_400
+
+
+def test_a_typed_level_is_a_parameter_commit_too(
+        window, monkeypatch, tmp_path, app):
+    target = with_track(window, monkeypatch, tmp_path, app)
+    counts = counting(window, monkeypatch)
+
+    window.music_panel.music_level.setValue(50)
+    app.processEvents()
+
+    assert counts == {"stores": 1, "syncs": 0, "builds": 0}
+    assert window._planned_music(target).music_level == Fraction(1, 2)
+
+
+def test_a_passage_drag_prepares_the_stream_once_on_release(
+        window, monkeypatch, tmp_path, app):
+    target = with_track(window, monkeypatch, tmp_path, app)
+    counts = counting(window, monkeypatch)
+    editor = window.music_editor
+    passage = editor.choice.passage
+
+    editor.begin_gesture()
+    for start in (4_410, 8_820, 13_230):
+        editor.draft(replace(editor.choice, passage=SampleSpan(
+            start, passage.end, passage.rate)))
+    assert counts["syncs"] == 0, "a drag prepared the stream before release"
+    editor.end_gesture()
+
+    assert counts["stores"] == 1 and counts["syncs"] == 1
+    assert window._planned_music(target).passage.start == 13_230
+
+
+def test_escape_stores_nothing_and_shows_the_stored_value(
+        window, monkeypatch, tmp_path, app):
+    target = with_track(window, monkeypatch, tmp_path, app)
+    before = window._planned_music(target)
+    counts = counting(window, monkeypatch)
+    editor = window.music_editor
+
+    editor.begin_gesture()
+    editor.draft(replace(editor.choice, music_level=Fraction(1, 4)))
+    assert window.music_panel.music_level.value() == 25
+    editor.cancel_gesture()
+
+    assert counts["stores"] == 0
+    assert window._planned_music(target) == before
+    assert window.music_panel.music_level.value() == 100
+
+
+def test_a_gesture_whose_output_changes_underneath_it_commits_nothing(
+        window, monkeypatch, tmp_path, app):
+    """Begin on A, move to B, let go: neither output is written.
+
+    Two defences stand here — loading B abandons the gesture, and the pin no
+    longer matches — and either alone is enough, so this fails only with both
+    gone. The pin's own proof, with no reload, is in test_music_timeline.
+    """
+    first = with_track(window, monkeypatch, tmp_path, app)
+    before = window._planned_music(first)
+    editor = window.music_editor
+    editor.begin_gesture()
+    editor.draft(replace(editor.choice, fade_in_samples=4_000))
+    counts = counting(window, monkeypatch)
+
+    focus(window, 1)
+    second = window._music_target
+    assert second != first
+    editor.draft(replace(editor.choice, fade_in_samples=8_000))
+    editor.end_gesture()
+
+    assert counts["stores"] <= 1          # B may be seeded by the focus
+    assert window._planned_music(first) == before
+    assert window._planned_music(second).fade_in_samples != 8_000
+    assert not editor.gesture_active
+
+
+def test_the_read_asks_for_the_waveform_from_the_same_one_pass(
+        window, monkeypatch, tmp_path, app, probes):
+    focus(window, 0)
+    probe = choose_track(window, monkeypatch, tmp_path / "song.mp3")
+    request = probe.waveform_request
+    assert isinstance(request, WaveformRequest)
+    assert request.generation == probe.generation
+
+
+def test_a_waveform_is_filed_under_the_track_it_came_from(
+        window, monkeypatch, tmp_path, app):
+    focus(window, 0)
+    target = window._music_target
+    track = tmp_path / "song.mp3"
+    probe = choose_track(window, monkeypatch, track)
+    asset = an_asset(track)
+    envelope = an_envelope(asset)
+
+    probe.deliver_waveform(WaveformInspection.ready(
+        probe.waveform_request, asset, envelope))
+    app.processEvents()
+
+    assert window._planned_music(target).asset == asset
+    assert window.music_editor.envelope is envelope
+
+
+def test_a_superseded_waveform_is_dropped_whole(
+        window, monkeypatch, tmp_path, app):
+    """Generation fence: an older read carries neither its track nor its
+    waveform onto the output."""
+    focus(window, 0)
+    target = window._music_target
+    old = choose_track(window, monkeypatch, tmp_path / "old.mp3")
+    choose_track(window, monkeypatch, tmp_path / "new.mp3")
+    stale = an_asset(tmp_path / "old.mp3")
+
+    # Emitted straight, not through the stopped stand-in: a real result can
+    # already be queued across threads when its read is stopped.
+    old.waveform_ready.emit(WaveformInspection.ready(
+        old.waveform_request, stale, an_envelope(stale)))
+    app.processEvents()
+
+    assert window._planned_music(target).asset is None
+    assert WaveformAssetKey.from_asset(stale) not in window._music_envelopes
+
+
+def test_an_unavailable_waveform_is_said_and_is_not_silence(
+        window, monkeypatch, tmp_path, app):
+    focus(window, 0)
+    track = tmp_path / "song.mp3"
+    probe = choose_track(window, monkeypatch, track)
+    asset = an_asset(track)
+    probe.deliver_waveform(WaveformInspection.unavailable(
+        probe.waveform_request, asset, "waveform unavailable: too odd"))
+    app.processEvents()
+    assert window.music_editor.envelope is None
+    assert "too odd" in window.music_editor.envelope_note
+
+
+def test_reading_a_known_track_s_waveform_writes_no_choice(
+        window, monkeypatch, tmp_path, app, probes):
+    """Correction 5: a track chosen before (no waveform held) has its
+    waveform read once on first showing; that read stores nothing."""
+    target = with_track(window, monkeypatch, tmp_path, app)
+    envelope_probe = probes[-1]
+    assert envelope_probe.waveform_request is not None, (
+        "no waveform read was started for the known track")
+    stored = window._planned_music(target)
+    counts = counting(window, monkeypatch)
+
+    envelope_probe.deliver_waveform(WaveformInspection.ready(
+        envelope_probe.waveform_request, stored.asset,
+        an_envelope(stored.asset)))
+    app.processEvents()
+
+    assert counts["stores"] == 0
+    assert window._planned_music(target) == stored
+    assert window.music_editor.envelope is not None
+
+
+def test_a_track_changed_on_disk_shows_no_waveform_and_keeps_the_choice(
+        window, monkeypatch, tmp_path, app, probes):
+    target = with_track(window, monkeypatch, tmp_path, app)
+    envelope_probe = probes[-1]
+    stored = window._planned_music(target)
+    changed = replace(stored.asset, sha256="b" * 64)
+
+    envelope_probe.deliver_waveform(WaveformInspection.ready(
+        envelope_probe.waveform_request, changed, an_envelope(changed)))
+    app.processEvents()
+
+    assert window._planned_music(target) == stored
+    assert window.music_editor.envelope is None
+    assert "changed" in window.music_editor.envelope_note
+
+
+def test_more_and_a_resize_read_nothing(window, monkeypatch, tmp_path, app,
+                                        probes):
+    with_track(window, monkeypatch, tmp_path, app)
+    made = len(probes)
+    counts = counting(window, monkeypatch)
+    timeline = window.preview_view.music_timeline
+    timeline.more_button.setChecked(True)
+    timeline.more_button.setChecked(False)
+    window.resize(window.width() - 40, window.height() - 40)
+    app.processEvents()
+    assert len(probes) == made
+    assert counts == {"stores": 0, "syncs": 0, "builds": 0}
+
+
+def test_monitoring_resolves_with_the_output_s_own_preset(window, app):
+    """The panel's preset was used before; in Flow it is the output's own."""
+    first, second = window.clips
+    first.selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    second.selects = [Select(2.0, 6.0, "two", sid="r-2")]
+    tick(window, 0)
+    tick(window, 1)
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+    a, b = [one.target for one in window._working_outputs()]
+    window.output_plan.set_choices(b, "social", ExportSettings(), MusicChoice())
+    window._select_working_target(a)
+    app.processEvents()
+    assert window.export_panel.preset_key() == "master"
+    assert window._monitor_preset(b) == "social"
+    window.set_view_mode(Mode.CLASSIC)
