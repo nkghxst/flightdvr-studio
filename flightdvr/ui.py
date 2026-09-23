@@ -35,7 +35,7 @@ from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import (
-    QPoint, QRect, QRectF, QSettings, Qt, QThread, QTimer, Signal,
+    QEvent, QPoint, QRect, QRectF, QSettings, Qt, QThread, QTimer, Signal,
 )
 from PySide6.QtGui import (
     QAction, QActionGroup, QColor, QIcon, QImage, QKeySequence, QPainter,
@@ -119,6 +119,7 @@ from .session import (
     apply_settings, apply_to, capture_from, capture_settings, for_source,
     missing_from, recent_sessions, remember,
 )
+from .range_lanes import LaneRange
 from .shortcuts import SHORTCUT_GROUPS
 from .target_choices import SavedMusic, decode_outputs, encode_outputs
 from .waveform_data import WaveformAssetKey, WaveformRequest, WaveformStatus
@@ -439,6 +440,10 @@ class MainWindow(QMainWindow):
         self._picture_frame = None
         self.flow_source_note = None
         self._music_band_was_open: bool | None = None
+        self._size_before_band = None
+        self._refit_on_regrow = False
+        # What Classic's column measurably could not hold of the picture.
+        self._classic_fit: int | None = None
         self._viewport_home = None
         self.sidebar_working = None
         self.sidebar_submitted = None
@@ -983,6 +988,10 @@ class MainWindow(QMainWindow):
         takes everything the picture cannot use.
         """
         column = QWidget()
+        # The picture's height follows the column's width by itself; this
+        # tells it when the column's height comes back, as it does when
+        # Classic's Music band closes and hands its room back.
+        column.installEventFilter(self)
         layout = QVBoxLayout(column)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(INNER)
@@ -1006,6 +1015,9 @@ class MainWindow(QMainWindow):
             self._on_sequence_scrub_requested)
         view.trim_changed.connect(self._on_trim_changed)
         view.select_picked.connect(self._pick_select)
+        view.range_lanes.range_clicked.connect(self._on_lane_clicked)
+        view.range_lanes.range_stepped.connect(
+            lambda sid: self._on_lane_clicked(sid, None))
         view.select_added.connect(self._add_select)
         view.select_removed.connect(self._remove_select)
         view.select_renamed.connect(self._rename_select)
@@ -1073,9 +1085,189 @@ class MainWindow(QMainWindow):
         view = self.preview_view
         view.track_requested.connect(self._choose_music_track)
         view.music_changed.connect(self._on_music_changed)
-        view.music_band.toggled.connect(lambda *_: self._relayout())
+        view.music_band_changing.connect(self._before_music_band)
+        view.music_band.toggled.connect(self._on_music_band_toggled)
         self._build_live_preview()
         return view.music_band
+
+    def _on_music_band_toggled(self, open_: bool) -> None:
+        """Make room for the band from the picture, not from the screen.
+
+        Classic's band sits under the whole split, and the picture had
+        already sized itself against the full column: opening the band grew
+        the window by the band's height (913 to 1060, measured). Now the
+        picture leaves that room as it leaves room for the list, and the View
+        menu's Music entry says what the band says.
+        """
+        action = getattr(self, "music_action", None)
+        if action is not None and action.isChecked() != bool(open_):
+            blocked = action.blockSignals(True)
+            action.setChecked(bool(open_))
+            action.blockSignals(blocked)
+        if self._view_mode is Mode.CLASSIC:
+            # Shallow before it is shown, so its first request is the
+            # shallow one.
+            self.preview_view.set_music_presentation(Presentation.CLASSIC)
+            if open_:
+                was = self._size_before_band or self.size()
+                QTimer.singleShot(0, lambda: self._make_music_room(was))
+            else:
+                self._restore_classic_picture()
+        self._relayout()
+
+    def _say_music_growth(self, was) -> None:
+        """Never silently: if even the shallow band did not fit, say by how
+        much, and what makes room without it."""
+        grown = self.height() - was.height()
+        if grown > 0 and self._view_mode is Mode.CLASSIC:
+            self.statusBar().showMessage(
+                f"Music needed {grown} px more than the window had, so the "
+                "window grew. View ▸ Clip list: Collapsed makes room without "
+                "growing it.", 12000)
+
+    def _before_music_band(self, _open: bool) -> None:
+        self._size_before_band = self.size()
+
+    def _make_music_room(self, was, tries: int = 4) -> None:
+        """Take what the band needed from the picture, exactly.
+
+        Measured rather than predicted: the window grows by what the band
+        could not find, so that is what the picture gives up — never through
+        its floor — and the window is given its size back. What cannot be
+        found that way is said, not hidden.
+        """
+        box = self.preview_view.preview_box
+        band = self.preview_view.music_band
+        if (self._view_mode is not Mode.CLASSIC or not band.isChecked()
+                or box.parentWidget() is not self._left_column):
+            return
+        # How far the window's own minimum now stands over the size it had:
+        # read, not converged on, so the picture gives up exactly that.
+        over = max(self.height(), self.minimumSizeHint().height()) - was.height()
+        floor = box.content_floor()
+        panel = self.browser_panel
+        if over > 0 and tries > 0:
+            if box.height() > floor:
+                self._classic_fit = max(floor, box.height() - over)
+                box.set_height_cap(self._classic_height_cap())
+            elif panel.minimumHeight() > panel.minimumSizeHint().height():
+                # The picture is at its floor: the list's reserve is what is
+                # left, down to what the list's own controls need — never
+                # through them.
+                panel.setMinimumHeight(max(panel.minimumSizeHint().height(),
+                                           panel.minimumHeight() - over))
+            else:
+                self._say_music_growth(was)
+                return
+            self._keep_window_size(was)
+            # Again once that has settled: the first answer can be a few
+            # pixels short while the layouts catch up.
+            QTimer.singleShot(
+                120, lambda: self._make_music_room(was, tries - 1))
+            return
+        self._say_music_growth(was)
+
+    def _classic_height_cap(self) -> int | None:
+        """Expanded's ceiling, and whatever the column measurably cannot
+        hold, whichever is lower."""
+        box = self.preview_view.preview_box
+        caps = [cap for cap in (
+            box.content_floor()
+            if self._layout_state.browser is BrowserMode.EXPANDED else None,
+            self._classic_fit) if cap is not None]
+        return min(caps) if caps else None
+
+    def _fit_classic_picture(self, tries: int = 4) -> None:
+        """Keep the picture's bottom edge inside its column.
+
+        Measured natively, Classic's column could be laid out taller than it
+        was: at 1440x913 the list took its 288px preference beside a 380px
+        picture in a 619px column, and the picture lost its bottom 55px — at
+        the base as well. Opening Music then took its room the same way, by
+        hiding more of the picture. So the overrun is read after layout and
+        the picture gives up exactly that, never through its own floor, and
+        takes it back when there is room again.
+        """
+        box = self.preview_view.preview_box
+        column = self._left_column
+        if (self._view_mode is not Mode.CLASSIC or column is None
+                or box.parentWidget() is not column
+                or not column.isVisible() or column.height() <= 0):
+            return
+        clearance = column.height() - (box.geometry().bottom() + 1)
+        body = self.preview_view.music_body
+        if (clearance < 0 and box.height() <= box.content_floor()
+                and self.preview_view.music_band.isChecked()
+                and body.maximumHeight() > body.minimumHeight()):
+            # The picture has nothing left to give: the open band's body
+            # scrolls in what remains, down to its track row.
+            body.setMaximumHeight(max(body.minimumHeight(),
+                                      body.height() + clearance))
+            if tries > 0:
+                QTimer.singleShot(
+                    40, lambda: self._fit_classic_picture(tries - 1))
+            return
+        if clearance < 0 and box.height() > box.content_floor():
+            fit = max(box.content_floor(), box.height() + clearance)
+        elif clearance > 0 and self._classic_fit is not None:
+            fit = box.height() + clearance
+            if fit >= box.useful_height(box.width()):
+                fit = None
+        else:
+            return
+        if fit == self._classic_fit:
+            return
+        self._classic_fit = fit
+        box.set_height_cap(self._classic_height_cap())
+        if tries > 0:
+            QTimer.singleShot(40, lambda: self._fit_classic_picture(tries - 1))
+
+    def _restore_classic_picture(self) -> None:
+        """The picture as the list mode has it, with the band closed."""
+        box = self.preview_view.preview_box
+        if box.parentWidget() is not self._left_column:
+            return
+        box.set_list_room(self._classic_list_room())
+        self._classic_fit = None
+        box.set_height_cap(self._classic_height_cap())
+        self.browser_panel.setMinimumHeight(self._classic_list_minimum())
+        # Hiding the band's body can hand the column its height back before
+        # this runs, or only on the next layout pass: both are covered.
+        box.refit()
+        self._refit_on_regrow = True
+
+    def _classic_list_minimum(self) -> int:
+        """The list's own reserve: none while it is collapsed to one line,
+        which is otherwise 150px kept for a list that is not there."""
+        if self._layout_state.browser is BrowserMode.COLLAPSED:
+            return 0
+        return MIN_LIST_HEIGHT
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt naming)
+        if (watched is self._left_column and self._refit_on_regrow
+                and event.type() == QEvent.Type.Resize
+                and event.size().height() > event.oldSize().height()):
+            self._refit_on_regrow = False
+            # Whatever was measured while the band still stood there is
+            # measured again now the column is whole.
+            self._classic_fit = None
+            self.preview_view.preview_box.set_height_cap(
+                self._classic_height_cap())
+            self._refit_classic_picture()
+            QTimer.singleShot(0, self._fit_classic_picture)
+        return super().eventFilter(watched, event)
+
+    def _refit_classic_picture(self) -> None:
+        box = self.preview_view.preview_box
+        if box.parentWidget() is self._left_column:
+            box.refit()
+
+    def _classic_list_room(self) -> int:
+        """What Classic's picture leaves under it: the list, or the one-line
+        summary that stands in for it."""
+        if self._layout_state.browser is BrowserMode.COLLAPSED:
+            return self.browser_panel.summary_bar.sizeHint().height()
+        return MIN_LIST_HEIGHT
 
     @property
     def music_panel(self) -> QWidget:
@@ -2870,6 +3062,9 @@ class MainWindow(QMainWindow):
         # Output's "For:" belongs to Flow; Classic keeps its familiar single
         # set of controls.
         self.export_panel.set_target_selector_visible(chosen is Mode.FLOW)
+        # Flow's Music page is the band; closing it from a menu would leave
+        # that page with nothing on it.
+        self.music_action.setEnabled(chosen is Mode.CLASSIC)
         self.export_panel.set_add_label(
             "Queue this output" if chosen is Mode.FLOW else "Add to queue")
         if chosen is Mode.FLOW:
@@ -2892,6 +3087,9 @@ class MainWindow(QMainWindow):
             # Flow's short pages need the controls beside the picture closed
             # up; nothing is hidden. Classic gets its arrangement back.
             self.preview_view.set_flow_controls(True)
+            # The filmstrip is on Trim's page alone in Flow, and there each
+            # range gets its own lane under it.
+            self.preview_view.range_lanes.set_wanted(True)
             band = self.preview_view.music_band
             self._music_band_was_open = band.isChecked()
             band.setChecked(True)
@@ -2911,6 +3109,8 @@ class MainWindow(QMainWindow):
                 self._apply_choices(*self._flow_defaults)
                 self._flow_defaults = None
             self._flow_host.hide()
+            # Classic's filmstrip is the reference's: the recording alone.
+            self.preview_view.range_lanes.set_wanted(False)
             # Back to the strip before it goes home, for the same reason.
             self.queue_panel.set_fills_page(False)
             self.preview_view.set_flow_controls(False)
@@ -3390,10 +3590,8 @@ class MainWindow(QMainWindow):
         # still in its Flow frame: set once it was back in the column, it was
         # worked out against the column's height from before Flow, and the
         # window grew by the difference (913 to 924, natively).
-        box.set_list_room(MIN_LIST_HEIGHT)
-        box.set_height_cap(box.content_floor()
-                           if self._layout_state.browser is BrowserMode.EXPANDED
-                           else None)
+        box.set_list_room(self._classic_list_room())
+        box.set_height_cap(self._classic_height_cap())
         # It may be in any page's region, or in none at all after Queue, so it
         # is detached by parent rather than removed from one known layout.
         if box.parentWidget() is not None:
@@ -3895,8 +4093,15 @@ class MainWindow(QMainWindow):
         self.queue_action.setCheckable(True)
         self.queue_action.toggled.connect(self._on_queue_action)
 
-        # No Music entry. Music is not built, and a menu item that toggles
-        # nothing is worse than an absent one.
+        # The band's own toggle, mirrored both ways like the queue's. Flow's
+        # Music page always shows the band, so it is Classic's control.
+        self.music_action = view_menu.addAction("Music")
+        self.music_action.setCheckable(True)
+        # Built before the band; the band starts closed and reports every
+        # change after that through `_on_music_band_toggled`.
+        self.music_action.setChecked(False)
+        self.music_action.toggled.connect(
+            lambda on: self.preview_view.music_band.setChecked(bool(on)))
 
         view_menu.addSeparator()
         reset_action = view_menu.addAction("Restore default layout")
@@ -4238,6 +4443,7 @@ class MainWindow(QMainWindow):
         # list they ended up in. The frame is deferred for the same reason.
         QTimer.singleShot(0, self._sync_thumbnail_size)
         QTimer.singleShot(0, self._fit_music_presentation)
+        QTimer.singleShot(0, self._fit_classic_picture)
 
     def _sync_thumbnail_size(self) -> None:
         """Fit the thumbnails to the space the list actually has.
@@ -4817,10 +5023,20 @@ class MainWindow(QMainWindow):
         # goes through the preview's content floor, so every control it holds
         # stays usable and the picture letterboxes rather than distorting.
         box = self.preview_box
-        if mode is BrowserMode.EXPANDED:
-            box.set_height_cap(box.content_floor())
-        else:
-            box.set_height_cap(None)
+        was = self.size()
+        # Measured afresh for this mode's arrangement.
+        self._classic_fit = None
+        box.set_height_cap(self._classic_height_cap())
+        # Collapsed hands the list's reserve back to the picture; the
+        # summary line is all that is left under it.
+        self.browser_panel.setMinimumHeight(self._classic_list_minimum())
+        if box.parentWidget() is self._left_column:
+            box.set_list_room(self._classic_list_room())
+            if (self._view_mode is Mode.CLASSIC
+                    and self.preview_view.music_band.isChecked()):
+                # The mode's cap replaced the one the band's room was taken
+                # with; take it again at this mode's arrangement.
+                QTimer.singleShot(0, lambda: self._make_music_room(was))
 
         # The splitter is deliberately not touched here. No mode wants a
         # different split, and re-imposing the computed one moved it by a
@@ -4968,6 +5184,7 @@ class MainWindow(QMainWindow):
         self.trim_bar.set_clip(clip.duration, clip.trim_in, clip.out_point)
         self._show_selects()
         self.trim_bar.set_strip(Filmstrip())
+        self.preview_view.range_lanes.set_strip(None)
         self._strip = Filmstrip()
         self._activity = None
         self.preview_view.show_activity("")
@@ -5010,6 +5227,7 @@ class MainWindow(QMainWindow):
                 self.frame_view.set_message("no frames")
             return
         self.trim_bar.set_strip(strip)
+        self.preview_view.range_lanes.set_strip(strip)
         self._strip = strip
         if self._music_target is not None and self.music_editor is not None:
             self._show_music_picture(self._music_target)
@@ -5641,6 +5859,7 @@ class MainWindow(QMainWindow):
     def _show_selects(self) -> None:
         """Put the clip's ranges on the bar and say which is being edited."""
         clip = self._trim_clip
+        self._show_lanes()
         if clip is None:
             self.preview_view.show_selects(0, 0, "")
             return
@@ -5658,6 +5877,45 @@ class MainWindow(QMainWindow):
         self.preview_view.show_selects(len(ranges), clip.current,
                                        editing.name if editing else "",
                                        nameable=bool(clip.real_selects))
+
+    def _show_lanes(self) -> None:
+        """One lane per real range, by identity. A whole recording has no
+        range to put on a clock of its own."""
+        clip = self._trim_clip
+        lanes = self.preview_view.range_lanes
+        if clip is None:
+            lanes.set_ranges((), "")
+            return
+        real = clip.real_selects
+        editing = (clip.selects[clip.current].sid
+                   if real and clip.current < len(clip.selects) else "")
+        lanes.set_ranges(
+            [LaneRange(one.sid, one.name, one.start, one.end or clip.duration)
+             for one in real], editing)
+
+    def _on_lane_clicked(self, sid: str, source) -> None:
+        """A lane was pressed, or stepped to with Up and Down.
+
+        Resolved by the range's identity at the moment of the press, never by
+        a row number: the lanes were drawn from an order that a rename, a
+        removal or a reorder may since have changed. Another range becomes
+        the one being edited; inside the one already being edited, the
+        playhead moves to the moment pressed — short of the exclusive end.
+        """
+        clip = self._trim_clip
+        if clip is None:
+            return
+        index = next((i for i, one in enumerate(clip.selects)
+                      if one.sid == sid), None)
+        if index is None:
+            return
+        if index != clip.current or source is None:
+            self._pick_select(index)
+            return
+        chosen = clip.selects[index]
+        end = chosen.end or clip.duration
+        last = end - 1.0 / max(1.0, clip.fps)
+        self._jump(max(chosen.start, min(source, last)))
 
     def _pick_select(self, index: int) -> None:
         if self._refuse_joined_source_action():
@@ -5723,6 +5981,8 @@ class MainWindow(QMainWindow):
         if clip is None or not clip.selects:
             return
         clip.selects[clip.current].name = name
+        # The lane's title only: the name field is being typed in.
+        self._show_lanes()
         self._touch_session()
 
     def _set_in(self) -> None:

@@ -280,6 +280,16 @@ class PreviewPanel(QGroupBox):
         self._list_room = pixels
         self._apply_height()
 
+    def refit(self) -> None:
+        """Work the height out again against the column as it is now.
+
+        The height follows the width by itself, but nothing tells it when only
+        the column's height changes. Closing Classic's Music band gives the
+        column its height back without touching its width; measured natively,
+        the picture otherwise stayed 23px short of where it had been.
+        """
+        self._apply_height()
+
     def set_height_cap(self, cap: int | None) -> None:
         """Cap the height, or pass None to go back to what the width earns.
 

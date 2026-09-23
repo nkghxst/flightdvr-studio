@@ -28,6 +28,8 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QObject, Signal
 
+from flightdvr.widgets import MIN_LIST_HEIGHT
+
 from flightdvr.classic_layout import (
     BrowserMode, ClassicLayout, COLLAPSED_LEFT_SHARE, EXPANDED_LEFT_SHARE,
     NORMAL_LEFT_SHARE, split_sizes,
@@ -417,8 +419,66 @@ def test_the_view_menu_offers_the_modes_and_the_reset(window):
     for mode in BrowserMode:
         assert any(mode.label in text for text in actions), mode
     assert any("Restore default layout" in text for text in actions)
-    # Music does not exist yet, so there is nothing honest to toggle.
-    assert not any("Music" in text for text in actions)
+    # Music exists now (W4), and its entry is the band's own toggle.
+    assert "Music" in actions
+
+
+def test_the_view_menu_music_entry_and_the_band_agree_both_ways(window,
+                                                                  qt_app):
+    band = window.preview_view.music_band
+    action = window.music_action
+    assert not band.isChecked() and not action.isChecked()
+    action.trigger()
+    qt_app.processEvents()
+    assert band.isChecked() and action.isChecked()
+    band.setChecked(False)
+    qt_app.processEvents()
+    assert not action.isChecked()
+    band.setChecked(True)
+    qt_app.processEvents()
+    assert action.isChecked()
+    band.setChecked(False)
+
+
+def test_collapsed_gives_the_list_reserve_back_to_the_picture(window, qt_app):
+    """R12: the one-line summary is all that stays under the picture."""
+    box = window.preview_view.preview_box
+    window.set_browser_mode(BrowserMode.COLLAPSED)
+    qt_app.processEvents()
+    collapsed = box._list_room
+    assert collapsed == window.browser_panel.summary_bar.sizeHint().height()
+    assert collapsed < MIN_LIST_HEIGHT
+    window.set_browser_mode(BrowserMode.NORMAL)
+    qt_app.processEvents()
+    assert box._list_room == MIN_LIST_HEIGHT
+
+
+def test_the_classic_band_is_the_shallow_one(window, qt_app):
+    """Classic's band gives way down to its track row instead of growing
+    the window; Flow's keeps its working minimum."""
+    from flightdvr.preview_panel import CLASSIC_MUSIC_MAXIMUM, MUSIC_BAND_MINIMUM
+    view = window.preview_view
+    band = view.music_band
+    band.setChecked(True)
+    qt_app.processEvents()
+    body = view.music_body
+    assert body.minimumHeight() == max(
+        24, view.track_button.sizeHint().height())
+    assert body.maximumHeight() == CLASSIC_MUSIC_MAXIMUM
+    assert MUSIC_BAND_MINIMUM > body.minimumHeight()
+    band.setChecked(False)
+    qt_app.processEvents()
+
+
+def test_collapsed_releases_the_list_reserve_and_normal_restores_it(
+        window, qt_app):
+    panel = window.browser_panel
+    window.set_browser_mode(BrowserMode.COLLAPSED)
+    qt_app.processEvents()
+    assert panel.minimumHeight() == 0
+    window.set_browser_mode(BrowserMode.NORMAL)
+    qt_app.processEvents()
+    assert panel.minimumHeight() == MIN_LIST_HEIGHT
 
 
 def test_the_view_menu_follows_the_mode_chosen_in_the_browser(window, qt_app):
@@ -779,5 +839,96 @@ def test_a_second_row_in_the_collapsed_band_would_still_fail(qt_app):
         assert expanded - browser_only > allowance, (
             "the collapsed-band allowance is loose enough to hide a row")
     finally:
+        window.close()
+        assert_no_threads_left(window)
+
+
+# -- Expanded shows more rows (W4, R12) -------------------------------------------
+
+
+def many_clips_window(qt_app, mode, size=(1440, 913)):
+    """Twelve clips, the mode chosen before anything is measured: no earlier
+    Normal visit for Expanded to borrow a size from."""
+    from flightdvr.media import find_tools
+    from flightdvr.ui import MainWindow
+
+    window = MainWindow(find_tools())
+    window.set_browser_mode(mode)
+    window.resize(*size)
+    window.show()
+    qt_app.processEvents()
+    for index in range(12):
+        window._add_clip(window._scan_generation,
+                         a_clip(f"hdz_{index:03d}.ts", 60.0 + index))
+    for _ in range(4):
+        qt_app.processEvents()
+        window._sync_thumbnail_size()
+    return window
+
+
+def fully_visible_rows(window) -> int:
+    table = window.browser_panel.table
+    viewport = table.viewport().rect()
+    return sum(1 for row in range(table.rowCount())
+               if viewport.contains(table.visualRect(
+                   table.model().index(row, 0)).adjusted(0, 0, -1, -1)))
+
+
+def test_expanded_from_the_start_shows_more_rows_than_normal(qt_app):
+    normal = many_clips_window(qt_app, BrowserMode.NORMAL)
+    expanded = many_clips_window(qt_app, BrowserMode.EXPANDED)
+    try:
+        assert expanded.size() == normal.size()
+        assert fully_visible_rows(expanded) > fully_visible_rows(normal)
+        assert (expanded.browser_panel.table.iconSize().height()
+                < normal.browser_panel.table.iconSize().height())
+    finally:
+        for window in (normal, expanded):
+            window.close()
+            assert_no_threads_left(window)
+
+
+def test_switching_modes_repeatedly_lands_on_the_same_rows(qt_app):
+    window = many_clips_window(qt_app, BrowserMode.NORMAL)
+    table = window.browser_panel.table
+    try:
+        table.selectRow(5)
+        table.scrollToItem(table.item(5, 0))
+        qt_app.processEvents()
+        seen = {}
+        for _round in range(3):
+            for mode in (BrowserMode.EXPANDED, BrowserMode.NORMAL):
+                window.set_browser_mode(mode)
+                for _ in range(4):
+                    qt_app.processEvents()
+                    window._sync_thumbnail_size()
+                size = table.iconSize().height()
+                assert seen.setdefault(mode, size) == size, mode
+                # The selection, and the row it is on, survive the switch.
+                assert table.currentRow() == 5
+                assert table.selectionModel().isRowSelected(5)
+        assert seen[BrowserMode.EXPANDED] < seen[BrowserMode.NORMAL]
+    finally:
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_flow_s_stacked_list_ignores_classic_s_expanded_rows(qt_app):
+    """Flow's Browse stacks the list and keeps its own sizing: Expanded left
+    over from Classic must not shrink its thumbnails."""
+    window = many_clips_window(qt_app, BrowserMode.EXPANDED)
+    panel = window.browser_panel
+    table = panel.table
+    try:
+        panel.set_stacked(True)
+        sizes = {}
+        for mode in (BrowserMode.EXPANDED, BrowserMode.NORMAL):
+            panel.show_mode(mode)
+            table.setIconSize(table.iconSize() * 0)     # never the cached size
+            panel.sync_thumbnail_size()
+            sizes[mode] = table.iconSize().height()
+        assert sizes[BrowserMode.EXPANDED] == sizes[BrowserMode.NORMAL]
+    finally:
+        panel.set_stacked(False)
         window.close()
         assert_no_threads_left(window)

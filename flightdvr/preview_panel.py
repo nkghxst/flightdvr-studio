@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from .music_panel import MusicPanel
 from .music_timeline import MusicEditor, MusicTimeline, Presentation
 from .player import FrameView
+from .range_lanes import RangeLanes
 from .sequence_strip import SequenceStrip
 from .trim import TrimBar
 from .widgets import INNER, TIGHT, PreviewPanel as AspectPreviewBox, dim
@@ -34,6 +35,13 @@ from .widgets import INNER, TIGHT, PreviewPanel as AspectPreviewBox, dim
 # Enough of the band to work in without the window demanding a screen it may
 # not have. The rest scrolls; nothing is removed.
 MUSIC_BAND_MINIMUM = 220
+# Classic's band is the shallow one, under a picture and a list that already
+# share the window. At its least it is the track row and the rest scrolls —
+# measured natively, anything more grew a 1120x760 window with the list
+# collapsed. At most what the band used to insist on, so where there is room
+# it looks as it did.
+CLASSIC_MUSIC_MINIMUM = 24
+CLASSIC_MUSIC_MAXIMUM = MUSIC_BAND_MINIMUM
 
 # The controls column beside the picture. Classic's width, and Flow's: wider,
 # so the key hint takes two lines rather than three and Play sits beside Grab
@@ -147,6 +155,9 @@ class PreviewView(QObject):
     activity_accepted = Signal()
     track_requested = Signal()
     music_changed = Signal()
+    # Before the band's body is shown or hidden: showing it can resize the
+    # window at once, and the window needs the size it had before that.
+    music_band_changing = Signal(bool)
     listen_toggled = Signal(bool)
     listen_level_changed = Signal(int)
     listening_changed = Signal(str)
@@ -684,17 +695,36 @@ class PreviewView(QObject):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout.addWidget(self.music_body)
         self.music_body.setVisible(False)
+        band.toggled.connect(self.music_band_changing)
         band.toggled.connect(self.music_body.setVisible)
-        band.toggled.connect(
-            lambda on: layout.setContentsMargins(
-                0, TIGHT, 0, INNER) if on else layout.setContentsMargins(
-                    0, 0, 0, 0))
+        self._music_band_layout = layout
+        band.toggled.connect(lambda _on: self._music_band_margins())
         return band
+
+    def _music_band_margins(self) -> None:
+        """Open, a little air around the body; closed, none. Classic's
+        shallow band spends no height on it: measured natively, those 10px
+        were part of what grew a 1120x760 window."""
+        shallow = (self.music_timeline.presentation is Presentation.CLASSIC)
+        if self.music_band.isChecked() and not shallow:
+            self._music_band_layout.setContentsMargins(0, TIGHT, 0, INNER)
+        else:
+            self._music_band_layout.setContentsMargins(0, 0, 0, 0)
 
     def set_music_presentation(self, presentation: Presentation) -> None:
         """Arrange the band for where it is shown. Chooses nothing, reads
         nothing: it only shows and hides."""
         self.music_timeline.set_presentation(presentation)
+        if presentation is Presentation.CLASSIC:
+            # The track row, measured rather than assumed: its height is
+            # the font's and the style's.
+            self.music_body.setMinimumHeight(max(
+                CLASSIC_MUSIC_MINIMUM, self.track_button.sizeHint().height()))
+            self.music_body.setMaximumHeight(CLASSIC_MUSIC_MAXIMUM)
+        else:
+            self.music_body.setMinimumHeight(MUSIC_BAND_MINIMUM)
+            self.music_body.setMaximumHeight(16777215)
+        self._music_band_margins()
         self._arrange_music()
 
     def _arrange_music(self) -> None:
@@ -730,4 +760,9 @@ class PreviewView(QObject):
             lambda index: self.select_picked.emit(index)
         )
         layout.addWidget(self.trim_bar)
+        # Flow's Trim page adds one lane per range under the whole recording.
+        # Hidden everywhere else, so Classic's filmstrip is exactly as it was.
+        self.range_lanes = RangeLanes()
+        self.range_lanes.follow(self.trim_bar)
+        layout.addWidget(self.range_lanes)
         return band

@@ -187,6 +187,10 @@ class BrowserPanel(QWidget):
         header.addSpacing(8)
         header.addWidget(QLabel("List:"))
         self.mode_buttons: dict[BrowserMode, QPushButton] = {}
+        # Which mode is showing, for sizing the rows: Expanded's height is
+        # meant to become more rows.
+        self._mode = BrowserMode.NORMAL
+        self._stacked = False
         for mode in BrowserMode:
             button = QPushButton(mode.label)
             button.setCheckable(True)
@@ -366,6 +370,7 @@ class BrowserPanel(QWidget):
         Measured natively, the header and review rows need 640 and 624px side
         by side; a list beside the picture at the compact size has about 450.
         """
+        self._stacked = bool(stacked)
         direction = (QBoxLayout.Direction.TopToBottom if stacked
                      else QBoxLayout.Direction.LeftToRight)
         for row in self._rows:
@@ -480,6 +485,7 @@ class BrowserPanel(QWidget):
             button.setChecked(candidate is mode)
             button.blockSignals(blocked)
         collapsed = mode is BrowserMode.COLLAPSED
+        self._mode = mode
         self.table.setVisible(not collapsed)
         self.summary_bar.setVisible(collapsed)
 
@@ -517,7 +523,23 @@ class BrowserPanel(QWidget):
 
         viewport = self.table.viewport().height()
         if viewport > 0:
-            by_height = max(48, viewport // MIN_VISIBLE_CLIPS - 6)
+            # Expanded is asked for rows, not for bigger pictures of the same
+            # rows: sized for twice as many clips, the height it gains shows
+            # more of them. Measured natively, sizing it like Normal turned
+            # 157px of list into 185px and two rows into two larger rows.
+            # Worked out from the list as it is now, in either mode, so
+            # nothing depends on which mode came first.
+            # Flow's stacked list keeps its own sizing whatever Classic's
+            # mode was left at.
+            expanded = (self._mode is BrowserMode.EXPANDED
+                        and not self._stacked)
+            wanted_rows = (2 * MIN_VISIBLE_CLIPS if expanded
+                           else MIN_VISIBLE_CLIPS)
+            # Normal's rows never go below 48px; Expanded's may go down to
+            # the smallest thumbnail, which is where its extra rows come
+            # from on a list that is only somewhat taller.
+            least = round(MIN_THUMB_WIDTH * 9 / 16) if expanded else 48
+            by_height = max(least, viewport // wanted_rows - 6)
             width = max(
                 MIN_THUMB_WIDTH,
                 min(width, round(by_height * 16 / 9)),
