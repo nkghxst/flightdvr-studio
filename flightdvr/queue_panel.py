@@ -19,13 +19,18 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QProgressBar,
-    QPushButton, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout,
-    QWidget,
+    QAbstractItemView, QAbstractScrollArea, QHBoxLayout, QHeaderView, QLabel,
+    QProgressBar, QPushButton, QSizePolicy, QSpacerItem, QTableWidget,
+    QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .jobs import Job, JobStatus
-from .widgets import GAP, TIGHT
+from .widgets import GAP, TIGHT, dim
+
+# Classic's queue is a strip under the work, so its table is kept short. A page
+# that is only the queue lifts that, and the table grows with its rows.
+STRIP_TABLE_HEIGHT = 150
+UNBOUNDED = 16777215
 
 
 class QueuePanel(QWidget):
@@ -38,6 +43,9 @@ class QueuePanel(QWidget):
     reveal_requested = Signal()
     about_requested = Signal()
     item_activated = Signal(object)
+    # The job whose row is selected, or None. Selecting is looking: nothing
+    # here starts, stops, removes or plays anything.
+    job_selected = Signal(object)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -62,7 +70,10 @@ class QueuePanel(QWidget):
         self.overall_bar.setValue(0)
         self.overall_bar.setTextVisible(True)
         self.overall_bar.setFormat("idle")
-        self.overall_bar.setMinimumWidth(220)
+        # A floor, not a size: it stretches wherever there is room. At 220 the
+        # header alone held Flow's Queue page past the 1060px compact width
+        # once a job's count lengthened the toggle beside it.
+        self.overall_bar.setMinimumWidth(140)
         header.addWidget(self.overall_bar, 1)
         self.overall_label = QLabel("")
         self.overall_label.setMinimumWidth(210)
@@ -102,7 +113,7 @@ class QueuePanel(QWidget):
         self.table.itemDoubleClicked.connect(
             lambda item, *_: self.item_activated.emit(item)
         )
-        self.table.setMaximumHeight(150)
+        self.table.setMaximumHeight(STRIP_TABLE_HEIGHT)
         head = self.table.horizontalHeader()
         # Filenames are short; progress is the thing worth watching, so it gets
         # the width rather than the name column.
@@ -135,6 +146,108 @@ class QueuePanel(QWidget):
         row.addStretch(1)
         layout.addLayout(row)
 
+        # What a selected job was submitted with, read from the job itself.
+        # Shown only where the queue is the page; the strip has no room for it.
+        self.details = QWidget()
+        details = QVBoxLayout(self.details)
+        details.setContentsMargins(0, TIGHT, 0, 0)
+        details.setSpacing(TIGHT)
+        self.details_title = QLabel("")
+        details.addWidget(self.details_title)
+        self.details_note = dim(QLabel(
+            "Read-only. Editing the planned output it came from does not "
+            "reach it."))
+        self.details_note.setWordWrap(True)
+        details.addWidget(self.details_note)
+        self.details_body = QLabel("")
+        self.details_body.setWordWrap(True)
+        self.details_body.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        details.addWidget(self.details_body)
+        # As tall as what it says: the page's slack goes below, not between
+        # its lines.
+        self.details.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                   QSizePolicy.Policy.Maximum)
+        self.details.hide()
+        layout.addWidget(self.details)
+
+        # Takes the slack only when the queue is the page, so the jobs sit at
+        # the top rather than being spread down it. Inert in the strip.
+        self._tail = QSpacerItem(0, 0, QSizePolicy.Policy.Minimum,
+                                 QSizePolicy.Policy.Minimum)
+        layout.addItem(self._tail)
+
+        self._jobs: list[Job] = []
+        self._fills_page = False
+        self._strip_was_open: bool | None = None
+        self._shown_job: Job | None = None
+        self.table.itemSelectionChanged.connect(self._on_selection)
+
+    # -- the queue as a page (Flow) ---------------------------------------------
+
+    def set_fills_page(self, fills: bool) -> None:
+        """Arrange for a page that is only the queue, or back to the strip.
+
+        On the page the table is as tall as its rows, the actions sit directly
+        under it and the submitted details under those; the slack goes below.
+        The body stays open, because collapsing it would empty the page.
+        """
+        fills = bool(fills)
+        if fills and not self._fills_page:
+            # Classic's own choice, open or closed, comes back with the strip.
+            self._strip_was_open = self.toggle.isChecked()
+        self._fills_page = fills
+        if fills:
+            self.table.setMaximumHeight(UNBOUNDED)
+            self.table.setSizeAdjustPolicy(
+                QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+            self.table.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                     QSizePolicy.Policy.Maximum)
+            self._tail.changeSize(0, 0, QSizePolicy.Policy.Minimum,
+                                  QSizePolicy.Policy.Expanding)
+            self.open_queue()
+        else:
+            self.table.setMaximumHeight(STRIP_TABLE_HEIGHT)
+            self.table.setSizeAdjustPolicy(
+                QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
+            self.table.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                     QSizePolicy.Policy.Expanding)
+            self._tail.changeSize(0, 0, QSizePolicy.Policy.Minimum,
+                                  QSizePolicy.Policy.Minimum)
+            if self._strip_was_open is not None:
+                self.toggle.setChecked(self._strip_was_open)
+                self._strip_was_open = None
+        self.toggle.setEnabled(not fills)
+        self.details.setVisible(fills and self._shown_job is not None)
+        self.body.layout().invalidate()
+
+    @property
+    def fills_page(self) -> bool:
+        return self._fills_page
+
+    def selected_job(self) -> Job | None:
+        rows = self.table.selectionModel().selectedRows()
+        if len(rows) != 1:
+            return None
+        row = rows[0].row()
+        return self._jobs[row] if 0 <= row < len(self._jobs) else None
+
+    def _on_selection(self) -> None:
+        self.job_selected.emit(self.selected_job())
+
+    def show_details(self, title: str, lines: list[str]) -> None:
+        """Say what the selected job was submitted with. The window words it."""
+        self._shown_job = self.selected_job()
+        self.details_title.setText(f"<b>{title}</b>")
+        self.details_body.setText("\n".join(lines))
+        self.details.setVisible(self._fills_page)
+
+    def clear_details(self) -> None:
+        self._shown_job = None
+        self.details_title.setText("")
+        self.details_body.setText("")
+        self.details.hide()
+
     def _on_toggled(self, open_: bool) -> None:
         self.body.setVisible(open_)
         self.toggle.setArrowType(
@@ -164,9 +277,18 @@ class QueuePanel(QWidget):
         return "Queue — " + ", ".join(parts)
 
     def rebuild(self, jobs: list[Job]) -> None:
+        # The selection is a job, not a row number. Rows are rewritten in place,
+        # so after a removal the same row can hold a different job — and its
+        # details would then describe something nobody selected.
+        was = self.selected_job()
+        self._jobs = list(jobs)
         self.toggle.setText(self.summary(jobs))
         if jobs:
             self.open_queue()
+            if self._fills_page:
+                # What Classic would have done had it been showing: jobs open
+                # the strip, so it comes back open.
+                self._strip_was_open = True
 
         self.table.setRowCount(len(jobs))
         for row, job in enumerate(jobs):
@@ -188,6 +310,20 @@ class QueuePanel(QWidget):
             if job.message and job.status in (JobStatus.DONE, JobStatus.FAILED):
                 status = f"{job.status.value} — {job.message}"
             self.table.setItem(row, 3, QTableWidgetItem(status))
+
+        blocked = self.table.blockSignals(True)
+        try:
+            self.table.clearSelection()
+            if was is not None:
+                for row, job in enumerate(self._jobs):
+                    if job is was:
+                        self.table.selectRow(row)
+                        break
+        finally:
+            self.table.blockSignals(blocked)
+        # Announced every time, so what the details say follows the job's
+        # status rather than the moment it was selected.
+        self.job_selected.emit(self.selected_job())
 
     def set_running(self, running: bool) -> None:
         self.start_button.setEnabled(not running)

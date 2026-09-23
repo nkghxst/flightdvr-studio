@@ -44,7 +44,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
     QListWidget, QListWidgetItem, QStackedWidget,
-    QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
+    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox,
+    QProgressBar,
     QPushButton, QScrollArea, QSizePolicy, QSplitter, QTableWidget,
     QToolButton, QVBoxLayout, QWidget,
 )
@@ -79,16 +80,21 @@ from .audio_stream import (
     AudioStream, LiveAudioMapping, MonitorState, SequencePcmReader,
     SequenceSourceSegment,
 )
+from .flow_shell import FlowShell, OneLineNote, PictureFrame
+from .output_sidebar import Card, OutputSidebar
 from .flow_layout import (
-    Mode, Stage, first_stage as flow_first_stage, mode_from_stored,
-    neighbours as flow_neighbours, offered_stages, stage_from_stored,
-    title as flow_title,
+    Clock, Domain, Mode, Region, SelectedContext, Stage,
+    first_stage as flow_first_stage, material_revision, mode_from_stored,
+    neighbours as flow_neighbours, nothing_selected, occurrences_of,
+    offered_stages,
+    stage_from_stored, title as flow_title,
 )
 from .live_preview import Listening, LivePreview
 from .music_panel import MusicPanel
 from .output_naming import naming_inputs, resolve_output
 from .output_plan import (
-    OutputPlan, OutputTarget, ordinary_pieces, working_outputs,
+    OutputPlan, OutputTarget, ordinary_pieces, piece_label, target_for_piece,
+    working_outputs,
 )
 from .presets import (
     PRESET_ORDER, PRESETS, ExportSettings, describe_join_problems,
@@ -132,6 +138,11 @@ COPYRIGHT_HOLDER = "Isadu Nkemi"
 # Said whenever a decision is refused because the list is still being built.
 # Enough of a card to read its recording, preset and one line about sound.
 SIDEBAR_MINIMUM = 210
+
+# Beside a thumbnail, room for a recording's name: under this the Clip column
+# stops being a column. Measured natively at the compact size, where it
+# stretched to about 40px and the name never showed.
+CLIP_NAME_ROOM = 110
 
 SCAN_IN_PROGRESS = ("Still listing this folder — decisions can be made once "
                     "the scan finishes")
@@ -186,6 +197,65 @@ class _MonitorSnapshot:
 # role for ordering. This one records the current-settings export marker so the
 # Exported filter reads the same answer the row displays.
 EXPORTED_ROLE = Qt.ItemDataRole.UserRole + 2
+
+
+def music_words(choice) -> str:
+    """One truthful phrase for a music choice, or nothing when it has none."""
+    mode = choice.mode
+    if mode is None:
+        return ""
+    if mode is AudioMode.ORIGINAL:
+        return "Original audio"
+    if mode is AudioMode.NO_SOUND:
+        return "No sound"
+    track = choice.track.name if choice.track else "a track"
+    return (f"{track} + original audio" if mode is AudioMode.MIX
+            else track)
+
+
+def _occurrence_words(clip) -> str:
+    span = clip.trim_label
+    label = piece_label(clip)
+    return f"{label} · {span}" if span else f"{label} · whole recording"
+
+
+def submitted_lines(job) -> list[str]:
+    """What a job was submitted with, read from the job and nothing else.
+
+    The job owns deep copies of its clips, settings and music, so these lines
+    cannot follow later edits to the planned output it came from. Where it
+    will be written is not evidence that it was: only a job the encoder
+    finished, whose file is still there, says "Written to".
+    """
+    lines: list[str] = []
+    if len(job.clips) > 1:
+        lines.append(f"Source: {len(job.clips)} ranges, joined in this order")
+        # Each occurrence on its own line, a repeated recording included:
+        # the same file twice is two ranges, not one.
+        lines.extend(f"  {index}. {_occurrence_words(clip)}"
+                     for index, clip in enumerate(job.clips, start=1))
+    else:
+        lines.append(f"Source: {_occurrence_words(job.clips[0])}")
+    preset = job.preset_label
+    if job.preset_key == "social" and job.settings.social_mode == "size":
+        preset += f" · a file size, {job.settings.social_size_mb} MB"
+    lines.append(f"Preset: {preset}")
+    lines.append(f"Sound: {music_words(job.audio) or 'the preset default'}")
+    path = job.out_path
+    if job.status is JobStatus.DONE:
+        lines.append(f"Written to: {path}" if path.exists() else
+                     f"Reported finished, but nothing is at {path} now")
+    elif job.status is JobStatus.RUNNING:
+        lines.append(f"Being written to: {path} — not finished")
+    elif job.status is JobStatus.PENDING:
+        lines.append(f"Will be written to: {path}")
+    else:
+        lines.append(f"Was to be written to: {path} — no finished file")
+    status = job.status.value
+    if job.message:
+        status += f" — {job.message}"
+    lines.append(f"Status: {status}")
+    return lines
 
 class MainWindow(QMainWindow):
     # A closing window cannot parent a QThread that is still reaping a probe
@@ -283,11 +353,17 @@ class MainWindow(QMainWindow):
         self._flow_slots: dict = {}
         self._left_column: QWidget | None = None
         self.flow_viewport = None
+        self._picture_frame = None
         self.flow_source_note = None
+        self._music_band_was_open: bool | None = None
         self._viewport_home = None
         self.sidebar_working = None
         self.sidebar_submitted = None
         self._sidebar_target: OutputTarget | None = None
+        # What a newly planned output starts with in Flow: the panel as it
+        # stood on entering Flow, or as edited with nothing selected. Never
+        # whichever output happened to be loaded when a list was repainted.
+        self._flow_defaults: tuple[str, ExportSettings] | None = None
         self._sidebar_building = False
         self._assembly_drawing = False
         self._sidebar_rebuilds = 0
@@ -761,7 +837,39 @@ class MainWindow(QMainWindow):
         panel.review_requested.connect(self._set_review)
         panel.length_filter_changed.connect(self._refresh_review_filter)
         panel.mode_requested.connect(self.set_browser_mode)
+        head = panel.table.horizontalHeader()
+        head.geometriesChanged.connect(self._fit_clip_column)
+        head.sectionResized.connect(
+            lambda index, *_: index != 0 and self._fit_clip_column())
         return panel
+
+    def _fit_clip_column(self) -> None:
+        """Keep the Clip column readable where the list is narrow.
+
+        It stretches into whatever the other columns leave. Beside the picture
+        at the compact size that was about 40px beside a 120px thumbnail: the
+        thumbnail painted over Length and no recording's name showed. There it
+        keeps a readable width and the table scrolls sideways; nothing is
+        dropped. Classic's list is never that narrow and keeps its stretch.
+        """
+        table = self.browser_panel.table
+        head = table.horizontalHeader()
+        narrow_browse = (self._view_mode is Mode.FLOW
+                         and self._flow_stage is Stage.BROWSE)
+        floor = table.iconSize().width() + CLIP_NAME_ROOM
+        others = sum(head.sectionSize(column)
+                     for column in range(1, table.columnCount())
+                     if not table.isColumnHidden(column))
+        room = table.viewport().width() - others
+        stretch = QHeaderView.ResizeMode.Stretch
+        if not narrow_browse or room >= floor:
+            if head.sectionResizeMode(0) != stretch:
+                head.setSectionResizeMode(0, stretch)
+            return
+        if head.sectionResizeMode(0) != QHeaderView.ResizeMode.Interactive:
+            head.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        if head.sectionSize(0) != floor:
+            head.resizeSection(0, floor)
 
     # Compatibility views for the established MainWindow API. They keep
     # integrations and UI tests working without making the widgets
@@ -916,10 +1024,25 @@ class MainWindow(QMainWindow):
         return OutputTarget.clip_or_range(clip.fingerprint, sid)
 
     def _music_context(self) -> tuple[str, str, bool, bool]:
-        """Target name, and the same triple `_run_job` resolves music under."""
-        if self._music_target is not None and self._music_target.is_assembly:
-            return (f"Assembly · {len(self._music_target.items)} rows",
-                    self._preset_key(), True, False)
+        """Target name, and the same triple the queue resolves music under.
+
+        Named and judged by the output being edited. In Flow that output keeps
+        its own preset, and the music panel's editability depends on it —
+        reading the panel's preset, or naming the focused clip, would describe
+        a different output from the one the choice is written to.
+        """
+        target = self._music_target
+        if target is not None and target.is_assembly:
+            return (f"Assembly · {len(target.items)} rows",
+                    self._choices_for(target)[0]
+                    if self._view_mode is Mode.FLOW else self._preset_key(),
+                    True, False)
+        if self._view_mode is Mode.FLOW and target is not None:
+            label = next((output.label for output in self._working_outputs()
+                          if output.target == target), "")
+            if label:
+                return (label, self._choices_for(target)[0],
+                        self.export_panel.join_enabled(), False)
         clip = self._trim_clip
         name = clip.path.name if clip is not None else ""
         ranges = clip.real_selects if clip is not None else []
@@ -927,7 +1050,6 @@ class MainWindow(QMainWindow):
             chosen = ranges[min(clip.current, len(ranges) - 1)]
             name = f"{name} · {chosen.name or 'range'}"
         return name, self._preset_key(), self.export_panel.join_enabled(), False
-
     def _assembly_working_output(self):
         """The one exact valid joined output, without compiling a second plan."""
         if not self.export_panel.join_enabled():
@@ -961,6 +1083,66 @@ class MainWindow(QMainWindow):
         self._assembly_music_target = target
         self.output_plan.select(target)
 
+    # -- the one answer to "what is being looked at" --------------------------
+
+    def context_for_job(self, job) -> SelectedContext:
+        """A submitted job, read from its own frozen values and nothing else.
+
+        Deliberately does not consult the working plan. A job carries the
+        target, sequence, settings and music it was committed with, and the
+        queue's own note promises that editing the plan it came from does not
+        reach it — a context assembled from live state would quietly break
+        that promise while looking identical.
+        """
+        occurrences = occurrences_of(job.sequence)
+        identity = str(job.out_path)
+        return SelectedContext(
+            domain=Domain.SUBMITTED,
+            revision=material_revision(
+                Domain.SUBMITTED, occurrences, submitted=identity),
+            target=job.target,
+            sequence=job.sequence,
+            occurrences=occurrences,
+            preset_key=job.preset_key,
+            settings=job.settings,
+            music=job.audio,
+            submitted=identity,
+        )
+
+    def context_for_working(self, target: OutputTarget) -> SelectedContext:
+        """One editable planned output, with its own settings and music.
+
+        The preset, settings and music come from the plan entry for *this*
+        target rather than from whatever the panels happen to be showing, which
+        is what makes an A to B to A round trip give A back unchanged.
+        """
+        sequence = (self._sequence_plan
+                    if target == self._sequence_target else None)
+        occurrences = occurrences_of(sequence)
+        return SelectedContext(
+            domain=Domain.WORKING,
+            revision=material_revision(Domain.WORKING, occurrences),
+            target=target,
+            sequence=sequence,
+            occurrences=occurrences,
+            preset_key=self._preset_key(),
+            settings=self.export_panel.capture(),
+            music=self._planned_music(target),
+        )
+
+    def context_for_source(self, clip) -> SelectedContext:
+        """A recording being inspected, on its own time.
+
+        Browse and Trim are allowed to look at source without disturbing which
+        planned output is selected, so this deliberately carries no target.
+        """
+        path = str(clip.path)
+        return SelectedContext(
+            domain=Domain.SOURCE,
+            revision=material_revision(Domain.SOURCE, source_path=path),
+            source_path=path,
+        )
+
     def _planned_music(self, target: OutputTarget) -> MusicChoice:
         try:
             return self.output_plan.get(target).music
@@ -968,8 +1150,103 @@ class MainWindow(QMainWindow):
             return MusicChoice()
 
     def _store_music(self, target: OutputTarget, choice: MusicChoice) -> None:
-        self.output_plan.set_choices(
-            target, self._preset_key(), self.current_settings(), choice)
+        """Record a music choice without touching the output's other choices.
+
+        A music write used to stamp the panel's preset and settings onto the
+        output as a side effect. With per-output settings that is a quiet
+        overwrite: change the track on A while the panel shows something else
+        — in Classic, say — and A's own preset is replaced by it.
+        """
+        if target in self.output_plan.targets:
+            planned = self.output_plan.get(target)
+            self.output_plan.set_choices(
+                target, planned.preset_key, planned.settings, choice)
+            return
+        preset, settings = self._seed_defaults()
+        self.output_plan.set_choices(target, preset, settings, choice)
+
+    # -- each output's own preset and settings ---------------------------------
+
+    def _seed_defaults(self) -> tuple[str, ExportSettings]:
+        """The explicit starting choices for an output seen for the first time.
+
+        In Flow these are the recorded defaults, not the panel: the panel is
+        showing whichever output is loaded, and seeding B from A's settings
+        because a list happened to repaint while A was open is exactly the
+        leak this avoids. Classic has one set of choices, so it uses them.
+        """
+        if self._view_mode is Mode.FLOW and self._flow_defaults is not None:
+            return self._flow_defaults
+        return self._preset_key(), self.current_settings()
+
+    def _ensure_target_choices(self, target: OutputTarget) -> None:
+        """Give an output its own entry the first time it exists. Once only.
+
+        Not for an Assembly. Its entry is created and rekeyed by its own
+        tracked binding, which deliberately refuses to adopt an entry it did
+        not create — that refusal is what stops a reordered Assembly
+        inheriting a stale or foreign choice, and seeding here would trip it.
+        """
+        if target in self.output_plan.targets or target.is_assembly:
+            return
+        preset, settings = self._seed_defaults()
+        self.output_plan.set_choices(target, preset, settings, MusicChoice())
+
+    def _choices_for(self, target: OutputTarget) -> tuple[str, ExportSettings]:
+        """An output's own preset and settings, or the explicit defaults if it
+        has none yet. Never the panel's ambient state."""
+        if target in self.output_plan.targets:
+            planned = self.output_plan.get(target)
+            return planned.preset_key, planned.settings
+        return self._seed_defaults()
+
+    def _active_targets(self) -> list[OutputTarget]:
+        """The planned outputs that exist now. Retained, unticked entries are
+        remembered but are not part of any batch."""
+        return [output.target for output in self._working_outputs()]
+
+    def _apply_choices(self, preset: str, settings: ExportSettings) -> None:
+        """Show choices in the panel as a load, never as an edit.
+
+        The one fence is `load_choices` emitting nothing. A second flag here
+        was removed: with the panel's signals blocked, capture is never even
+        called during a load, so the flag could not be reached and no test
+        could tell it apart from its absence.
+        """
+        self.export_panel.load_choices(preset, settings)
+        if not self._ready:
+            return
+        # What an edit would have refreshed, minus recording it as a choice.
+        self.trim_note.setVisible(preset == "remux")
+        self._refresh_vertical_overlay()
+        self._refresh_export_markers()
+        self._update_estimate()
+
+    def _load_target(self, target: OutputTarget) -> None:
+        self._ensure_target_choices(target)
+        self._apply_choices(*self._choices_for(target))
+
+    def _capture_choices(self) -> None:
+        """A genuine edit in Flow: record it where it belongs.
+
+        With an output selected it is that output's. With none, it edits the
+        defaults new outputs start from — there is nothing else it could
+        honestly belong to, and falling back to the first output would write
+        to one nobody chose.
+        """
+        if self._view_mode is not Mode.FLOW:
+            return
+        preset, settings = self._preset_key(), self.current_settings()
+        target = self._sidebar_target
+        if target is not None and target in self._active_targets():
+            if target not in self.output_plan.targets and target.is_assembly:
+                # Created by its owner, never adopted.
+                self._bind_assembly_music_target(target)
+            music = (self.output_plan.get(target).music
+                     if target in self.output_plan.targets else MusicChoice())
+            self.output_plan.set_choices(target, preset, settings, music)
+        elif target is None:
+            self._flow_defaults = (preset, settings)
 
     def _sync_music_panel(self) -> None:
         """Show the exact output being edited, without inventing a fallback."""
@@ -987,7 +1264,17 @@ class MainWindow(QMainWindow):
                     audition = True
                 target = self._assembly_music_target
             else:
-                target = self._music_target_for(self._trim_clip)
+                # In Flow the selected output is the one being edited, on
+                # every page that edits. Browse moves the focused clip to
+                # inspect a recording without changing that — so deriving the
+                # target from the focus edited whatever was looked at last.
+                selected = self._sidebar_target
+                if (self._view_mode is Mode.FLOW and selected is not None
+                        and not selected.is_assembly
+                        and selected in self._active_targets()):
+                    target = selected
+                else:
+                    target = self._music_target_for(self._trim_clip)
                 if target is not None and target not in self.output_plan.targets:
                     self._store_music(target, MusicChoice())
                 if target is not None:
@@ -1159,7 +1446,7 @@ class MainWindow(QMainWindow):
             self._show_music_state(target)
 
     def _music_refusal(self, pieces, *, joined: bool | None = None,
-                       bundle: bool = False) -> str:
+                       bundle: bool = False, preset_for=None) -> str:
         """Why this action cannot be queued, asked before anything is queued.
 
         Configured music that cannot be exported refuses the whole action. It
@@ -1185,7 +1472,9 @@ class MainWindow(QMainWindow):
                         "for it to finish, or clear the choice.")
             if target in self._music_trouble:
                 return f"Assembly: {self._music_trouble[target]}"
-            reason = MusicPanel._refusal(self._preset_key(), True, bundle)
+            preset = (preset_for(pieces[0]) if preset_for is not None
+                      else self._preset_key())
+            reason = MusicPanel._refusal(preset, True, bundle)
             if reason:
                 return f"Assembly: {reason}"
             if choice.mode in (AudioMode.REPLACE, AudioMode.MIX):
@@ -1209,7 +1498,9 @@ class MainWindow(QMainWindow):
                         "read. Wait for it to finish, or clear the choice.")
             if target in self._music_trouble:
                 return f"{piece.path.name}: {self._music_trouble[target]}"
-            reason = MusicPanel._refusal(self._preset_key(), joined, bundle)
+            preset = (preset_for(piece) if preset_for is not None
+                      else self._preset_key())
+            reason = MusicPanel._refusal(preset, joined, bundle)
             if reason:
                 return f"{piece.path.name}: {reason}"
             if choice.mode in (AudioMode.REPLACE, AudioMode.MIX):
@@ -1744,74 +2035,61 @@ class MainWindow(QMainWindow):
         }
 
     def _build_flow_host(self) -> QWidget:
-        """The Flow page: a stage bar, one stage at a time, and Back/Next.
+        """The Flow page, arranged by the shell and filled by this window.
 
-        It owns no panel. Panels are lent to it when the mode changes and go
-        home when it changes back, so there is exactly one of each and nothing
-        is reconnected.
+        It owns no panel. Panels are lent into the shell's regions when the
+        mode changes and go home when it changes back, so there is exactly one
+        of each and nothing is reconnected.
+
+        The shell decides arrangement only. Which stage is shown, whether a
+        move is allowed and what the fixed actions do stay here, because only
+        the window knows what is selected and what committing means.
         """
         host = QWidget()
         layout = QVBoxLayout(host)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(INNER)
+        layout.setSpacing(0)
 
-        # The picture is persistent, as the approved revision places it: every
-        # page that decides something you can only judge by looking has it, and
-        # there is one of it. It is the same `PreviewView` Classic uses.
+        shell = self.flow_shell = FlowShell(self._offered_stages)
+        shell.stage_chosen.connect(
+            lambda value: self._show_stage(Stage(value)))
+        shell.back_requested.connect(lambda: self._step_stage(-1))
+        shell.next_requested.connect(lambda: self._step_stage(1))
+        shell.primary_activated.connect(self._commit_all_planned)
+        shell.secondary_activated.connect(self._cancel)
+        layout.addWidget(shell, 1)
+
+        # The established lending machinery addresses stages by slot. Pointing
+        # those names at the shell's panel regions keeps the splitter/index
+        # bookkeeping that already gets Classic's layout back exactly, rather
+        # than rewriting it alongside a new arrangement.
+        # A page with a list region lends its panel there: Browse's panel is
+        # the recordings list, and it goes beside the picture, not under it.
+        self._flow_slots = {
+            stage: (shell.host(stage, Region.LIST)
+                    or shell.host(stage, Region.PANEL))
+            for stage in self._offered_stages
+        }
+        self.flow_stage_buttons = shell.stage_buttons
+        self.flow_back = shell.back_button
+        self.flow_next = shell.next_button
+
+        # Flow-only output clock and the honest caption about what the picture
+        # is. Both travel with the picture into whichever region has it.
+        # The picture sits in a frame on every page that has one, so its own
+        # height-for-width cannot size the page around it.
+        self._picture_frame = PictureFrame()
+        self._picture_frame.resized.connect(self._fit_picture)
         self.flow_viewport = QWidget()
         viewport = QVBoxLayout(self.flow_viewport)
         viewport.setContentsMargins(0, 0, 0, 0)
         viewport.setSpacing(TIGHT)
-        # Flow-only output clock.  The picture itself is still the one Classic
-        # owns; this strip merely maps the compiled joined plan onto it.
         viewport.addWidget(self.preview_view.sequence_strip)
-        self.flow_source_note = dim(QLabel(""))
-        self.flow_source_note.setWordWrap(True)
+        self.flow_source_note = dim(OneLineNote(""))
         viewport.addWidget(self.flow_source_note)
-        layout.addWidget(self.flow_viewport)
 
-        self.flow_stage_bar = QWidget()
-        bar = QHBoxLayout(self.flow_stage_bar)
-        bar.setContentsMargins(0, 0, 0, 0)
-        bar.setSpacing(TIGHT)
-        self.flow_stage_buttons = {}
-        for stage in self._offered_stages:
-            button = QPushButton(flow_title(stage))
-            button.setCheckable(True)
-            button.clicked.connect(
-                lambda _checked=False, chosen=stage: self._show_stage(chosen))
-            bar.addWidget(button)
-            self.flow_stage_buttons[stage] = button
-        bar.addStretch(1)
-        layout.addWidget(self.flow_stage_bar)
-
-        self.flow_stages = QStackedWidget()
-        self._flow_slots = {}
-        for stage in self._offered_stages:
-            slot = QWidget()
-            slot_layout = QVBoxLayout(slot)
-            slot_layout.setContentsMargins(0, 0, 0, 0)
-            slot_layout.setSpacing(INNER)
-            self._flow_slots[stage] = slot
-            self.flow_stages.addWidget(slot)
-        body = QHBoxLayout()
-        body.setSpacing(INNER)
-        body.addWidget(self.flow_stages, 3)
         self._sidebar = self._build_sidebar()
-        self._sidebar.setMinimumWidth(SIDEBAR_MINIMUM)
-        body.addWidget(self._sidebar, 1)
-        layout.addLayout(body, 1)
-
-        steps = QHBoxLayout()
-        steps.setSpacing(TIGHT)
-        self.flow_back = QPushButton("Back")
-        self.flow_back.clicked.connect(lambda: self._step_stage(-1))
-        self.flow_next = QPushButton("Next")
-        self.flow_next.clicked.connect(lambda: self._step_stage(1))
-        steps.addStretch(1)
-        steps.addWidget(self.flow_back)
-        steps.addWidget(self.flow_next)
-        layout.addLayout(steps)
+        shell.adopt_sidebar(self._sidebar)
         return host
 
     def _lend_to_flow(self) -> None:
@@ -1916,20 +2194,67 @@ class MainWindow(QMainWindow):
                 and self._flow_stage is Stage.ASSEMBLE
                 and chosen is not Mode.FLOW):
             self._leave_sequence_scrub()
+        # Moving the panels asks for more room for a moment either way; the
+        # window keeps its size unless the new arrangement truly needs more.
+        was = self.size()
         # The mode is recorded first. The sidebar only does its work while
         # Flow is the mode, so refreshing before this was refreshing into a
         # guard that had every right to refuse — and the list arrived empty.
         self._view_mode = chosen
+        # Output's "For:" belongs to Flow; Classic keeps its familiar single
+        # set of controls.
+        self.export_panel.set_target_selector_visible(chosen is Mode.FLOW)
+        self.export_panel.set_add_label(
+            "Queue this output" if chosen is Mode.FLOW else "Add to queue")
         if chosen is Mode.FLOW:
+            # Classic's one set of choices becomes the defaults new outputs
+            # start from, and is what the panel returns to on the way out.
+            self._flow_defaults = (self._preset_key(), self.current_settings())
             self._refresh_sidebar()
+            # Coming back to an output that is still planned shows its own
+            # choices again rather than Classic's.
+            if self._sidebar_target in self._active_targets():
+                self._load_target(self._sidebar_target)
             self._lend_to_flow()
+            # On Flow's Queue page the queue is the page: jobs at the top,
+            # with what each was submitted with beneath. Switched only once it
+            # has left Classic's strip, where a taller table grew the window.
+            self.queue_panel.set_fills_page(True)
+            # The Music page is the music controls. Collapsed — Classic's way
+            # of giving height back to the picture — the page showed a picture
+            # and one checkbox. Classic's choice comes back on the way out.
+            # Flow's short pages need the controls beside the picture closed
+            # up; nothing is hidden. Classic gets its arrangement back.
+            self.preview_view.set_flow_controls(True)
+            band = self.preview_view.music_band
+            self._music_band_was_open = band.isChecked()
+            band.setChecked(True)
             self._lend_viewport()
             self.splitter.hide()
-            self._flow_host.show()
+            # The page is arranged before it is shown. Shown first, each piece
+            # moved in asked the window for room on its own, half-arranged —
+            # measured natively, a 913px window grew to 1194 for a moment.
             self._show_stage(self._flow_stage or
                              flow_first_stage(self._offered_stages))
+            self._flow_host.show()
         else:
+            if self._flow_defaults is not None:
+                # Classic has one set of choices. Leaving Flow with an output's
+                # own settings still showing would make them Classic's by
+                # accident, and its batch would then render with them.
+                self._apply_choices(*self._flow_defaults)
+                self._flow_defaults = None
             self._flow_host.hide()
+            # Back to the strip before it goes home, for the same reason.
+            self.queue_panel.set_fills_page(False)
+            self.preview_view.set_flow_controls(False)
+            self.preview_view.set_controls_below(False)
+            self.browser_panel.set_stacked(False)
+            self._fit_clip_column()
+            if self._music_band_was_open is not None:
+                self.preview_view.music_band.setChecked(
+                    self._music_band_was_open)
+                self._music_band_was_open = None
             self._return_viewport()
             self._return_from_flow()
             self.splitter.show()
@@ -1938,6 +2263,7 @@ class MainWindow(QMainWindow):
         for name, action in self._view_actions.items():
             action.setChecked(name is chosen)
         self._relayout()
+        self._keep_window_size(was)
 
     def _show_stage(self, stage) -> None:
         """Show one stage. Navigation alone changes nothing but what is seen."""
@@ -1948,7 +2274,20 @@ class MainWindow(QMainWindow):
                 and chosen is not Stage.ASSEMBLE):
             self._leave_sequence_scrub()
         self._flow_stage = chosen
-        self.flow_stages.setCurrentWidget(self._flow_slots[chosen])
+        was = self.size()
+        self.flow_shell.set_stage(chosen)
+        # Browse puts the list beside the picture. Measured natively, side by
+        # side they needed 1178px of a compact page's 794: the list's rows
+        # stack their pieces and the picture's controls go under it. Only
+        # there; every other page keeps the controls beside the picture.
+        browse = chosen is Stage.BROWSE
+        self.browser_panel.set_stacked(browse)
+        self.preview_view.set_controls_below(browse)
+        self._fit_clip_column()
+        # The picture goes where this page keeps it, or nowhere: Queue has no
+        # viewport region at all, so nothing is left hidden behind its jobs.
+        self._place_viewport(chosen)
+        self._keep_window_size(was)
         self.settings_store.setValue("flow_stage", chosen.value)
         if chosen is Stage.ASSEMBLE:
             self._refresh_sequence_plan()
@@ -1967,13 +2306,117 @@ class MainWindow(QMainWindow):
             self._sync_music_panel()
         self._show_source_note()
         back, forward = flow_neighbours(chosen, self._offered_stages)
-        self.flow_back.setEnabled(back is not None)
-        self.flow_next.setEnabled(forward is not None)
-        for offered, button in self.flow_stage_buttons.items():
-            blocked = button.blockSignals(True)
-            button.setChecked(offered is chosen)
-            button.blockSignals(blocked)
+        self.flow_shell.set_steps(back is not None, forward is not None)
+        self._show_page_actions(chosen)
 
+    def _keep_window_size(self, was) -> None:
+        """Give back height a page change only needed for a moment.
+
+        Measured natively: moving the picture in asks, for an instant, for the
+        old and the new place at once — 1194px on a 913px window — and a
+        window that has grown never shrinks back by itself, so opening Flow
+        left it taller than the screen. Once the layouts settle it is resized
+        to what it was; Qt still holds it to whatever the page really needs.
+
+        Only growth the change itself caused, and only if nothing has resized
+        the window since: CI caught the first version undoing a deliberate
+        resize that followed a change made while the window was being built.
+        """
+        grown = self.size()
+        if (not self.isVisible() or grown == was
+                or self.isMaximized() or self.isFullScreen()):
+            return
+
+        expected = [grown]
+
+        def restore(tries_left: int = 5) -> None:
+            if self.size() != expected[0] or (self.isMaximized()
+                                               or self.isFullScreen()):
+                return      # something else has sized it since: leave it be
+            # The minimum the move imposed for a moment is only recalculated as
+            # the layouts settle, and a resize before then is clamped straight
+            # back. So it is tried again, briefly, until it takes.
+            if self.layout() is not None:
+                self.layout().invalidate()
+                self.layout().activate()
+            self.resize(was)
+            if self.size() != was and tries_left > 0:
+                expected[0] = self.size()
+                QTimer.singleShot(20, lambda: restore(tries_left - 1))
+
+        QTimer.singleShot(0, restore)
+
+    def _place_viewport(self, stage: Stage) -> None:
+        """Put the one picture in this page's region, or take it away.
+
+        Moved rather than duplicated, and taken out entirely where the page
+        has no region for it: a hidden viewport would keep a decoder alive for
+        a page that shows nothing, which is how Queue would get its space
+        without earning it.
+        """
+        host = self.flow_shell.host(stage, Region.VIEWPORT)
+        box = self.preview_view.preview_box
+        if host is None:
+            for widget in (self._picture_frame, self.flow_viewport):
+                if widget.parentWidget() is not None:
+                    widget.setParent(None)
+            return
+        frame = self._picture_frame
+        if box.parentWidget() is not frame:
+            frame.hold(box)
+            # Nothing under the picture in the frame: no list to keep room for.
+            box.set_list_room(0)
+        if frame.parentWidget() is not host:
+            host.layout().addWidget(frame, 1)
+            host.layout().addWidget(self.flow_viewport)
+        box.show()
+        frame.show()
+        self.flow_viewport.show()
+        # Its arrangement may have changed while it waited detached (Queue has
+        # no place for it), and a hidden box drops the layout request that
+        # asked to apply it. Arriving at the same size, nothing asked again:
+        # natively, Browse after Queue kept the picture filling the box and the
+        # controls below its bottom edge.
+        box.layout().invalidate()
+        box.layout().activate()
+        self._fit_picture()
+
+    def _fit_picture(self) -> None:
+        """Cap the picture to the room its page gives it, never through its
+        floor. Measured natively, uncapped it was 347px in a 275px region and
+        covered the caption beneath."""
+        box = self.preview_view.preview_box
+        frame = self._picture_frame
+        if frame is None or box.parentWidget() is not frame:
+            return
+        # The box's own minimum as well as its floor: the floor counts the
+        # controls and the chrome, the minimum the layout's margins round them,
+        # and taking the smaller clipped 4px off the controls, natively.
+        floor = max(box.content_floor(), box.minimumSizeHint().height())
+        frame.set_floor(floor)
+        box.set_height_cap(max(floor, frame.height()))
+
+    def _show_page_actions(self, stage: Stage) -> None:
+        """Name the fixed actions so all-versus-one cannot be mistaken.
+
+        "Queue all planned" queues every output planned now, each with its own
+        choices; Output's own button queues only the output open in it.
+        Neither starts a render — queued work waits for Start, as it always
+        has — so neither is called "render". Cancel stops the render that is
+        running, from any page, and is off when nothing is.
+        """
+        running = bool(self.worker and self.worker.isRunning())
+        planned = len(self._active_targets())
+        if stage is Stage.QUEUE:
+            self.flow_shell.set_actions(
+                primary=f"Queue all planned ({planned})",
+                primary_enabled=False,
+                secondary="Cancel this render", secondary_enabled=running)
+            return
+        self.flow_shell.set_actions(
+            primary=f"Queue all planned ({planned})",
+            primary_enabled=planned > 0,
+            secondary="Cancel render", secondary_enabled=running)
     def _step_stage(self, direction: int) -> None:
         back, forward = flow_neighbours(self._flow_stage, self._offered_stages)
         self._show_stage(forward if direction > 0 else back)
@@ -2252,23 +2695,21 @@ class MainWindow(QMainWindow):
     # -- the persistent picture ------------------------------------------------
 
     def _lend_viewport(self) -> None:
-        """Hoist the picture above the stages, remembering where it lives.
+        """Record where the picture lives in Classic before Flow borrows it.
 
-        It cannot be lent to a stage. A widget is in one place at a time, and
-        the approved design has it on Browse, Trim, Assemble and Output — so it
-        goes above them, which is also what makes it one picture rather than
-        four.
+        Only the home is taken here. Where it *goes* is the current page's
+        business — each page keeps the picture in its own region and Queue has
+        no region for it, so hoisting it to one fixed place would put it above
+        a page that is meant not to have it.
         """
         box = self.preview_view.preview_box
         home = self._left_column.layout() if self._left_column else None
-        if home is None or self.flow_viewport is None:
+        if home is None:
             return
         index = home.indexOf(box)
         if index < 0:
             return
         self._viewport_home = (home, index)
-        self.flow_viewport.layout().insertWidget(0, box, 1)
-        box.show()
 
     def _return_viewport(self) -> None:
         """Put it back in the column, at the index it came from."""
@@ -2277,8 +2718,22 @@ class MainWindow(QMainWindow):
         home, index = self._viewport_home
         self._viewport_home = None
         box = self.preview_view.preview_box
-        if self.flow_viewport is not None and self.flow_viewport.layout():
-            self.flow_viewport.layout().removeWidget(box)
+        # Classic's own sizing, exactly as it was: room for the list under it,
+        # and the ceiling only its Expanded list asks for. Set while it is
+        # still in its Flow frame: set once it was back in the column, it was
+        # worked out against the column's height from before Flow, and the
+        # window grew by the difference (913 to 924, natively).
+        box.set_list_room(MIN_LIST_HEIGHT)
+        box.set_height_cap(box.content_floor()
+                           if self._layout_state.browser is BrowserMode.EXPANDED
+                           else None)
+        # It may be in any page's region, or in none at all after Queue, so it
+        # is detached by parent rather than removed from one known layout.
+        if box.parentWidget() is not None:
+            box.setParent(None)
+        for widget in (self._picture_frame, self.flow_viewport):
+            if widget is not None and widget.parentWidget():
+                widget.setParent(None)
         home.insertWidget(index, box)
         box.show()
 
@@ -2294,8 +2749,17 @@ class MainWindow(QMainWindow):
         Browse and Trim already show source and are not captioned: a line
         under every page is a line nobody reads.
         """
-        if stage not in (Stage.ASSEMBLE, Stage.OUTPUT):
-            return ""
+        if stage is not Stage.ASSEMBLE:
+            context = self._active_context(stage)
+            # The context decides, not the page's name. Source inspection is
+            # source and is not captioned; anything on the output clock is
+            # being decided on behalf of a file that does not exist yet, and
+            # until W5 the picture under it is still the source.
+            if context.clock is Clock.SOURCE and context.resolved:
+                return ""
+            if not context.resolved and stage not in (Stage.OUTPUT,
+                                                      Stage.MUSIC):
+                return ""
         if stage is Stage.ASSEMBLE:
             plan = self._sequence_plan
             if plan is None:
@@ -2389,6 +2853,27 @@ class MainWindow(QMainWindow):
             return None
         return clip
 
+    def _active_context(self, stage) -> SelectedContext:
+        """The context a page is showing, derived in one place.
+
+        Browse and Trim deliberately request a *source* context — they are
+        where a recording is inspected and trimmed — without disturbing which
+        planned output stays selected. Every other page shows the selected
+        output. The clock then comes from that context, never from the page's
+        name, so pressing Next cannot turn source seconds into output seconds.
+        """
+        clip = self._focused_source()
+        if stage in (Stage.BROWSE, Stage.TRIM):
+            if clip is not None:
+                return self.context_for_source(clip)
+            return nothing_selected("choose a recording to inspect it")
+        target = self._sidebar_target
+        if target is None and clip is not None:
+            target = self._music_target_for(clip)
+        if target is not None:
+            return self.context_for_working(target)
+        return nothing_selected("choose an output to see it")
+
     def _show_source_note(self) -> None:
         if self.flow_source_note is None:
             return
@@ -2397,33 +2882,24 @@ class MainWindow(QMainWindow):
         self.flow_source_note.setVisible(bool(text))
 
     def _build_sidebar(self) -> QWidget:
-        """Working outputs above, submitted jobs below. Flow only."""
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(INNER)
-
-        layout.addWidget(QLabel("Working outputs"))
-        self.sidebar_working = QListWidget()
-        self.sidebar_working.setToolTip(
-            "What Add to queue would build now. Choosing one opens it for "
-            "editing; it does not play anything."
+        """What you are making: planned above, committed below. Flow only."""
+        sidebar = self.output_sidebar = OutputSidebar()
+        sidebar.planned.setToolTip(
+            "What Commit to render would build now. Choosing one opens it "
+            "for editing; it does not play anything."
         )
-        self.sidebar_working.itemSelectionChanged.connect(
-            self._on_sidebar_choice)
-        layout.addWidget(self.sidebar_working, 1)
-
-        self.sidebar_submitted_title = dim(QLabel("Submitted"))
-        layout.addWidget(self.sidebar_submitted_title)
-        self.sidebar_submitted = QListWidget()
-        self.sidebar_submitted.setSelectionMode(
-            QListWidget.SelectionMode.NoSelection)
-        self.sidebar_submitted.setToolTip(
-            "Already queued. Their settings are fixed; start, cancel and "
+        sidebar.committed.setToolTip(
+            "Already committed. Their settings are frozen; start, cancel and "
             "progress stay on the queue."
         )
-        layout.addWidget(self.sidebar_submitted)
-        return panel
+        sidebar.chosen.connect(self._on_sidebar_choice)
+        # The established names still address the two lists, so the existing
+        # selection and refresh behaviour keeps its tests rather than being
+        # rewritten beside a new arrangement.
+        self.sidebar_working = sidebar.planned
+        self.sidebar_submitted = sidebar.committed
+        self.sidebar_submitted_title = sidebar.committed_title
+        return sidebar
 
     def _music_line(self, target) -> str:
         """One truthful line about sound, or nothing at all.
@@ -2437,17 +2913,7 @@ class MainWindow(QMainWindow):
             return f"Reading {self._music_reading[target].name}…"
         if target in self._music_trouble:
             return "Music could not be read"
-        choice = self._planned_music(target)
-        mode = choice.mode
-        if mode is None:
-            return ""
-        if mode is AudioMode.ORIGINAL:
-            return "Original audio"
-        if mode is AudioMode.NO_SOUND:
-            return "No sound"
-        track = choice.track.name if choice.track else "a track"
-        return (f"{track} + original audio" if mode is AudioMode.MIX
-                else track)
+        return music_words(self._planned_music(target))
 
     def _refresh_sidebar(self) -> None:
         """Rebuild both lists from what is true now.
@@ -2466,50 +2932,70 @@ class MainWindow(QMainWindow):
         self._sidebar_building = True
         self._sidebar_rebuilds += 1
         try:
-            chosen = self._sidebar_target
-            self.sidebar_working.clear()
-            preset = PRESETS[self._preset_key()].label
             outputs = self._working_outputs()
             for output in outputs:
-                music = self._music_line(output.target)
-                lines = [output.label, preset]
-                if music:
-                    lines.append(music)
-                item = QListWidgetItem("\n".join(lines))
-                item.setData(Qt.ItemDataRole.UserRole, output.target)
-                self.sidebar_working.addItem(item)
-                if output.target == chosen:
-                    item.setSelected(True)
-
-            self.sidebar_submitted.clear()
-            for job in self.jobs:
-                self.sidebar_submitted.addItem(
-                    f"{job.name}\n{job.preset_label} · {job.status.value}")
-            self.sidebar_submitted_title.setVisible(bool(self.jobs))
-            self.sidebar_submitted.setVisible(bool(self.jobs))
+                self._ensure_target_choices(output.target)
+            active = [output.target for output in outputs]
+            if (self._sidebar_target is not None
+                    and self._sidebar_target not in active):
+                # The chosen output stopped existing. Nothing is chosen now —
+                # not the first remaining one — and the panel goes back to the
+                # defaults rather than keeping choices that belong to nobody.
+                self._sidebar_target = None
+                if self._flow_defaults is not None:
+                    self._apply_choices(*self._flow_defaults)
+            planned = [
+                Card(key=output.target, title=output.label,
+                     # Its own preset, not the panel's: the panel is showing
+                     # whichever output is open.
+                     detail=PRESETS[self._choices_for(output.target)[0]].label,
+                     sound=self._music_line(output.target), status="Planned")
+                for output in outputs
+            ]
+            committed = [
+                Card(key=id(job), title=job.name, detail=job.preset_label,
+                     status=job.status.value)
+                for job in self.jobs
+            ]
+            self.output_sidebar.show_cards(planned, committed)
+            if self._sidebar_target is not None:
+                self.output_sidebar.select(self._sidebar_target)
+            # Same rows, same selection: the "For:" list is never built from
+            # a second derivation of what the outputs are.
+            self.export_panel.show_targets(
+                [(card.title, card.key) for card in planned],
+                self._sidebar_target)
         finally:
             self._sidebar_building = False
         if self._joined_assemble_active():
             self._refresh_sequence_plan()
 
-    def _on_sidebar_choice(self) -> None:
-        """Open the chosen output for editing, through the ordinary handlers.
+    def _on_sidebar_choice(self, target=None) -> None:
+        """A card was chosen in the sidebar."""
+        if target is None:
+            target = self.output_sidebar.selected_key
+        self._select_working_target(target)
 
-        Selecting a row does what clicking that clip in the table does, so
-        there are not two ways to be focused for them to disagree about. It
-        starts no sound: choosing something to edit is not asking to hear it.
+    def _select_working_target(self, target) -> None:
+        """The one way a planned output becomes the one being edited.
+
+        Both selectors — the sidebar card and Output's "For:" — come through
+        here and nowhere else, and each is told the answer rather than asked
+        for its own afterwards. Two selectors that each decided for themselves
+        could disagree, and the symptom would be an edit landing on an output
+        the person was not looking at.
+
+        Choosing is loading, not editing: it changes no setting, queues
+        nothing and starts no sound.
         """
-        if self._sidebar_building:
+        if self._sidebar_building or target is None:
             return
         if self._refuse_joined_source_action():
             return
-        items = self.sidebar_working.selectedItems()
-        if not items:
-            return
-        target = items[0].data(Qt.ItemDataRole.UserRole)
-        if target is None:
-            return
         self._sidebar_target = target
+        self.output_sidebar.select(target)
+        self.export_panel.select_target(target)
+        self._load_target(target)
         self._focus_piece(target.items[0].fingerprint, target.items[0].sid)
 
     def _focus_piece(self, fingerprint: str, sid: str) -> None:
@@ -2562,6 +3048,7 @@ class MainWindow(QMainWindow):
     def _build_export_panel(self) -> QWidget:
         panel = self.export_panel = ExportPanel(self)
         panel.preset_changed.connect(self._on_preset_changed)
+        panel.target_chosen.connect(self._select_working_target)
         panel.settings_changed.connect(self._on_export_settings_changed)
         panel.assembly_panel.fill_requested.connect(self._fill_assembly)
         panel.assembly_panel.order_changed.connect(self._capture_assembly)
@@ -2580,7 +3067,7 @@ class MainWindow(QMainWindow):
         # Wait until the edit is committed. Retargeting on every keystroke
         # would turn a temporarily incomplete template into a modal warning.
         panel.template_edit.editingFinished.connect(self._on_output_changed)
-        panel.add_requested.connect(self._add_to_queue)
+        panel.add_requested.connect(self._on_add_requested)
         panel.bundle_requested.connect(self._add_bundle)
         return panel
 
@@ -2595,7 +3082,17 @@ class MainWindow(QMainWindow):
         )
         panel.about_requested.connect(self._show_about)
         panel.item_activated.connect(self._open_finished_job)
+        panel.job_selected.connect(self._show_submitted)
         return panel
+
+    def _show_submitted(self, job) -> None:
+        """What a selected job was submitted with, from the job alone."""
+        if job is None:
+            self.queue_panel.clear_details()
+            return
+        self.queue_panel.show_details(
+            f"Submitted settings — {job.out_path.name}",
+            submitted_lines(job))
 
     def _on_queue_toggled(self, open_: bool) -> None:
         self.queue_panel._on_toggled(open_)
@@ -4671,6 +5168,8 @@ class MainWindow(QMainWindow):
         return self.export_panel.preset_key()
 
     def _on_preset_changed(self, key: str | None = None) -> None:
+        if self._ready:
+            self._capture_choices()
         self._refresh_sidebar()
         if not self._ready:
             return
@@ -4682,6 +5181,8 @@ class MainWindow(QMainWindow):
 
     def _on_export_settings_changed(self) -> None:
         """Refresh both the estimate and any source-space preview guidance."""
+        if self._ready:
+            self._capture_choices()
         self._refresh_vertical_overlay()
         self._update_estimate()
 
@@ -4843,6 +5344,24 @@ class MainWindow(QMainWindow):
         # than none: it reads as a promise about the job you are about to
         # queue. When there is an assembly, it is the job, so it is what gets
         # measured — ticks included nothing and excluded nothing.
+        #
+        # In Flow the panel is showing one output's own choices, and "Queue
+        # this output" queues that output alone — so that is what is measured.
+        # Summing every ticked piece under one output's preset would promise a
+        # size for a batch that does not render with these settings.
+        target = self._sidebar_target
+        if (self._view_mode is Mode.FLOW and target is not None
+                and target in self._active_targets()):
+            own = next(output for output in self._working_outputs()
+                       if output.target == target)
+            self._show_estimate(list(own.pieces), joined=target.is_assembly)
+            return
+        if self._view_mode is Mode.FLOW:
+            # Nothing chosen is not everything chosen. Sizing every ticked
+            # piece under the defaults promised a batch nobody had set up.
+            self.export_panel.set_estimate(
+                "Choose an output to see its estimated size.")
+            return
         if self.export_panel.join_enabled():
             pieces, gaps = self._assembly_export_pieces()
             if gaps or len(pieces) < 2:
@@ -4894,7 +5413,47 @@ class MainWindow(QMainWindow):
 
     # -- queue ----------------------------------------------------------------
 
-    def _add_to_queue(self) -> None:
+    def _on_add_requested(self) -> None:
+        """Output's own button: the open output in Flow, the batch in Classic."""
+        if self._view_mode is Mode.FLOW:
+            self._commit_selected()
+        else:
+            self._add_to_queue()
+
+    def _commit_all_planned(self) -> None:
+        """Every output planned now, each with its own preset and settings.
+
+        Retained entries for outputs that are no longer planned are not part
+        of the batch; they are remembered, not queued.
+        """
+        self._add_to_queue(choices=self._choices_for)
+        self._show_page_actions(self._flow_stage or Stage.OUTPUT)
+
+    def _commit_selected(self) -> None:
+        """Only the output open in the panel — and nothing if there is none.
+
+        No selection never means "the first one" or "all of them": both would
+        queue something the person did not choose.
+        """
+        target = self._sidebar_target
+        if target is None or target not in self._active_targets():
+            QMessageBox.warning(
+                self, "No output chosen",
+                "Nothing has been queued. Choose the output to queue from the "
+                "list or from For:, or use Queue all planned.")
+            return
+        self._add_to_queue(choices=self._choices_for, only=target)
+        self._show_page_actions(self._flow_stage or Stage.OUTPUT)
+
+    def _add_to_queue(self, *, choices=None, only=None) -> None:
+        """Queue the planned outputs, all or nothing. Never starts a render.
+
+        ``choices`` maps an output target to that output's own ``(preset,
+        settings)``; when it is None every piece uses the panel, which is
+        Classic's single batch path exactly as it always was. ``only`` limits
+        the action to one output — and if that output is not planned, nothing
+        is queued: it never falls back to the first output, or to all of them.
+        """
         # A filled assembly names its own material, so it is resolved once,
         # here, and the same pieces then answer every question below —
         # validation, estimate, runtime and the queue itself. Deriving any of
@@ -4930,13 +5489,43 @@ class MainWindow(QMainWindow):
             # point and one out point.
             pieces = ordinary_pieces(clips)
 
+        joined_target = (working_outputs(pieces, joined=True)[0].target
+                         if assembling else None)
+        if only is not None:
+            if assembling:
+                chosen = joined_target == only
+            else:
+                pieces = [piece for piece in pieces
+                          if target_for_piece(piece) == only]
+                chosen = bool(pieces)
+            if not chosen:
+                QMessageBox.warning(
+                    self, "That output is not planned",
+                    "Nothing has been queued. The output you chose is no "
+                    "longer planned — choose one from the list again.")
+                return
+        keep = ({target_for_piece(piece) for piece in pieces}
+                if not assembling and only is not None else None)
+
         out_dir = Path(self.export_panel.output_text().strip())
         if not str(out_dir).strip():
             QMessageBox.warning(self, "No output folder", "Choose where the exports should go.")
             return
 
-        key = self._preset_key()
-        settings = self.current_settings()
+        # One answer to "which preset and settings does this piece render
+        # with". Classic passes no choices, so every piece takes the panel —
+        # the one batch it has always had. Flow passes each output's own.
+        panel_choice = (self._preset_key(), self.current_settings())
+
+        def own(target):
+            if choices is None or target is None:
+                return panel_choice
+            return choices(target)
+
+        def piece_choice(piece):
+            return own(joined_target if assembling else target_for_piece(piece))
+
+        key, settings = own(joined_target) if assembling else panel_choice
         subfolders = self.export_panel.subfolders_enabled()
         stamp = self.flight_date()
 
@@ -4952,8 +5541,10 @@ class MainWindow(QMainWindow):
         # repeats this named check because jobs can reach it by another route,
         # but a pilot choosing Vertical should hear about a narrow source now,
         # not after it has waited for the queue to reach the front.
-        if key == "vertical":
-            problems = vertical_problems(pieces)
+        vertical = [piece for piece in pieces
+                    if piece_choice(piece)[0] == "vertical"]
+        if vertical:
+            problems = vertical_problems(vertical)
             if problems:
                 QMessageBox.warning(
                     self, "These clips cannot be made vertical",
@@ -4966,7 +5557,8 @@ class MainWindow(QMainWindow):
         # single job exists. Music that cannot be exported refuses the
         # whole action rather than being dropped: the person asked for it,
         # and a silent file with no explanation is the worst of both.
-        refusal = self._music_refusal(pieces)
+        refusal = self._music_refusal(
+            pieces, preset_for=lambda piece: piece_choice(piece)[0])
         if refusal:
             QMessageBox.warning(
                 self, "That music cannot be exported yet",
@@ -5067,8 +5659,10 @@ class MainWindow(QMainWindow):
             # small — on a 90 fps recording it dropped 119 frames of 360 and
             # reported success. The joined branch asks the same question
             # through join_problems.
-            if key == "slowmo":
-                unslowable = slow_problems(clips)
+            slowed = [piece for piece in pieces
+                      if piece_choice(piece)[0] == "slowmo"]
+            if slowed:
+                unslowable = slow_problems(slowed)
                 if unslowable:
                     QMessageBox.warning(
                         self, "These clips cannot be slowed",
@@ -5083,10 +5677,17 @@ class MainWindow(QMainWindow):
                 for clip in clips:
                     parts = clip.for_export()
                     for index, piece in enumerate(parts):
+                        # Numbered within the whole recording even when only
+                        # one output is being queued: a range's name must not
+                        # change because its siblings stayed behind.
+                        if (keep is not None
+                                and target_for_piece(piece) not in keep):
+                            continue
                         naming = naming_inputs(
                             piece, index, len(parts), session_name)
                         resolved = resolve_output(
-                            naming, key, out_dir, template, subfolders, stamp)
+                            naming, piece_choice(piece)[0], out_dir, template,
+                            subfolders, stamp)
                         planned.append((piece, naming, resolved))
             except BadTemplate as exc:
                 QMessageBox.warning(
@@ -5124,7 +5725,8 @@ class MainWindow(QMainWindow):
                 if output_key(target) in already:
                     continue
                 already.add(output_key(target))
-                self.jobs.append(Job([piece], key, settings, target,
+                piece_key, piece_settings = piece_choice(piece)
+                self.jobs.append(Job([piece], piece_key, piece_settings, target,
                                      out_dir=out_dir, stem=stem,
                                      subfolders=subfolders, naming=naming,
                                      template=template,

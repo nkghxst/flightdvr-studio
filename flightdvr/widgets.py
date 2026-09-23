@@ -157,6 +157,14 @@ class PreviewPanel(QGroupBox):
         # An optional ceiling, for when the clip list is worth more than the
         # last of the picture. None is the shipped behaviour and costs nothing.
         self._height_cap: int | None = None
+        # Room kept under the picture for the clip list that shares its column
+        # in Classic. A frame that holds only the picture has no list to keep
+        # room for, and reserving it there left a blank band under the picture.
+        self._list_room = MIN_LIST_HEIGHT
+        # Where the controls column sits: beside the picture (Classic, and
+        # every Flow page but one), or below it, for a column too narrow to
+        # hold both side by side.
+        self._controls_below = False
         self._sizing = False
         # What the group box's title and frame cost, measured while nothing is
         # capping the height. Remembered rather than re-measured, because once
@@ -175,6 +183,8 @@ class PreviewPanel(QGroupBox):
         """
         if self.view is None or self.sidebar is None:
             return self.minimumHeight()
+        if self._controls_below:
+            return self._stacked_height(width, picture_floor=False)
         margins = self.contentsMargins()
         spacing = self.layout().spacing() if self.layout() else 0
         # Both measured off the picture once there is one, so the answer holds
@@ -199,6 +209,8 @@ class PreviewPanel(QGroupBox):
         """
         if self.sidebar is None:
             return self.minimumHeight()
+        if self._controls_below:
+            return self._stacked_height(self.width(), picture_floor=True)
         margins = self.contentsMargins()
         chrome = self._chrome
         if chrome is None:
@@ -215,6 +227,58 @@ class PreviewPanel(QGroupBox):
                 needed = max(needed,
                              layout.heightForWidth(self.sidebar.width()))
         return needed + chrome
+
+    def set_controls_below(self, below: bool) -> None:
+        """Say the controls sit under the picture rather than beside it.
+
+        The layout itself is the owner's to rearrange; this is the height
+        arithmetic that goes with it. Beside, the taller of picture and
+        controls sets the height. Below, they add up.
+        """
+        below = bool(below)
+        if below == self._controls_below:
+            return
+        self._controls_below = below
+        self._apply_height()
+
+    def _stacked_height(self, width: int, picture_floor: bool) -> int:
+        """Picture, gap, controls and the box's own chrome, one above another.
+
+        With `picture_floor`, the least the picture may be (the floor a cap
+        cannot go through); otherwise what the width earns at its aspect.
+        """
+        margins = self.contentsMargins()
+        spacing = self.layout().spacing() if self.layout() else 0
+        # Across, the picture spans the box less its insets, measured off the
+        # picture once there is one, as `useful_height` does.
+        inset = (self.width() - self.view.width()
+                 if self.view.width() > 0 and self.width() > 0
+                 else margins.left() + margins.right())
+        inner = max(1, width - inset)
+        chrome = self._chrome
+        if chrome is None:
+            chrome = margins.top() + margins.bottom()
+        if picture_floor:
+            picture = self.view.minimumHeight()
+        else:
+            picture = max(round(inner / self.view.aspect),
+                          self.view.minimumHeight())
+        controls = self.sidebar.sizeHint().height()
+        layout = self.sidebar.layout()
+        if layout is not None and layout.hasHeightForWidth():
+            controls = max(controls, layout.heightForWidth(inner))
+        return picture + spacing + controls + chrome
+
+    def set_list_room(self, pixels: int) -> None:
+        """How much of the parent's height to leave for a list under this.
+
+        Classic's column holds the list, and keeps `MIN_LIST_HEIGHT` for it.
+        """
+        pixels = max(0, int(pixels))
+        if pixels == self._list_room:
+            return
+        self._list_room = pixels
+        self._apply_height()
 
     def set_height_cap(self, cap: int | None) -> None:
         """Cap the height, or pass None to go back to what the width earns.
@@ -234,7 +298,7 @@ class PreviewPanel(QGroupBox):
         # Never at the cost of the clip list disappearing entirely.
         parent = self.parentWidget()
         if parent is not None:
-            wanted = min(wanted, max(1, parent.height() - MIN_LIST_HEIGHT))
+            wanted = min(wanted, max(1, parent.height() - self._list_room))
         if self._height_cap is not None:
             # A ceiling, but never through the floor: the controls stay usable
             # and the picture keeps its aspect by letterboxing, which is the
@@ -259,8 +323,12 @@ class PreviewPanel(QGroupBox):
             return
         self._sizing = True
         try:
-            if (self._height_cap is None and self.view is not None
-                    and self.view.height() > 0):
+            # Measured only with the controls beside the picture: below it, the
+            # box's height less the picture's is the controls as well, and
+            # counting them as chrome inflated every floor that followed —
+            # measured natively, 320px where the controls needed 206.
+            if (self._height_cap is None and not self._controls_below
+                    and self.view is not None and self.view.height() > 0):
                 self._chrome = self.height() - self.view.height()
             wanted = self._wanted_height()
             if self.height() != wanted:

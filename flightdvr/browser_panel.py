@@ -20,7 +20,8 @@ from __future__ import annotations
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QHeaderView, QLabel,
+    QAbstractItemView, QBoxLayout, QCheckBox, QComboBox, QHBoxLayout,
+    QHeaderView, QLabel,
     QPushButton, QSizePolicy, QSpinBox, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QTableWidget, QVBoxLayout, QWidget,
 )
@@ -146,10 +147,17 @@ class BrowserPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        header = QHBoxLayout()
+        # Each long row is its own pieces, in their own order, side by side —
+        # exactly one row, as it always was. `set_stacked` puts the pieces one
+        # under another for a list column too narrow to hold the row, without
+        # dropping, reordering or squeezing any control.
+        self._rows: list[QBoxLayout] = []
+        header_row = self._row(layout)
+        header = self._piece(header_row)
         self.clip_count_label = QLabel("No clips loaded")
         header.addWidget(self.clip_count_label)
         header.addStretch(1)
+        header = self._piece(header_row)
 
         self.preview_button = QPushButton("Open in player…")
         self.preview_button.setToolTip(
@@ -175,6 +183,7 @@ class BrowserPanel(QWidget):
 
         # The browser's own control. The View menu mirrors it rather than
         # replacing it: the everyday route should be where the list is.
+        header = self._piece(header_row)
         header.addSpacing(8)
         header.addWidget(QLabel("List:"))
         self.mode_buttons: dict[BrowserMode, QPushButton] = {}
@@ -196,11 +205,11 @@ class BrowserPanel(QWidget):
                 lambda *_, chosen=mode: self.mode_requested.emit(chosen))
             header.addWidget(button)
             self.mode_buttons[mode] = button
-        layout.addLayout(header)
 
         layout.addWidget(self._build_summary_bar())
 
-        review = QHBoxLayout()
+        review_row = self._row(layout)
+        review = self._piece(review_row)
         review.addWidget(QLabel("Show:"))
         self.review_filter = QComboBox()
         for label, value in (
@@ -219,6 +228,7 @@ class BrowserPanel(QWidget):
         )
         review.addWidget(self.review_filter)
 
+        review = self._piece(review_row)
         review.addSpacing(8)
         review.addWidget(QLabel("Mark:"))
         self.review_buttons: dict[str, QPushButton] = {}
@@ -234,20 +244,20 @@ class BrowserPanel(QWidget):
             review.addWidget(button)
             self.review_buttons[state] = button
 
+        review = self._piece(review_row)
         review.addStretch(1)
         self.review_count_label = QLabel("0 of 0 reviewed")
         self.review_count_label.setToolTip(
             "Keep, Maybe and Reject all count as reviewed"
         )
         review.addWidget(self.review_count_label)
-        layout.addLayout(review)
 
         # This row costs the window 6 px of minimum height: 712 at the base
         # against 718 here, measured with the same clips loaded. Tightening the
         # gap in front of it does not buy that back, so it is recorded as the
         # price of the control rather than hidden, and pinned by a test so it
         # cannot grow quietly.
-        layout.addLayout(self._build_length_row())
+        self._build_length_row(self._row(layout))
 
         self.warning_label = dim(QLabel())
         self.warning_label.hide()
@@ -336,7 +346,38 @@ class BrowserPanel(QWidget):
         row.addStretch(1)
         return bar
 
-    def _build_length_row(self) -> QHBoxLayout:
+    def _row(self, layout: QVBoxLayout) -> QBoxLayout:
+        row = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        row.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(row)
+        self._rows.append(row)
+        return row
+
+    @staticmethod
+    def _piece(row: QBoxLayout) -> QHBoxLayout:
+        piece = QHBoxLayout()
+        piece.setContentsMargins(0, 0, 0, 0)
+        row.addLayout(piece)
+        return piece
+
+    def set_stacked(self, stacked: bool) -> None:
+        """Pieces side by side (one row, Classic), or one under another.
+
+        Measured natively, the header and review rows need 640 and 624px side
+        by side; a list beside the picture at the compact size has about 450.
+        """
+        direction = (QBoxLayout.Direction.TopToBottom if stacked
+                     else QBoxLayout.Direction.LeftToRight)
+        for row in self._rows:
+            row.setDirection(direction)
+        self.layout().invalidate()
+
+    @property
+    def stacked(self) -> bool:
+        return bool(self._rows) and (
+            self._rows[0].direction() is QBoxLayout.Direction.TopToBottom)
+
+    def _build_length_row(self, outer: QBoxLayout) -> None:
         """The duration filter from #96, as two bounds and one escape hatch.
 
         Both bounds are spin boxes whose minimum reads as "off", so there is no
@@ -344,7 +385,7 @@ class BrowserPanel(QWidget):
         unreadable clips are the same thing to `ClipInfo.duration`, so they get
         their own visible choice rather than being quietly counted as short.
         """
-        row = QHBoxLayout()
+        row = self._piece(outer)
         row.addWidget(QLabel("Length:"))
 
         self.min_length = QSpinBox()
@@ -366,6 +407,8 @@ class BrowserPanel(QWidget):
             "Hide clips longer than this. The bound is inclusive.")
         row.addWidget(QLabel("at most"))
         row.addWidget(self.max_length)
+
+        row = self._piece(outer)
 
         self.show_unknown = QCheckBox("Show unknown")
         self.show_unknown.setChecked(True)
@@ -401,7 +444,6 @@ class BrowserPanel(QWidget):
                                 QSizePolicy.Policy.Preferred)
         row.addWidget(self.length_label)
         row.addWidget(self.hidden_label, 1)
-        return row
 
     def _on_length_changed(self, *_args) -> None:
         """Keep the pair coherent, then tell the window to re-filter.
