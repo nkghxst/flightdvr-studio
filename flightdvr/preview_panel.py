@@ -38,10 +38,11 @@ MUSIC_BAND_MINIMUM = 220
 # Classic's band is the shallow one, under a picture and a list that already
 # share the window. At its least it is the track row and the rest scrolls —
 # measured natively, anything more grew a 1120x760 window with the list
-# collapsed. At most what the band used to insist on, so where there is room
-# it looks as it did.
+# collapsed. At most the track and listening rows and a shallow lane: taller,
+# and the band took the list's rows even where the picture had given the
+# room (two rows to none at 1440x913, measured natively).
 CLASSIC_MUSIC_MINIMUM = 24
-CLASSIC_MUSIC_MAXIMUM = MUSIC_BAND_MINIMUM
+CLASSIC_MUSIC_MAXIMUM = 120
 
 # The controls column beside the picture. Classic's width, and Flow's: wider,
 # so the key hint takes two lines rather than three and Play sits beside Grab

@@ -442,6 +442,7 @@ class MainWindow(QMainWindow):
         self.flow_source_note = None
         self._music_band_was_open: bool | None = None
         self._size_before_band = None
+        self._list_before_band = 0
         self._holding = False
         self._refit_on_regrow = False
         # What Classic's column measurably could not hold of the picture.
@@ -1131,6 +1132,7 @@ class MainWindow(QMainWindow):
 
     def _before_music_band(self, _open: bool) -> None:
         self._size_before_band = self.size()
+        self._list_before_band = self.browser_panel.table.height()
 
     def _make_music_room(self, was, tries: int = 4) -> None:
         """Take what the band needed from the picture, exactly.
@@ -1150,6 +1152,16 @@ class MainWindow(QMainWindow):
         over = max(self.height(), self.minimumSizeHint().height()) - was.height()
         floor = box.content_floor()
         panel = self.browser_panel
+        # And what the list lost to the band: that is the picture's to give,
+        # down to its floor, before the list gives any of its rows. Measured
+        # natively, the list otherwise went from two rows to none.
+        lost = self._list_before_band - panel.table.height()
+        if over <= 0 and lost > 0 and box.height() > floor and tries > 0:
+            self._classic_fit = max(floor, box.height() - lost)
+            box.set_height_cap(self._classic_height_cap())
+            QTimer.singleShot(
+                120, lambda: self._make_music_room(was, tries - 1))
+            return
         if over > 0 and tries > 0:
             if box.height() > floor:
                 self._classic_fit = max(floor, box.height() - over)
