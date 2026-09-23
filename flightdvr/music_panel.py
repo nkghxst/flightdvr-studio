@@ -334,6 +334,12 @@ class MusicPanel(QWidget):
         self.unsupported_label.setVisible(bool(message))
         self._apply_enabled()
 
+    @property
+    def supported(self) -> bool:
+        """Whether this output's music can be edited here, as the resolver's
+        capability rule says — never a second rule of the editor's own."""
+        return self._supported
+
     @staticmethod
     def _refusal(preset_key: str, joined: bool, bundle: bool) -> str:
         """The same refusals `resolve_audio_plan` makes, said in advance.

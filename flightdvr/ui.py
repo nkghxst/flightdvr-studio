@@ -71,8 +71,8 @@ from .help_content import naming_help_html, release_links
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
 from .media import ClipInfo, Select, Tools, available_encoders
 from .audio_plan import (
-    OUTPUT_RATE, AudioMode, MusicChoice, SampleSpan, resolve_audio_plan,
-    resolve_monitor_audio_plan, round_samples,
+    OUTPUT_RATE, AudioMode, MusicChoice, SampleSpan, ShortTrackPolicy,
+    resolve_audio_plan, resolve_monitor_audio_plan, round_samples,
 )
 from .audio_device import AudioOutput
 from .audio_reader import FfmpegPcmReader, MusicAssetProbe
@@ -90,7 +90,11 @@ from .flow_layout import (
     stage_from_stored, title as flow_title,
 )
 from .live_preview import Listening, LivePreview
+from .music_edit import EditKind, music_view, rational_fps
 from .music_panel import MusicPanel
+from .music_timeline import (
+    LiveMusicBinding, MusicEditor, MusicTimeline, Presentation,
+)
 from .output_naming import naming_inputs, resolve_output
 from .output_plan import (
     OutputPlan, OutputTarget, ordinary_pieces, piece_label, target_for_piece,
@@ -116,6 +120,7 @@ from .session import (
     missing_from, recent_sessions, remember,
 )
 from .shortcuts import SHORTCUT_GROUPS
+from .waveform_data import WaveformAssetKey, WaveformRequest, WaveformStatus
 from .sequence_plan import (
     OccurrenceId, Resolution, SequencePlan, SequencePlanError, SequenceTerminal,
     compile_sequence,
@@ -217,6 +222,43 @@ def _occurrence_words(clip) -> str:
     span = clip.trim_label
     label = piece_label(clip)
     return f"{label} · {span}" if span else f"{label} · whole recording"
+
+
+def _seconds(samples: int, rate: int) -> str:
+    return f"{samples / rate:.3f} s"
+
+
+def submitted_music_numbers(audio, output_samples: int) -> list[str]:
+    """A submitted choice's music numbers, from the frozen choice alone.
+
+    Fades are shown as asked; where the export fits a shorter pair into the
+    output, that is said beside them, because the request is what was kept.
+    """
+    lines = []
+    passage, asset = audio.passage, audio.asset
+    if passage is not None and asset is not None:
+        rate = passage.rate
+        lines.append(f"Passage: {_seconds(passage.start, rate)}–"
+                     f"{_seconds(passage.end, rate)} of the song")
+    lines.append("If shorter: " + (
+        "Loop" if audio.short_track is ShortTrackPolicy.LOOP else "Play once"))
+    fades = (f"Fade in: {_seconds(audio.fade_in_samples, OUTPUT_RATE)} · "
+             f"Fade out: {_seconds(audio.fade_out_samples, OUTPUT_RATE)}")
+    view = music_view(audio, output_samples)
+    if view is not None and (
+            (view.fade_in_effective, view.fade_out_effective)
+            != (view.fade_in_requested, view.fade_out_requested)):
+        fades += (f" (fits {_seconds(view.fade_in_effective, OUTPUT_RATE)} and "
+                  f"{_seconds(view.fade_out_effective, OUTPUT_RATE)} in this "
+                  "output)")
+    lines.append(fades)
+    level = f"Music level: {round(float(audio.music_level) * 100)}%"
+    if audio.mode is AudioMode.MIX:
+        level += f" · Recording level: {round(float(audio.dvr_level) * 100)}%"
+    else:
+        level += " · Recording level: not used (Replace)"
+    lines.append(level)
+    return lines
 
 
 def submitted_lines(job) -> list[str]:
@@ -338,6 +380,17 @@ class MainWindow(QMainWindow):
         # reading with nothing that can be done about it.
         self._music_reading: dict[OutputTarget, Path] = {}
         self._music_trouble: dict[OutputTarget, str] = {}
+        # The waveform of each track an output or a queued job uses, while it
+        # is used: W2's result from the same single read that validates the
+        # track, held only for drawing. Never a second decode per resize.
+        self._music_envelopes: dict = {}
+        self._envelope_notes: dict = {}
+        self._envelope_tried: set = set()
+        self._envelope_probe: MusicAssetProbe | None = None
+        self._envelope_generation = 0
+        self._music_binding: LiveMusicBinding | None = None
+        self._music_audition = False
+        self.music_editor = None
         # Built once the preview view exists, because it wires that view's
         # controls. Monitoring only: nothing here reaches a job or a session.
         self.live_preview: LivePreview | None = None
@@ -1161,9 +1214,11 @@ class MainWindow(QMainWindow):
             planned = self.output_plan.get(target)
             self.output_plan.set_choices(
                 target, planned.preset_key, planned.settings, choice)
+            self._prune_envelopes()
             return
         preset, settings = self._seed_defaults()
         self.output_plan.set_choices(target, preset, settings, choice)
+        self._prune_envelopes()
 
     # -- each output's own preset and settings ---------------------------------
 
@@ -1287,10 +1342,12 @@ class MainWindow(QMainWindow):
                 return
             choice = self._planned_music(target)
             name, preset_key, joined, bundle = self._music_context()
+            self._music_audition = audition
             self.music_panel.load(
                 choice, target=name, preset_key=preset_key,
                 joined=joined, bundle=bundle, audition=audition)
             self.music_panel.set_asset(choice.asset)
+            self._load_music_editor(target, choice, name)
             self._show_music_state(target)
             self._sync_live_preview()
             self._refresh_sidebar()
@@ -1332,18 +1389,315 @@ class MainWindow(QMainWindow):
             False, "The music choice for this output decides its audio.")
 
     def _on_music_changed(self) -> None:
-        """A real edit in the band. Refused while the list is being rebuilt."""
+        """A typed or chosen edit in the numbers: one commit, like a drag."""
         target = self._music_target
         if target is None:
             return
         if self._refuse_while_rebuilding():
             self._sync_music_panel()
             return
-        self._store_music(target, self.music_panel.capture())
+        self.music_editor.commit(self.music_panel.capture())
+
+    def _on_music_committed(self, choice: MusicChoice, kind) -> None:
+        """The one place an edit to the music is stored and heard.
+
+        A gain or a fade is stored and applied to what is playing in place —
+        it never falls through to a rebuild, and with nothing playing it
+        starts nothing. Anything structural is stored and the stream is
+        prepared again once, at the picture's position if it was being heard.
+        """
+        target = self._music_target
+        if target is None:
+            return
+        if self._refuse_while_rebuilding():
+            self._sync_music_panel()
+            return
+        self._store_music(target, choice)
+        self._show_music_numbers(choice)
+        in_place = (self._music_binding is not None
+                    and self._music_binding.committed(target, choice, kind))
+        if not in_place:
+            listening = (self.live_preview is not None
+                         and not self.live_preview.status.muted)
+            self._sync_live_preview()
+            if listening:
+                self._rearm_after_structural()
         self._show_music_state(target)
-        self._sync_live_preview()
         self._refresh_sidebar()
         self._refresh_export_markers()
+
+    def _on_music_drafted(self, choice: MusicChoice, kind) -> None:
+        """Mid-gesture: heard in place if it is a gain or fade, and shown in
+        the numbers. Nothing is stored."""
+        if self._music_binding is not None:
+            self._music_binding.drafted(self._music_target, choice, kind)
+        self._show_music_numbers(choice)
+
+    def _on_music_cancelled(self, stored: MusicChoice) -> None:
+        """Escape: what is shown and what is heard both go back."""
+        if self._music_binding is not None:
+            self._music_binding.cancelled(self._music_target, stored)
+        self._show_music_numbers(stored)
+
+    def _show_music_numbers(self, choice: MusicChoice) -> None:
+        name, preset_key, joined, bundle = self._music_context()
+        self.music_panel.load(
+            choice, target=name, preset_key=preset_key, joined=joined,
+            bundle=bundle, audition=self._music_audition)
+        self.music_panel.set_asset(choice.asset)
+
+    def _rearm_after_structural(self) -> None:
+        if self._joined_assemble_active():
+            self._prepare_monitoring(
+                self.preview_view.sequence_strip.position,
+                play=self.player.is_playing)
+        else:
+            self._prepare_monitoring(
+                self.player.position, play=self.player.is_playing)
+
+    def _music_pin(self):
+        """What a gesture edits: the output, its track, its material."""
+        target = self._music_target
+        if target is None:
+            return None
+        asset = self._planned_music(target).asset
+        try:
+            revision = self.context_for_working(target).revision
+        except Exception:
+            revision = None
+        return (target, None if asset is None else asset.sha256, revision)
+
+    def _monitor_preset(self, target) -> str:
+        """The output's own preset, as the refusal already asks it."""
+        if target is not None and target == self._music_target:
+            return self._music_context()[1]
+        if self._view_mode is Mode.FLOW and isinstance(target, OutputTarget):
+            return self._choices_for(target)[0]
+        return self._preset_key()
+
+    def _monitor_plan_for(self, target, choice: MusicChoice):
+        """What monitoring would play for `choice`, against the same length
+        and source as what is playing now — or None."""
+        live = self.live_preview
+        if live is None or target is None or target != self._music_target:
+            return None
+        current = live.audio_plan
+        if current is None:
+            return None
+        try:
+            return resolve_monitor_audio_plan(
+                choice, current.output.samples,
+                source_has_audio=current.source_has_audio,
+                preset_key=self._monitor_preset(target))
+        except ValueError:
+            return None
+
+    # -- what the lanes draw -------------------------------------------------
+
+    def _music_occurrence(self, target):
+        """The one occurrence of an ordinary output, compiled without side
+        effects: its output length and where in the recording it starts."""
+        if target is None or target.is_assembly:
+            return None
+        fingerprint = target.items[0].fingerprint
+        clip = next((c for c in self.clips if c.fingerprint == fingerprint), None)
+        if clip is None:
+            return None
+        matches = [output for output in working_outputs(ordinary_pieces([clip]))
+                   if output.target == target]
+        if len(matches) != 1:
+            return None
+        try:
+            sequence = compile_sequence(
+                matches[0], resolution=Resolution.success(),
+                revision="music-view")
+        except Exception:
+            return None
+        if len(sequence.occurrences) != 1:
+            return None
+        return clip, sequence.occurrences[0]
+
+    def _fit_music_presentation(self) -> None:
+        """Classic's shallow band, or Flow's full lanes if they fit the
+        page, else the folded ones with More….
+
+        Measured against the band's own room rather than a window size: the
+        full arrangement's height is asked of the arrangement itself. Only
+        shows and hides; nothing is chosen, read or prepared.
+        """
+        view = getattr(self, "preview_view", None)
+        if view is None or self.music_editor is None:
+            return
+        if self._view_mode is not Mode.FLOW:
+            view.set_music_presentation(Presentation.CLASSIC)
+            return
+        view.set_music_presentation(Presentation.FULL)
+        room = view.music_body.viewport().height()
+        # The lanes are what has to fit; the numbers under them may scroll
+        # (the band is a scroll area, and nothing is removed by scrolling).
+        needed = (view.music_content.sizeHint().height()
+                  - view.music_panel.sizeHint().height())
+        if room > 0 and needed > room:
+            view.set_music_presentation(Presentation.COMPACT)
+
+    def _load_music_editor(self, target, choice: MusicChoice, name: str) -> None:
+        editor = self.music_editor
+        samples, fps = 0, rational_fps(0)
+        if target is not None and target.is_assembly:
+            sequence = self._sequence_plan
+            if sequence is not None and self._sequence_target == target:
+                samples = sequence.total_samples
+        else:
+            found = self._music_occurrence(target)
+            if found is not None:
+                clip, occurrence = found
+                samples = occurrence.sample_span.samples
+                fps = rational_fps(clip.fps)
+        editor.load(choice, output_samples=samples, fps=fps, label=name,
+                    editable=self.music_panel.supported)
+        self._show_music_envelope(choice.asset)
+        self._show_music_picture(target)
+        self._acquire_envelope(choice.asset)
+
+    def _show_music_picture(self, target) -> None:
+        """The recording's existing frames, or an Assembly's spans. Nothing
+        is extracted or decoded for this."""
+        editor = self.music_editor
+        if target is not None and target.is_assembly:
+            sequence = self._sequence_plan
+            spans = ()
+            if sequence is not None and self._sequence_target == target:
+                spans = tuple(
+                    (one.sample_span.start, one.sample_span.end,
+                     f"{index + 1}. {Path(one.source_path).name}")
+                    for index, one in enumerate(sequence.occurrences))
+            editor.set_picture(occurrences=spans)
+            return
+        found = self._music_occurrence(target)
+        strip = self._strip
+        if (found is None or not strip or self._trim_clip is None
+                or self._trim_clip.fingerprint != found[0].fingerprint):
+            editor.set_picture()
+            return
+        editor.set_picture(strip, origin=float(found[1].source.start))
+
+    # -- the waveform: W2's result, fenced, never a second decode -------------
+
+    def _show_music_envelope(self, asset) -> None:
+        self._show_editor_envelope(self.music_editor, asset)
+
+    def _show_editor_envelope(self, editor, asset) -> None:
+        if asset is None:
+            editor.set_envelope(None, "")
+            return
+        key = WaveformAssetKey.from_asset(asset)
+        envelope = self._music_envelopes.get(key)
+        note = "" if envelope is not None else self._envelope_notes.get(
+            key, "Reading the waveform…")
+        editor.set_envelope(envelope, note)
+
+    def _take_envelope(self, key, inspection) -> None:
+        if inspection.status is WaveformStatus.READY:
+            self._music_envelopes[key] = inspection.envelope
+            self._envelope_notes.pop(key, None)
+        else:
+            self._envelope_notes[key] = (
+                inspection.reason or "The waveform is not available.")
+
+    def _music_waveform(self, inspection) -> None:
+        """The combined result of reading a newly chosen track."""
+        generation = inspection.request.generation
+        target = self._current_music_result(generation)
+        if target is None:
+            return
+        # Fenced by generation (above), target (the probe's own) and asset:
+        # the envelope is filed under the asset this very result validated.
+        self._take_envelope(WaveformAssetKey.from_asset(inspection.asset),
+                            inspection)
+        self._music_ready(generation, inspection.asset)
+
+    def _acquire_envelope(self, asset) -> None:
+        """Read the waveform of a track already chosen, once.
+
+        Only on first showing a track whose waveform is not held — never on
+        More, a resize or a theme change. It writes nothing but the waveform:
+        no choice, working or submitted, is touched by it.
+        """
+        if asset is None:
+            return
+        key = WaveformAssetKey.from_asset(asset)
+        if (key in self._music_envelopes or key in self._envelope_tried
+                or self._music_probe is not None):
+            return
+        self._envelope_tried.add(key)
+        self._stop_envelope_probe()
+        self._envelope_generation += 1
+        generation = self._envelope_generation
+        request = WaveformRequest(generation=generation,
+                                  request_key=str(asset.track))
+        probe = MusicAssetProbe(self.tools, asset.track, generation, self,
+                                waveform_request=request)
+        probe.waveform_ready.connect(
+            lambda result, key=key: self._envelope_only_ready(key, result))
+        probe.failed.connect(
+            lambda gen, reason, key=key: self._envelope_only_failed(
+                key, gen, reason))
+        self._envelope_probe = probe
+        self._envelope_notes[key] = "Reading the waveform…"
+        probe.start()
+
+    def _envelope_only_ready(self, key, inspection) -> None:
+        if inspection.request.generation != self._envelope_generation:
+            return
+        self._envelope_probe = None
+        if WaveformAssetKey.from_asset(inspection.asset) != key:
+            # Not the file that was chosen any more. Its waveform is not
+            # drawn under the old one's name, and the choice is left alone.
+            self._envelope_notes[key] = (
+                "The track has changed since it was chosen; its waveform "
+                "is not shown.")
+        else:
+            self._take_envelope(key, inspection)
+        self._refresh_shown_envelope(key)
+
+    def _envelope_only_failed(self, key, generation: int, reason: str) -> None:
+        if generation != self._envelope_generation:
+            return
+        self._envelope_probe = None
+        self._envelope_notes[key] = f"The waveform could not be read: {reason}"
+        self._refresh_shown_envelope(key)
+
+    def _refresh_shown_envelope(self, key) -> None:
+        target = self._music_target
+        if target is not None:
+            asset = self._planned_music(target).asset
+            if asset is not None and WaveformAssetKey.from_asset(asset) == key:
+                self._show_music_envelope(asset)
+        shown = self._submitted_editor.stored.asset
+        if shown is not None and WaveformAssetKey.from_asset(shown) == key:
+            self._show_editor_envelope(self._submitted_editor, shown)
+
+    def _stop_envelope_probe(self) -> None:
+        probe, self._envelope_probe = self._envelope_probe, None
+        if probe is not None:
+            if probe.isRunning():
+                self._retain_probe_thread(probe)
+            probe.stop()
+
+    def _prune_envelopes(self) -> None:
+        """Hold waveforms only for tracks an output or a queued job uses."""
+        used = set()
+        for target in self.output_plan.targets:
+            asset = self.output_plan.get(target).music.asset
+            if asset is not None:
+                used.add(WaveformAssetKey.from_asset(asset))
+        for job in self.jobs:
+            if job.audio.asset is not None:
+                used.add(WaveformAssetKey.from_asset(job.audio.asset))
+        for key in list(self._music_envelopes):
+            if key not in used:
+                del self._music_envelopes[key]
+                self._envelope_tried.discard(key)
 
     def _choose_music_track(self) -> None:
         target = self._music_target
@@ -1367,11 +1721,18 @@ class MainWindow(QMainWindow):
     def _start_music_probe(self, target: OutputTarget, track: Path) -> None:
         """Read the file away from this thread, bound to target and generation."""
         self._stop_music_probe()
+        self._stop_envelope_probe()
         self._music_generation += 1
         self._music_reading[target] = track
         self._music_trouble.pop(target, None)
-        probe = MusicAssetProbe(self.tools, track, self._music_generation, self)
+        # One read validates the track and draws its waveform: W2's combined
+        # route, which reports both at once.
+        request = WaveformRequest(generation=self._music_generation,
+                                  request_key=str(track))
+        probe = MusicAssetProbe(self.tools, track, self._music_generation, self,
+                                waveform_request=request)
         probe.ready.connect(self._music_ready)
+        probe.waveform_ready.connect(self._music_waveform)
         probe.failed.connect(self._music_failed)
         self._music_probe = probe
         self._music_probe_target = target
@@ -1564,6 +1925,16 @@ class MainWindow(QMainWindow):
         view.listening_changed.connect(self._on_listening_changed)
         view.restart_requested.connect(self._on_monitor_restart)
 
+        # The music editor: one value, every presentation. A drag drafts; a
+        # release, a typed number or a key release commits once.
+        editor = self.music_editor = view.music_editor
+        editor.pin_source = self._music_pin
+        editor.committed.connect(self._on_music_committed)
+        editor.drafted.connect(self._on_music_drafted)
+        editor.cancelled.connect(self._on_music_cancelled)
+        self._music_binding = LiveMusicBinding(
+            self.live_preview, self._monitor_plan_for)
+
     def _monitor_refusal(self, target) -> str:
         """Why this output cannot be monitored, in the words it is refused in.
 
@@ -1620,7 +1991,7 @@ class MainWindow(QMainWindow):
             samples = snapshot.samples
             return resolve_monitor_audio_plan(
                 choice, samples, source_has_audio=source_has_audio,
-                preset_key=self._preset_key()), samples
+                preset_key=self._monitor_preset(target)), samples
 
         clip = self._trim_clip
         if clip is None:
@@ -1745,7 +2116,7 @@ class MainWindow(QMainWindow):
                 plan = resolve_monitor_audio_plan(
                     choice, snapshot.samples,
                     source_has_audio=source_has_audio,
-                    preset_key=self._preset_key())
+                    preset_key=self._monitor_preset(target))
 
                 leaves = {}
                 for occurrence, key, clip in occurrence_sources:
@@ -1824,7 +2195,7 @@ class MainWindow(QMainWindow):
         self.live_preview.set_target(
             target, reason=reason)
         self.live_preview.set_speed(
-            2.0 if self._preset_key() == "slowmo" else 1.0)
+            2.0 if self._monitor_preset(target) == "slowmo" else 1.0)
         self._show_monitoring()
 
     def _show_monitoring(self) -> None:
@@ -2011,6 +2382,7 @@ class MainWindow(QMainWindow):
         if self._monitor_rearm_required:
             return
         self.live_preview.tick(output_sample)
+        self.music_editor.set_playhead(output_sample)
         self._show_monitoring()
 
     # -- view modes ------------------------------------------------------------
@@ -2080,6 +2452,14 @@ class MainWindow(QMainWindow):
         # height-for-width cannot size the page around it.
         self._picture_frame = PictureFrame()
         self._picture_frame.resized.connect(self._fit_picture)
+        # Music's lanes are its subject: the page gives them its slack and
+        # the picture keeps what it prefers, as the reference arranges it.
+        music_panel_host = shell.host(Stage.MUSIC, Region.PANEL)
+        music_view_host = shell.host(Stage.MUSIC, Region.VIEWPORT)
+        if music_panel_host is not None and music_view_host is not None:
+            page = music_panel_host.parentWidget().layout()
+            page.setStretch(page.indexOf(music_view_host), 0)
+            page.setStretch(page.indexOf(music_panel_host), 1)
         self.flow_viewport = QWidget()
         viewport = QVBoxLayout(self.flow_viewport)
         viewport.setContentsMargins(0, 0, 0, 0)
@@ -2263,6 +2643,7 @@ class MainWindow(QMainWindow):
         for name, action in self._view_actions.items():
             action.setChecked(name is chosen)
         self._relayout()
+        self._fit_music_presentation()
         self._keep_window_size(was)
 
     def _show_stage(self, stage) -> None:
@@ -3083,6 +3464,12 @@ class MainWindow(QMainWindow):
         panel.about_requested.connect(self._show_about)
         panel.item_activated.connect(self._open_finished_job)
         panel.job_selected.connect(self._show_submitted)
+        # A queued job's music, read-only: the same presentation code, fed
+        # only from the job's own frozen choice.
+        self._submitted_editor = MusicEditor(self)
+        self._submitted_music = MusicTimeline(self._submitted_editor)
+        self._submitted_music.set_presentation(Presentation.SUBMITTED)
+        panel.adopt_details_music(self._submitted_music)
         return panel
 
     def _show_submitted(self, job) -> None:
@@ -3093,6 +3480,32 @@ class MainWindow(QMainWindow):
         self.queue_panel.show_details(
             f"Submitted settings — {job.out_path.name}",
             submitted_lines(job))
+        self._show_submitted_music(job)
+
+    def _show_submitted_music(self, job) -> None:
+        """The job's music as it was submitted. Nothing here can change it,
+        and nothing plays: there is no submitted-job audition."""
+        audio = job.audio
+        has_music = (audio.mode in (AudioMode.REPLACE, AudioMode.MIX)
+                     and audio.asset is not None)
+        if not has_music:
+            self.queue_panel.show_details_music(False)
+            return
+        if job.sequence is not None:
+            samples = job.sequence.total_samples
+        else:
+            seconds = job.clips[0].trimmed_duration
+            samples = round_samples(Fraction(str(seconds)) * OUTPUT_RATE)
+        editor = self._submitted_editor
+        editor.load(audio, output_samples=samples,
+                    label=job.out_path.name, read_only=True)
+        self._show_editor_envelope(editor, audio.asset)
+        # Read once if it is not held; that read writes no choice, and never
+        # the job's.
+        self._acquire_envelope(audio.asset)
+        self.queue_panel.show_details_music(
+            True, "Playing a submitted job is not available here.",
+            submitted_music_numbers(audio, samples))
 
     def _on_queue_toggled(self, open_: bool) -> None:
         self.queue_panel._on_toggled(open_)
@@ -3520,6 +3933,7 @@ class MainWindow(QMainWindow):
         # stop being. Sizing thumbnails against that gave rows too tall for the
         # list they ended up in. The frame is deferred for the same reason.
         QTimer.singleShot(0, self._sync_thumbnail_size)
+        QTimer.singleShot(0, self._fit_music_presentation)
 
     def _sync_thumbnail_size(self) -> None:
         """Fit the thumbnails to the space the list actually has.
@@ -3549,6 +3963,7 @@ class MainWindow(QMainWindow):
         if self.live_preview is not None:
             self.live_preview.close()
         self._stop_music_probe()
+        self._stop_envelope_probe()
         # First, because it is the one holding a decoder open on the card.
         self.player.shutdown()
         self._flight_scan_ready = False
@@ -4282,6 +4697,8 @@ class MainWindow(QMainWindow):
             return
         self.trim_bar.set_strip(strip)
         self._strip = strip
+        if self._music_target is not None and self.music_editor is not None:
+            self._show_music_picture(self._music_target)
         self._show_frame(self.trim_bar.playhead)
 
     def _show_frame(self, seconds: float) -> None:
@@ -6002,6 +6419,7 @@ class MainWindow(QMainWindow):
         # The single funnel for anything that changes the queue, so this is
         # where the strip learns what to say and when to open itself.
         self.queue_panel.rebuild(self.jobs)
+        self._prune_envelopes()
 
     def _open_finished_job(self, item) -> None:
         """Double-clicking a finished row opens what it produced."""

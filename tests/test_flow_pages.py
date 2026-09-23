@@ -3016,3 +3016,107 @@ def test_browse_from_queue_still_shows_the_controls_under_the_picture(window,
     assert box.contains(side), (box, side)
     assert side.top() >= global_rect(view.frame_view).bottom()
     window.set_view_mode(Mode.CLASSIC)
+
+
+# -- W3: the music presentations -------------------------------------------------
+
+def test_classic_shows_the_shallow_band_not_a_second_flow_stack(window, app):
+    from flightdvr.music_timeline import Presentation
+    window.show()
+    window.resize(1400, 900)
+    settled(app)
+    timeline = window.preview_view.music_timeline
+    window._fit_music_presentation()
+    assert timeline.presentation is Presentation.CLASSIC
+    assert timeline.picture.isHidden() and timeline.song.isHidden()
+    assert not timeline.music.isHidden()
+    assert not window.music_panel.isHidden()
+
+
+def test_a_short_music_page_folds_and_more_unfolds_without_choosing(window, app):
+    from flightdvr.music_timeline import Presentation
+    first, _second = planned_pair(window, app)
+    window.show()
+    window.resize(1402, 700)
+    settled(app)
+    window._select_working_target(first)
+    window._show_stage(Stage.MUSIC)
+    settled(app)
+    window._fit_music_presentation()
+    timeline = window.preview_view.music_timeline
+    before = window.output_plan.get(first)
+    room = window.preview_view.music_body.viewport().height()
+    needed = window.preview_view.music_content.sizeHint().height()
+    assert needed > room, "the fixture never made the page short"
+    assert timeline.presentation is Presentation.COMPACT
+    assert timeline.song.isHidden() and window.music_panel.isHidden()
+    assert not timeline.music.isHidden() and not timeline.picture.isHidden()
+    timeline.more_button.setChecked(True)
+    settled(app)
+    assert not timeline.song.isHidden() and not window.music_panel.isHidden()
+    timeline.more_button.setChecked(False)
+    assert window.output_plan.get(first) == before
+    window.set_view_mode(Mode.CLASSIC)
+    settled(app)
+    assert timeline.presentation is Presentation.CLASSIC
+
+
+def test_a_tall_music_page_shows_everything(window, app):
+    from flightdvr.music_timeline import Presentation
+    first, _second = planned_pair(window, app)
+    window.show()
+    window.resize(1402, 1600)
+    settled(app)
+    window._select_working_target(first)
+    window._show_stage(Stage.MUSIC)
+    settled(app)
+    window._fit_music_presentation()
+    timeline = window.preview_view.music_timeline
+    room = window.preview_view.music_body.viewport().height()
+    needed = window.preview_view.music_content.sizeHint().height()
+    assert (timeline.presentation is Presentation.FULL) == (needed <= room or room == 0)
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_on_music_the_picture_yields_its_room_to_the_lanes(window, app):
+    """Natively at 1440x913 the picture kept the page's slack on Music and
+    the lanes folded; the reference gives the lanes the room. Elsewhere the
+    picture still takes it."""
+    first, _second = planned_pair(window, app)
+    window.show()
+    window.resize(1402, 1100)
+    settled(app)
+    window._select_working_target(first)
+    frame = window._picture_frame
+    window._show_stage(Stage.OUTPUT)
+    settled(app)
+    on_output = frame.height()
+    window._show_stage(Stage.MUSIC)
+    settled(app)
+    assert frame.height() == frame.minimumSizeHint().height(), (
+        "the picture kept more than it needs on Music")
+    assert on_output > frame.height(), "the fixture gave the picture no slack"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_the_music_band_keeps_its_rows_together(window, app):
+    """Natively the band's spare height went between its rows, pushing the
+    song overview to the bottom edge. It goes below them."""
+    first, _second = planned_pair(window, app)
+    window.show()
+    window.resize(1402, 1400)
+    settled(app)
+    window._select_working_target(first)
+    window._show_stage(Stage.MUSIC)
+    settled(app)
+    view = window.preview_view
+    view.music_panel.hide()
+    settled(app)
+    timeline = view.music_timeline
+    button = view.track_button
+    gap = timeline.mapTo(view.music_content, timeline.rect().topLeft()).y() - (
+        button.mapTo(view.music_content, button.rect().bottomLeft()).y())
+    spare = view.music_content.height() - view.music_content.sizeHint().height()
+    assert spare > 60, "the fixture left no spare height to place"
+    assert gap < 120, f"{gap}px between the track row and the lanes"
+    window.set_view_mode(Mode.CLASSIC)

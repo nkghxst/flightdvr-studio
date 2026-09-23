@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from .music_panel import MusicPanel
+from .music_timeline import MusicEditor, MusicTimeline, Presentation
 from .player import FrameView
 from .sequence_strip import SequenceStrip
 from .trim import TrimBar
@@ -652,9 +653,21 @@ class PreviewView(QObject):
         self.music_silence_note.setWordWrap(True)
         body.addWidget(self.music_silence_note)
 
+        # One editor for every way the music is shown. The lanes are its
+        # visual presentation; the numbers below are another view of the
+        # same value, so a drag and a typed number cannot disagree.
+        self.music_editor = MusicEditor(self)
+        self.music_timeline = MusicTimeline(self.music_editor)
+        self.music_timeline.more_button.toggled.connect(
+            lambda _on: self._arrange_music())
+        body.addWidget(self.music_timeline)
+
         self.music_panel = MusicPanel()
         self.music_panel.changed.connect(lambda: self.music_changed.emit())
         body.addWidget(self.music_panel)
+        # Spare height goes below everything, not between the rows: spread
+        # out, the rows pushed the song overview to the band's bottom edge.
+        body.addStretch(1)
 
         # Measured before it was built this way: the controls stack to a 625px
         # minimum, which made the whole window refuse to be shorter than
@@ -677,6 +690,17 @@ class PreviewView(QObject):
                 0, TIGHT, 0, INNER) if on else layout.setContentsMargins(
                     0, 0, 0, 0))
         return band
+
+    def set_music_presentation(self, presentation: Presentation) -> None:
+        """Arrange the band for where it is shown. Chooses nothing, reads
+        nothing: it only shows and hides."""
+        self.music_timeline.set_presentation(presentation)
+        self._arrange_music()
+
+    def _arrange_music(self) -> None:
+        # The numbers are behind More… in the compact presentation, and in
+        # every other one they are simply there.
+        self.music_panel.setVisible(self.music_timeline.shows_more)
 
     def show_track_status(self, text: str) -> None:
         """What the acquisition is doing, in words a person can act on."""

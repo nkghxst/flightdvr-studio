@@ -207,6 +207,31 @@ class LivePreview:
         if self._output is not None:
             self._output.reset(self._generation)
 
+    @property
+    def audio_plan(self):
+        """The plan being listened to, or None. For resolving an edit against
+        the same length and source; never to be edited itself."""
+        stream = self._stream
+        return getattr(stream, "audio_plan", None) if stream is not None else None
+
+    def update_parameters(self, target, audio) -> bool:
+        """Apply new gains and fades to what is being listened to, in place.
+
+        Nothing is silenced, rebuilt or re-anchored: the stream keeps its
+        readers, position and loop phase, and the device keeps its generation.
+        Refused — returning False and changing nothing — when there is no
+        stream, when it belongs to another output, when monitoring is refused,
+        or when the new plan is not a parameter change of the current one.
+        """
+        if self._stream is None or self._target_reason:
+            return False
+        if target != self._target:
+            return False
+        update = getattr(self._stream, "update_parameters", None)
+        if update is None:
+            return False
+        return bool(update(audio))
+
     def set_speed(self, speed: float) -> None:
         """Monitoring is for 1x only, and says so at any other speed.
 
