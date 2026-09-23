@@ -2478,6 +2478,7 @@ def test_changing_mode_gives_back_room_it_only_needed_for_a_moment(
     made here, while the panels move, exactly where it happened."""
     import time
 
+    window.show()          # a window nobody can see has no room to give back
     window.resize(1200, 900)
     app.processEvents()
     was = window.size()
@@ -2500,6 +2501,34 @@ def test_changing_mode_gives_back_room_it_only_needed_for_a_moment(
         app.processEvents()
         time.sleep(0.01)
     assert window.size() == was
+
+
+def test_giving_back_room_never_undoes_a_deliberate_resize(window, app):
+    """CI caught the first version: a window reopening in Flow queued a
+    restore to its construction-time size, and the resize that followed —
+    the test's here, a restored geometry at startup in the app — was undone
+    when the queue ran. Only growth the change itself caused is given back."""
+    import time
+
+    window.show()          # visible, so it is the size guard being tested
+    window.resize(1000, 800)
+    app.processEvents()
+    real = window._place_viewport
+
+    def growing(stage):
+        real(stage)
+        window.resize(1000, 1100)
+
+    window._place_viewport = growing
+    window.set_view_mode(Mode.FLOW)
+    window.resize(1402, 900)
+    for _ in range(5):
+        app.processEvents()
+        time.sleep(0.01)
+
+    assert window.size().toTuple() == (1402, 900), (
+        f"a deliberate resize was undone: {window.size().toTuple()}")
+    window.set_view_mode(Mode.CLASSIC)
 
 
 def test_with_no_output_chosen_output_estimates_nothing(window, app):

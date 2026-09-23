@@ -2188,13 +2188,19 @@ class MainWindow(QMainWindow):
         window that has grown never shrinks back by itself, so opening Flow
         left it taller than the screen. Once the layouts settle it is resized
         to what it was; Qt still holds it to whatever the page really needs.
+
+        Only growth the change itself caused, and only if nothing has resized
+        the window since: CI caught the first version undoing a deliberate
+        resize that followed a change made while the window was being built.
         """
-        if self.isMaximized() or self.isFullScreen():
+        grown = self.size()
+        if (not self.isVisible() or grown == was
+                or self.isMaximized() or self.isFullScreen()):
             return
 
         def restore():
-            if self.size() != was and not (self.isMaximized()
-                                           or self.isFullScreen()):
+            if self.size() == grown and not (self.isMaximized()
+                                             or self.isFullScreen()):
                 self.resize(was)
 
         QTimer.singleShot(0, restore)
