@@ -351,6 +351,7 @@ class MainWindow(QMainWindow):
         self._envelope_generation = 0
         self._music_binding: LiveMusicBinding | None = None
         self._music_audition = False
+        self.music_editor = None
         # Built once the preview view exists, because it wires that view's
         # controls. Monitoring only: nothing here reaches a job or a session.
         self.live_preview: LivePreview | None = None
@@ -1174,9 +1175,11 @@ class MainWindow(QMainWindow):
             planned = self.output_plan.get(target)
             self.output_plan.set_choices(
                 target, planned.preset_key, planned.settings, choice)
+            self._prune_envelopes()
             return
         preset, settings = self._seed_defaults()
         self.output_plan.set_choices(target, preset, settings, choice)
+        self._prune_envelopes()
 
     # -- each output's own preset and settings ---------------------------------
 
@@ -1474,6 +1477,26 @@ class MainWindow(QMainWindow):
         if len(sequence.occurrences) != 1:
             return None
         return clip, sequence.occurrences[0]
+
+    def _fit_music_presentation(self) -> None:
+        """Classic's shallow band, or Flow's full lanes if they fit the
+        page, else the folded ones with More….
+
+        Measured against the band's own room rather than a window size: the
+        full arrangement's height is asked of the arrangement itself. Only
+        shows and hides; nothing is chosen, read or prepared.
+        """
+        view = getattr(self, "preview_view", None)
+        if view is None or self.music_editor is None:
+            return
+        if self._view_mode is not Mode.FLOW:
+            view.set_music_presentation(Presentation.CLASSIC)
+            return
+        view.set_music_presentation(Presentation.FULL)
+        room = view.music_body.viewport().height()
+        needed = view.music_content.sizeHint().height()
+        if room > 0 and needed > room:
+            view.set_music_presentation(Presentation.COMPACT)
 
     def _load_music_editor(self, target, choice: MusicChoice, name: str) -> None:
         editor = self.music_editor
@@ -2565,6 +2588,7 @@ class MainWindow(QMainWindow):
         for name, action in self._view_actions.items():
             action.setChecked(name is chosen)
         self._relayout()
+        self._fit_music_presentation()
         self._keep_window_size(was)
 
     def _show_stage(self, stage) -> None:
@@ -3822,6 +3846,7 @@ class MainWindow(QMainWindow):
         # stop being. Sizing thumbnails against that gave rows too tall for the
         # list they ended up in. The frame is deferred for the same reason.
         QTimer.singleShot(0, self._sync_thumbnail_size)
+        QTimer.singleShot(0, self._fit_music_presentation)
 
     def _sync_thumbnail_size(self) -> None:
         """Fit the thumbnails to the space the list actually has.
@@ -6307,6 +6332,7 @@ class MainWindow(QMainWindow):
         # The single funnel for anything that changes the queue, so this is
         # where the strip learns what to say and when to open itself.
         self.queue_panel.rebuild(self.jobs)
+        self._prune_envelopes()
 
     def _open_finished_job(self, item) -> None:
         """Double-clicking a finished row opens what it produced."""

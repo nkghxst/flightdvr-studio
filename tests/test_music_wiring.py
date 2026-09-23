@@ -1172,3 +1172,19 @@ def test_monitoring_resolves_with_the_output_s_own_preset(window, app):
     assert window.export_panel.preset_key() == "master"
     assert window._monitor_preset(b) == "social"
     window.set_view_mode(Mode.CLASSIC)
+
+
+def test_a_waveform_is_held_only_while_something_uses_its_track(
+        window, monkeypatch, tmp_path, app, probes):
+    target = with_track(window, monkeypatch, tmp_path, app)
+    stored = window._planned_music(target)
+    probes[-1].deliver_waveform(WaveformInspection.ready(
+        probes[-1].waveform_request, stored.asset, an_envelope(stored.asset)))
+    app.processEvents()
+    key = WaveformAssetKey.from_asset(stored.asset)
+    assert key in window._music_envelopes
+
+    window.music_editor.commit(MusicChoice(mode=AudioMode.ORIGINAL))
+    app.processEvents()
+
+    assert key not in window._music_envelopes
