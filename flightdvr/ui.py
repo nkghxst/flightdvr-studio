@@ -419,6 +419,7 @@ class MainWindow(QMainWindow):
         self._session_generation = 0
         # Stored outputs this version could not read, kept as they were.
         self._unread_outputs: list = []
+        self._restored_selection: OutputTarget | None = None
         self._music_binding: LiveMusicBinding | None = None
         self._music_audition = False
         self.music_editor = None
@@ -1504,7 +1505,8 @@ class MainWindow(QMainWindow):
         entries = [(plan.get(target), self._pending_saved(target))
                    for target in plan.targets]
         selected = (self._sidebar_target
-                    if self._sidebar_target in plan.targets else None)
+                    if self._sidebar_target in plan.targets
+                    else self._restored_selection)
         stored = encode_outputs(entries, selected)
         self.session.outputs = stored["outputs"] + list(self._unread_outputs)
         self.session.selected_output = stored.get("selected_output")
@@ -1530,6 +1532,7 @@ class MainWindow(QMainWindow):
         self._music_reading.clear()
         self._music_trouble.clear()
         self._unread_outputs = []
+        self._restored_selection = None
         self.output_plan = OutputPlan()
         self._assembly_music_target = None
         self._sidebar_target = None
@@ -1564,6 +1567,10 @@ class MainWindow(QMainWindow):
         if read.selected is not None:
             self._sidebar_target = read.selected
             self.output_plan.select(read.selected)
+            # Held until its output exists: ticks are not part of a session,
+            # so a reopened Flow may list nothing yet. Chosen again when it
+            # appears, unless someone has chosen something else first.
+            self._restored_selection = read.selected
         self._queue_pending_checks()
         return problems
 
@@ -3832,6 +3839,12 @@ class MainWindow(QMainWindow):
             for output in outputs:
                 self._ensure_target_choices(output.target)
             active = [output.target for output in outputs]
+            restored = self._restored_selection
+            if (restored is not None and restored in active
+                    and self._sidebar_target in (None, restored)):
+                self._sidebar_target = restored
+                self._restored_selection = None
+                self._apply_choices(*self._choices_for(restored))
             if (self._sidebar_target is not None
                     and self._sidebar_target not in active):
                 # The chosen output stopped existing. Nothing is chosen now —
@@ -3889,6 +3902,8 @@ class MainWindow(QMainWindow):
         if self._refuse_joined_source_action():
             return
         self._sidebar_target = target
+        # A person's choice outranks the one read back from the file.
+        self._restored_selection = None
         self.output_sidebar.select(target)
         self.export_panel.select_target(target)
         self._load_target(target)

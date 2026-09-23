@@ -1863,3 +1863,41 @@ def test_closing_while_checking_leaves_no_running_read(
     assert check.isRunning()
     again.close()
     assert check.stopped and not check.isRunning()
+
+
+def test_a_restored_selection_waits_for_its_output_to_exist(
+        window, app, tmp_path, monkeypatch, probes):
+    """Ticks are not part of a session: a reopened Flow lists nothing until
+    rows are ticked. The saved selection is not lost meanwhile, and not
+    re-saved as nothing; it is chosen when its output appears."""
+    a, b = planned_pair(window, tmp_path, app)
+    again = reopen(app, tmp_path, monkeypatch)
+    try:
+        again.set_view_mode(Mode.FLOW)
+        app.processEvents()
+        assert again._sidebar_target is None
+        again._flush_session()
+        assert stored(again)["selected_output"] == encoded(b)
+        tick(again, 0)
+        app.processEvents()
+        again._refresh_sidebar()
+        assert again._sidebar_target == b
+        again.set_view_mode(Mode.CLASSIC)
+    finally:
+        again.close()
+
+
+def test_choosing_before_the_restored_output_appears_wins(
+        window, app, tmp_path, monkeypatch, probes):
+    a, b = planned_pair(window, tmp_path, app)
+    again = reopen(app, tmp_path, monkeypatch)
+    try:
+        again.set_view_mode(Mode.FLOW)
+        tick(again, 0)
+        app.processEvents()
+        again._select_working_target(a)
+        again._refresh_sidebar()
+        assert again._sidebar_target == a
+        again.set_view_mode(Mode.CLASSIC)
+    finally:
+        again.close()
