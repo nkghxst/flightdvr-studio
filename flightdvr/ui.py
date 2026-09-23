@@ -120,6 +120,7 @@ from .session import (
     missing_from, recent_sessions, remember,
 )
 from .shortcuts import SHORTCUT_GROUPS
+from .target_choices import SavedMusic, decode_outputs, encode_outputs
 from .waveform_data import WaveformAssetKey, WaveformRequest, WaveformStatus
 from .sequence_plan import (
     OccurrenceId, Resolution, SequencePlan, SequencePlanError, SequenceTerminal,
@@ -226,6 +227,23 @@ def _occurrence_words(clip) -> str:
 
 def _seconds(samples: int, rate: int) -> str:
     return f"{samples / rate:.3f} s"
+
+
+def _untouched_levels(captured: MusicChoice, stored: MusicChoice) -> MusicChoice:
+    """A typed edit, without the panel's whole-percent rounding of the levels
+    nobody touched.
+
+    The panel reads every field back on any edit, and it can only show a
+    level to the nearest percent. Typing a fade on an output whose recording
+    level is exactly 1/7 must not quietly make it 7/50 — a saved choice
+    would change because it was looked at.
+    """
+    kept = {}
+    for name in ("music_level", "dvr_level"):
+        exact = getattr(stored, name)
+        if getattr(captured, name) == Fraction(round(float(exact) * 100), 100):
+            kept[name] = exact
+    return replace(captured, **kept) if kept else captured
 
 
 def submitted_music_numbers(audio, output_samples: int) -> list[str]:
@@ -388,6 +406,18 @@ class MainWindow(QMainWindow):
         self._envelope_tried: set = set()
         self._envelope_probe: MusicAssetProbe | None = None
         self._envelope_generation = 0
+        # Saved tracks not yet confirmed to be the same bytes. Each record has
+        # its own revision; a check's result lands only on the records it was
+        # started for, in the session it was started in, and one at a time.
+        self._pending_music: dict[OutputTarget, tuple[int, SavedMusic]] = {}
+        self._pending_revision = 0
+        self._pending_checks: list[tuple] = []
+        self._pending_probe: MusicAssetProbe | None = None
+        self._pending_request: tuple | None = None
+        self._check_generation = 0
+        self._session_generation = 0
+        # Stored outputs this version could not read, kept as they were.
+        self._unread_outputs: list = []
         self._music_binding: LiveMusicBinding | None = None
         self._music_audition = False
         self.music_editor = None
@@ -1133,6 +1163,16 @@ class MainWindow(QMainWindow):
                 self._music_reading[target] = self._music_reading.pop(previous)
             if previous in self._music_trouble:
                 self._music_trouble[target] = self._music_trouble.pop(previous)
+            if previous in self._pending_music:
+                # With its revision, and with the check under way told where
+                # it went: otherwise the result arrives for a key nothing
+                # holds and the output reads as being checked for ever.
+                self._pending_music[target] = self._pending_music.pop(previous)
+                request = self._pending_request
+                if request is not None and previous in request[3]:
+                    waiting = dict(request[3])
+                    waiting[target] = waiting.pop(previous)
+                    self._pending_request = (*request[:3], waiting)
         self._assembly_music_target = target
         self.output_plan.select(target)
 
@@ -1215,10 +1255,249 @@ class MainWindow(QMainWindow):
             self.output_plan.set_choices(
                 target, planned.preset_key, planned.settings, choice)
             self._prune_envelopes()
+            self._touch_outputs()
             return
         preset, settings = self._seed_defaults()
         self.output_plan.set_choices(target, preset, settings, choice)
         self._prune_envelopes()
+        self._touch_outputs()
+
+    # -- each output's choices, saved and reopened ------------------------------
+
+    def _touch_outputs(self) -> None:
+        """A planned output changed: written with the marks, and quietly.
+
+        Not `_touch_session`, which says the scan is unfinished when refused.
+        Showing a clip during a rescan stores an empty choice for it, and that
+        is not an edit anyone made or needs to hear about.
+        """
+        if self.session is not None and self._decisions_editable():
+            self._session_timer.start()
+
+    def _capture_outputs(self) -> None:
+        """Every planned output, from the plan itself — never the panel.
+
+        An output whose saved track is still unconfirmed is written back as it
+        was read (with any edit made meanwhile), not as the stand-in shown.
+        """
+        plan = self.output_plan
+        entries = [(plan.get(target), self._pending_saved(target))
+                   for target in plan.targets]
+        selected = (self._sidebar_target
+                    if self._sidebar_target in plan.targets else None)
+        stored = encode_outputs(entries, selected)
+        self.session.outputs = stored["outputs"] + list(self._unread_outputs)
+        self.session.selected_output = stored.get("selected_output")
+
+    def _pending_saved(self, target) -> SavedMusic | None:
+        pending = self._pending_music.get(target)
+        return pending[1] if pending is not None else None
+
+    def _quiesce_outputs(self) -> None:
+        """Stop everything bound to the outgoing session's outputs.
+
+        Before anything of the next one is installed: a gesture, a track read
+        or a check still running would otherwise land on whatever now has its
+        target's name.
+        """
+        editor = self.music_editor
+        if editor is not None and editor.gesture_active:
+            editor.cancel_gesture()
+        self._stop_music_probe()
+        self._stop_pending_checks()
+        self._session_generation += 1
+        self._pending_music.clear()
+        self._music_reading.clear()
+        self._music_trouble.clear()
+        self._unread_outputs = []
+        self.output_plan = OutputPlan()
+        self._assembly_music_target = None
+        self._sidebar_target = None
+        self._music_target = None
+
+    def _restore_outputs(self, found: Session) -> list[str]:
+        """Install a session's outputs whole, replacing rather than merging.
+
+        Only targets and choices: nothing is selected for editing, loaded into
+        a panel, played or queued here. Returns what could not be read.
+        """
+        read = decode_outputs(found.outputs, found.selected_output,
+                              hw_encoder=self.hw_encoder)
+        problems = list(read.problems)
+        for one in read.outputs:
+            target, planned = one.target, one.planned
+            if target.is_assembly:
+                if self._assembly_music_target is not None:
+                    problems.append("a second Assembly output was not read")
+                    continue
+                # Tracked as the binding's own, so the first refresh selects
+                # or rekeys it instead of refusing it as foreign or seeding
+                # it with the panel's defaults.
+                self._assembly_music_target = target
+            self.output_plan.set_choices(
+                target, planned.preset_key, planned.settings, planned.music)
+            if one.pending is not None:
+                self._pending_revision += 1
+                self._pending_music[target] = (self._pending_revision,
+                                               one.pending)
+        self._unread_outputs = list(read.unread)
+        if read.selected is not None:
+            self._sidebar_target = read.selected
+            self.output_plan.select(read.selected)
+        self._queue_pending_checks()
+        return problems
+
+    def _show_restored_output(self) -> None:
+        """Once identities and choices are in place, show what was selected.
+
+        Choosing is loading, as it is from the sidebar: nothing is edited,
+        focused elsewhere, played or queued.
+        """
+        if self._view_mode is Mode.FLOW:
+            # The reopened session's own panel values are what new outputs
+            # start from now, not the previous session's.
+            self._flow_defaults = (self._preset_key(), self.current_settings())
+            self._refresh_sidebar()
+            target = self._sidebar_target
+            if target is not None and target in self._active_targets():
+                self.output_sidebar.select(target)
+                self.export_panel.select_target(target)
+                self._load_target(target)
+                self._sync_music_panel()
+
+    def _keep_pending_requests(self, target, choice: MusicChoice) -> MusicChoice:
+        """An edit to an output whose saved track is not confirmed yet.
+
+        A level, fade, policy or mode edit is kept on the saved record, so the
+        passage it cannot see survives it. Removing the track, or choosing
+        Original or No sound, is a different choice and supersedes it.
+        """
+        pending = self._pending_music.get(target)
+        if pending is None:
+            return choice
+        revision, saved = pending
+        if (choice.track != saved.track
+                or choice.mode not in (AudioMode.REPLACE, AudioMode.MIX)):
+            self._supersede_pending(target)
+            return choice
+        saved = saved.with_requests(choice)
+        self._pending_music[target] = (revision, saved)
+        return saved.requested
+
+    def _supersede_pending(self, target) -> None:
+        if self._pending_music.pop(target, None) is not None:
+            self._music_reading.pop(target, None)
+            self._music_trouble.pop(target, None)
+
+    def _queue_pending_checks(self) -> None:
+        """One read per saved track, in plan order, one at a time."""
+        keys = []
+        for target, (_revision, saved) in self._pending_music.items():
+            key = (saved.track, saved.sha256, saved.stream_index)
+            if key not in keys:
+                keys.append(key)
+            self._music_reading[target] = saved.track
+        self._pending_checks = keys
+        self._next_pending_check()
+
+    def _next_pending_check(self) -> None:
+        while self._pending_checks and self._pending_probe is None:
+            key = self._pending_checks.pop(0)
+            waiting = {target: revision for target, (revision, saved)
+                       in self._pending_music.items()
+                       if (saved.track, saved.sha256, saved.stream_index) == key}
+            if not waiting:
+                continue
+            track = key[0]
+            if not track.is_file():
+                self._pending_settled(waiting, (
+                    f"The saved track {track.name} is not there any more. "
+                    "Choose it again."))
+                continue
+            self._check_generation += 1
+            generation = self._check_generation
+            # The same single read that validates and draws a chosen track.
+            request = WaveformRequest(generation=generation,
+                                      request_key=str(track))
+            probe = MusicAssetProbe(self.tools, track, generation, self,
+                                    waveform_request=request)
+            probe.waveform_ready.connect(self._pending_checked)
+            probe.failed.connect(self._pending_failed)
+            self._pending_probe = probe
+            self._pending_request = (generation, self._session_generation,
+                                     key, waiting)
+            probe.start()
+        self._after_pending_change()
+
+    def _current_pending_request(self, generation: int):
+        request = self._pending_request
+        if (request is None or generation != request[0]
+                or request[1] != self._session_generation):
+            return None
+        self._pending_probe = None
+        self._pending_request = None
+        return request
+
+    def _pending_checked(self, inspection) -> None:
+        """A saved track has been read again. Adopted only if it is the same."""
+        request = self._current_pending_request(inspection.request.generation)
+        if request is None:
+            return
+        asset = inspection.asset
+        adopted = False
+        for target, revision in request[3].items():
+            current = self._pending_music.get(target)
+            if current is None or current[0] != revision:
+                continue
+            saved = current[1]
+            reason = saved.mismatch(asset)
+            if reason:
+                self._pending_settled({target: revision}, (
+                    f"The saved track {saved.track.name} cannot be used: "
+                    f"{reason}. Choose it again."))
+                continue
+            del self._pending_music[target]
+            self._music_reading.pop(target, None)
+            self._music_trouble.pop(target, None)
+            self._store_music(target, saved.resolved(asset))
+            adopted = True
+        if adopted:
+            self._take_envelope(WaveformAssetKey.from_asset(asset), inspection)
+        self._next_pending_check()
+
+    def _pending_failed(self, generation: int, reason: str) -> None:
+        request = self._current_pending_request(generation)
+        if request is None:
+            return
+        self._pending_settled(request[3], (
+            f"The saved track {request[2][0].name} could not be read: "
+            f"{reason}. Choose it again."))
+        self._next_pending_check()
+
+    def _pending_settled(self, waiting: dict, trouble: str) -> None:
+        """Not confirmed. The record stays exactly as saved, and says why."""
+        for target, revision in waiting.items():
+            current = self._pending_music.get(target)
+            if current is None or current[0] != revision:
+                continue
+            self._music_reading.pop(target, None)
+            self._music_trouble[target] = trouble
+
+    def _after_pending_change(self) -> None:
+        target = self._music_target
+        if target is not None and not self._music_syncing:
+            self._sync_music_panel()
+        self._refresh_sidebar()
+        self._refresh_export_markers()
+
+    def _stop_pending_checks(self) -> None:
+        probe, self._pending_probe = self._pending_probe, None
+        self._pending_request = None
+        self._pending_checks = []
+        if probe is not None:
+            if probe.isRunning():
+                self._retain_probe_thread(probe)
+            probe.stop()
 
     # -- each output's own preset and settings ---------------------------------
 
@@ -1300,6 +1579,7 @@ class MainWindow(QMainWindow):
             music = (self.output_plan.get(target).music
                      if target in self.output_plan.targets else MusicChoice())
             self.output_plan.set_choices(target, preset, settings, music)
+            self._touch_outputs()
         elif target is None:
             self._flow_defaults = (preset, settings)
 
@@ -1358,8 +1638,10 @@ class MainWindow(QMainWindow):
     def _show_music_state(self, target: OutputTarget) -> None:
         """One line about acquisition, and one about what the export will do."""
         if target in self._music_reading:
+            reading = self._music_reading[target].name
             self.preview_view.show_track_status(
-                f"Reading {self._music_reading[target].name}…")
+                f"Checking the saved track {reading}…"
+                if target in self._pending_music else f"Reading {reading}…")
         elif target in self._music_trouble:
             self.preview_view.show_track_status(self._music_trouble[target])
         else:
@@ -1396,7 +1678,9 @@ class MainWindow(QMainWindow):
         if self._refuse_while_rebuilding():
             self._sync_music_panel()
             return
-        self.music_editor.commit(self.music_panel.capture())
+        self.music_editor.commit(
+            _untouched_levels(self.music_panel.capture(),
+                              self._planned_music(target)))
 
     def _on_music_committed(self, choice: MusicChoice, kind) -> None:
         """The one place an edit to the music is stored and heard.
@@ -1412,6 +1696,7 @@ class MainWindow(QMainWindow):
         if self._refuse_while_rebuilding():
             self._sync_music_panel()
             return
+        choice = self._keep_pending_requests(target, choice)
         self._store_music(target, choice)
         self._show_music_numbers(choice)
         in_place = (self._music_binding is not None
@@ -1713,6 +1998,7 @@ class MainWindow(QMainWindow):
         if not chosen:
             return
         track = Path(chosen)
+        self._supersede_pending(target)
         self._store_music(
             target, replace(self._planned_music(target), track=track,
                             mode=AudioMode.REPLACE, asset=None, passage=None))
@@ -3291,6 +3577,8 @@ class MainWindow(QMainWindow):
         those once, where the numbers are.
         """
         if target in self._music_reading:
+            if target in self._pending_music:
+                return f"Checking {self._music_reading[target].name}…"
             return f"Reading {self._music_reading[target].name}…"
         if target in self._music_trouble:
             return "Music could not be read"
@@ -3663,6 +3951,10 @@ class MainWindow(QMainWindow):
         # The whole list, not `trim_in = trim_out = 0`. Those are a view onto
         # the select being edited, so zeroing them leaves every other select on
         # the clip — which is the same leak again, one range further along.
+        #
+        # The outputs likewise, and first: nothing still bound to the old
+        # session's outputs may land on the new one's.
+        self._quiesce_outputs()
         for clip in self.clips:
             clip.selects = []
             clip.current = 0
@@ -3687,6 +3979,11 @@ class MainWindow(QMainWindow):
         if apply_settings(found, self.export_panel):
             self._on_preset_changed()
         restored = apply_to(found, self.clips)
+        # Installed whole before anything shows a clip, an output or the
+        # Assembly: each of those seeds an empty choice for a target it finds
+        # missing, and a seeded default is exactly what must not stand in for
+        # a saved one.
+        unread = self._restore_outputs(found)
         for clip in self.clips:
             self._mark_trim_in_table(clip)
             self._mark_review_in_table(clip)
@@ -3697,8 +3994,14 @@ class MainWindow(QMainWindow):
         # After the trims, because the assembly names ranges and the ranges
         # only exist once apply_to has put them back on the clips.
         self._refresh_assembly()
+        self._show_restored_output()
 
         notes = []
+        if unread:
+            notes.append(
+                f"{len(unread)} saved output"
+                f"{' was' if len(unread) == 1 else 's were'} not restored "
+                f"({unread[0]})")
         if restored:
             notes.append(f"{restored} trim{'' if restored == 1 else 's'} "
                          "restored from your last visit")
@@ -3778,6 +4081,7 @@ class MainWindow(QMainWindow):
         if self._decisions_editable():
             capture_from(self.session, self.clips)
             capture_settings(self.session, self.export_panel, self.clips)
+            self._capture_outputs()
         # Otherwise this is a rescan still in progress. Its clips carry no
         # decisions yet, and `capture_from` reads a clip with no ranges and no
         # review as one whose marks were deliberately cleared — so reading the
@@ -3964,6 +4268,7 @@ class MainWindow(QMainWindow):
             self.live_preview.close()
         self._stop_music_probe()
         self._stop_envelope_probe()
+        self._stop_pending_checks()
         # First, because it is the one holding a decoder open on the card.
         self.player.shutdown()
         self._flight_scan_ready = False
@@ -4051,6 +4356,15 @@ class MainWindow(QMainWindow):
         self.export_panel.set_hardware(found)
         if found:
             self.hw_encoder, self.hw_label = found
+            # Outputs read back or planned before this machine's encoder was
+            # known learn it now; a file never supplies it.
+            for target in self.output_plan.targets:
+                planned = self.output_plan.get(target)
+                if not planned.settings.hw_encoder:
+                    self.output_plan.set_choices(
+                        target, planned.preset_key,
+                        replace(planned.settings, hw_encoder=self.hw_encoder),
+                        planned.music)
 
     # -- source handling ------------------------------------------------------
 

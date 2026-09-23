@@ -1338,3 +1338,528 @@ def test_submitted_fades_say_what_fits_and_mix_names_its_recording_level():
     assert lines[2] == ("Fade in: 8.000 s · Fade out: 6.000 s (fits 5.714 s "
                         "and 4.286 s in this output)")
     assert lines[3] == "Music level: 50% · Recording level: 25%"
+
+
+# -- saved, reopened and confirmed (W4) ------------------------------------------
+
+import json  # noqa: E402
+
+from flightdvr.audio_plan import ShortTrackPolicy  # noqa: E402
+
+SHA_B = "b" * 64
+
+
+def a_file(tmp_path, name: str) -> Path:
+    track = tmp_path / name
+    track.write_bytes(b"not decoded here")
+    return track
+
+
+def exact_a(tmp_path) -> MusicChoice:
+    return MusicChoice(
+        mode=AudioMode.MIX,
+        asset=AudioAsset(a_file(tmp_path, "a.wav"), "a" * 64, 0, 44_100, 2,
+                         441_000),
+        passage=SampleSpan(44_101, 176_403, 44_100),
+        music_level=Fraction(2, 3), dvr_level=Fraction(1, 7),
+        fade_in_samples=12_345, fade_out_samples=67_891)
+
+
+def exact_b(tmp_path) -> MusicChoice:
+    return MusicChoice(
+        mode=AudioMode.REPLACE,
+        asset=AudioAsset(a_file(tmp_path, "b.flac"), SHA_B, 0, 48_000, 2,
+                         480_000),
+        passage=SampleSpan(96_001, 240_007, 48_000),
+        short_track=ShortTrackPolicy.PLAY_ONCE,
+        music_level=Fraction(3, 5), dvr_level=Fraction(1, 4),
+        fade_in_samples=23_456, fade_out_samples=34_567)
+
+
+def two_ranges(window):
+    """Two nonzero-origin ranges of one recording, A then B."""
+    clip = window.clips[0]
+    clip.selects = [Select(96.0, 132.0, "A", sid="range-a"),
+                    Select(180.0, 204.0, "B", sid="range-b")]
+    clip.current = 0
+    return (OutputTarget.clip_or_range(clip.fingerprint, "range-a"),
+            OutputTarget.clip_or_range(clip.fingerprint, "range-b"))
+
+
+def planned_pair(window, tmp_path, app):
+    """A and B with distinct presets, settings and music; B selected in
+    Flow; then written."""
+    a, b = two_ranges(window)
+    tick(window, 0)
+    window.output_plan.set_choices(a, "master", ExportSettings(master_crf=21),
+                                   exact_a(tmp_path))
+    window.output_plan.set_choices(b, "social",
+                                   ExportSettings(social_size_mb=7),
+                                   exact_b(tmp_path))
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+    window._select_working_target(b)
+    window.set_view_mode(Mode.CLASSIC)
+    window._flush_session()
+    return a, b
+
+
+def stored(window) -> dict:
+    return json.loads(window.session.path.read_text(encoding="utf-8"))
+
+
+def encoded(target) -> dict:
+    return {"assembly": target.is_assembly,
+            "items": [item.as_dict() for item in target.items]}
+
+
+def entry(document: dict, target) -> dict:
+    return next(one for one in document["outputs"]
+                if one["target"] == encoded(target))
+
+
+def reopen(app, tmp_path, monkeypatch, names=("hdz_001.ts", "hdz_002.ts")):
+    """A second window onto the same card: the session it finds is the one
+    the first wrote."""
+    from flightdvr.media import find_tools
+    from flightdvr.ui import MainWindow
+
+    card = tmp_path / "card"
+    made = MainWindow(find_tools())
+    made.source_combo.insertItem(0, str(card), str(card))
+    made.source_combo.setCurrentIndex(0)
+    made._ready = True
+    monkeypatch.setattr(made.thumbs, "request", lambda *_: None)
+    monkeypatch.setattr(made.player, "load", lambda *a, **k: None)
+    for name in names:
+        made._add_clip(made._scan_generation, a_clip(name, card))
+    made._scan_done(made._scan_generation, len(names))
+    app.processEvents()
+    return made
+
+
+def confirm(probe, asset) -> None:
+    probe.deliver_waveform(WaveformInspection.ready(
+        probe.waveform_request, asset, an_envelope(asset)))
+
+
+def test_each_output_is_written_exactly_with_its_selection(
+        window, app, tmp_path):
+    a, b = planned_pair(window, tmp_path, app)
+    document = stored(window)
+    assert document["schema"] == 4
+    first = entry(document, a)
+    assert first["preset"] == "master"
+    assert first["settings"]["master_crf"] == 21
+    assert "hw_encoder" not in first["settings"]
+    assert first["music"] == {
+        "mode": "mix", "track": str(tmp_path / "a.wav"),
+        "reference": {"sha256": "a" * 64, "stream": 0, "rate": 44_100,
+                      "channels": 2, "samples": 441_000},
+        "passage": [44_101, 176_403, 44_100], "short_track": "loop",
+        "music_level": [2, 3], "dvr_level": [1, 7],
+        "fade_in_samples": 12_345, "fade_out_samples": 67_891}
+    second = entry(document, b)
+    assert second["preset"] == "social"
+    assert second["settings"]["social_size_mb"] == 7
+    assert second["music"]["passage"] == [96_001, 240_007, 48_000]
+    assert second["music"]["short_track"] == "play_once"
+    # By identity, not by position.
+    assert document["selected_output"] == encoded(b)
+
+
+def test_reopening_holds_requests_until_each_track_is_confirmed_then_is_exact(
+        window, app, tmp_path, monkeypatch, probes):
+    a, b = planned_pair(window, tmp_path, app)
+    written = stored(window)
+    before = len(probes)
+    again = reopen(app, tmp_path, monkeypatch)
+    try:
+        # One read at a time, in plan order; nothing confirmed yet.
+        assert [p.track.name for p in probes[before:]] == ["a.wav"]
+        shown = again._planned_music(a)
+        assert shown.asset is None and shown.passage is None
+        assert shown.music_level == Fraction(2, 3)
+        assert again._pending_music[a][1].passage == SampleSpan(
+            44_101, 176_403, 44_100)
+        assert again._music_line(a) == "Checking a.wav…"
+        # Saved again before any confirmation: exactly what was read.
+        again._flush_session()
+        assert entry(stored(again), a) == entry(written, a)
+        assert entry(stored(again), b) == entry(written, b)
+
+        confirm(probes[before], exact_a(tmp_path).asset)
+        app.processEvents()
+        assert again._planned_music(a) == exact_a(tmp_path)
+        assert [p.track.name for p in probes[before:]] == ["a.wav", "b.flac"]
+        confirm(probes[before + 1], exact_b(tmp_path).asset)
+        app.processEvents()
+        assert again._planned_music(b) == exact_b(tmp_path)
+        assert again._pending_music == {}
+        # Confirmation is not a request to hear it.
+        assert again.live_preview.audio_plan is None
+        assert not again.player.is_playing
+        assert again.output_plan.get(a).settings.master_crf == 21
+        assert again.output_plan.get(b).settings.social_size_mb == 7
+
+        # A/B/A in Flow, starting from the saved selection.
+        tick(again, 0)
+        again.set_view_mode(Mode.FLOW)
+        app.processEvents()
+        assert again._sidebar_target == b
+        for target, preset, music in ((a, "master", exact_a),
+                                      (b, "social", exact_b),
+                                      (a, "master", exact_a)):
+            again._select_working_target(target)
+            app.processEvents()
+            assert again._preset_key() == preset
+            assert again._planned_music(target) == music(tmp_path)
+        # Reopening restores nothing into the queue.
+        assert again.jobs == []
+        again.set_view_mode(Mode.CLASSIC)
+    finally:
+        again.close()
+
+
+def test_a_renamed_and_reordered_range_keeps_its_own_choices(
+        window, app, tmp_path, monkeypatch, probes):
+    a, b = planned_pair(window, tmp_path, app)
+    clip = window.clips[0]
+    clip.selects = [Select(180.0, 204.0, "renamed B", sid="range-b"),
+                    Select(96.0, 132.0, "renamed A", sid="range-a")]
+    window._flush_session()
+    assert entry(stored(window), a)["music"]["passage"] == [
+        44_101, 176_403, 44_100]
+    before = len(probes)
+    again = reopen(app, tmp_path, monkeypatch)
+    try:
+        confirm(probes[before], exact_a(tmp_path).asset)
+        app.processEvents()
+        confirm(probes[before + 1], exact_b(tmp_path).asset)
+        app.processEvents()
+        assert again._planned_music(a) == exact_a(tmp_path)
+        assert again._planned_music(b) == exact_b(tmp_path)
+        assert [s.sid for s in again.clips[0].selects] == ["range-b",
+                                                           "range-a"]
+    finally:
+        again.close()
+
+
+def test_an_edit_before_confirmation_keeps_the_passage(
+        window, app, tmp_path, monkeypatch, probes):
+    """Refinement 2: a level edit while the track is being checked is kept
+    on the saved record; the passage it cannot see survives it, is written
+    by a second save, and is what confirmation restores."""
+    a, _b = planned_pair(window, tmp_path, app)
+    before = len(probes)
+    again = reopen(app, tmp_path, monkeypatch)
+    try:
+        focus(again, 0)
+        assert again._music_target == a
+        again.music_panel.music_level.setValue(50)
+        app.processEvents()
+        saved = again._pending_music[a][1]
+        assert saved.music_level == Fraction(1, 2)
+        assert saved.passage == SampleSpan(44_101, 176_403, 44_100)
+
+        again._flush_session()
+        music = entry(stored(again), a)["music"]
+        assert music["music_level"] == [1, 2]
+        assert music["passage"] == [44_101, 176_403, 44_100]
+        assert music["reference"]["sha256"] == "a" * 64
+
+        confirm(probes[before], exact_a(tmp_path).asset)
+        app.processEvents()
+        assert again._planned_music(a) == replace(
+            exact_a(tmp_path), music_level=Fraction(1, 2))
+    finally:
+        again.close()
+
+
+def test_choosing_original_while_unconfirmed_supersedes_the_saved_track(
+        window, app, tmp_path, monkeypatch, probes):
+    a, _b = planned_pair(window, tmp_path, app)
+    before = len(probes)
+    again = reopen(app, tmp_path, monkeypatch)
+    try:
+        focus(again, 0)
+        again._on_music_committed(MusicChoice(mode=AudioMode.ORIGINAL), None)
+        assert a not in again._pending_music
+        # The check already under way lands on nothing.
+        confirm(probes[before], exact_a(tmp_path).asset)
+        app.processEvents()
+        assert again._planned_music(a) == MusicChoice(mode=AudioMode.ORIGINAL)
+    finally:
+        again.close()
+
+
+@pytest.mark.parametrize("fresh, why", [
+    (lambda t: replace(exact_a(t).asset, sha256="c" * 64), "changed"),
+    (lambda t: replace(exact_a(t).asset, stream_index=1), "stream"),
+    (lambda t: replace(exact_a(t).asset, sample_rate=48_000), "sample rate"),
+    (lambda t: replace(exact_a(t).asset, decoded_samples=176_402), "shorter"),
+])
+def test_a_different_track_stays_unavailable_and_is_saved_unchanged(
+        window, app, tmp_path, monkeypatch, probes, fresh, why):
+    """Refinement 3, through the connected callback: nothing is adopted,
+    nothing substitutes, the queue refuses and nothing is heard."""
+    a, _b = planned_pair(window, tmp_path, app)
+    written = entry(stored(window), a)
+    before = len(probes)
+    again = reopen(app, tmp_path, monkeypatch)
+    try:
+        confirm(probes[before], fresh(tmp_path))
+        app.processEvents()
+        assert again._planned_music(a).asset is None
+        assert a in again._pending_music
+        assert why in again._music_trouble[a]
+        assert again._music_line(a) == "Music could not be read"
+        again._flush_session()
+        assert entry(stored(again), a) == written
+
+        tick(again, 0)
+        said = warnings_from(monkeypatch)
+        again._add_to_queue()
+        app.processEvents()
+        assert again.jobs == [] and said and why in said[0]
+        assert again.live_preview.audio_plan is None
+    finally:
+        again.close()
+
+
+def test_a_missing_track_is_said_without_reading_and_the_next_is_checked(
+        window, app, tmp_path, monkeypatch, probes):
+    a, b = planned_pair(window, tmp_path, app)
+    (tmp_path / "a.wav").unlink()
+    before = len(probes)
+    again = reopen(app, tmp_path, monkeypatch)
+    try:
+        assert [p.track.name for p in probes[before:]] == ["b.flac"]
+        assert "not there any more" in again._music_trouble[a]
+        assert again._pending_music[a][1].passage == SampleSpan(
+            44_101, 176_403, 44_100)
+    finally:
+        again.close()
+
+
+def test_a_failed_read_advances_to_the_next_check(
+        window, app, tmp_path, monkeypatch, probes):
+    a, b = planned_pair(window, tmp_path, app)
+    before = len(probes)
+    again = reopen(app, tmp_path, monkeypatch)
+    try:
+        probes[before].deliver(reason="no audio")
+        app.processEvents()
+        assert "no audio" in again._music_trouble[a]
+        assert [p.track.name for p in probes[before:]] == ["a.wav", "b.flac"]
+    finally:
+        again.close()
+
+
+def test_a_late_confirmation_after_a_session_switch_lands_nowhere(
+        window, app, tmp_path, monkeypatch, probes):
+    a, _b = planned_pair(window, tmp_path, app)
+    before = len(probes)
+    again = reopen(app, tmp_path, monkeypatch)
+    try:
+        old = probes[before]
+        again._adopt_session(again.session)        # reopened in place
+        assert old.stopped
+        asset = exact_a(tmp_path).asset
+        # Emitted straight: a real result can already be queued across
+        # threads when its read is stopped.
+        old.waveform_ready.emit(WaveformInspection.ready(
+            old.waveform_request, asset, an_envelope(asset)))
+        app.processEvents()
+        assert again._planned_music(a).asset is None
+        assert a in again._pending_music
+        assert probes[-1] is not old and not probes[-1].stopped
+    finally:
+        again.close()
+
+
+def test_a_late_confirmation_after_choosing_another_track_lands_nowhere(
+        window, app, tmp_path, monkeypatch, probes):
+    a, _b = planned_pair(window, tmp_path, app)
+    before = len(probes)
+    again = reopen(app, tmp_path, monkeypatch)
+    try:
+        check = probes[before]
+        focus(again, 0)
+        other = choose_track(again, monkeypatch, tmp_path / "other.mp3")
+        confirm(check, exact_a(tmp_path).asset)
+        app.processEvents()
+        assert again._planned_music(a).track == tmp_path / "other.mp3"
+        assert again._planned_music(a).passage is None
+        other.deliver(an_asset(tmp_path / "other.mp3"))
+        app.processEvents()
+        assert again._planned_music(a).asset.track == tmp_path / "other.mp3"
+    finally:
+        again.close()
+
+
+def test_reopening_leaves_a_queued_job_alone_and_saves_no_queue(
+        window, app, tmp_path, monkeypatch, probes):
+    planned_pair(window, tmp_path, app)
+    said = warnings_from(monkeypatch)
+    window._add_to_queue()
+    app.processEvents()
+    assert said == [] and window.jobs
+    frozen = [(job.target, job.audio, job.settings, job.out_path)
+              for job in window.jobs]
+    window._adopt_session(window.session)
+    app.processEvents()
+    assert [(job.target, job.audio, job.settings, job.out_path)
+            for job in window.jobs] == frozen
+    window._flush_session()
+    assert "jobs" not in stored(window) and "queue" not in stored(window)
+
+
+def test_a_saved_output_whose_recording_is_not_scanned_is_kept_as_saved(
+        window, app, tmp_path, monkeypatch, probes):
+    a, b = planned_pair(window, tmp_path, app)
+    written = stored(window)
+    again = reopen(app, tmp_path, monkeypatch, names=("hdz_002.ts",))
+    try:
+        assert a in again.output_plan.targets and b in again.output_plan.targets
+        again.set_view_mode(Mode.FLOW)
+        app.processEvents()
+        # Not an output now, and nothing chosen in its place.
+        assert a not in again._active_targets()
+        assert again._sidebar_target is None
+        again.set_view_mode(Mode.CLASSIC)
+        again._flush_session()
+        assert entry(stored(again), a) == entry(written, a)
+        assert entry(stored(again), b) == entry(written, b)
+    finally:
+        again.close()
+
+
+def test_an_unreadable_saved_output_is_kept_and_its_neighbours_restored(
+        window, app, tmp_path, monkeypatch, probes):
+    a, b = planned_pair(window, tmp_path, app)
+    document = stored(window)
+    broken = entry(document, a)
+    broken["preset"] = "from-the-future"
+    window.session.path.write_text(json.dumps(document), encoding="utf-8")
+    window._session_timer.stop()
+    before = len(probes)
+    again = reopen(app, tmp_path, monkeypatch)
+    try:
+        assert a not in again.output_plan.targets
+        assert b in again.output_plan.targets
+        assert again._sidebar_target == b
+        assert [p.track.name for p in probes[before:]] == ["b.flac"]
+        again._flush_session()
+        kept = stored(again)["outputs"]
+        assert broken in kept and entry(stored(again), b) == entry(document, b)
+    finally:
+        again.close()
+
+
+def test_a_restored_assembly_is_bound_as_its_own_and_survives_round_trips(
+        window, app, tmp_path, monkeypatch, probes):
+    """Refinement 4: the first refresh neither refuses the restored choice
+    as foreign nor seeds it with defaults; Flow to Classic and back, and a
+    second restore, keep it."""
+    target = assembly_target(window, app)
+    chosen = exact_a(tmp_path)
+    window._store_music(target, chosen)
+    window.set_view_mode(Mode.CLASSIC)
+    window._flush_session()
+    assert entry(stored(window), target)["music"]["passage"] == [
+        44_101, 176_403, 44_100]
+
+    before = len(probes)
+    again = reopen(app, tmp_path, monkeypatch)
+    try:
+        assert again._assembly_music_target == target
+        again.set_view_mode(Mode.FLOW)
+        again._show_stage(Stage.ASSEMBLE)
+        app.processEvents()
+        again._show_stage(Stage.MUSIC)
+        app.processEvents()
+        assert again._music_target == target
+        assert again._pending_music[target][1].passage == chosen.passage
+        confirm(probes[before], chosen.asset)
+        app.processEvents()
+        assert again._planned_music(target) == chosen
+
+        again.set_view_mode(Mode.CLASSIC)
+        app.processEvents()
+        again.set_view_mode(Mode.FLOW)
+        again._show_stage(Stage.MUSIC)
+        app.processEvents()
+        assert again._planned_music(target) == chosen
+
+        for _ in range(2):
+            again._flush_session()
+            again._adopt_session(again.session)
+            app.processEvents()
+            assert again._pending_music[target][1].passage == chosen.passage
+        again._show_stage(Stage.MUSIC)
+        app.processEvents()
+        assert again._music_target == target
+        again.set_view_mode(Mode.CLASSIC)
+    finally:
+        again.close()
+
+
+def test_a_typed_edit_keeps_exact_levels_nobody_touched(
+        window, monkeypatch, tmp_path, app):
+    """The panel shows levels to the nearest percent; typing a fade must not
+    turn an exact 1/7 into the 7/50 it displays."""
+    target = with_track(window, monkeypatch, tmp_path, app)
+    exact = replace(window._planned_music(target), music_level=Fraction(2, 3),
+                    dvr_level=Fraction(1, 7), mode=AudioMode.MIX)
+    window._store_music(target, exact)
+    window._sync_music_panel()
+    window.music_panel.music_level.setValue(50)
+    app.processEvents()
+    stored = window._planned_music(target)
+    assert stored.music_level == Fraction(1, 2)
+    assert stored.dvr_level == Fraction(1, 7)
+
+
+def test_rekey_while_checking_carries_the_saved_track_to_the_new_order(
+        window, app, tmp_path, monkeypatch, probes):
+    """A reorder rekeys the Assembly's choice; a check under way follows it
+    rather than landing on a key nothing holds."""
+    target = assembly_target(window, app)
+    chosen = exact_a(tmp_path)
+    window._store_music(target, chosen)
+    window.set_view_mode(Mode.CLASSIC)
+    window._flush_session()
+    before = len(probes)
+    again = reopen(app, tmp_path, monkeypatch)
+    try:
+        again.set_view_mode(Mode.FLOW)
+        again._show_stage(Stage.ASSEMBLE)
+        app.processEvents()
+        first, second = again.clips
+        moved = [Item(second.fingerprint, "b"), Item(first.fingerprint, "a"),
+                 Item(first.fingerprint, "a")]
+        again._store_assembly(moved)
+        again._show_stage(Stage.MUSIC)
+        app.processEvents()
+        now = OutputTarget.assembly(moved)
+        assert again._music_target == now
+        assert again._pending_music[now][1].passage == chosen.passage
+        confirm(probes[before], chosen.asset)
+        app.processEvents()
+        assert again._planned_music(now) == chosen
+        assert now not in again._music_reading
+        again.set_view_mode(Mode.CLASSIC)
+    finally:
+        again.close()
+
+
+def test_closing_while_checking_leaves_no_running_read(
+        window, app, tmp_path, monkeypatch, probes):
+    planned_pair(window, tmp_path, app)
+    before = len(probes)
+    again = reopen(app, tmp_path, monkeypatch)
+    check = probes[before]
+    assert check.isRunning()
+    again.close()
+    assert check.stopped and not check.isRunning()

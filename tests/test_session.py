@@ -625,3 +625,68 @@ def test_a_document_with_rubbish_in_the_new_fields_still_opens(tmp_path):
         read = Session.load(broken)
         assert read.path == broken, name
         assert read.join_order == [] and read.export == {}, name
+
+
+# -- each output's own choices (W4, schema 4) ------------------------------------
+
+def test_a_version_3_document_opens_with_no_outputs_and_its_export(tmp_path):
+    """Astra's legacy case: the same range identity, the one panel's values,
+    and no music invented for anything."""
+    old = tmp_path / "v3.flightdvr.json"
+    old.write_text(json.dumps({
+        "schema": 3, "title": "before outputs", "source": r"G:\movies",
+        "clips": {"fp": {"name": "hdz_001.ts", "review": "keep",
+                         "selects": [{"start": 96.0, "end": 132.0,
+                                      "name": "A", "id": "range-a"}]}},
+        "export": {"preset": "master", "master_crf": 21},
+    }))
+    read = Session.load(old)
+    assert read.outputs == [] and read.selected_output is None
+    assert read.export == {"preset": "master", "master_crf": 21}
+    assert [s.sid for s in read.marks("fp").selects] == ["range-a"]
+
+    stored = json.loads(read.save().read_text())
+    assert stored["schema"] == SCHEMA == 4
+    assert "outputs" not in stored and "selected_output" not in stored
+
+
+def test_a_version_2_range_gets_one_identity_that_survives_a_save(tmp_path):
+    old = tmp_path / "v2.flightdvr.json"
+    old.write_text(json.dumps({
+        "schema": 2, "clips": {"fp": {"name": "hdz_001.ts",
+                                      "selects": [{"start": 1.0, "end": 2.0}]}},
+    }))
+    first = Session.load(old).marks("fp").selects[0].sid
+    assert first
+    again = Session.load(Session.load(old).save(tmp_path / "v4.flightdvr.json"))
+    assert Session.load(tmp_path / "v4.flightdvr.json").marks(
+        "fp").selects[0].sid == again.marks("fp").selects[0].sid
+
+
+def test_outputs_and_the_selection_round_trip_as_stored(tmp_path):
+    outputs = [{"target": {"assembly": False,
+                           "items": [{"clip": "fp", "range": "range-a"}]},
+                "preset": "master", "settings": {"master_crf": 18}}]
+    selected = {"assembly": False, "items": [{"clip": "fp", "range": "range-a"}]}
+    session = Session(title="t", outputs=outputs, selected_output=selected)
+    read = Session.load(session.save(tmp_path / "s.flightdvr.json"))
+    assert read.outputs == outputs and read.selected_output == selected
+
+
+def test_a_malformed_output_does_not_empty_the_session(tmp_path):
+    """Session.load turns any conversion error into an empty session, so the
+    outputs are kept as stored and read one by one later."""
+    stored = tmp_path / "s.flightdvr.json"
+    stored.write_text(json.dumps({
+        "schema": 4, "title": "kept",
+        "clips": {"fp": {"name": "a.ts", "review": "keep"}},
+        "outputs": [{"target": "rubbish"}, 7],
+        "selected_output": "not a target",
+    }))
+    read = Session.load(stored)
+    assert read.title == "kept" and read.marks("fp").review == KEEP
+    assert read.outputs == [{"target": "rubbish"}, 7]
+    assert read.selected_output is None
+    stored.write_text(json.dumps({"schema": 4, "title": "kept",
+                                  "outputs": "not a list"}))
+    assert Session.load(stored).outputs == []

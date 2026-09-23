@@ -58,7 +58,7 @@ RECENT_LIMIT = 12
 # get wrong. `_migrate` is where old versions become current ones, and there is
 # a test for every step it knows about, because this file will outlive several
 # of its own formats.
-SCHEMA = 3
+SCHEMA = 4
 
 UNREVIEWED, KEEP, MAYBE, REJECT = "", "keep", "maybe", "reject"
 REVIEW_STATES = (UNREVIEWED, KEEP, MAYBE, REJECT)
@@ -130,6 +130,14 @@ class Session:
     # be showing.
     export: dict = field(default_factory=dict)
 
+    # Each planned output's own choices, in plan order, and which one was
+    # being edited — as stored, because `target_choices` is what reads them
+    # and skips a malformed entry without losing its neighbours. Kept beside
+    # `export` rather than replacing it: `export` is still what Classic's one
+    # panel and a session with no outputs come back to.
+    outputs: list = field(default_factory=list)
+    selected_output: dict | None = None
+
     # -- what is in it --------------------------------------------------------
 
     def marks(self, fingerprint: str, name: str = "") -> ClipMarks:
@@ -167,6 +175,10 @@ class Session:
             stored["assembly"] = [i.as_dict() for i in self.assembly]
         if self.export:
             stored["export"] = dict(self.export)
+        if self.outputs:
+            stored["outputs"] = list(self.outputs)
+            if self.selected_output is not None:
+                stored["selected_output"] = self.selected_output
         return stored
 
     def save(self, path: Path | None = None) -> Path:
@@ -213,6 +225,13 @@ class Session:
                           for i in (raw.get("assembly") or [])
                           if isinstance(i, dict)],
                 export=dict(raw.get("export") or {}),
+                # Not decoded here. One unreadable output must not turn the
+                # whole file into an empty session, which this guard would.
+                outputs=(list(raw["outputs"])
+                         if isinstance(raw.get("outputs"), list) else []),
+                selected_output=(raw["selected_output"]
+                                 if isinstance(raw.get("selected_output"), dict)
+                                 else None),
                 path=Path(path),
             )
         # Valid JSON is not the same as valid session data. A select whose
@@ -456,4 +475,9 @@ def _migrate(raw: dict) -> dict:
             for fingerprint, marks in (raw.get("clips") or {}).items()
             if isinstance(marks, dict)
         })
+        version = 3
+    if version == 3:
+        # Each output's own choices. Nothing to convert: a version 3 file
+        # has none, and reads with its one `export` exactly as it did.
+        raw = dict(raw, schema=4)
     return raw
