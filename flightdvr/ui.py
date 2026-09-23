@@ -449,6 +449,13 @@ class MainWindow(QMainWindow):
         self._classic_fit: int | None = None
         # What folding Flow's Output saved, to know when unfolding fits.
         self._output_fold_saves = 0
+        # Classic's list folded to its summary while Music needs the room
+        # (approved 24 September): how tall the window must be for a complete
+        # row again, and whether someone asked for the list back meanwhile.
+        self._fold_need = 0
+        self._fold_suppressed = False
+        self._making_room = False
+        self._room_pending = False
         self._viewport_home = None
         self.sidebar_working = None
         self.sidebar_submitted = None
@@ -930,6 +937,7 @@ class MainWindow(QMainWindow):
         panel.review_requested.connect(self._set_review)
         panel.length_filter_changed.connect(self._refresh_review_filter)
         panel.mode_requested.connect(self.set_browser_mode)
+        panel.unfold_requested.connect(self._on_unfold_requested)
         head = panel.table.horizontalHeader()
         head.geometriesChanged.connect(self._fit_clip_column)
         head.sectionResized.connect(
@@ -1135,6 +1143,17 @@ class MainWindow(QMainWindow):
         self._list_before_band = self.browser_panel.table.height()
 
     def _make_music_room(self, was, tries: int = 4) -> None:
+        # Folding waits for this to finish: mid-way, the picture has not yet
+        # given up what it will, and a list short of a row now may not be.
+        self._making_room = True
+        try:
+            self._make_music_room_step(was, tries)
+        finally:
+            self._making_room = self._room_pending
+        if not self._making_room:
+            self._check_list_fold()
+
+    def _make_music_room_step(self, was, tries: int) -> None:
         """Take what the band needed from the picture, exactly.
 
         Measured rather than predicted: the window grows by what the band
@@ -1142,6 +1161,7 @@ class MainWindow(QMainWindow):
         its floor — and the window is given its size back. What cannot be
         found that way is said, not hidden.
         """
+        self._room_pending = False
         box = self.preview_view.preview_box
         band = self.preview_view.music_band
         if (self._view_mode is not Mode.CLASSIC or not band.isChecked()
@@ -1159,6 +1179,7 @@ class MainWindow(QMainWindow):
         if over <= 0 and lost > 0 and box.height() > floor and tries > 0:
             self._classic_fit = max(floor, box.height() - lost)
             box.set_height_cap(self._classic_height_cap())
+            self._room_pending = True
             QTimer.singleShot(
                 120, lambda: self._make_music_room(was, tries - 1))
             return
@@ -1178,6 +1199,7 @@ class MainWindow(QMainWindow):
             self._keep_window_size(was)
             # Again once that has settled: the first answer can be a few
             # pixels short while the layouts catch up.
+            self._room_pending = True
             QTimer.singleShot(
                 120, lambda: self._make_music_room(was, tries - 1))
             return
@@ -1268,6 +1290,9 @@ class MainWindow(QMainWindow):
         box = self.preview_view.preview_box
         if box.parentWidget() is not self._left_column:
             return
+        self._fold_suppressed = False
+        if self.browser_panel.folded:
+            self._set_list_folded(False)
         box.set_list_room(self._classic_list_room())
         self._classic_fit = None
         box.set_height_cap(self._classic_height_cap())
@@ -1277,10 +1302,93 @@ class MainWindow(QMainWindow):
         box.refit()
         self._refit_on_regrow = True
 
+    def _fully_visible_rows(self) -> int:
+        table = self.browser_panel.table
+        viewport = table.viewport().rect()
+        return sum(1 for row in range(table.rowCount())
+                   if not table.isRowHidden(row)
+                   and viewport.contains(table.visualRect(
+                       table.model().index(row, 0)).adjusted(0, 0, -1, -1)))
+
+    def _check_list_fold(self, tries: int = 6) -> None:
+        """Keep a complete row in Classic's list while Music is open, and
+        fold the list to its summary only when none can be found.
+
+        Approved on 24 September for compact Classic. A missing row is taken
+        first from the picture above its floor, then from the band's body
+        down to its track row; only when both are at their least does the
+        list fold. It unfolds once what could be taken back again covers what
+        the list needs beyond its summary line — decided from the room, not
+        from a remembered size, so a resize either way settles once.
+        """
+        panel = self.browser_panel
+        box = self.preview_view.preview_box
+        body = self.preview_view.music_body
+        wanted = (self._view_mode is Mode.CLASSIC
+                  and self.preview_view.music_band.isChecked()
+                  and self._layout_state.browser is not BrowserMode.COLLAPSED
+                  and not self._fold_suppressed
+                  and box.parentWidget() is self._left_column)
+        if panel.folded:
+            reclaim = (max(0, box.height() - box.content_floor())
+                       + max(0, body.height() - body.minimumHeight()))
+            if not wanted or reclaim >= self._fold_need:
+                self._set_list_folded(False)
+            return
+        if (self._making_room or not wanted or not panel.table.isVisible()
+                or panel.table.rowCount() == 0
+                or self._fully_visible_rows() > 0):
+            return
+        table = panel.table
+        smallest_row = round(MIN_THUMB_WIDTH * 9 / 16) + 6
+        short = max(1, smallest_row - table.viewport().height())
+        floor = box.content_floor()
+        if tries > 0 and box.height() > floor:
+            self._classic_fit = max(floor, box.height() - short)
+            box.set_height_cap(self._classic_height_cap())
+        elif tries > 0 and body.height() > body.minimumHeight():
+            body.setMaximumHeight(max(body.minimumHeight(),
+                                      body.height() - short))
+        else:
+            # Nothing left to give without clipping a control: the summary
+            # stands in, and what unfolding would need is remembered.
+            chrome = table.height() - table.viewport().height()
+            self._fold_need = max(
+                1, chrome + smallest_row
+                - panel.summary_bar.sizeHint().height())
+            self._set_list_folded(True)
+            return
+        QTimer.singleShot(60, lambda: self._check_list_fold(tries - 1))
+
+    def _set_list_folded(self, folded: bool) -> None:
+        panel = self.browser_panel
+        panel.show_folded(folded)
+        panel.setMinimumHeight(self._classic_list_minimum())
+        box = self.preview_view.preview_box
+        if box.parentWidget() is self._left_column:
+            box.set_list_room(self._classic_list_room())
+        self._refresh_browser_summary()
+        if not folded:
+            # Its rows were hidden, not rebuilt: the selection and scroll are
+            # the ones it had. Keep the selected row in view.
+            item = self.table.item(self.table.currentRow(), 0)
+            if item is not None:
+                self.table.scrollToItem(item)
+        self._relayout()
+
+    def _on_unfold_requested(self) -> None:
+        """"Show clips" on the folded summary: the list comes back, and stays
+        back until Music is closed, however little room it has."""
+        self._fold_suppressed = True
+        self._set_list_folded(False)
+        self.table.setFocus()
+
     def _classic_list_minimum(self) -> int:
-        """The list's own reserve: none while it is collapsed to one line,
-        which is otherwise 150px kept for a list that is not there."""
-        if self._layout_state.browser is BrowserMode.COLLAPSED:
+        """The list's own reserve: none while it is collapsed or folded to
+        one line, which is otherwise 150px kept for a list that is not
+        there."""
+        if (self._layout_state.browser is BrowserMode.COLLAPSED
+                or self.browser_panel.folded):
             return 0
         return MIN_LIST_HEIGHT
 
@@ -1306,7 +1414,8 @@ class MainWindow(QMainWindow):
     def _classic_list_room(self) -> int:
         """What Classic's picture leaves under it: the list, or the one-line
         summary that stands in for it."""
-        if self._layout_state.browser is BrowserMode.COLLAPSED:
+        if (self._layout_state.browser is BrowserMode.COLLAPSED
+                or self.browser_panel.folded):
             return self.browser_panel.summary_bar.sizeHint().height()
         return MIN_LIST_HEIGHT
 
@@ -3102,6 +3211,10 @@ class MainWindow(QMainWindow):
         # Moving the panels asks for more room for a moment either way; the
         # window keeps its size unless the new arrangement truly needs more.
         was = self.size()
+        # A fold is Classic's; the list goes to Flow as a list.
+        if self.browser_panel.folded:
+            self.browser_panel.show_folded(False)
+            self.browser_panel.setMinimumHeight(MIN_LIST_HEIGHT)
         # The mode is recorded first. The sidebar only does its work while
         # Flow is the mode, so refreshing before this was refreshing into a
         # guard that had every right to refuse — and the list arrived empty.
@@ -3220,6 +3333,7 @@ class MainWindow(QMainWindow):
             self._sync_music_panel()
         self._show_source_note()
         QTimer.singleShot(0, self._fit_output_folding)
+        QTimer.singleShot(0, self._check_list_fold)
         back, forward = flow_neighbours(chosen, self._offered_stages)
         self.flow_shell.set_steps(back is not None, forward is not None)
         self._show_page_actions(chosen)
@@ -4506,15 +4620,19 @@ class MainWindow(QMainWindow):
             return
         self._holding = True
         try:
-            hint = self.minimumSizeHint()
-            height = hint.height()
             box = self.preview_view.preview_box
+            # The figure Qt itself would hold the window to — its layout's
+            # total minimum, not minimumSizeHint, which widened a window
+            # coming back from Flow by 3px (measured natively) — less, in
+            # Classic, the picture above its floor.
+            least = self.layout().totalMinimumSize()
+            height = least.height()
             if (self._view_mode is Mode.CLASSIC
                     and box.parentWidget() is self._left_column):
                 height -= max(0, box.height() - box.content_floor())
             if (self.minimumWidth(), self.minimumHeight()) != (
-                    hint.width(), height):
-                self.setMinimumSize(hint.width(), max(0, height))
+                    least.width(), height):
+                self.setMinimumSize(least.width(), max(0, height))
         finally:
             self._holding = False
 
@@ -4533,6 +4651,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._fit_music_presentation)
         QTimer.singleShot(0, self._fit_classic_picture)
         QTimer.singleShot(0, self._fit_output_folding)
+        QTimer.singleShot(0, self._check_list_fold)
 
     def _sync_thumbnail_size(self) -> None:
         """Fit the thumbnails to the space the list actually has.
@@ -5099,6 +5218,11 @@ class MainWindow(QMainWindow):
         ceiling instead, which is the one thing that does hand the list room.
         """
         mode = BrowserMode(mode)
+        # A choice made while folded is the person's: the fold gives way
+        # to it, and is decided again for the new arrangement.
+        self._fold_suppressed = False
+        if self.browser_panel.folded:
+            self.browser_panel.show_folded(False)
         self._layout_state = self._layout_state.with_browser(mode)
         self.browser_panel.show_mode(mode)
         action = self.browser_mode_actions.get(mode)
@@ -5160,7 +5284,10 @@ class MainWindow(QMainWindow):
         ranges = len(clip.real_selects)
         parts = [clip.path.name, REVIEW_LABELS[clip.review]]
         if ranges:
-            parts.append(f"{ranges} range" + ("s" if ranges != 1 else ""))
+            current = min(clip.current, ranges - 1)
+            named = clip.real_selects[current].name
+            parts.append(f"range {current + 1} of {ranges}"
+                         + (f" ({named})" if named else ""))
         shown = sum(1 for row in range(self.table.rowCount())
                     if not self.table.isRowHidden(row))
         parts.append(f"{shown} of {len(self.clips)} shown")

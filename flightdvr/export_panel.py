@@ -20,10 +20,10 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QSettings, Qt, Signal
+from PySide6.QtCore import QDate, QEvent, QSettings, Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout,
-    QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QRadioButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
@@ -100,6 +100,7 @@ class ExportPanel(QWidget):
         )
         scroller.setWidget(self._build_controls())
         self.scroller = scroller
+        scroller.viewport().installEventFilter(self)
         layout.addWidget(scroller, 1)
         layout.addWidget(self._build_actions())
         self.setMinimumWidth(330)
@@ -166,6 +167,49 @@ class ExportPanel(QWidget):
         index = self.target_combo.currentIndex()
         return self.target_combo.itemData(index) if index >= 0 else None
 
+    def _arrange_presets(self, columns: int) -> None:
+        columns = max(1, min(columns, len(PRESET_ORDER)))
+        if columns == self._preset_columns:
+            return
+        self._preset_columns = columns
+        grid = self._preset_grid
+        for key in PRESET_ORDER:
+            grid.removeWidget(self.preset_buttons[key])
+        for index, key in enumerate(PRESET_ORDER):
+            grid.addWidget(self.preset_buttons[key],
+                           index // columns, index % columns)
+        # Spare width after the last column, as the single row had it.
+        for column in range(len(PRESET_ORDER) + 1):
+            grid.setColumnStretch(column, 1 if column == columns else 0)
+
+    def _fit_presets(self) -> None:
+        """As many preset buttons to a row as the width holds."""
+        box = getattr(self, "_preset_box", None)
+        if box is None:
+            return
+        margins = box.contentsMargins()
+        room = (self.scroller.viewport().width() - margins.left()
+                - margins.right() - 2)
+        if room <= 0:
+            return
+        spacing = self._preset_grid.horizontalSpacing()
+        spacing = spacing if spacing >= 0 else 6
+        widths = [self.preset_buttons[key].sizeHint().width()
+                  for key in PRESET_ORDER]
+        for columns in range(len(widths), 0, -1):
+            # A grid column is as wide as its widest button, in every row.
+            column_widths = [max(widths[i::columns])
+                             for i in range(columns)]
+            if sum(column_widths) + spacing * (columns - 1) <= room:
+                break
+        self._arrange_presets(columns)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt naming)
+        if (watched is self.scroller.viewport()
+                and event.type() == QEvent.Type.Resize):
+            self._fit_presets()
+        return super().eventFilter(watched, event)
+
     def set_target_selector_visible(self, visible: bool) -> None:
         self.target_row.setVisible(bool(visible))
 
@@ -224,7 +268,15 @@ class ExportPanel(QWidget):
         # Only the chosen preset explains itself. Showing all four descriptions
         # at once filled the panel and pushed the Output box and the Add button
         # off the bottom of the window.
-        button_row = QHBoxLayout()
+        # One row where it fits, and as many as it needs where it does not.
+        # Measured natively at 1120x760, Classic's column was 437px wide and
+        # the row needed 552: Slow motion and the right edge of the guidance
+        # below were cut off. Same buttons, same order, same group; only the
+        # rows they sit in change.
+        self.preset_row = QWidget()
+        self._preset_grid = QGridLayout(self.preset_row)
+        self._preset_grid.setContentsMargins(0, 0, 0, 0)
+        self._preset_columns = 0
         self.preset_group = QButtonGroup(self)
         self.preset_buttons: dict[str, QRadioButton] = {}
         for key in PRESET_ORDER:
@@ -232,10 +284,10 @@ class ExportPanel(QWidget):
             button.setToolTip(PRESETS[key].blurb)
             self.preset_group.addButton(button)
             self.preset_buttons[key] = button
-            button_row.addWidget(button)
             button.toggled.connect(self._on_preset_changed)
-        button_row.addStretch(1)
-        preset_layout.addLayout(button_row)
+        self._arrange_presets(len(PRESET_ORDER))
+        preset_layout.addWidget(self.preset_row)
+        self._preset_box = preset_box
         self.preset_help = dim(QLabel())
         preset_layout.addWidget(self.preset_help)
         self.preset_buttons["master"].setChecked(True)

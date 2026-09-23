@@ -146,6 +146,8 @@ class BrowserPanel(QWidget):
     review_requested = Signal(str)
     length_filter_changed = Signal()
     mode_requested = Signal(object)
+    # Folded for Music: bring the list back, without choosing a mode.
+    unfold_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -192,6 +194,7 @@ class BrowserPanel(QWidget):
         header.addSpacing(8)
         header.addWidget(QLabel("List:"))
         self.mode_buttons: dict[BrowserMode, QPushButton] = {}
+        self._folded = False
         # Which mode is showing, for sizing the rows: Expanded's height is
         # meant to become more rows.
         self._mode = BrowserMode.NORMAL
@@ -338,10 +341,9 @@ class BrowserPanel(QWidget):
         row = QHBoxLayout(bar)
         row.setContentsMargins(0, 0, 0, 0)
 
-        self.reopen_button = QPushButton("Show clips")
+        self.reopen_button = QPushButton("&Show clips")
         self.reopen_button.setToolTip("Bring the clip list back")
-        self.reopen_button.clicked.connect(
-            lambda *_: self.mode_requested.emit(BrowserMode.NORMAL))
+        self.reopen_button.clicked.connect(lambda *_: self._reopen())
         row.addWidget(self.reopen_button)
 
         self.summary_thumb = QLabel()
@@ -351,9 +353,42 @@ class BrowserPanel(QWidget):
         row.addWidget(self.summary_thumb)
 
         self.summary_label = QLabel("No clip selected")
-        row.addWidget(self.summary_label)
+        # Cut rather than widening the window for a long recording name: the
+        # whole line is on hover. Measured natively, a folded summary carried
+        # into Flow widened a 1120px window to 1335.
+        self.summary_label.setMinimumWidth(0)
+        self.summary_label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                         QSizePolicy.Policy.Preferred)
+        row.addWidget(self.summary_label, 1)
         row.addStretch(1)
         return bar
+
+    def _reopen(self) -> None:
+        """Folded for Music, this unfolds and leaves the chosen mode alone;
+        collapsed by choice, it asks for the list as it always did."""
+        if self._folded:
+            self.unfold_requested.emit()
+        else:
+            self.mode_requested.emit(BrowserMode.NORMAL)
+
+    @property
+    def folded(self) -> bool:
+        return self._folded
+
+    def show_folded(self, folded: bool) -> None:
+        """Stand the summary in for the list while Music needs its room.
+
+        Only what is shown changes. The mode buttons keep saying which mode
+        was chosen, and the list keeps its rows, selection and scroll, hidden
+        rather than rebuilt, so unfolding puts back exactly what was there.
+        """
+        self._folded = bool(folded)
+        collapsed = self._folded or self._mode is BrowserMode.COLLAPSED
+        self.table.setVisible(not collapsed)
+        self.summary_bar.setVisible(collapsed)
+        self.reopen_button.setToolTip(
+            "Bring the clip list back while Music is open" if self._folded
+            else "Bring the clip list back")
 
     def _row(self, layout: QVBoxLayout) -> QBoxLayout:
         row = QBoxLayout(QBoxLayout.Direction.LeftToRight)
@@ -494,7 +529,7 @@ class BrowserPanel(QWidget):
             blocked = button.blockSignals(True)
             button.setChecked(candidate is mode)
             button.blockSignals(blocked)
-        collapsed = mode is BrowserMode.COLLAPSED
+        collapsed = mode is BrowserMode.COLLAPSED or self._folded
         self._mode = mode
         self.table.setVisible(not collapsed)
         self.summary_bar.setVisible(collapsed)
@@ -502,6 +537,7 @@ class BrowserPanel(QWidget):
     def set_summary(self, text: str, thumbnail=None) -> None:
         """The collapsed line's contents, supplied by the window."""
         self.summary_label.setText(text)
+        self.summary_label.setToolTip(text)
         if thumbnail is not None and not thumbnail.isNull():
             self.summary_thumb.setPixmap(thumbnail)
             self.summary_thumb.show()
@@ -552,7 +588,12 @@ class BrowserPanel(QWidget):
             # Normal's rows never go below 48px; Expanded's may go down to
             # the smallest thumbnail, which is where its extra rows come
             # from on a list that is only somewhat taller.
-            least = round(MIN_THUMB_WIDTH * 9 / 16) if expanded else 48
+            smallest = round(MIN_THUMB_WIDTH * 9 / 16)
+            least = smallest if expanded else 48
+            if viewport < least + 6:
+                # One complete row at the smallest thumbnail rather than a
+                # sliver of a larger one (approved 24 September).
+                least = max(smallest, viewport - 6)
             by_height = max(least, viewport // wanted_rows - 6)
             width = max(
                 MIN_THUMB_WIDTH,

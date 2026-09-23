@@ -965,3 +965,119 @@ def test_the_window_minimum_counts_the_picture_at_its_floor(qt_app):
     finally:
         window.close()
         assert_no_threads_left(window)
+
+
+# -- the approved compact fold, and wrapped presets (24 September) --------------
+
+
+def test_a_fold_shows_the_summary_and_keeps_the_chosen_mode(qt_app):
+    window = many_clips_window(qt_app, BrowserMode.EXPANDED, (1120, 760))
+    panel = window.browser_panel
+    table = panel.table
+    try:
+        table.selectRow(5)
+        table.setCurrentCell(5, 0)
+        window.preview_view.music_band.setChecked(True)
+        qt_app.processEvents()
+        # Folded directly: whether this offscreen size needs it is the
+        # native harness's question; this is about what a fold is.
+        window._set_list_folded(True)
+        assert panel.folded and not table.isVisible()
+        assert panel.summary_bar.isVisible()
+        # The person's choice is untouched: buttons, menu and state.
+        assert panel.mode_buttons[BrowserMode.EXPANDED].isChecked()
+        assert window.browser_mode_actions[BrowserMode.EXPANDED].isChecked()
+        assert window._layout_state.browser is BrowserMode.EXPANDED
+        assert panel.minimumHeight() == 0
+        # "Show clips" brings the list back, on its row, and keeps it back.
+        panel.reopen_button.click()
+        qt_app.processEvents()
+        assert not panel.folded and table.isVisible()
+        assert table.currentRow() == 5 and window._fold_suppressed
+        window._check_list_fold()
+        assert not panel.folded
+        # Closing Music forgets the explicit restore.
+        window.preview_view.music_band.setChecked(False)
+        qt_app.processEvents()
+        assert not window._fold_suppressed
+    finally:
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_a_mode_choice_while_folded_unfolds_and_is_kept(qt_app):
+    window = many_clips_window(qt_app, BrowserMode.NORMAL, (1120, 760))
+    panel = window.browser_panel
+    try:
+        window._set_list_folded(True)
+        window.set_browser_mode(BrowserMode.COLLAPSED)
+        qt_app.processEvents()
+        assert not panel.folded
+        assert window._layout_state.browser is BrowserMode.COLLAPSED
+        assert panel.summary_bar.isVisible()
+    finally:
+        window.set_browser_mode(BrowserMode.NORMAL)
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_the_fold_is_never_carried_into_flow(qt_app):
+    from flightdvr.flow_layout import Mode
+    window = many_clips_window(qt_app, BrowserMode.NORMAL, (1120, 760))
+    try:
+        window._set_list_folded(True)
+        window.set_view_mode(Mode.FLOW)
+        qt_app.processEvents()
+        assert not window.browser_panel.folded
+        window.set_view_mode(Mode.CLASSIC)
+    finally:
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_the_summary_names_the_range_being_worked_on(qt_app):
+    from flightdvr.media import Select
+    window = many_clips_window(qt_app, BrowserMode.NORMAL)
+    try:
+        window.table.setCurrentCell(2, 0)
+        window._load_selected_clip()
+        clip = window._trim_clip
+        clip.selects = [Select(1.0, 2.0, "", sid="s-1"),
+                        Select(3.0, 5.0, "Launch", sid="s-2")]
+        clip.current = 1
+        window._refresh_browser_summary()
+        text = window.browser_panel.summary_label.text()
+        assert clip.path.name in text and "range 2 of 2 (Launch)" in text
+        assert window.browser_panel.summary_label.toolTip() == text
+    finally:
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_the_preset_buttons_wrap_to_the_width_they_have(qt_app):
+    from flightdvr.export_panel import ExportPanel
+    from flightdvr.presets import PRESET_ORDER
+    panel = ExportPanel()
+    try:
+        panel.resize(900, 700)
+        panel.show()
+        qt_app.processEvents()
+        assert panel._preset_columns == len(PRESET_ORDER)
+        panel.resize(360, 700)
+        for _ in range(3):
+            qt_app.processEvents()
+        assert panel._preset_columns < len(PRESET_ORDER)
+        viewport = panel.scroller.viewport()
+        for button in panel.preset_buttons.values():
+            right = button.mapTo(viewport, button.rect().topRight()).x()
+            assert right < viewport.width(), button.text()
+        # Same buttons, same group, same order.
+        assert list(panel.preset_buttons) == list(PRESET_ORDER)
+        assert all(button.group() is panel.preset_group
+                   for button in panel.preset_buttons.values())
+        panel.resize(900, 700)
+        for _ in range(3):
+            qt_app.processEvents()
+        assert panel._preset_columns == len(PRESET_ORDER)
+    finally:
+        panel.close()
