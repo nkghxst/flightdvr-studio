@@ -44,7 +44,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
     QListWidget, QListWidgetItem, QStackedWidget,
-    QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
+    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox,
+    QProgressBar,
     QPushButton, QScrollArea, QSizePolicy, QSplitter, QTableWidget,
     QToolButton, QVBoxLayout, QWidget,
 )
@@ -137,6 +138,11 @@ COPYRIGHT_HOLDER = "Isadu Nkemi"
 # Said whenever a decision is refused because the list is still being built.
 # Enough of a card to read its recording, preset and one line about sound.
 SIDEBAR_MINIMUM = 210
+
+# Beside a thumbnail, room for a recording's name: under this the Clip column
+# stops being a column. Measured natively at the compact size, where it
+# stretched to about 40px and the name never showed.
+CLIP_NAME_ROOM = 110
 
 SCAN_IN_PROGRESS = ("Still listing this folder — decisions can be made once "
                     "the scan finishes")
@@ -831,7 +837,39 @@ class MainWindow(QMainWindow):
         panel.review_requested.connect(self._set_review)
         panel.length_filter_changed.connect(self._refresh_review_filter)
         panel.mode_requested.connect(self.set_browser_mode)
+        head = panel.table.horizontalHeader()
+        head.geometriesChanged.connect(self._fit_clip_column)
+        head.sectionResized.connect(
+            lambda index, *_: index != 0 and self._fit_clip_column())
         return panel
+
+    def _fit_clip_column(self) -> None:
+        """Keep the Clip column readable where the list is narrow.
+
+        It stretches into whatever the other columns leave. Beside the picture
+        at the compact size that was about 40px beside a 120px thumbnail: the
+        thumbnail painted over Length and no recording's name showed. There it
+        keeps a readable width and the table scrolls sideways; nothing is
+        dropped. Classic's list is never that narrow and keeps its stretch.
+        """
+        table = self.browser_panel.table
+        head = table.horizontalHeader()
+        narrow_browse = (self._view_mode is Mode.FLOW
+                         and self._flow_stage is Stage.BROWSE)
+        floor = table.iconSize().width() + CLIP_NAME_ROOM
+        others = sum(head.sectionSize(column)
+                     for column in range(1, table.columnCount())
+                     if not table.isColumnHidden(column))
+        room = table.viewport().width() - others
+        stretch = QHeaderView.ResizeMode.Stretch
+        if not narrow_browse or room >= floor:
+            if head.sectionResizeMode(0) != stretch:
+                head.setSectionResizeMode(0, stretch)
+            return
+        if head.sectionResizeMode(0) != QHeaderView.ResizeMode.Interactive:
+            head.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        if head.sectionSize(0) != floor:
+            head.resizeSection(0, floor)
 
     # Compatibility views for the established MainWindow API. They keep
     # integrations and UI tests working without making the widgets
@@ -2212,6 +2250,7 @@ class MainWindow(QMainWindow):
             self.preview_view.set_flow_controls(False)
             self.preview_view.set_controls_below(False)
             self.browser_panel.set_stacked(False)
+            self._fit_clip_column()
             if self._music_band_was_open is not None:
                 self.preview_view.music_band.setChecked(
                     self._music_band_was_open)
@@ -2244,6 +2283,7 @@ class MainWindow(QMainWindow):
         browse = chosen is Stage.BROWSE
         self.browser_panel.set_stacked(browse)
         self.preview_view.set_controls_below(browse)
+        self._fit_clip_column()
         # The picture goes where this page keeps it, or nowhere: Queue has no
         # viewport region at all, so nothing is left hidden behind its jobs.
         self._place_viewport(chosen)
@@ -2332,6 +2372,13 @@ class MainWindow(QMainWindow):
         box.show()
         frame.show()
         self.flow_viewport.show()
+        # Its arrangement may have changed while it waited detached (Queue has
+        # no place for it), and a hidden box drops the layout request that
+        # asked to apply it. Arriving at the same size, nothing asked again:
+        # natively, Browse after Queue kept the picture filling the box and the
+        # controls below its bottom edge.
+        box.layout().invalidate()
+        box.layout().activate()
         self._fit_picture()
 
     def _fit_picture(self) -> None:
@@ -2671,6 +2718,15 @@ class MainWindow(QMainWindow):
         home, index = self._viewport_home
         self._viewport_home = None
         box = self.preview_view.preview_box
+        # Classic's own sizing, exactly as it was: room for the list under it,
+        # and the ceiling only its Expanded list asks for. Set while it is
+        # still in its Flow frame: set once it was back in the column, it was
+        # worked out against the column's height from before Flow, and the
+        # window grew by the difference (913 to 924, natively).
+        box.set_list_room(MIN_LIST_HEIGHT)
+        box.set_height_cap(box.content_floor()
+                           if self._layout_state.browser is BrowserMode.EXPANDED
+                           else None)
         # It may be in any page's region, or in none at all after Queue, so it
         # is detached by parent rather than removed from one known layout.
         if box.parentWidget() is not None:
@@ -2679,12 +2735,6 @@ class MainWindow(QMainWindow):
             if widget is not None and widget.parentWidget():
                 widget.setParent(None)
         home.insertWidget(index, box)
-        # Classic's own sizing, exactly as it was: room for the list under it,
-        # and the ceiling only its Expanded list asks for.
-        box.set_list_room(MIN_LIST_HEIGHT)
-        box.set_height_cap(box.content_floor()
-                           if self._layout_state.browser is BrowserMode.EXPANDED
-                           else None)
         box.show()
 
     def _source_note(self, stage) -> str:

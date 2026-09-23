@@ -2965,3 +2965,54 @@ def test_the_caption_keeps_every_word(window, app):
     assert not note.hasHeightForWidth()
     assert note.toolTip() == note.text()
     assert note.minimumSizeHint().height() == note.sizeHint().height()
+
+
+def test_a_narrow_list_keeps_its_clip_column_readable(window, app):
+    """Natively at the compact size the Clip column stretched to about 40px
+    beside a 120px thumbnail: the thumbnail covered Length and no name
+    showed. Narrow, it keeps a readable width and the table scrolls sideways;
+    every column stays. Elsewhere, and in Classic, it stretches as before."""
+    from PySide6.QtWidgets import QHeaderView
+    from flightdvr.ui import CLIP_NAME_ROOM
+
+    shown_flow(window, app)
+    window._show_stage(Stage.BROWSE)
+    listing = window.flow_shell.host(Stage.BROWSE, Region.LIST)
+    listing.setMaximumWidth(360)
+    settled(app)
+    head = window.table.horizontalHeader()
+    floor = window.table.iconSize().width() + CLIP_NAME_ROOM
+
+    assert head.sectionResizeMode(0) is QHeaderView.ResizeMode.Interactive, (
+        "a narrow list left the Clip column to stretch into nothing")
+    assert head.sectionSize(0) >= floor, head.sectionSize(0)
+    assert not any(window.table.isColumnHidden(c)
+                   for c in range(window.table.columnCount()))
+
+    # Straight from Browse to Classic. The header's own resize signal would
+    # usually put the stretch back too; with it quiet, leaving Flow must.
+    blocked = head.blockSignals(True)
+    try:
+        window.set_view_mode(Mode.CLASSIC)
+        settled(app)
+    finally:
+        head.blockSignals(blocked)
+    assert head.sectionResizeMode(0) is QHeaderView.ResizeMode.Stretch
+
+
+def test_browse_from_queue_still_shows_the_controls_under_the_picture(window,
+                                                                      app):
+    """Found natively: arriving on Browse from Queue — where the picture has
+    no place and waits detached — left the box laid out the old way. The
+    picture filled it and the controls sat below its bottom edge, clipped."""
+    shown_flow(window, app)
+    view = window.preview_view
+    for stage in (Stage.MUSIC, Stage.QUEUE, Stage.BROWSE):
+        window._show_stage(stage)
+        settled(app)
+    box = global_rect(view.preview_box)
+    side = global_rect(view.sidebar)
+
+    assert box.contains(side), (box, side)
+    assert side.top() >= global_rect(view.frame_view).bottom()
+    window.set_view_mode(Mode.CLASSIC)

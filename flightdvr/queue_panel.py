@@ -164,6 +164,10 @@ class QueuePanel(QWidget):
         self.details_body.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         details.addWidget(self.details_body)
+        # As tall as what it says: the page's slack goes below, not between
+        # its lines.
+        self.details.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                   QSizePolicy.Policy.Maximum)
         self.details.hide()
         layout.addWidget(self.details)
 
