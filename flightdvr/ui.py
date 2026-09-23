@@ -79,7 +79,7 @@ from .audio_stream import (
     AudioStream, LiveAudioMapping, MonitorState, SequencePcmReader,
     SequenceSourceSegment,
 )
-from .flow_shell import FlowShell
+from .flow_shell import FlowShell, OneLineNote, PictureFrame
 from .output_sidebar import Card, OutputSidebar
 from .flow_layout import (
     Clock, Domain, Mode, Region, SelectedContext, Stage,
@@ -347,6 +347,7 @@ class MainWindow(QMainWindow):
         self._flow_slots: dict = {}
         self._left_column: QWidget | None = None
         self.flow_viewport = None
+        self._picture_frame = None
         self.flow_source_note = None
         self._music_band_was_open: bool | None = None
         self._viewport_home = None
@@ -2024,33 +2025,29 @@ class MainWindow(QMainWindow):
         # those names at the shell's panel regions keeps the splitter/index
         # bookkeeping that already gets Classic's layout back exactly, rather
         # than rewriting it alongside a new arrangement.
+        # A page with a list region lends its panel there: Browse's panel is
+        # the recordings list, and it goes beside the picture, not under it.
         self._flow_slots = {
-            stage: shell.host(stage, Region.PANEL)
+            stage: (shell.host(stage, Region.LIST)
+                    or shell.host(stage, Region.PANEL))
             for stage in self._offered_stages
         }
-        # Browse's list region is hidden, not left blank. Measured natively,
-        # the recordings list needs 640px and the picture with its controls
-        # 532px, so side by side Browse cannot be narrower than 1444px — past
-        # both the 1440px and the 1060px reference widths. Fitting them beside
-        # each other needs the list's toolbar to wrap and the picture's side
-        # controls to move below it, in browser_panel.py and widgets.py, which
-        # are outside this change. Until then Browse is one column, as before.
-        listing = shell.host(Stage.BROWSE, Region.LIST)
-        if listing is not None:
-            listing.hide()
         self.flow_stage_buttons = shell.stage_buttons
         self.flow_back = shell.back_button
         self.flow_next = shell.next_button
 
         # Flow-only output clock and the honest caption about what the picture
         # is. Both travel with the picture into whichever region has it.
+        # The picture sits in a frame on every page that has one, so its own
+        # height-for-width cannot size the page around it.
+        self._picture_frame = PictureFrame()
+        self._picture_frame.resized.connect(self._fit_picture)
         self.flow_viewport = QWidget()
         viewport = QVBoxLayout(self.flow_viewport)
         viewport.setContentsMargins(0, 0, 0, 0)
         viewport.setSpacing(TIGHT)
         viewport.addWidget(self.preview_view.sequence_strip)
-        self.flow_source_note = dim(QLabel(""))
-        self.flow_source_note.setWordWrap(True)
+        self.flow_source_note = dim(OneLineNote(""))
         viewport.addWidget(self.flow_source_note)
 
         self._sidebar = self._build_sidebar()
@@ -2188,14 +2185,20 @@ class MainWindow(QMainWindow):
             # The Music page is the music controls. Collapsed — Classic's way
             # of giving height back to the picture — the page showed a picture
             # and one checkbox. Classic's choice comes back on the way out.
+            # Flow's short pages need the controls beside the picture closed
+            # up; nothing is hidden. Classic gets its arrangement back.
+            self.preview_view.set_flow_controls(True)
             band = self.preview_view.music_band
             self._music_band_was_open = band.isChecked()
             band.setChecked(True)
             self._lend_viewport()
             self.splitter.hide()
-            self._flow_host.show()
+            # The page is arranged before it is shown. Shown first, each piece
+            # moved in asked the window for room on its own, half-arranged —
+            # measured natively, a 913px window grew to 1194 for a moment.
             self._show_stage(self._flow_stage or
                              flow_first_stage(self._offered_stages))
+            self._flow_host.show()
         else:
             if self._flow_defaults is not None:
                 # Classic has one set of choices. Leaving Flow with an output's
@@ -2206,6 +2209,9 @@ class MainWindow(QMainWindow):
             self._flow_host.hide()
             # Back to the strip before it goes home, for the same reason.
             self.queue_panel.set_fills_page(False)
+            self.preview_view.set_flow_controls(False)
+            self.preview_view.set_controls_below(False)
+            self.browser_panel.set_stacked(False)
             if self._music_band_was_open is not None:
                 self.preview_view.music_band.setChecked(
                     self._music_band_was_open)
@@ -2231,6 +2237,13 @@ class MainWindow(QMainWindow):
         self._flow_stage = chosen
         was = self.size()
         self.flow_shell.set_stage(chosen)
+        # Browse puts the list beside the picture. Measured natively, side by
+        # side they needed 1178px of a compact page's 794: the list's rows
+        # stack their pieces and the picture's controls go under it. Only
+        # there; every other page keeps the controls beside the picture.
+        browse = chosen is Stage.BROWSE
+        self.browser_panel.set_stacked(browse)
+        self.preview_view.set_controls_below(browse)
         # The picture goes where this page keeps it, or nowhere: Queue has no
         # viewport region at all, so nothing is left hidden behind its jobs.
         self._place_viewport(chosen)
@@ -2274,10 +2287,22 @@ class MainWindow(QMainWindow):
                 or self.isMaximized() or self.isFullScreen()):
             return
 
-        def restore():
-            if self.size() == grown and not (self.isMaximized()
-                                             or self.isFullScreen()):
-                self.resize(was)
+        expected = [grown]
+
+        def restore(tries_left: int = 5) -> None:
+            if self.size() != expected[0] or (self.isMaximized()
+                                               or self.isFullScreen()):
+                return      # something else has sized it since: leave it be
+            # The minimum the move imposed for a moment is only recalculated as
+            # the layouts settle, and a resize before then is clamped straight
+            # back. So it is tried again, briefly, until it takes.
+            if self.layout() is not None:
+                self.layout().invalidate()
+                self.layout().activate()
+            self.resize(was)
+            if self.size() != was and tries_left > 0:
+                expected[0] = self.size()
+                QTimer.singleShot(20, lambda: restore(tries_left - 1))
 
         QTimer.singleShot(0, restore)
 
@@ -2292,15 +2317,37 @@ class MainWindow(QMainWindow):
         host = self.flow_shell.host(stage, Region.VIEWPORT)
         box = self.preview_view.preview_box
         if host is None:
-            for widget in (box, self.flow_viewport):
+            for widget in (self._picture_frame, self.flow_viewport):
                 if widget.parentWidget() is not None:
                     widget.setParent(None)
             return
-        if box.parentWidget() is not host:
-            host.layout().addWidget(box, 1)
+        frame = self._picture_frame
+        if box.parentWidget() is not frame:
+            frame.hold(box)
+            # Nothing under the picture in the frame: no list to keep room for.
+            box.set_list_room(0)
+        if frame.parentWidget() is not host:
+            host.layout().addWidget(frame, 1)
             host.layout().addWidget(self.flow_viewport)
         box.show()
+        frame.show()
         self.flow_viewport.show()
+        self._fit_picture()
+
+    def _fit_picture(self) -> None:
+        """Cap the picture to the room its page gives it, never through its
+        floor. Measured natively, uncapped it was 347px in a 275px region and
+        covered the caption beneath."""
+        box = self.preview_view.preview_box
+        frame = self._picture_frame
+        if frame is None or box.parentWidget() is not frame:
+            return
+        # The box's own minimum as well as its floor: the floor counts the
+        # controls and the chrome, the minimum the layout's margins round them,
+        # and taking the smaller clipped 4px off the controls, natively.
+        floor = max(box.content_floor(), box.minimumSizeHint().height())
+        frame.set_floor(floor)
+        box.set_height_cap(max(floor, frame.height()))
 
     def _show_page_actions(self, stage: Stage) -> None:
         """Name the fixed actions so all-versus-one cannot be mistaken.
@@ -2628,9 +2675,16 @@ class MainWindow(QMainWindow):
         # is detached by parent rather than removed from one known layout.
         if box.parentWidget() is not None:
             box.setParent(None)
-        if self.flow_viewport is not None and self.flow_viewport.parentWidget():
-            self.flow_viewport.setParent(None)
+        for widget in (self._picture_frame, self.flow_viewport):
+            if widget is not None and widget.parentWidget():
+                widget.setParent(None)
         home.insertWidget(index, box)
+        # Classic's own sizing, exactly as it was: room for the list under it,
+        # and the ceiling only its Expanded list asks for.
+        box.set_list_room(MIN_LIST_HEIGHT)
+        box.set_height_cap(box.content_floor()
+                           if self._layout_state.browser is BrowserMode.EXPANDED
+                           else None)
         box.show()
 
     def _source_note(self, stage) -> str:

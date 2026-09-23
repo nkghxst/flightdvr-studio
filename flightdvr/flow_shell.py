@@ -37,10 +37,11 @@ without building a window.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QPainter, QPalette
 from PySide6.QtWidgets import (
-    QHBoxLayout, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
-    QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from .flow_layout import Region, Stage, regions_for, title
@@ -57,6 +58,103 @@ SIDEBAR_MINIMUM = 240
 # beside it stays narrow enough that the list is still the thing you read.
 LIST_STRETCH = 3
 VIEWPORT_STRETCH = 2
+
+
+class OneLineNote(QLabel):
+    """A caption that keeps to one line and says the rest on hover.
+
+    The picture's caption wrapped, and a wrapped label hands its height-for-
+    width up the layout: Qt then sized the picture's whole region from it and
+    ignored the region's minimum. One line, cut with an ellipsis where it
+    must be, with every word still in the tooltip and in `text()`.
+    """
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt naming)
+        super().setText(text)
+        self.setToolTip(text)
+        self.update()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 (Qt naming)
+        # One line at any width. A label claims height-for-width for rich
+        # text too, and laid out at no width at all that claimed 68px.
+        return False
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 (Qt naming)
+        return -1
+
+    def _line(self) -> int:
+        margins = self.contentsMargins()
+        return self.fontMetrics().height() + margins.top() + margins.bottom()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
+        return QSize(0, self._line())
+
+    def sizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
+        return QSize(0, self._line())
+
+    def elided(self) -> str:
+        return self.fontMetrics().elidedText(
+            self.text(), Qt.TextElideMode.ElideRight, max(0, self.width()))
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        painter = QPainter(self)
+        self.style().drawItemText(
+            painter, self.contentsRect(),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            self.palette(), self.isEnabled(), self.elided(),
+            QPalette.ColorRole.WindowText)
+
+
+class PictureFrame(QWidget):
+    """Holds the one picture in a page without letting its shape size the page.
+
+    The picture sets its own height from its width. Put straight into a page,
+    that shape travelled up the layout and Qt gave its region less than it
+    asked for, so the picture spilled over the caption beneath it — measured
+    natively, 347px of picture in a 275px region. This frame answers for it
+    instead: it asks the page for the picture's floor and no more, takes the
+    page's slack, clips what it holds, and says how tall it came out so the
+    picture can be capped to fit.
+    """
+
+    resized = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._floor = 0
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred,
+                           QSizePolicy.Policy.Expanding)
+
+    def hold(self, widget: QWidget) -> None:
+        layout = self.layout()
+        while layout.count():
+            layout.takeAt(0)
+        layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addStretch(1)
+
+    def set_floor(self, height: int) -> None:
+        """The least the picture can be without clipping its own controls."""
+        height = max(0, int(height))
+        if height != self._floor:
+            self._floor = height
+            self.updateGeometry()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 (Qt naming)
+        # The picture's own height-for-width stops here.
+        return False
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
+        return QSize(self.layout().minimumSize().width(), self._floor)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
+        return QSize(self.layout().sizeHint().width(), self._floor)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        self.resized.emit()
 
 
 class FlowShell(QWidget):

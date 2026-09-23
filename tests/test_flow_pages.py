@@ -44,6 +44,7 @@ from flightdvr.assembly import Item
 from flightdvr.assembly_panel import ITEM_ROLE as ASSEMBLY_ITEM_ROLE
 from flightdvr.audio_plan import AudioMode, MusicChoice
 from flightdvr.flow_layout import Mode, Region, Stage
+from flightdvr.widgets import MIN_LIST_HEIGHT
 from flightdvr.jobs import Job, JobStatus
 from flightdvr.media import ClipInfo, Select
 
@@ -967,12 +968,14 @@ def test_the_picture_is_one_object_in_each_page_that_has_one(window, app):
         host = window.flow_shell.host(stage, Region.VIEWPORT)
         if stage is Stage.QUEUE:
             assert host is None, "Queue grew a viewport region"
-            assert box.parentWidget() is None, (
+            # Out of the window entirely, not merely hidden in it. It
+            # travels in its frame, so the frame is what has no parent.
+            assert not window.isAncestorOf(box), (
                 "the picture followed the page that has no region for it")
             continue
         assert host is not None
         seen.append(window.preview_view.preview_box)
-        assert box.parentWidget() is host, (
+        assert host.isAncestorOf(box), (
             f"{stage.value} did not receive the one picture")
 
     assert seen, "no page took the picture at all"
@@ -2490,7 +2493,7 @@ def test_changing_mode_gives_back_room_it_only_needed_for_a_moment(
 
     monkeypatch.setattr(window, "_place_viewport", growing)
     window.set_view_mode(Mode.FLOW)
-    for _ in range(5):
+    for _ in range(20):
         app.processEvents()
         time.sleep(0.01)
     assert window.size() == was, (
@@ -2790,3 +2793,175 @@ def test_classic_gets_its_own_music_band_state_back(window, app):
         app.processEvents()
         assert band.isChecked() is classic_had, (
             f"Classic had the band {'open' if classic_had else 'shut'}")
+
+
+# -- the picture fits its page, and Browse puts the list beside it -------------
+
+
+def shown_flow(window, app, width=1060, height=700):
+    window.show()
+    window.resize(width, height)
+    settled(app)
+    in_flow(window, app)
+    settled(app)
+
+
+def global_rect(widget):
+    from PySide6.QtCore import QRect
+    return QRect(widget.mapToGlobal(widget.rect().topLeft()), widget.size())
+
+
+def test_the_picture_never_spills_out_of_its_frame(window, app):
+    """Measured natively: 347px of picture in a 275px region, over the caption
+    beneath it. On every page with a picture, it fits inside its frame, is
+    never below its own minimum, and the caption does not overlap it."""
+    make_aba_assembly(window, app)
+    shown_flow(window, app)
+    box = window.preview_view.preview_box
+    frame = window._picture_frame
+    for stage in (Stage.BROWSE, Stage.TRIM, Stage.ASSEMBLE, Stage.MUSIC,
+                  Stage.OUTPUT):
+        window._show_stage(stage)
+        settled(app)
+        assert box.height() <= frame.height(), (stage, box.height(), frame.height())
+        assert box.height() >= box.minimumSizeHint().height(), stage
+        note = window.flow_source_note
+        if note.isVisible() and note.text():
+            assert not global_rect(note).intersects(global_rect(box)), stage
+        # And when the page changes height under it, which is when a picture
+        # that only sized itself from its width would spill.
+        for size in ((1060, 960), (1060, 700)):   # height alone
+            window.resize(*size)
+            settled(app)
+            assert box.height() <= frame.height(), (stage, size)
+            # ...and takes the room its width earns when the page grows,
+            # rather than keeping whatever height it had before.
+            earned = min(box.useful_height(box.width()), frame.height())
+            assert box.height() >= earned - 1, (stage, size, box.height(),
+                                                earned)
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_a_frame_with_only_the_picture_keeps_no_room_for_a_list(window, app):
+    """Classic's column keeps 150px under the picture for the list; a frame
+    that holds only the picture left that as a blank band."""
+    shown_flow(window, app, 1400, 900)
+    window._show_stage(Stage.OUTPUT)
+    settled(app)
+    box = window.preview_view.preview_box
+    frame = window._picture_frame
+    if box.useful_height(box.width()) >= frame.height():
+        assert box.height() == frame.height(), (box.height(), frame.height())
+    window.set_view_mode(Mode.CLASSIC)
+    settled(app)
+    assert box._list_room == MIN_LIST_HEIGHT, "Classic lost its list room"
+
+
+def test_classic_gets_its_picture_controls_back_exactly(window, app):
+    from PySide6.QtWidgets import QBoxLayout
+    view = window.preview_view
+    before = (view.sidebar.width(), view._side_actions.direction(),
+              [gap.sizeHint().height() for gap in view._side_gaps],
+              view._box_layout.direction(), view.sidebar.measured_at_width)
+    shown_flow(window, app)
+    for stage in (Stage.BROWSE, Stage.OUTPUT):
+        window._show_stage(stage)
+        settled(app)
+    assert view._side_actions.direction() is QBoxLayout.Direction.LeftToRight
+    window.set_view_mode(Mode.CLASSIC)
+    settled(app)
+    after = (view.sidebar.width(), view._side_actions.direction(),
+             [gap.sizeHint().height() for gap in view._side_gaps],
+             view._box_layout.direction(), view.sidebar.measured_at_width)
+    assert after == before
+
+
+def test_browse_puts_the_list_beside_the_picture_and_its_controls_below(
+        window, app):
+    """Sol's review, item 1: a tall list to the left of the picture."""
+    shown_flow(window, app)
+    window._show_stage(Stage.BROWSE)
+    settled(app)
+    listing = window.flow_shell.host(Stage.BROWSE, Region.LIST)
+    view = window.preview_view
+    table, picture, side = (global_rect(window.table),
+                            global_rect(view.frame_view),
+                            global_rect(view.sidebar))
+
+    assert not listing.isHidden() and listing.isAncestorOf(window.table)
+    assert table.right() < picture.left(), (table, picture)
+    assert side.top() >= picture.bottom(), "the controls are not under the picture"
+    assert window.browser_panel.stacked
+
+    window._show_stage(Stage.OUTPUT)
+    settled(app)
+    picture, side = global_rect(view.frame_view), global_rect(view.sidebar)
+    assert side.left() >= picture.right(), "the controls left the side elsewhere"
+    assert not window.browser_panel.stacked
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_stacking_the_list_rows_keeps_every_control_in_order(window, app):
+    """Reversible: the same widgets, in the same order, whichever way."""
+    panel = window.browser_panel
+
+    def order():
+        found = []
+        for row in panel._rows:
+            for index in range(row.count()):
+                piece = row.itemAt(index).layout()
+                for inner in range(piece.count()):
+                    widget = piece.itemAt(inner).widget()
+                    if widget is not None:
+                        found.append(widget)
+        return found
+
+    before = order()
+    panel.set_stacked(True)
+    assert order() == before and panel.stacked
+    panel.set_stacked(False)
+    assert order() == before and not panel.stacked
+
+
+def test_the_controls_floor_is_measured_at_their_real_width(window, app):
+    """Qt's minimum hint wrapped the column's labels at a width it never has:
+    208px claimed for 176, natively. In Flow the column says what it needs at
+    its width; Classic keeps Qt's answer."""
+    side = window.preview_view.sidebar
+    classic = side.minimumSizeHint().height()
+    shown_flow(window, app)
+    window._show_stage(Stage.OUTPUT)
+    settled(app)
+    assert side.minimumSizeHint().height() == side.layout().heightForWidth(
+        side.width())
+    window.set_view_mode(Mode.CLASSIC)
+    settled(app)
+    assert side.minimumSizeHint().height() == classic
+
+
+def test_visiting_browse_does_not_inflate_the_floor_elsewhere(window, app):
+    """Natively, measuring the box's chrome with its controls below counted
+    them as chrome, and every page after Browse had a 320px floor."""
+    box = window.preview_view.preview_box
+    window.show()
+    window.resize(1060, 700)
+    settled(app)
+    chrome = box._chrome           # measured in Classic, beside the picture
+    assert chrome is not None
+    shown_flow(window, app)
+    for stage in (Stage.BROWSE, Stage.OUTPUT, Stage.BROWSE):
+        window._show_stage(stage)
+        settled(app)
+    assert box._chrome == chrome, "the controls were counted as chrome"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_the_caption_keeps_every_word(window, app):
+    from flightdvr.flow_shell import OneLineNote
+    note = window.flow_source_note
+    assert isinstance(note, OneLineNote)
+    note.setText("Source: hdz_001.ts · a very long range name — not the "
+                 "finished file.")
+    assert not note.hasHeightForWidth()
+    assert note.toolTip() == note.text()
+    assert note.minimumSizeHint().height() == note.sizeHint().height()

@@ -17,10 +17,11 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, QSize, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QScrollArea, QSlider, QVBoxLayout, QWidget,
+    QBoxLayout, QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpacerItem,
+    QVBoxLayout, QWidget,
 )
 
 from .music_panel import MusicPanel
@@ -32,6 +33,43 @@ from .widgets import INNER, TIGHT, PreviewPanel as AspectPreviewBox, dim
 # Enough of the band to work in without the window demanding a screen it may
 # not have. The rest scrolls; nothing is removed.
 MUSIC_BAND_MINIMUM = 220
+
+# The controls column beside the picture. Classic's width, and Flow's: wider,
+# so the key hint takes two lines rather than three and Play sits beside Grab
+# still — the height a short Flow page cannot spare, without dropping a word.
+SIDE_WIDTH = 190
+FLOW_SIDE_WIDTH = 300
+
+class ControlsColumn(QWidget):
+    """The column of controls beside the picture.
+
+    Its width is fixed, so how tall its wrapping labels are is known. Qt's
+    minimum hint measures them at the narrowest width the layout could take
+    instead — which this column never has — and wraps them into lines they
+    never occupy: 208px claimed for 176 of content, measured natively. In
+    Flow it reports the height at its real width; Classic keeps Qt's answer.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.measured_at_width = False
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
+        hint = super().minimumSizeHint()
+        layout = self.layout()
+        if not self.measured_at_width or layout is None:
+            return hint
+        fixed = self.minimumWidth() == self.maximumWidth()
+        width = self.maximumWidth() if fixed else self.width()
+        if width <= 0:
+            return hint
+        at_width = layout.heightForWidth(width)
+        if at_width <= 0:
+            return hint
+        # The layout's own size hint is already raised to that narrow-width
+        # minimum, so the height at the real width is the whole answer.
+        return QSize(hint.width(), at_width)
+
 
 # Said whenever monitoring is not running for an ordinary reason.
 SILENT_PREVIEW = (
@@ -120,6 +158,8 @@ class PreviewView(QObject):
         # back. Held here rather than read from the clip: this panel is given
         # names, it does not own them.
         self._committed_name = ""
+        self._flow_controls = False
+        self._controls_below = False
         self.preview_box = self._build_preview_box()
         self.sequence_strip = SequenceStrip()
         self.sequence_strip.scrub_requested.connect(
@@ -131,7 +171,9 @@ class PreviewView(QObject):
     def _build_preview_box(self) -> QWidget:
         """The video and its transport, permanently visible."""
         box = AspectPreviewBox("Preview and trim")
-        layout = QHBoxLayout(box)
+        # Beside the picture, or under it: the same widgets either way.
+        layout = self._box_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        box.setLayout(layout)
         layout.setContentsMargins(INNER, TIGHT, INNER, INNER)
         layout.setSpacing(INNER)
 
@@ -147,8 +189,8 @@ class PreviewView(QObject):
         return box
 
     def _build_sidebar(self) -> QWidget:
-        side = self.sidebar = QWidget()
-        side.setFixedWidth(190)
+        side = self.sidebar = ControlsColumn()
+        side.setFixedWidth(SIDE_WIDTH)
         column = QVBoxLayout(side)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(TIGHT)
@@ -165,7 +207,10 @@ class PreviewView(QObject):
         column.addWidget(self.trim_position)
         self.trim_summary = dim(QLabel(""))
         column.addWidget(self.trim_summary)
-        column.addSpacing(TIGHT)
+        # Held so Flow can close them up; Classic's are exactly addSpacing's.
+        self._side_gaps = [QSpacerItem(0, TIGHT, QSizePolicy.Policy.Minimum,
+                                       QSizePolicy.Policy.Fixed)]
+        column.addItem(self._side_gaps[0])
 
         # These change once per clip and deliberately stay out of the 30 Hz
         # playhead label update.
@@ -179,7 +224,15 @@ class PreviewView(QObject):
             "clock battery, so these are unreliable."
         )
         column.addWidget(self.clip_date)
-        column.addSpacing(INNER)
+        self._side_gaps.append(QSpacerItem(0, INNER, QSizePolicy.Policy.Minimum,
+                                           QSizePolicy.Policy.Fixed))
+        column.addItem(self._side_gaps[1])
+
+        # Play and Grab still: one above the other in Classic, side by side in
+        # Flow. Same widgets, same order, same spacing either way.
+        self._side_actions = QBoxLayout(QBoxLayout.Direction.TopToBottom)
+        self._side_actions.setContentsMargins(0, 0, 0, 0)
+        self._side_actions.setSpacing(TIGHT)
 
         self.play_button = QPushButton("Play")
         self.play_button.setToolTip(
@@ -187,7 +240,7 @@ class PreviewView(QObject):
             "Space does the same once the picture has focus."
         )
         self.play_button.clicked.connect(lambda *_: self.play_requested.emit())
-        column.addWidget(self.play_button)
+        self._side_actions.addWidget(self.play_button)
 
         self.still_button = QPushButton("Grab still…")
         self.still_button.setEnabled(False)
@@ -197,7 +250,8 @@ class PreviewView(QObject):
         )
         self.still_button.clicked.connect(
             lambda *_: self.grab_still_requested.emit())
-        column.addWidget(self.still_button)
+        self._side_actions.addWidget(self.still_button)
+        column.addLayout(self._side_actions)
 
         trim_row = QHBoxLayout()
         trim_row.setContentsMargins(0, 0, 0, 0)
@@ -506,6 +560,51 @@ class PreviewView(QObject):
             blocked = self.listen_check.blockSignals(True)
             self.listen_check.setChecked(listening)
             self.listen_check.blockSignals(blocked)
+
+    def set_flow_controls(self, flow: bool) -> None:
+        """Arrange the controls beside the picture for Flow, or for Classic.
+
+        Nothing is hidden either way. Flow's pages are short at the compact
+        size — measured natively, Assemble needed 632px of a page's 556 — so
+        the column is wider, the key hint wraps once instead of twice, Play
+        sits beside Grab still and the two fixed gaps close up.
+        """
+        self._flow_controls = flow
+        side = self.sidebar
+        if not self._controls_below:
+            side.setFixedWidth(FLOW_SIDE_WIDTH if flow else SIDE_WIDTH)
+        side.measured_at_width = flow
+        self._side_actions.setDirection(
+            QBoxLayout.Direction.LeftToRight if flow
+            else QBoxLayout.Direction.TopToBottom)
+        for gap, size in zip(self._side_gaps, (TIGHT, INNER)):
+            gap.changeSize(0, 0 if flow else size, QSizePolicy.Policy.Minimum,
+                           QSizePolicy.Policy.Fixed)
+        side.layout().invalidate()
+        side.updateGeometry()
+
+    def set_controls_below(self, below: bool) -> None:
+        """Put the controls column under the picture, or back beside it.
+
+        For Flow's Browse, where the recordings list takes the width beside
+        the picture: side by side the two needed 1178px of a compact page's
+        794. Below, the column takes the picture's width instead of its own.
+        """
+        below = bool(below)
+        self._controls_below = below
+        side = self.sidebar
+        self._box_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom if below
+            else QBoxLayout.Direction.LeftToRight)
+        if below:
+            side.setMinimumWidth(0)
+            side.setMaximumWidth(16777215)
+        else:
+            side.setFixedWidth(FLOW_SIDE_WIDTH if self._flow_controls
+                               else SIDE_WIDTH)
+        self.preview_box.set_controls_below(below)
+        side.updateGeometry()
+        self.preview_box.updateGeometry()
 
     def _build_music_band(self) -> QWidget:
         """The approved music band, under the filmstrip and collapsed by default.
