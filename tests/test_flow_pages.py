@@ -3076,3 +3076,24 @@ def test_a_tall_music_page_shows_everything(window, app):
     needed = window.preview_view.music_content.sizeHint().height()
     assert (timeline.presentation is Presentation.FULL) == (needed <= room or room == 0)
     window.set_view_mode(Mode.CLASSIC)
+
+
+def test_on_music_the_picture_yields_its_room_to_the_lanes(window, app):
+    """Natively at 1440x913 the picture kept the page's slack on Music and
+    the lanes folded; the reference gives the lanes the room. Elsewhere the
+    picture still takes it."""
+    first, _second = planned_pair(window, app)
+    window.show()
+    window.resize(1402, 1100)
+    settled(app)
+    window._select_working_target(first)
+    frame = window._picture_frame
+    window._show_stage(Stage.OUTPUT)
+    settled(app)
+    on_output = frame.height()
+    window._show_stage(Stage.MUSIC)
+    settled(app)
+    assert frame.height() == frame.minimumSizeHint().height(), (
+        "the picture kept more than it needs on Music")
+    assert on_output > frame.height(), "the fixture gave the picture no slack"
+    window.set_view_mode(Mode.CLASSIC)

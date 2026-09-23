@@ -1496,7 +1496,10 @@ class MainWindow(QMainWindow):
             return
         view.set_music_presentation(Presentation.FULL)
         room = view.music_body.viewport().height()
-        needed = view.music_content.sizeHint().height()
+        # The lanes are what has to fit; the numbers under them may scroll
+        # (the band is a scroll area, and nothing is removed by scrolling).
+        needed = (view.music_content.sizeHint().height()
+                  - view.music_panel.sizeHint().height())
         if room > 0 and needed > room:
             view.set_music_presentation(Presentation.COMPACT)
 
@@ -2412,6 +2415,14 @@ class MainWindow(QMainWindow):
         # height-for-width cannot size the page around it.
         self._picture_frame = PictureFrame()
         self._picture_frame.resized.connect(self._fit_picture)
+        # Music's lanes are its subject: the page gives them its slack and
+        # the picture keeps what it prefers, as the reference arranges it.
+        music_panel_host = shell.host(Stage.MUSIC, Region.PANEL)
+        music_view_host = shell.host(Stage.MUSIC, Region.VIEWPORT)
+        if music_panel_host is not None and music_view_host is not None:
+            page = music_panel_host.parentWidget().layout()
+            page.setStretch(page.indexOf(music_view_host), 0)
+            page.setStretch(page.indexOf(music_panel_host), 1)
         self.flow_viewport = QWidget()
         viewport = QVBoxLayout(self.flow_viewport)
         viewport.setContentsMargins(0, 0, 0, 0)
