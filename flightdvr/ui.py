@@ -444,6 +444,8 @@ class MainWindow(QMainWindow):
         self._refit_on_regrow = False
         # What Classic's column measurably could not hold of the picture.
         self._classic_fit: int | None = None
+        # What folding Flow's Output saved, to know when unfolding fits.
+        self._output_fold_saves = 0
         self._viewport_home = None
         self.sidebar_working = None
         self.sidebar_submitted = None
@@ -1176,6 +1178,31 @@ class MainWindow(QMainWindow):
             if self._layout_state.browser is BrowserMode.EXPANDED else None,
             self._classic_fit) if cap is not None]
         return min(caps) if caps else None
+
+    def _fit_output_folding(self) -> None:
+        """Flow's Output folds destination, naming and colour when they would
+        push the preset's options and the actions apart; Classic keeps them
+        inline, as it always has. Measured against the panel's own room, and
+        unfolded again only when the unfolded panel would fit — so it does not
+        flicker at the boundary. A fold someone opened stays open."""
+        panel = self.export_panel
+        if self._view_mode is not Mode.FLOW:
+            panel.set_folding(False)
+            return
+        room = panel.scroller.viewport().height()
+        controls = panel.scroller.widget()
+        if room <= 0 or controls is None:
+            return
+        if not panel.folding:
+            unfolded = controls.sizeHint().height()
+            if unfolded > room:
+                panel.set_folding(True)
+                self._output_fold_saves = max(
+                    0, unfolded - controls.sizeHint().height())
+        elif (not panel.fold_button.isChecked()
+              and controls.sizeHint().height() + self._output_fold_saves
+              <= room):
+            panel.set_folding(False)
 
     def _fit_classic_picture(self, tries: int = 4) -> None:
         """Keep the picture's bottom edge inside its column.
@@ -3172,6 +3199,7 @@ class MainWindow(QMainWindow):
                 "Space does the same once the picture has focus.")
             self._sync_music_panel()
         self._show_source_note()
+        QTimer.singleShot(0, self._fit_output_folding)
         back, forward = flow_neighbours(chosen, self._offered_stages)
         self.flow_shell.set_steps(back is not None, forward is not None)
         self._show_page_actions(chosen)
@@ -4444,6 +4472,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._sync_thumbnail_size)
         QTimer.singleShot(0, self._fit_music_presentation)
         QTimer.singleShot(0, self._fit_classic_picture)
+        QTimer.singleShot(0, self._fit_output_folding)
 
     def _sync_thumbnail_size(self) -> None:
         """Fit the thumbnails to the space the list actually has.

@@ -24,8 +24,8 @@ from PySide6.QtCore import QDate, QSettings, Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout,
     QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QRadioButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QVBoxLayout,
-    QWidget,
+    QRadioButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from .format import (
@@ -99,6 +99,7 @@ class ExportPanel(QWidget):
             "QScrollBar:vertical { width: 12px; }"
         )
         scroller.setWidget(self._build_controls())
+        self.scroller = scroller
         layout.addWidget(scroller, 1)
         layout.addWidget(self._build_actions())
         self.setMinimumWidth(330)
@@ -168,6 +169,33 @@ class ExportPanel(QWidget):
     def set_target_selector_visible(self, visible: bool) -> None:
         self.target_row.setVisible(bool(visible))
 
+    def set_folding(self, folding: bool) -> None:
+        """Fold destination, naming and colour behind one line, or show
+        them inline as Classic always has. Shows and hides only."""
+        self._folding = bool(folding)
+        self.fold_button.setVisible(self._folding)
+        self._show_folded()
+
+    @property
+    def folding(self) -> bool:
+        return self._folding
+
+    @property
+    def folded(self) -> bool:
+        return self._folding and not self.fold_button.isChecked()
+
+    def _folded_widgets(self) -> tuple:
+        return (self.colour_box, self.out_edit, self.pick_button,
+                self.name_label, self.template_edit, self.subfolder_check,
+                self.date_check, self.export_date, self.date_help)
+
+    def _show_folded(self) -> None:
+        shown = not self.folded
+        self.fold_button.setArrowType(
+            Qt.ArrowType.DownArrow if shown else Qt.ArrowType.RightArrow)
+        for widget in self._folded_widgets():
+            widget.setVisible(shown)
+
     def _set_target_index(self, key) -> None:
         for index in range(self.target_combo.count()):
             if self.target_combo.itemData(index) == key:
@@ -227,7 +255,24 @@ class ExportPanel(QWidget):
             self.options_stack.addWidget(builders[key]())
         layout.addWidget(self.options_stack)
 
-        colour_box = QGroupBox("Colour")
+        # Where the file goes, what it is called and its colour handling are
+        # set once and then left alone; on a short page they are what pushes
+        # the preset's own options and the actions apart. There they fold
+        # behind this one line — the resolved filename stays in view — and
+        # nothing is edited by folding or unfolding.
+        self.fold_button = QToolButton()
+        self.fold_button.setText("Destination, naming and colour…")
+        self.fold_button.setCheckable(True)
+        self.fold_button.setAutoRaise(True)
+        self.fold_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.fold_button.setArrowType(Qt.ArrowType.RightArrow)
+        self.fold_button.toggled.connect(lambda *_: self._show_folded())
+        self.fold_button.hide()
+        self._folding = False
+        layout.addWidget(self.fold_button)
+
+        colour_box = self.colour_box = QGroupBox("Colour")
         colour_layout = QVBoxLayout(colour_box)
         self.colour_combo = QComboBox()
         for key, label, _ in COLOUR_MODES:
@@ -245,14 +290,15 @@ class ExportPanel(QWidget):
         self.out_edit.setEditable(True)
         self.out_edit.setMinimumWidth(240)
         row.addWidget(self.out_edit, 1)
-        pick = QPushButton("…")
+        pick = self.pick_button = QPushButton("…")
         pick.setFixedWidth(34)
         pick.clicked.connect(self._browse_output)
         row.addWidget(pick)
         out_layout.addLayout(row)
 
         name_row = QHBoxLayout()
-        name_row.addWidget(QLabel("Name:"))
+        self.name_label = QLabel("Name:")
+        name_row.addWidget(self.name_label)
         self.template_edit = QLineEdit(DEFAULT_TEMPLATE)
         self.template_edit.setToolTip(
             "Fields: " + "  ".join(f"{{{f}}}" for f in TEMPLATE_FIELDS)
