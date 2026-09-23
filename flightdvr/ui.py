@@ -92,7 +92,7 @@ from .live_preview import Listening, LivePreview
 from .music_panel import MusicPanel
 from .output_naming import naming_inputs, resolve_output
 from .output_plan import (
-    OutputPlan, OutputTarget, ordinary_pieces, target_for_piece,
+    OutputPlan, OutputTarget, ordinary_pieces, piece_label, target_for_piece,
     working_outputs,
 )
 from .presets import (
@@ -191,6 +191,65 @@ class _MonitorSnapshot:
 # role for ordering. This one records the current-settings export marker so the
 # Exported filter reads the same answer the row displays.
 EXPORTED_ROLE = Qt.ItemDataRole.UserRole + 2
+
+
+def music_words(choice) -> str:
+    """One truthful phrase for a music choice, or nothing when it has none."""
+    mode = choice.mode
+    if mode is None:
+        return ""
+    if mode is AudioMode.ORIGINAL:
+        return "Original audio"
+    if mode is AudioMode.NO_SOUND:
+        return "No sound"
+    track = choice.track.name if choice.track else "a track"
+    return (f"{track} + original audio" if mode is AudioMode.MIX
+            else track)
+
+
+def _occurrence_words(clip) -> str:
+    span = clip.trim_label
+    label = piece_label(clip)
+    return f"{label} · {span}" if span else f"{label} · whole recording"
+
+
+def submitted_lines(job) -> list[str]:
+    """What a job was submitted with, read from the job and nothing else.
+
+    The job owns deep copies of its clips, settings and music, so these lines
+    cannot follow later edits to the planned output it came from. Where it
+    will be written is not evidence that it was: only a job the encoder
+    finished, whose file is still there, says "Written to".
+    """
+    lines: list[str] = []
+    if len(job.clips) > 1:
+        lines.append(f"Source: {len(job.clips)} ranges, joined in this order")
+        # Each occurrence on its own line, a repeated recording included:
+        # the same file twice is two ranges, not one.
+        lines.extend(f"  {index}. {_occurrence_words(clip)}"
+                     for index, clip in enumerate(job.clips, start=1))
+    else:
+        lines.append(f"Source: {_occurrence_words(job.clips[0])}")
+    preset = job.preset_label
+    if job.preset_key == "social" and job.settings.social_mode == "size":
+        preset += f" · a file size, {job.settings.social_size_mb} MB"
+    lines.append(f"Preset: {preset}")
+    lines.append(f"Sound: {music_words(job.audio) or 'the preset default'}")
+    path = job.out_path
+    if job.status is JobStatus.DONE:
+        lines.append(f"Written to: {path}" if path.exists() else
+                     f"Reported finished, but nothing is at {path} now")
+    elif job.status is JobStatus.RUNNING:
+        lines.append(f"Being written to: {path} — not finished")
+    elif job.status is JobStatus.PENDING:
+        lines.append(f"Will be written to: {path}")
+    else:
+        lines.append(f"Was to be written to: {path} — no finished file")
+    status = job.status.value
+    if job.message:
+        status += f" — {job.message}"
+    lines.append(f"Status: {status}")
+    return lines
 
 class MainWindow(QMainWindow):
     # A closing window cannot parent a QThread that is still reaping a probe
@@ -2121,6 +2180,10 @@ class MainWindow(QMainWindow):
             if self._sidebar_target in self._active_targets():
                 self._load_target(self._sidebar_target)
             self._lend_to_flow()
+            # On Flow's Queue page the queue is the page: jobs at the top,
+            # with what each was submitted with beneath. Switched only once it
+            # has left Classic's strip, where a taller table grew the window.
+            self.queue_panel.set_fills_page(True)
             self._lend_viewport()
             self.splitter.hide()
             self._flow_host.show()
@@ -2134,6 +2197,8 @@ class MainWindow(QMainWindow):
                 self._apply_choices(*self._flow_defaults)
                 self._flow_defaults = None
             self._flow_host.hide()
+            # Back to the strip before it goes home, for the same reason.
+            self.queue_panel.set_fills_page(False)
             self._return_viewport()
             self._return_from_flow()
             self.splitter.show()
@@ -2733,17 +2798,7 @@ class MainWindow(QMainWindow):
             return f"Reading {self._music_reading[target].name}…"
         if target in self._music_trouble:
             return "Music could not be read"
-        choice = self._planned_music(target)
-        mode = choice.mode
-        if mode is None:
-            return ""
-        if mode is AudioMode.ORIGINAL:
-            return "Original audio"
-        if mode is AudioMode.NO_SOUND:
-            return "No sound"
-        track = choice.track.name if choice.track else "a track"
-        return (f"{track} + original audio" if mode is AudioMode.MIX
-                else track)
+        return music_words(self._planned_music(target))
 
     def _refresh_sidebar(self) -> None:
         """Rebuild both lists from what is true now.
@@ -2912,7 +2967,17 @@ class MainWindow(QMainWindow):
         )
         panel.about_requested.connect(self._show_about)
         panel.item_activated.connect(self._open_finished_job)
+        panel.job_selected.connect(self._show_submitted)
         return panel
+
+    def _show_submitted(self, job) -> None:
+        """What a selected job was submitted with, from the job alone."""
+        if job is None:
+            self.queue_panel.clear_details()
+            return
+        self.queue_panel.show_details(
+            f"Submitted settings — {job.out_path.name}",
+            submitted_lines(job))
 
     def _on_queue_toggled(self, open_: bool) -> None:
         self.queue_panel._on_toggled(open_)

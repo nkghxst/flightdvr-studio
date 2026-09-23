@@ -2597,3 +2597,166 @@ def test_music_edits_the_selected_output_not_the_last_inspected_one(window,
     assert label in window.music_panel.target_label.text(), (
         "the music panel names a different output from the one it edits")
     window.set_view_mode(Mode.CLASSIC)
+
+
+# -- the Queue page: jobs at the top, and what each was submitted with ---------
+
+
+def settled(app, rounds: int = 5) -> None:
+    import time
+    for _ in range(rounds):
+        app.processEvents()
+        time.sleep(0.01)
+
+
+def queued_social_job(window, app, monkeypatch):
+    silence_dialogs(monkeypatch)
+    first, second = planned_pair(window, app)
+    choose(window, app, first, "social", size_mb=25)
+    window.export_panel.add_button.click()
+    app.processEvents()
+    assert len(window.jobs) == 1
+    return first, second, window.jobs[0]
+
+
+def select_job_row(window, app, row: int) -> None:
+    window.queue_panel.table.selectRow(row)
+    app.processEvents()
+
+
+def test_queue_page_puts_the_jobs_at_the_top(window, app, monkeypatch):
+    """Found natively and in Sol's review: the table was capped at Classic's
+    150px strip and the page spread the spare height around it, so the jobs
+    floated mid-page. On the page they sit under the header, with the
+    actions directly under them."""
+    queued_social_job(window, app, monkeypatch)
+    window.show()
+    window._show_stage(Stage.QUEUE)
+    settled(app)
+    panel = window.queue_panel
+    table_bottom = panel.table.mapTo(panel, panel.table.rect().bottomLeft()).y()
+    start_top = panel.start_button.mapTo(panel, panel.start_button.rect().topLeft()).y()
+    header_bottom = panel.toggle.mapTo(panel, panel.toggle.rect().bottomLeft()).y()
+    table_top = panel.table.mapTo(panel, panel.table.rect().topLeft()).y()
+
+    assert table_top - header_bottom < 20, (header_bottom, table_top)
+    assert 0 <= start_top - table_bottom < 20, (table_bottom, start_top)
+    assert panel.table.maximumHeight() > 150
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_classic_keeps_its_queue_strip_as_it_was(window, app, monkeypatch):
+    """Classic's queue is a short strip and its open/closed state is its own.
+    A trip through Flow's Queue page gives both back — and a job queued while
+    away opens it, as a job queued in Classic always has."""
+    panel = window.queue_panel
+    assert not panel.toggle.isChecked()
+    in_flow(window, app)
+    window.set_view_mode(Mode.CLASSIC)
+    app.processEvents()
+    assert panel.table.maximumHeight() == 150
+    assert not panel.toggle.isChecked(), "Flow left Classic's strip open"
+
+    queued_social_job(window, app, monkeypatch)
+    window._show_stage(Stage.QUEUE)
+    select_job_row(window, app, 0)
+    assert not panel.details.isHidden(), "the fixture never showed details"
+    window.set_view_mode(Mode.CLASSIC)
+    app.processEvents()
+    assert panel.toggle.isChecked(), "a job queued in Flow left the strip shut"
+    assert panel.details.isHidden(), "the submitted details leaked into Classic"
+    select_job_row(window, app, 0)
+    assert panel.details.isHidden(), "selecting in Classic showed the details"
+
+
+def test_a_selected_job_shows_what_it_was_submitted_with(window, app,
+                                                          monkeypatch):
+    first, _second, job = queued_social_job(window, app, monkeypatch)
+    window._show_stage(Stage.QUEUE)
+    select_job_row(window, app, 0)
+    said = window.queue_panel.details_body.text()
+
+    assert not window.queue_panel.details.isHidden()
+    assert "Preset: Social · a file size, 25 MB" in said, said
+    assert first.items[0].fingerprint and "hdz_001.ts" in said, said
+    assert f"Will be written to: {job.out_path}" in said, said
+    assert "Written to:" not in said.replace("be written to:", ""), (
+        "a waiting job was described as a finished file")
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_submitted_details_do_not_follow_later_edits(window, app, monkeypatch):
+    first, _second, _job = queued_social_job(window, app, monkeypatch)
+    window._show_stage(Stage.QUEUE)
+    select_job_row(window, app, 0)
+    before = window.queue_panel.details_body.text()
+
+    choose(window, app, first, "upload")        # edit the planned output
+    window._rebuild_queue()                     # and redraw everything
+    app.processEvents()
+
+    assert window.queue_panel.details_body.text() == before
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_details_follow_the_job_not_the_row(window, app, monkeypatch):
+    """Rows are rewritten in place. After the selected job is removed, the
+    same row holds a different job — and describing it would describe
+    something nobody selected."""
+    first, second, _job = queued_social_job(window, app, monkeypatch)
+    choose(window, app, second, "master")
+    window.export_panel.add_button.click()
+    app.processEvents()
+    assert len(window.jobs) == 2
+    window._show_stage(Stage.QUEUE)
+    select_job_row(window, app, 0)
+    assert "Social" in window.queue_panel.details_body.text()
+
+    del window.jobs[0]
+    window._rebuild_queue()
+    app.processEvents()
+
+    assert window.queue_panel.selected_job() is None
+    assert window.queue_panel.details.isHidden(), (
+        "details still describe a job that is gone, beside a different one")
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_selecting_a_job_is_only_looking(window, app, monkeypatch):
+    """No start, no removal, no audition: selection changes nothing."""
+    _first, _second, job = queued_social_job(window, app, monkeypatch)
+    window._show_stage(Stage.QUEUE)
+    started = []
+    monkeypatch.setattr(window, "_start", lambda *a: started.append(a))
+
+    select_job_row(window, app, 0)
+    window.queue_panel.table.clearSelection()
+    app.processEvents()
+
+    assert started == []
+    assert window.jobs == [job] and job.status is JobStatus.PENDING
+    assert window.worker is None or not window.worker.isRunning()
+    assert window.queue_panel.details.isHidden(), "cleared selection kept details"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_submitted_details_name_every_occurrence_of_a_repeated_source(
+        window, app, monkeypatch):
+    """A/B/A from one recording is three ranges, not two files."""
+    silence_dialogs(monkeypatch)
+    make_aba_assembly(window, app)
+    in_flow(window, app)
+    window.flow_shell.primary_button.click()
+    app.processEvents()
+    assert len(window.jobs) == 1 and len(window.jobs[0].clips) == 3
+    window._show_stage(Stage.QUEUE)
+    select_job_row(window, app, 0)
+    said = window.queue_panel.details_body.text()
+
+    assert "3 ranges, joined in this order" in said, said
+    first, second = window.clips
+    lines = [line.strip() for line in said.splitlines()]
+    assert lines[1].startswith("1. ") and first.path.name in lines[1]
+    assert lines[2].startswith("2. ") and second.path.name in lines[2]
+    assert lines[3].startswith("3. ") and first.path.name in lines[3]
+    window.set_view_mode(Mode.CLASSIC)
