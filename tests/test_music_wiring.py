@@ -1597,7 +1597,11 @@ def test_choosing_original_while_unconfirmed_supersedes_the_saved_track(
     (lambda t: replace(exact_a(t).asset, sha256="c" * 64), "changed"),
     (lambda t: replace(exact_a(t).asset, stream_index=1), "stream"),
     (lambda t: replace(exact_a(t).asset, sample_rate=48_000), "sample rate"),
-    (lambda t: replace(exact_a(t).asset, decoded_samples=176_402), "shorter"),
+    (lambda t: replace(exact_a(t).asset, decoded_samples=176_402), "length"),
+    # The review's case: same digest, stream and rate, and the passage would
+    # still fit — but the saved reference names another length or layout.
+    (lambda t: replace(exact_a(t).asset, decoded_samples=400_000), "length"),
+    (lambda t: replace(exact_a(t).asset, channels=1), "channel"),
 ])
 def test_a_different_track_stays_unavailable_and_is_saved_unchanged(
         window, app, tmp_path, monkeypatch, probes, fresh, why):
@@ -1608,7 +1612,12 @@ def test_a_different_track_stays_unavailable_and_is_saved_unchanged(
     before = len(probes)
     again = reopen(app, tmp_path, monkeypatch)
     try:
-        confirm(probes[before], fresh(tmp_path))
+        # Delivered through the connected callback. The waveform is left out:
+        # a one-channel envelope for a two-channel asset is not buildable, and
+        # the choice is decided by the asset alone.
+        probe = probes[before]
+        probe.deliver_waveform(WaveformInspection.unavailable(
+            probe.waveform_request, fresh(tmp_path), "not drawn here"))
         app.processEvents()
         assert again._planned_music(a).asset is None
         assert a in again._pending_music

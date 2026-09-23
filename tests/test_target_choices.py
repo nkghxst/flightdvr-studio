@@ -92,7 +92,7 @@ def test_negative_control_a_seconds_route_would_not_round_trip():
 
 
 def test_settings_keep_their_values_and_never_carry_the_encoder():
-    settings = ExportSettings(master_crf=21, colour="full", use_gpu=True,
+    settings = ExportSettings(master_crf=21, colour="rec709", use_gpu=True,
                               hw_encoder="h264_nvenc", keep_audio=False,
                               social_size_mb=7)
     stored = through_json(encode_settings(settings))
@@ -102,8 +102,8 @@ def test_settings_keep_their_values_and_never_carry_the_encoder():
 
 
 def test_unknown_settings_are_ignored_and_missing_ones_take_defaults():
-    back = decode_settings({"master_crf": 30, "from_the_future": "x"})
-    assert back == ExportSettings(master_crf=30)
+    back = decode_settings({"master_crf": 24, "from_the_future": "x"})
+    assert back == ExportSettings(master_crf=24)
 
 
 @pytest.mark.parametrize("stored", [
@@ -137,7 +137,9 @@ def test_assembly_order_and_repeats_are_the_identity():
     (asset(SHA_B), "changed"),
     (asset(stream=1), "stream"),
     (asset(rate=48_000), "sample rate"),
-    (asset(samples=176_402), "shorter"),
+    (asset(samples=176_402), "length"),
+    (asset(samples=400_000), "length"),      # the passage would still fit
+    (replace(asset(), channels=1), "channel"),
 ])
 def test_a_different_read_is_named_and_never_adopted(fresh, why):
     _shown, saved = decode_music(encode_music(choice_a()))
@@ -146,9 +148,10 @@ def test_a_different_read_is_named_and_never_adopted(fresh, why):
         saved.resolved(fresh)
 
 
-def test_the_passage_end_is_exclusive_when_confirming():
+def test_the_same_track_confirms_exactly():
     _shown, saved = decode_music(encode_music(choice_a()))
-    assert saved.mismatch(asset(samples=176_403)) == ""
+    assert saved.mismatch(asset()) == ""
+    assert saved.resolved(asset()) == choice_a()
 
 
 def test_an_edit_while_unconfirmed_keeps_the_track_and_passage():
@@ -246,12 +249,12 @@ def test_a_duplicate_target_is_reported_not_merged():
 
 def test_a_whole_output_round_trips_with_its_pending_track():
     _shown, saved = decode_music(encode_music(choice_a()))
-    one = planned(A, saved.requested, "upload", upload_crf=25)
+    one = planned(A, saved.requested, "upload", upload_crf=24)
     back = decode_output(through_json(encode_output(one, saved)),
                          hw_encoder="x")
     assert back.pending == saved
     assert back.planned.music == saved.requested
-    assert back.planned.settings == ExportSettings(upload_crf=25,
+    assert back.planned.settings == ExportSettings(upload_crf=24,
                                                    hw_encoder="x")
 
 
@@ -273,3 +276,92 @@ def test_damaged_outputs_are_refused(damage):
 def test_outputs_that_are_not_a_list_give_nothing():
     assert decode_outputs(None).outputs == ()
     assert decode_outputs({"x": 1}).problems
+
+
+# -- settings are the panel's own choices (Sol's review of 8277dce) ---------------
+
+
+@pytest.mark.parametrize("stored", [
+    {"master_crf": 999},
+    {"social_size_mb": 0},
+    {"social_size_mb": 2001},
+    {"colour": "invalid"},
+    {"social_mode": "unknown"},
+    {"vertical_position": 999},
+    {"vertical_position": -1},
+    {"edit_codec": "h265"},
+    {"master_speed": "ludicrous"},
+    {"social_crf": 18},                       # a Master level, not Social's
+    {"social_height": 1234},
+    {"upload_height": 2160},
+    {"social_fps": 24},
+])
+def test_a_value_the_panel_cannot_hold_is_refused(stored):
+    with pytest.raises(Malformed):
+        decode_settings(stored)
+
+
+def test_the_review_s_probe_is_refused_as_one_entry_and_spares_its_neighbours():
+    bad = {"master_crf": 999, "social_size_mb": 0, "colour": "invalid",
+           "social_mode": "unknown", "vertical_position": 999}
+    stored = through_json(encode_outputs(
+        [(planned(A), None), (planned(B), None)], B))
+    stored["outputs"][0]["settings"] = bad
+    read = decode_outputs(stored["outputs"], stored["selected_output"])
+    assert [one.target for one in read.outputs] == [B]
+    assert read.selected == B and read.unread == (stored["outputs"][0],)
+
+
+def test_every_default_and_every_offered_value_is_accepted():
+    from flightdvr.presets import (
+        COLOUR_MODES, EDIT_CODECS, QUALITY_LEVELS, SOCIAL_QUALITY_LEVELS,
+        SPEEDS)
+    from flightdvr.target_choices import FPS_STEPS, RESOLUTION_STEPS
+    assert decode_settings(encode_settings(ExportSettings())) == ExportSettings()
+    offered = (
+        [{"colour": key} for key, _l, _h in COLOUR_MODES]
+        + [{"edit_codec": key} for key in EDIT_CODECS]
+        + [{"master_speed": speed} for speed in SPEEDS]
+        + [{"upload_crf": crf} for crf, _n, _h in QUALITY_LEVELS]
+        + [{"social_crf": crf} for crf, _n, _h in SOCIAL_QUALITY_LEVELS]
+        + [{"social_height": h} for h in (0, *RESOLUTION_STEPS)]
+        + [{"social_fps": f} for f in (0, *FPS_STEPS)]
+        + [{"social_size_mb": 4}, {"social_size_mb": 2000},
+           {"vertical_position": 0}, {"vertical_position": 100},
+           {"social_mode": "size"}, {"social_mode": "quality"}])
+    for stored in offered:
+        decode_settings(stored)
+
+
+def test_every_stored_setting_has_a_rule():
+    """A field added to ExportSettings later must say what it may hold."""
+    from dataclasses import fields
+    from flightdvr import target_choices
+    for one in fields(ExportSettings):
+        if one.name in target_choices.MACHINE_FIELDS:
+            continue
+        if type(getattr(ExportSettings(), one.name)) is bool:
+            continue
+        assert (one.name in target_choices._CHOICES
+                or one.name in target_choices._RANGES), one.name
+
+
+def test_the_rules_match_the_output_panel(qtbot=None):
+    """The codec's copies of the panel's lists and bounds are the panel's."""
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    from flightdvr import export_panel, target_choices
+    assert tuple(export_panel.RESOLUTION_STEPS) == target_choices.RESOLUTION_STEPS
+    assert tuple(export_panel.FPS_STEPS) == target_choices.FPS_STEPS
+    panel = export_panel.ExportPanel()
+    assert (panel.social_size.minimum(), panel.social_size.maximum()) == (
+        target_choices._RANGES["social_size_mb"])
+    assert (panel.vertical_position.minimum(),
+            panel.vertical_position.maximum()) == (
+        target_choices._RANGES["vertical_position"])
+    modes = {panel.social_mode.itemData(i)
+             for i in range(panel.social_mode.count())}
+    assert modes == target_choices._CHOICES["social_mode"]
+    panel.deleteLater()

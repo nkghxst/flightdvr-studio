@@ -43,7 +43,9 @@ from .assembly import Item
 from .audio_plan import (
     AudioAsset, AudioMode, MusicChoice, SampleSpan, ShortTrackPolicy)
 from .output_plan import OutputTarget, PlannedOutput
-from .presets import PRESETS, ExportSettings
+from .presets import (
+    COLOUR_MODES, EDIT_CODECS, PRESETS, QUALITY_LEVELS, SOCIAL_QUALITY_LEVELS,
+    SPEEDS, ExportSettings)
 
 # Worked out afresh on every machine, never carried in a file: the encoder the
 # saving computer had may not exist on the one reopening it.
@@ -52,6 +54,36 @@ MACHINE_FIELDS = frozenset({"hw_encoder"})
 
 class Malformed(ValueError):
     """One stored entry could not be read as a choice."""
+
+
+# What the Output panel can actually be set to, field by field. A value it
+# could never have produced is not a choice to restore. Heights and frame
+# rates mirror export_panel's RESOLUTION_STEPS and FPS_STEPS, which live in a
+# Qt module this one does not import; a test holds the two lists together.
+RESOLUTION_STEPS = (1440, 1080, 720, 540, 480, 360)
+FPS_STEPS = (90, 60, 50, 30, 25)
+_QUALITY = frozenset(crf for crf, _name, _help in QUALITY_LEVELS)
+_CHOICES = {
+    "colour": frozenset(key for key, _label, _help in COLOUR_MODES),
+    "edit_codec": frozenset(EDIT_CODECS),
+    "master_speed": frozenset(SPEEDS),
+    "vertical_speed": frozenset(SPEEDS),
+    "upload_speed": frozenset(SPEEDS),
+    "master_crf": _QUALITY,
+    "slow_crf": _QUALITY,
+    "vertical_crf": _QUALITY,
+    "upload_crf": _QUALITY,
+    "social_crf": frozenset(crf for crf, _n, _h in SOCIAL_QUALITY_LEVELS),
+    "social_mode": frozenset({"size", "quality"}),
+    "social_height": frozenset({0, *RESOLUTION_STEPS}),
+    "upload_height": frozenset({0, *RESOLUTION_STEPS}),
+    "social_fps": frozenset({0, *FPS_STEPS}),
+}
+# The panel's own spin box and slider bounds, inclusive.
+_RANGES = {
+    "social_size_mb": (4, 2000),
+    "vertical_position": (0, 100),
+}
 
 
 # -- small typed readers --------------------------------------------------------
@@ -156,13 +188,24 @@ def decode_settings(raw, *, hw_encoder: str = "") -> ExportSettings:
     for one in fields(ExportSettings):
         if one.name in MACHINE_FIELDS or one.name not in raw:
             continue
-        value, kind = raw[one.name], type(getattr(defaults, one.name))
+        default = getattr(defaults, one.name)
+        value, kind = raw[one.name], type(default)
         if kind is bool:
             values[one.name] = _flag(value, one.name)
-        elif kind is int:
-            values[one.name] = _integer(value, one.name)
-        else:
-            values[one.name] = _text(value, one.name)
+            continue
+        value = (_integer(value, one.name) if kind is int
+                 else _text(value, one.name))
+        if one.name in _RANGES:
+            low, high = _RANGES[one.name]
+            if not low <= value <= high:
+                raise Malformed(f"{one.name} {value!r} is outside "
+                                f"{low}-{high}")
+        elif value != default and value not in _CHOICES[one.name]:
+            # The shipped default is always a choice: new outputs start
+            # from it whether or not a control lists it by name.
+            raise Malformed(f"{one.name} {value!r} is not a choice this "
+                            "version offers")
+        values[one.name] = value
     return ExportSettings(**values, hw_encoder=hw_encoder)
 
 
@@ -247,9 +290,13 @@ class SavedMusic:
             return "its audio is in a different stream now"
         if asset.sample_rate != self.sample_rate:
             return "its sample rate has changed"
-        if (self.passage is not None
-                and self.passage.end > asset.decoded_samples):
-            return "it is shorter than the passage chosen from it"
+        if asset.channels != self.channels:
+            return "its channel count has changed"
+        if asset.decoded_samples != self.decoded_samples:
+            # Exactly, not merely long enough for the passage: the saved
+            # reference names this length, and a file that decodes to a
+            # different one is not the one that was chosen.
+            return "its length has changed"
         return ""
 
     def resolved(self, asset: AudioAsset) -> MusicChoice:
