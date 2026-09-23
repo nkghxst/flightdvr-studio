@@ -2450,6 +2450,58 @@ def test_output_estimates_the_output_that_would_be_queued(window, app):
     window.set_view_mode(Mode.CLASSIC)
 
 
+def test_browse_never_shows_an_empty_list_region(window, app):
+    """Found natively: the shell built Browse's list region beside the picture
+    while the window lent the list to the region under it, so a third of the
+    page was an empty column. The list goes beside the picture only where
+    the two fit (they do not yet, at either reference width); until then the
+    region is hidden rather than blank."""
+    from flightdvr.flow_layout import Region
+
+    in_flow(window, app)
+    window._show_stage(Stage.BROWSE)
+    app.processEvents()
+    listing = window.flow_shell.host(Stage.BROWSE, Region.LIST)
+
+    assert listing.isHidden() or listing.isAncestorOf(window.table), (
+        "Browse shows a list region with no list in it")
+    assert not window.table.isHidden()
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_changing_mode_gives_back_room_it_only_needed_for_a_moment(
+        window, app, monkeypatch):
+    """Measured natively: moving the picture asked, for an instant, for 1194px
+    on a 913px window, and a window that has grown stays grown — opening Flow
+    left it taller than the screen, and going back to Classic left it 45px
+    taller again. Offscreen cannot produce that instant, so the growth is
+    made here, while the panels move, exactly where it happened."""
+    import time
+
+    window.resize(1200, 900)
+    app.processEvents()
+    was = window.size()
+    real = window._place_viewport
+
+    def growing(stage):
+        real(stage)
+        window.resize(was.width(), was.height() + 300)
+
+    monkeypatch.setattr(window, "_place_viewport", growing)
+    window.set_view_mode(Mode.FLOW)
+    for _ in range(5):
+        app.processEvents()
+        time.sleep(0.01)
+    assert window.size() == was, (
+        f"opening Flow left the window at {window.size().toTuple()}")
+
+    window.set_view_mode(Mode.CLASSIC)
+    for _ in range(5):
+        app.processEvents()
+        time.sleep(0.01)
+    assert window.size() == was
+
+
 def test_with_no_output_chosen_output_estimates_nothing(window, app):
     """Found natively: with the selection gone, Output fell back to sizing
     every ticked piece under the defaults — "17 files, about 68 MB" beside a

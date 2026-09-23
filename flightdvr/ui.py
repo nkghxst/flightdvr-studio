@@ -1968,6 +1968,16 @@ class MainWindow(QMainWindow):
             stage: shell.host(stage, Region.PANEL)
             for stage in self._offered_stages
         }
+        # Browse's list region is hidden, not left blank. Measured natively,
+        # the recordings list needs 640px and the picture with its controls
+        # 532px, so side by side Browse cannot be narrower than 1444px — past
+        # both the 1440px and the 1060px reference widths. Fitting them beside
+        # each other needs the list's toolbar to wrap and the picture's side
+        # controls to move below it, in browser_panel.py and widgets.py, which
+        # are outside this change. Until then Browse is one column, as before.
+        listing = shell.host(Stage.BROWSE, Region.LIST)
+        if listing is not None:
+            listing.hide()
         self.flow_stage_buttons = shell.stage_buttons
         self.flow_back = shell.back_button
         self.flow_next = shell.next_button
@@ -2089,6 +2099,9 @@ class MainWindow(QMainWindow):
                 and self._flow_stage is Stage.ASSEMBLE
                 and chosen is not Mode.FLOW):
             self._leave_sequence_scrub()
+        # Moving the panels asks for more room for a moment either way; the
+        # window keeps its size unless the new arrangement truly needs more.
+        was = self.size()
         # The mode is recorded first. The sidebar only does its work while
         # Flow is the mode, so refreshing before this was refreshing into a
         # guard that had every right to refuse — and the list arrived empty.
@@ -2129,6 +2142,7 @@ class MainWindow(QMainWindow):
         for name, action in self._view_actions.items():
             action.setChecked(name is chosen)
         self._relayout()
+        self._keep_window_size(was)
 
     def _show_stage(self, stage) -> None:
         """Show one stage. Navigation alone changes nothing but what is seen."""
@@ -2139,10 +2153,12 @@ class MainWindow(QMainWindow):
                 and chosen is not Stage.ASSEMBLE):
             self._leave_sequence_scrub()
         self._flow_stage = chosen
+        was = self.size()
         self.flow_shell.set_stage(chosen)
         # The picture goes where this page keeps it, or nowhere: Queue has no
         # viewport region at all, so nothing is left hidden behind its jobs.
         self._place_viewport(chosen)
+        self._keep_window_size(was)
         self.settings_store.setValue("flow_stage", chosen.value)
         if chosen is Stage.ASSEMBLE:
             self._refresh_sequence_plan()
@@ -2163,6 +2179,25 @@ class MainWindow(QMainWindow):
         back, forward = flow_neighbours(chosen, self._offered_stages)
         self.flow_shell.set_steps(back is not None, forward is not None)
         self._show_page_actions(chosen)
+
+    def _keep_window_size(self, was) -> None:
+        """Give back height a page change only needed for a moment.
+
+        Measured natively: moving the picture in asks, for an instant, for the
+        old and the new place at once — 1194px on a 913px window — and a
+        window that has grown never shrinks back by itself, so opening Flow
+        left it taller than the screen. Once the layouts settle it is resized
+        to what it was; Qt still holds it to whatever the page really needs.
+        """
+        if self.isMaximized() or self.isFullScreen():
+            return
+
+        def restore():
+            if self.size() != was and not (self.isMaximized()
+                                           or self.isFullScreen()):
+                self.resize(was)
+
+        QTimer.singleShot(0, restore)
 
     def _place_viewport(self, stage: Stage) -> None:
         """Put the one picture in this page's region, or take it away.

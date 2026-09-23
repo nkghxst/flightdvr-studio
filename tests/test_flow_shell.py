@@ -217,3 +217,24 @@ def test_a_page_left_behind_does_not_size_the_one_being_shown(shell):
 
     assert settled() == small, (
         "the page left behind still sets the size of the one on show")
+
+
+def test_a_page_never_shown_does_not_size_the_shell(shell):
+    """Found natively: opening Flow grew a 1440x913 window to 1194 tall.
+    Panels are lent into every page before the first page is chosen, and
+    until then each page still counted — so the window grew to the tallest
+    one, and a window that has grown does not shrink back by itself."""
+    from PySide6.QtWidgets import QWidget
+
+    shell.show()
+    QApplication.processEvents()
+    before = shell.pages.minimumSizeHint()
+
+    tall = QWidget()
+    tall.setMinimumSize(900, 800)
+    shell.host(Stage.MUSIC, Region.PANEL).layout().addWidget(tall)
+    tall.show()                       # as the window does with every panel
+    QApplication.processEvents()
+
+    assert shell.pages.minimumSizeHint() == before, (
+        "a page nobody has opened is sizing the shell")
