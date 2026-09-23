@@ -128,6 +128,11 @@ class ReviewTintDelegate(QStyledItemDelegate):
             option.backgroundBrush = QBrush(tint)
 
 
+HIDDEN_HELP = ("Filtering hides rows. It never unticks a clip, changes a "
+               "review state, touches a saved range or affects anything "
+               "already queued.")
+
+
 class BrowserPanel(QWidget):
     """Own the clip table and emit the handful of actions around it."""
 
@@ -439,11 +444,15 @@ class BrowserPanel(QWidget):
         # floor. They share the row for the same reason — an extra row above
         # the preview is height the preview needs at a short window.
         self.hidden_label = dim(QLabel(""))
-        self.hidden_label.setToolTip(
-            "Filtering hides rows. It never unticks a clip, changes a review "
-            "state, touches a saved range or affects anything already queued."
-        )
+        self.hidden_label.setToolTip(HIDDEN_HELP)
         for spare in (self.length_label, self.hidden_label):
+            # One line each. `dim` turns wrapping on, and a wrapping label
+            # answers height for width: the whole panel then asked its column
+            # for its full 288px however short the window, and at 1120x760 the
+            # picture below it was pushed 48px out of its frame (measured
+            # natively, base and W4 alike). Cut off rather than wrapped, with
+            # the full text on hover.
+            spare.setWordWrap(False)
             spare.setMinimumWidth(0)
             spare.setSizePolicy(QSizePolicy.Policy.Ignored,
                                 QSizePolicy.Policy.Preferred)
@@ -465,6 +474,7 @@ class BrowserPanel(QWidget):
         self.length_label.setText(bound_text(
             self.min_length.value(), self.max_length.value(),
             self.show_unknown.isChecked()))
+        self.length_label.setToolTip(self.length_label.text())
         self.length_filter_changed.emit()
 
     def reset_length_filter(self) -> None:
@@ -501,6 +511,10 @@ class BrowserPanel(QWidget):
 
     def set_hidden_summary(self, text: str) -> None:
         self.hidden_label.setText(text)
+        # The line may be cut on a narrow list; its words stay on hover,
+        # ahead of what filtering does and does not touch.
+        self.hidden_label.setToolTip(f"{text}\n\n{HIDDEN_HELP}" if text
+                                     else HIDDEN_HELP)
 
     def set_review_progress(self, reviewed: int, total: int) -> None:
         self.review_count_label.setText(f"{reviewed} of {total} reviewed")

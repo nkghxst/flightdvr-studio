@@ -441,6 +441,7 @@ class MainWindow(QMainWindow):
         self.flow_source_note = None
         self._music_band_was_open: bool | None = None
         self._size_before_band = None
+        self._holding = False
         self._refit_on_regrow = False
         # What Classic's column measurably could not hold of the picture.
         self._classic_fit: int | None = None
@@ -4457,6 +4458,38 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         super().resizeEvent(event)
         self._relayout()
+
+    def event(self, event) -> bool:  # noqa: D102
+        handled = super().event(event)
+        if event.type() == QEvent.Type.LayoutRequest and not self._holding:
+            QTimer.singleShot(0, self._hold_minimum)
+        return handled
+
+    def _hold_minimum(self) -> None:
+        """The window's least size, counting Classic's picture at its floor.
+
+        The layout's own minimum counts the picture at the height it has
+        now, which its width earned. Made narrower and shorter in one move —
+        a snap, a restore, a resize — the window was held to that old height
+        before the new width could shrink it: 1120x760 came out 837 tall,
+        measured natively. The picture yields down to its floor as soon as
+        the width arrives, so that floor is what the minimum counts.
+        """
+        if self._closing:
+            return
+        self._holding = True
+        try:
+            hint = self.minimumSizeHint()
+            height = hint.height()
+            box = self.preview_view.preview_box
+            if (self._view_mode is Mode.CLASSIC
+                    and box.parentWidget() is self._left_column):
+                height -= max(0, box.height() - box.content_floor())
+            if (self.minimumWidth(), self.minimumHeight()) != (
+                    hint.width(), height):
+                self.setMinimumSize(hint.width(), max(0, height))
+        finally:
+            self._holding = False
 
     def _relayout(self) -> None:
         """Everything whose size depends on another widget's size.
