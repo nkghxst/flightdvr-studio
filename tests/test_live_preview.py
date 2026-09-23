@@ -2559,3 +2559,49 @@ def test_closing_after_a_partial_acceptance_leaves_nothing_running():
     assert live._held is None
     assert stream.stopped
     assert not live.status.playing
+
+
+# -- W3: gains and fades reach the stream in place ------------------------------
+
+def test_a_parameter_update_rebuilds_nothing_and_resets_nothing():
+    """No factory call, no silence, no reprime, no device reset: the stream
+    takes it or refuses it."""
+    built = []
+    stream = FakeStream()
+    stream.updates = []
+    stream.update_parameters = lambda plan: (stream.updates.append(plan), True)[1]
+    output = FakeOutput()
+    live = LivePreview(stream_factory=lambda t, l: (built.append(t), stream)[1],
+                       output=output)
+    live.set_target("hdz_001.ts")
+    live.set_muted(False)
+    live.play()
+    before = (list(stream.calls), list(output.calls), len(built))
+
+    assert live.update_parameters("hdz_001.ts", "the new plan")
+
+    assert stream.updates == ["the new plan"]
+    assert (stream.calls, output.calls, len(built)) == before
+    assert live.status.playing and not live.status.muted
+
+
+def test_a_parameter_update_for_another_output_is_refused():
+    live, stream, _output = transport()
+    stream.update_parameters = lambda plan: True
+    assert not live.update_parameters("hdz_002.ts", "a plan")
+
+
+def test_with_nothing_to_hear_an_update_starts_nothing():
+    built = []
+    live = LivePreview(stream_factory=lambda t, l: (built.append(t), None)[1],
+                       output=FakeOutput())
+    live.set_target("hdz_001.ts")
+    assert not live.update_parameters("hdz_001.ts", "a plan")
+    assert built == ["hdz_001.ts"], "an update built a stream"
+
+
+def test_a_refused_target_takes_no_update():
+    live = LivePreview(stream_factory=lambda t, l: FakeStream(),
+                       output=FakeOutput())
+    live.set_target("hdz_001.ts", reason="music is still being read")
+    assert not live.update_parameters("hdz_001.ts", "a plan")

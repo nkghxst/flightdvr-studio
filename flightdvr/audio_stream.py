@@ -364,6 +364,25 @@ class LiveAudioMapping:
         return round_samples(Fraction(passage.start * OUTPUT_RATE, passage.rate))
 
 
+# What a plan must keep for a change to it to be a parameter update: where the
+# music and the source come from and how long everything runs. Gains and fades
+# are the rest, and those are all a parameter update may change.
+_STRUCTURE = ("mode", "output", "source_has_audio", "asset", "passage",
+              "short_track", "music_samples", "audible_samples")
+
+
+def parameters_only(old: LiveAudioMapping, new: LiveAudioMapping) -> bool:
+    """Whether `new` differs from `old` in gains and fades and nothing else.
+
+    The source mapping counts as structure too: a different source interval
+    is different material, even if every audio choice matches.
+    """
+    if old.source != new.source:
+        return False
+    return all(getattr(old.audio, name) == getattr(new.audio, name)
+               for name in _STRUCTURE)
+
+
 @dataclass(frozen=True)
 class PcmBlock:
     """Immutable output plus the monitor rendering captured for one pull."""
@@ -568,6 +587,43 @@ class AudioStream:
             captured.planned,
             monitored,
         )
+
+    def update_parameters(self, audio: OutputAudioPlan) -> bool:
+        """Change gains and fades in place, keeping everything that is moving.
+
+        The readers, the cursor, the generation and the queue all stay, so the
+        loop keeps its phase and no reader is asked to seek. The swap is atomic
+        with the worker's snapshot of the mapping: every block is rendered
+        wholly from one mapping or the other, never half of each.
+
+        What this does not do is reach sound already produced. The (at most
+        `QUEUE_CAPACITY`) queued blocks, one block the worker may be rendering
+        from the mapping it took before the swap, and whatever the consumer
+        and the device already hold were all made with the old values.
+
+        Refused, changing nothing, for anything that is not a gain or a fade —
+        including a different source interval — and for a stopped or failed
+        stream. The caller then prepares the stream again instead.
+        """
+        with self._changed:
+            if self._failure is not None or self._cancel.is_set():
+                return False
+            try:
+                updated = LiveAudioMapping(audio=audio,
+                                           source=self._mapping.source)
+            except ValueError:
+                # A different length cannot even pair with this source.
+                return False
+            if not parameters_only(self._mapping, updated):
+                return False
+            self._mapping = updated
+            return True
+
+    @property
+    def audio_plan(self) -> OutputAudioPlan:
+        """The plan blocks are being rendered from now."""
+        with self._lock:
+            return self._mapping.audio
 
     def reprime(self, output_sample: int) -> int:
         """Fence queued/in-flight work and start a new generation at a sample."""

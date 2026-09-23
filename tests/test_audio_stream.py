@@ -805,3 +805,131 @@ def test_sequence_reader_stop_unblocks_a_leaf_and_wait_remains_separate():
     assert stream.state in (StreamState.STOPPING, StreamState.STOPPED)
     assert stream.wait_stopped(2)
     assert leaf.close_requests == 1
+
+
+# -- W3: gains and fades change in place --------------------------------------
+
+from flightdvr.audio_stream import parameters_only  # noqa: E402
+
+
+def w3_plan(level=1, *, frames=12 * BLOCK_FRAMES,
+            passage=SampleSpan(4_410, 5_410, 44_100), policy=ShortTrackPolicy.LOOP):
+    return music_plan(AudioMode.REPLACE, frames, passage=passage,
+                      music_level=level, policy=policy, source=False)
+
+
+def drain(stream, count):
+    stream.resume()
+    blocks = []
+    while len(blocks) < count:
+        try:
+            block = stream.pull()
+        except Buffering:
+            time.sleep(0.002)
+            continue
+        if block is None:
+            break
+        blocks.append(block)
+    return blocks
+
+
+def test_a_parameter_update_keeps_readers_position_and_loop_phase():
+    """Level 1 -> 1/2 while four blocks are queued and a fifth may be in
+    flight. Every block is wholly one gain or the other; the old ones are a
+    prefix no longer than the queue plus one; the track positions run on as
+    if nothing had happened; and the reader was asked for exactly what an
+    untouched stream asks for — no seek, no second reader."""
+    passage = SampleSpan(4_410, 5_410, 44_100)       # loops every 1088 frames
+    origin = 4_800
+    loop = passage.samples_at(OUTPUT_RATE)
+    assert loop == 1_088
+
+    def run(update):
+        reader = FakeReader(value=lambda frame, channel: float(frame))
+        stream = AudioStream(mapping(w3_plan(1, passage=passage)),
+                             music_reader=reader, monitor=MonitorState(level=1))
+        try:
+            stream.start()
+            wait_for(lambda: stream.queued_blocks == QUEUE_CAPACITY)
+            if update:
+                assert stream.update_parameters(
+                    w3_plan(Fraction(1, 2), passage=passage))
+                assert stream.generation == 0
+            blocks = drain(stream, 12)
+        finally:
+            stop(stream)
+        return reader.reads, blocks
+
+    control_reads, _ = run(update=False)
+    reads, blocks = run(update=True)
+
+    assert reads == control_reads, "the update made the reader seek"
+    gains = []
+    for number, block in enumerate(blocks):
+        left = tuple(block.planned)[::2]
+        expected = [origin + (block.output_start + i) % loop
+                    for i in range(block.frames)]
+        ratios = {round(value / position, 6)
+                  for value, position in zip(left, expected)}
+        assert len(ratios) == 1, f"block {number} mixes two gains: {ratios}"
+        gains.append(ratios.pop())
+    old = gains.index(0.5)
+    assert set(gains[:old]) == {1.0} and set(gains[old:]) == {0.5}
+    assert old <= QUEUE_CAPACITY + 1, (
+        f"{old} blocks carried the old gain; the queue holds {QUEUE_CAPACITY}")
+
+
+def test_the_block_being_rendered_during_an_update_is_wholly_old():
+    """The in-flight barrier. The worker has taken the mapping and is inside
+    the music read when the update lands: that block is rendered entirely
+    with the old gain, and the next entirely with the new one."""
+    reader = BlockingReader(frames=20_000)
+    reader.value = lambda frame, channel: float(frame)
+    stream = AudioStream(mapping(w3_plan(1, frames=2 * BLOCK_FRAMES)),
+                         music_reader=reader, monitor=MonitorState(level=1))
+    try:
+        stream.start()
+        assert reader.read_started.wait(2), "the worker never started a read"
+        assert stream.update_parameters(w3_plan(Fraction(1, 2),
+                                                frames=2 * BLOCK_FRAMES))
+        reader.release.set()
+        first, second = drain(stream, 2)
+    finally:
+        stop(stream)
+    first_left = tuple(first.planned)[::2]
+    second_left = tuple(second.planned)[::2]
+    assert first_left[0] == 4_800.0 and first_left[-1] == 4_800.0 + 479
+    assert second_left[0] == (4_800 + 480) * 0.5
+    assert second_left[-1] == (4_800 + 959) * 0.5
+
+
+@pytest.mark.parametrize("change", [
+    {"passage": SampleSpan(4_411, 5_410, 44_100)},
+    {"passage": SampleSpan(4_410, 5_409, 44_100)},
+    {"policy": ShortTrackPolicy.PLAY_ONCE},
+    {"frames": 13 * BLOCK_FRAMES},
+])
+def test_anything_but_a_gain_or_fade_is_refused_and_changes_nothing(change):
+    reader = FakeReader(value=lambda frame, channel: float(frame))
+    before = w3_plan(1)
+    stream = AudioStream(mapping(before), music_reader=reader,
+                         monitor=MonitorState(level=1))
+    kwargs = {"level": Fraction(1, 2), **change}
+    level = kwargs.pop("level")
+    assert not stream.update_parameters(w3_plan(level, **kwargs))
+    assert stream.audio_plan == before
+    stop(stream)
+
+
+def test_a_different_source_interval_is_different_material():
+    plan = w3_plan(1)
+    assert not parameters_only(mapping(plan, 100), mapping(plan, 101))
+    assert parameters_only(mapping(plan, 100),
+                           mapping(w3_plan(Fraction(1, 2)), 100))
+
+
+def test_a_stopped_stream_takes_no_update():
+    stream = AudioStream(mapping(w3_plan(1)), music_reader=FakeReader(),
+                         monitor=MonitorState(level=1))
+    stop(stream)
+    assert not stream.update_parameters(w3_plan(Fraction(1, 2)))
