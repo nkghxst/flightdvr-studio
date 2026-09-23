@@ -207,6 +207,13 @@ class LivePreview:
         if self._output is not None:
             self._output.reset(self._generation)
 
+    @property
+    def audio_plan(self):
+        """The plan being listened to, or None. For resolving an edit against
+        the same length and source; never to be edited itself."""
+        stream = self._stream
+        return getattr(stream, "audio_plan", None) if stream is not None else None
+
     def update_parameters(self, target, audio) -> bool:
         """Apply new gains and fades to what is being listened to, in place.
 
