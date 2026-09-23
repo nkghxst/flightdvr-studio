@@ -932,3 +932,36 @@ def test_flow_s_stacked_list_ignores_classic_s_expanded_rows(qt_app):
         panel.set_stacked(False)
         window.close()
         assert_no_threads_left(window)
+
+
+def test_the_list_panel_does_not_answer_height_for_width(qt_app):
+    """Its one-line labels wrapped, so the panel asked its column for its
+    full preferred height at any window size (48px overflow at 1120x760,
+    measured natively)."""
+    window = many_clips_window(qt_app, BrowserMode.NORMAL, (1120, 760))
+    panel = window.browser_panel
+    try:
+        assert not panel.length_label.wordWrap()
+        assert not panel.hidden_label.wordWrap()
+        assert not panel.hasHeightForWidth()
+        panel.set_hidden_summary("3 hidden by length")
+        assert panel.hidden_label.toolTip().startswith("3 hidden by length")
+    finally:
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_the_window_minimum_counts_the_picture_at_its_floor(qt_app):
+    """A narrower-and-shorter move is not held to the old picture's height."""
+    window = many_clips_window(qt_app, BrowserMode.NORMAL, (1460, 1000))
+    try:
+        for _ in range(6):
+            qt_app.processEvents()
+        box = window.preview_view.preview_box
+        slack = box.height() - box.content_floor()
+        assert slack > 0
+        assert window.minimumHeight() == (
+            window.minimumSizeHint().height() - slack)
+    finally:
+        window.close()
+        assert_no_threads_left(window)
