@@ -348,6 +348,7 @@ class MainWindow(QMainWindow):
         self._left_column: QWidget | None = None
         self.flow_viewport = None
         self.flow_source_note = None
+        self._music_band_was_open: bool | None = None
         self._viewport_home = None
         self.sidebar_working = None
         self.sidebar_submitted = None
@@ -2184,6 +2185,12 @@ class MainWindow(QMainWindow):
             # with what each was submitted with beneath. Switched only once it
             # has left Classic's strip, where a taller table grew the window.
             self.queue_panel.set_fills_page(True)
+            # The Music page is the music controls. Collapsed — Classic's way
+            # of giving height back to the picture — the page showed a picture
+            # and one checkbox. Classic's choice comes back on the way out.
+            band = self.preview_view.music_band
+            self._music_band_was_open = band.isChecked()
+            band.setChecked(True)
             self._lend_viewport()
             self.splitter.hide()
             self._flow_host.show()
@@ -2199,6 +2206,10 @@ class MainWindow(QMainWindow):
             self._flow_host.hide()
             # Back to the strip before it goes home, for the same reason.
             self.queue_panel.set_fills_page(False)
+            if self._music_band_was_open is not None:
+                self.preview_view.music_band.setChecked(
+                    self._music_band_was_open)
+                self._music_band_was_open = None
             self._return_viewport()
             self._return_from_flow()
             self.splitter.show()

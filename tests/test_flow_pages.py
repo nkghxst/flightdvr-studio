@@ -2760,3 +2760,33 @@ def test_submitted_details_name_every_occurrence_of_a_repeated_source(
     assert lines[2].startswith("2. ") and second.path.name in lines[2]
     assert lines[3].startswith("3. ") and first.path.name in lines[3]
     window.set_view_mode(Mode.CLASSIC)
+
+
+def test_the_music_page_opens_its_controls(window, app):
+    """Found natively and in Sol's review: Flow's Music page arrived with
+    Classic's collapsed band — a picture and one checkbox, nothing of what
+    the page is for."""
+    band = window.preview_view.music_band
+    assert not band.isChecked()
+    first, _second = planned_pair(window, app)
+    window._select_working_target(first)
+    window._show_stage(Stage.MUSIC)
+    app.processEvents()
+
+    assert band.isChecked()
+    assert not window.preview_view.music_content.isHidden()
+    assert window.flow_shell.host(Stage.MUSIC, Region.PANEL).isAncestorOf(band)
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_classic_gets_its_own_music_band_state_back(window, app):
+    band = window.preview_view.music_band
+    for classic_had in (False, True):
+        band.setChecked(classic_had)
+        in_flow(window, app)
+        window._show_stage(Stage.MUSIC)
+        app.processEvents()
+        window.set_view_mode(Mode.CLASSIC)
+        app.processEvents()
+        assert band.isChecked() is classic_had, (
+            f"Classic had the band {'open' if classic_had else 'shut'}")
