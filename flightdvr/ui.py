@@ -71,8 +71,8 @@ from .help_content import naming_help_html, release_links
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
 from .media import ClipInfo, Select, Tools, available_encoders
 from .audio_plan import (
-    OUTPUT_RATE, AudioMode, MusicChoice, SampleSpan, resolve_audio_plan,
-    resolve_monitor_audio_plan, round_samples,
+    OUTPUT_RATE, AudioMode, MusicChoice, SampleSpan, ShortTrackPolicy,
+    resolve_audio_plan, resolve_monitor_audio_plan, round_samples,
 )
 from .audio_device import AudioOutput
 from .audio_reader import FfmpegPcmReader, MusicAssetProbe
@@ -90,7 +90,7 @@ from .flow_layout import (
     stage_from_stored, title as flow_title,
 )
 from .live_preview import Listening, LivePreview
-from .music_edit import EditKind, rational_fps
+from .music_edit import EditKind, music_view, rational_fps
 from .music_panel import MusicPanel
 from .music_timeline import (
     LiveMusicBinding, MusicEditor, MusicTimeline, Presentation,
@@ -222,6 +222,43 @@ def _occurrence_words(clip) -> str:
     span = clip.trim_label
     label = piece_label(clip)
     return f"{label} · {span}" if span else f"{label} · whole recording"
+
+
+def _seconds(samples: int, rate: int) -> str:
+    return f"{samples / rate:.3f} s"
+
+
+def submitted_music_numbers(audio, output_samples: int) -> list[str]:
+    """A submitted choice's music numbers, from the frozen choice alone.
+
+    Fades are shown as asked; where the export fits a shorter pair into the
+    output, that is said beside them, because the request is what was kept.
+    """
+    lines = []
+    passage, asset = audio.passage, audio.asset
+    if passage is not None and asset is not None:
+        rate = passage.rate
+        lines.append(f"Passage: {_seconds(passage.start, rate)}–"
+                     f"{_seconds(passage.end, rate)} of the song")
+    lines.append("If shorter: " + (
+        "Loop" if audio.short_track is ShortTrackPolicy.LOOP else "Play once"))
+    fades = (f"Fade in: {_seconds(audio.fade_in_samples, OUTPUT_RATE)} · "
+             f"Fade out: {_seconds(audio.fade_out_samples, OUTPUT_RATE)}")
+    view = music_view(audio, output_samples)
+    if view is not None and (
+            (view.fade_in_effective, view.fade_out_effective)
+            != (view.fade_in_requested, view.fade_out_requested)):
+        fades += (f" (fits {_seconds(view.fade_in_effective, OUTPUT_RATE)} and "
+                  f"{_seconds(view.fade_out_effective, OUTPUT_RATE)} in this "
+                  "output)")
+    lines.append(fades)
+    level = f"Music level: {round(float(audio.music_level) * 100)}%"
+    if audio.mode is AudioMode.MIX:
+        level += f" · Recording level: {round(float(audio.dvr_level) * 100)}%"
+    else:
+        level += " · Recording level: not used (Replace)"
+    lines.append(level)
+    return lines
 
 
 def submitted_lines(job) -> list[str]:
@@ -3467,7 +3504,8 @@ class MainWindow(QMainWindow):
         # the job's.
         self._acquire_envelope(audio.asset)
         self.queue_panel.show_details_music(
-            True, "Playing a submitted job is not available here.")
+            True, "Playing a submitted job is not available here.",
+            submitted_music_numbers(audio, samples))
 
     def _on_queue_toggled(self, open_: bool) -> None:
         self.queue_panel._on_toggled(open_)

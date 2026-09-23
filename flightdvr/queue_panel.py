@@ -170,6 +170,12 @@ class QueuePanel(QWidget):
         music = QVBoxLayout(self.details_music)
         music.setContentsMargins(0, TIGHT, 0, 0)
         music.setSpacing(TIGHT)
+        # The frozen numbers, as text: read, not edited.
+        self.details_numbers = QLabel("")
+        self.details_numbers.setWordWrap(True)
+        self.details_numbers.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        music.addWidget(self.details_numbers)
         self.details_playback = dim(QLabel(""))
         self.details_playback.setWordWrap(True)
         music.addWidget(self.details_playback)
@@ -264,7 +270,9 @@ class QueuePanel(QWidget):
         """Hold the read-only music presentation, above the playback note."""
         self.details_music.layout().insertWidget(0, widget)
 
-    def show_details_music(self, shown: bool, playback: str = "") -> None:
+    def show_details_music(self, shown: bool, playback: str = "",
+                           numbers: list[str] | None = None) -> None:
+        self.details_numbers.setText("\n".join(numbers or []))
         self.details_playback.setText(playback)
         self.details_music.setVisible(shown)
 

@@ -1271,3 +1271,70 @@ def test_a_job_without_music_shows_no_music(window, monkeypatch, tmp_path,
     assert not window.queue_panel.details_music.isHidden()
     window._show_submitted(without)
     assert window.queue_panel.details_music.isHidden()
+
+
+def test_a_submitted_job_shows_its_frozen_numbers_as_readable_text(
+        window, monkeypatch, tmp_path, app):
+    """Sol's review: the lane alone was not the submitted numbers. They are
+    read from the job, shown as text, and a later working edit changes none
+    of them."""
+    from flightdvr.audio_plan import ShortTrackPolicy
+
+    target = with_track(window, monkeypatch, tmp_path, app)
+    chosen = replace(
+        window._planned_music(target),
+        passage=SampleSpan(220_500, 441_000, 44_100),      # 5 s .. 10 s
+        short_track=ShortTrackPolicy.PLAY_ONCE,
+        music_level=Fraction(3, 5), dvr_level=Fraction(1, 10),
+        fade_in_samples=36_000, fade_out_samples=96_000)
+    window._store_music(target, chosen)
+    window._sync_music_panel()
+    tick(window, 0)
+    said = warnings_from(monkeypatch)
+    window._add_to_queue()
+    app.processEvents()
+    assert said == [] and len(window.jobs) == 1
+    job = window.jobs[0]
+
+    window.show()
+    window.set_view_mode(Mode.FLOW)
+    window._show_stage(Stage.QUEUE)
+    app.processEvents()
+    panel = window.queue_panel
+    panel.table.selectRow(0)
+    app.processEvents()
+    expected = ("Passage: 5.000 s–10.000 s of the song\n"
+                "If shorter: Play once\n"
+                "Fade in: 0.750 s · Fade out: 2.000 s\n"
+                "Music level: 60% · Recording level: not used (Replace)")
+    assert panel.details_numbers.isVisible()
+    assert panel.details_numbers.text() == expected
+
+    window._show_stage(Stage.MUSIC)
+    window.music_editor.commit(replace(window.music_editor.stored,
+                                       music_level=Fraction(1, 5),
+                                       fade_in_samples=4_800))
+    app.processEvents()
+    assert window._planned_music(target).music_level == Fraction(1, 5)
+    window._show_stage(Stage.QUEUE)
+    panel.table.clearSelection()
+    panel.table.selectRow(0)
+    app.processEvents()
+    assert panel.details_numbers.text() == expected, "a working edit reached it"
+    assert job.audio == chosen
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_submitted_fades_say_what_fits_and_mix_names_its_recording_level():
+    from flightdvr.ui import submitted_music_numbers
+
+    asset = an_asset(Path("song.mp3"))
+    audio = MusicChoice(mode=AudioMode.MIX, asset=asset,
+                        passage=SampleSpan(0, 441_000, 44_100),
+                        music_level=Fraction(1, 2), dvr_level=Fraction(1, 4),
+                        fade_in_samples=384_000, fade_out_samples=288_000)
+    lines = submitted_music_numbers(audio, 480_000)
+    # 480 000 * 384 000 // 672 000 = 274 285 -> 5.714 s; the rest 4.286 s.
+    assert lines[2] == ("Fade in: 8.000 s · Fade out: 6.000 s (fits 5.714 s "
+                        "and 4.286 s in this output)")
+    assert lines[3] == "Music level: 50% · Recording level: 25%"
