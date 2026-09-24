@@ -462,6 +462,7 @@ class MainWindow(QMainWindow):
         self.sidebar_working = None
         self.sidebar_submitted = None
         self._sidebar_target: OutputTarget | None = None
+        self._source_focus_deferred = False
         # What a newly planned output starts with in Flow: the panel as it
         # stood on entering Flow, or as edited with nothing selected. Never
         # whichever output happened to be loaded when a list was repainted.
@@ -3279,6 +3280,8 @@ class MainWindow(QMainWindow):
         # Flow is the mode, so refreshing before this was refreshing into a
         # guard that had every right to refuse — and the list arrived empty.
         self._view_mode = chosen
+        if chosen is Mode.CLASSIC:
+            self._restore_deferred_source_focus()
         # Output's "For:" belongs to Flow; Classic keeps its familiar single
         # set of controls.
         self.export_panel.set_target_selector_visible(chosen is Mode.FLOW)
@@ -3388,6 +3391,8 @@ class MainWindow(QMainWindow):
                        and not self._output_recipe.target.is_assembly))):
             self._leave_output_picture()
         self._flow_stage = chosen
+        if chosen in (Stage.BROWSE, Stage.TRIM):
+            self._restore_deferred_source_focus()
         was = self.size()
         self.flow_shell.set_stage(chosen)
         # Browse puts the list beside the picture. Measured natively, side by
@@ -4287,7 +4292,7 @@ class MainWindow(QMainWindow):
             self._refresh_output_picture()
 
     def _focus_piece(self, fingerprint: str, sid: str) -> None:
-        """Focus one range of one recording, through the table's own handlers.
+        """Focus a target's source identity without crossing picture clocks.
 
         Both lists that offer something to choose come through here, so there
         is only one way to become focused and no second one to disagree with
@@ -4299,6 +4304,24 @@ class MainWindow(QMainWindow):
             clip = self.clip_by_path.get(item.data(Qt.ItemDataRole.UserRole))
             if clip is None or clip.fingerprint != fingerprint:
                 continue
+            if self._output_picture_active():
+                # Selecting a working output is not a source seek. Keep the
+                # table/range identity for the next source page, but do not
+                # let its selection timer load a decoder over the bound recipe.
+                previous = self.table.blockSignals(True)
+                try:
+                    self.table.setCurrentCell(row, 0)
+                finally:
+                    self.table.blockSignals(previous)
+                self._select_timer.stop()
+                if sid:
+                    for index, chosen in enumerate(clip.real_selects):
+                        if chosen.sid == sid:
+                            clip.current = index
+                            break
+                self._source_focus_deferred = True
+                return
+            self._source_focus_deferred = False
             self.table.setCurrentCell(row, 0)
             self._load_selected_clip()
             if sid:
@@ -4307,6 +4330,16 @@ class MainWindow(QMainWindow):
                         self._pick_select(index)
                         break
             return
+
+    def _restore_deferred_source_focus(self) -> None:
+        """Materialize a working choice only after returning to source time."""
+        if not self._source_focus_deferred:
+            return
+        self._source_focus_deferred = False
+        self._load_selected_clip()
+        clip = self._highlighted_clip()
+        if clip is not None and clip.selects:
+            self._pick_select(clip.current)
 
     def _on_assembly_choice(self) -> None:
         """Choosing an Assembly occurrence scrubs to its joined start."""

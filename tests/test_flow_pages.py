@@ -1931,6 +1931,114 @@ def test_selected_assembly_picture_survives_assemble_music_output(
         assert window.preview_view.sequence_strip.plan is recipe.sequence
 
 
+@pytest.mark.parametrize("stage", [Stage.OUTPUT, Stage.MUSIC])
+def test_same_recording_output_choice_defers_source_seek_until_trim(
+        window, app, monkeypatch, stage):
+    clip = window.clips[0]
+    clip.selects = [Select(1.0, 5.0, "one", sid="r-1"),
+                    Select(6.0, 9.0, "two", sid="r-2")]
+    tick(window, 0)
+    app.processEvents()
+    first, second = [one.target for one in window._working_outputs()]
+    in_flow(window, app)
+    window._select_working_target(first)
+    window._show_stage(stage)
+    app.processEvents()
+    calls = []
+    original_load = window.player.load
+    monkeypatch.setattr(window.player, "load",
+                        lambda *args, **kwargs: (
+                            calls.append(args), original_load(*args, **kwargs)))
+    window.statusBar().clearMessage()
+    window._select_working_target(second)
+    app.processEvents()
+    assert window._output_recipe.target == second
+    assert not calls, "working choice loaded a source decoder"
+    assert "paused" not in window.statusBar().currentMessage().lower()
+    assert clip.selects[clip.current].sid == "r-2"
+    if stage is Stage.MUSIC:
+        window._set_in()
+        assert "return to Browse or Trim" in window.statusBar().currentMessage()
+    monkeypatch.setattr(window.player, "load", original_load)
+    window._show_stage(Stage.TRIM)
+    app.processEvents()
+    assert window._trim_clip is clip
+    assert clip.selects[clip.current].sid == "r-2"
+    assert (window.trim_bar.in_point, window.trim_bar.out_point) == (6.0, 9.0)
+
+
+def test_reselecting_output_does_not_pause_but_source_controls_still_refuse(
+        window, app, monkeypatch):
+    first, _ = two_planned_targets(window, app)
+    in_flow(window, app)
+    window._select_working_target(first)
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+    binding = window.player.recipe_binding
+    pauses, monitor_pauses, monitor_mutes = [], [], []
+    original_pause = window.player.pause
+    original_monitor_pause = window.live_preview.pause
+    original_set_muted = window.live_preview.set_muted
+    monkeypatch.setattr(window.player, "pause",
+                        lambda: (pauses.append(True), original_pause()))
+    monkeypatch.setattr(window.live_preview, "pause",
+                        lambda: (monitor_pauses.append(True),
+                                 original_monitor_pause()))
+    monkeypatch.setattr(window.live_preview, "set_muted",
+                        lambda value: (monitor_mutes.append(value),
+                                       original_set_muted(value)))
+    window.statusBar().clearMessage()
+    window._select_working_target(first)
+    app.processEvents()
+    assert window.player.recipe_binding == binding
+    assert not pauses and not monitor_pauses and not monitor_mutes
+    assert not window.statusBar().currentMessage()
+
+    window._set_in()  # genuine source edit remains outside the output clock
+    assert pauses
+    assert "return to Browse or Trim" in window.statusBar().currentMessage()
+
+
+def test_classic_restores_deferred_output_range_focus(window, app):
+    clip = window.clips[0]
+    clip.selects = [Select(1.0, 5.0, "one", sid="r-1"),
+                    Select(6.0, 9.0, "two", sid="r-2")]
+    tick(window, 0)
+    app.processEvents()
+    first, second = [one.target for one in window._working_outputs()]
+    in_flow(window, app)
+    window._select_working_target(first)
+    window._show_stage(Stage.OUTPUT)
+    window._select_working_target(second)
+    window.set_view_mode(Mode.CLASSIC)
+    app.processEvents()
+    assert window._trim_clip is clip
+    assert clip.selects[clip.current].sid == "r-2"
+    assert (window.trim_bar.in_point, window.trim_bar.out_point) == (6.0, 9.0)
+
+
+def test_selected_assembly_target_focus_does_not_interrupt_picture(
+        window, app, monkeypatch):
+    make_aba_assembly(window, app)
+    in_flow(window, app)
+    window._show_stage(Stage.ASSEMBLE)
+    target = window._working_outputs()[0].target
+    window._select_working_target(target)
+    app.processEvents()
+    binding = window.player.recipe_binding
+    pauses = []
+    monkeypatch.setattr(window.player, "pause", lambda: pauses.append(True))
+    window.statusBar().clearMessage()
+    window._select_working_target(target)
+    app.processEvents()
+    assert window.player.recipe_binding == binding
+    assert not pauses
+    assert not window.statusBar().currentMessage()
+    window._set_in()
+    assert pauses and "return to Browse or Trim" in (
+        window.statusBar().currentMessage())
+
+
 def test_output_picture_identity_fences_a_b_a_and_stale_frames(
         window, app, monkeypatch):
     first, second = two_planned_targets(window, app)
@@ -3683,3 +3791,64 @@ def test_w5_native_generated_output_acceptance(window, app, tmp_path):
                 if thread.isRunning()]
     (artifact_dir / f"{theme}-results.json").write_text(
         json.dumps(results, indent=2), encoding="utf-8")
+
+
+def test_w5_native_output_choice_restores_trim_focus(window, app, tmp_path):
+    """Opt-in compact pointer route for the review's A/B focus correction."""
+    import subprocess
+
+    from flightdvr.media import find_tools
+
+    destination = os.environ.get("FLIGHTDVR_W5_NATIVE_DIR")
+    if not destination:
+        pytest.skip("opt-in generated native acceptance")
+    assert app.platformName() == "windows"
+    artifact_dir = Path(destination)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    source = tmp_path / "two-ranges.nut"
+    tools = find_tools()
+    made = subprocess.run([
+        str(tools.ffmpeg), "-hide_banner", "-nostdin", "-v", "error", "-y",
+        "-f", "lavfi", "-i", "testsrc=size=320x180:rate=30:duration=2",
+        "-an", "-c:v", "ffv1", "-level", "3", str(source),
+    ], capture_output=True, timeout=40)
+    assert made.returncode == 0, made.stderr.decode("utf-8", "replace")
+    clip = ClipInfo(source, source.stat().st_size, datetime(2026, 9, 24),
+                    duration=2.0, width=320, height=180, fps=30.0,
+                    video_codec="ffv1")
+    clip.selects = [Select(0.1, 0.7, "A", sid="r-a"),
+                    Select(1.0, 1.6, "B", sid="r-b")]
+    window._add_clip(window._scan_generation, clip)
+    row = next(row for row in range(window.table.rowCount())
+               if window.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+               == str(source))
+    tick(window, row)
+    in_flow(window, app)
+    first, second = [one.target for one in window._working_outputs()]
+    window.resize(1060, 700)
+    window.show()
+    assert (window.width(), window.height()) == (1060, 700)
+    window._show_stage(Stage.OUTPUT)
+    window._select_working_target(first)
+    settled(app)
+    planned = window.output_sidebar.planned
+    assert planned.count() == 2 and planned.isVisible()
+    rect = planned.visualItemRect(planned.item(1))
+    QTest.mouseClick(planned.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, rect.center())
+    settled(app)
+    assert window._sidebar_target == second
+    assert window._output_recipe.target == second
+    assert clip.selects[clip.current].sid == "r-b"
+    assert "paused" not in window.statusBar().currentMessage().lower()
+    assert window.grab().save(str(artifact_dir / "focus-output-compact.png"))
+    QTest.mouseClick(window.flow_shell.stage_buttons[Stage.TRIM],
+                     Qt.MouseButton.LeftButton)
+    settled(app)
+    assert window._trim_clip is clip
+    assert (window.trim_bar.in_point, window.trim_bar.out_point) == (1.0, 1.6)
+    assert window.grab().save(str(artifact_dir / "focus-trim-compact.png"))
+    window.set_view_mode(Mode.CLASSIC)
+    settled(app)
+    assert not [thread for thread in window.findChildren(QThread)
+                if thread.isRunning()]
