@@ -72,7 +72,7 @@ from .jobs import ExportWorker, Job, JobStatus, write_concat_file
 from .media import ClipInfo, Select, Tools, available_encoders
 from .audio_plan import (
     OUTPUT_RATE, AudioMode, MusicChoice, SampleSpan, ShortTrackPolicy,
-    resolve_audio_plan, resolve_monitor_audio_plan, round_samples,
+    resolve_monitor_audio_plan, round_samples,
 )
 from .audio_device import AudioOutput
 from .audio_reader import FfmpegPcmReader, MusicAssetProbe
@@ -2597,22 +2597,39 @@ class MainWindow(QMainWindow):
             return "Its music track is still being read."
         if target in self._music_trouble:
             return self._music_trouble[target]
-        _name, preset_key, joined, bundle = self._music_context()
-        if isinstance(target, OutputTarget) and target.is_assembly:
-            if bundle:
-                return MusicPanel._refusal(preset_key, joined, bundle)
-            if preset_key != "master":
-                return (f"Music/audio monitoring is not supported for the "
-                        f"{preset_key} preset yet.")
-            if (not self._joined_assemble_active()
-                    or self._sequence_plan is None
-                    or self._sequence_target != target):
-                return "Assembly monitoring is available on a valid Assemble stage."
-            return ""
-        refusal = MusicPanel._refusal(preset_key, joined, bundle)
+        # The output's own preset, and never the Classic join switch: a
+        # single range is one output whatever that switch says.
+        preset_key = self._monitor_preset(target)
+        joined = isinstance(target, OutputTarget) and target.is_assembly
+        refusal = MusicPanel._refusal(preset_key, joined, False)
         if refusal:
             return refusal
+        if joined and self._assembly_monitor_sequence(target) is None:
+            return ("Assembly monitoring needs its compiled Assembly: open it "
+                    "on Assemble, Music or Output.")
         return ""
+
+    def _monitor_clip(self, target: OutputTarget):
+        """The recording an ordinary output is cut from: its own, found by
+        its fingerprint. Not whichever recording has source focus — choosing
+        an output on Output or Music deliberately leaves that alone (W5)."""
+        fingerprint = target.items[0].fingerprint
+        return next((clip for clip in self.clips
+                     if clip.fingerprint == fingerprint), None)
+
+    def _assembly_monitor_sequence(self, target: OutputTarget):
+        """The compiled sequence an Assembly is monitored against, or None.
+
+        The Assemble stage's own, or the one the selected Output picture is
+        bound to (Music, Output). Either way it must be this exact target.
+        """
+        recipe = self._output_recipe
+        if recipe is not None and recipe.target == target:
+            return recipe.sequence
+        if (self._joined_assemble_active() and self._sequence_plan is not None
+                and self._sequence_target == target):
+            return self._sequence_plan
+        return None
 
     def _monitor_plan(self, target, listening):
         """The audio plan being listened to, which is not always the export's.
@@ -2642,7 +2659,7 @@ class MainWindow(QMainWindow):
                 choice, samples, source_has_audio=source_has_audio,
                 preset_key=self._monitor_preset(target)), samples
 
-        clip = self._trim_clip
+        clip = self._monitor_clip(target)
         if clip is None:
             return None, 0
         if listening is Listening.SOURCE:
@@ -2656,22 +2673,17 @@ class MainWindow(QMainWindow):
         samples = snapshot.samples
         if samples <= 0:
             return None, 0
-        return resolve_audio_plan(
-            choice, samples,
-            source_has_audio=clip.has_audio,
-            preset_key=self._preset_key(),
-            joined=self.export_panel.join_enabled(),
-            bundle=False,
-        ), samples
+        return resolve_monitor_audio_plan(
+            choice, samples, source_has_audio=clip.has_audio,
+            preset_key=self._monitor_preset(target)), samples
 
     def _new_monitor_snapshot(self, target: OutputTarget) -> _MonitorSnapshot:
         """Freeze the exact focused range or current compiled Assembly."""
         if target is None:
             raise ValueError("choose an output to monitor")
         if target.is_assembly:
-            sequence = self._sequence_plan
-            if (not self._joined_assemble_active() or sequence is None
-                    or self._sequence_target != target):
+            sequence = self._assembly_monitor_sequence(target)
+            if sequence is None:
                 raise ValueError("choose one valid compiled Assembly to monitor")
             if tuple(one.item for one in sequence.occurrences) != target.items:
                 raise ValueError("the Assembly target changed after compilation")
@@ -2679,7 +2691,7 @@ class MainWindow(QMainWindow):
                 target, sequence, None,
                 SampleSpan(0, sequence.total_samples, OUTPUT_RATE))
 
-        clip = self._trim_clip
+        clip = self._monitor_clip(target)
         if clip is None:
             raise ValueError("choose one clip or range to monitor")
 
@@ -2788,7 +2800,7 @@ class MainWindow(QMainWindow):
                     # closes each distinct reader once even for repeated A.
                     allocated[:] = [source_reader]
             else:
-                clip = self._trim_clip
+                clip = self._monitor_clip(target)
                 if clip is None:
                     return None
                 if listening is Listening.SOURCE:
@@ -2799,11 +2811,10 @@ class MainWindow(QMainWindow):
                     choice = self._planned_music(target)
                     if not choice.configured:
                         return None
-                plan = resolve_audio_plan(
+                plan = resolve_monitor_audio_plan(
                     choice, snapshot.samples,
                     source_has_audio=clip.has_audio,
-                    preset_key=self._preset_key(),
-                    joined=self.export_panel.join_enabled(), bundle=False)
+                    preset_key=self._monitor_preset(target))
                 source_reader = None
                 if clip.has_audio:
                     source_reader = FfmpegPcmReader.for_source(
@@ -2838,9 +2849,6 @@ class MainWindow(QMainWindow):
         self._monitor_snapshot = None
         self._monitor_rearm_required = False
         reason = self._monitor_refusal(target)
-        if (isinstance(target, OutputTarget) and target.is_assembly
-                and not self._joined_assemble_active()):
-            reason = "Assembly monitoring is available on the Assemble stage."
         self.live_preview.set_target(
             target, reason=reason)
         self.live_preview.set_speed(

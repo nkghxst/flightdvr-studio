@@ -36,7 +36,9 @@ import pytest
 from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtWidgets import QApplication
 
-from flightdvr.audio_plan import AudioMode, AudioAsset, MusicChoice, SampleSpan
+from flightdvr.audio_plan import (AudioMode, AudioAsset, MusicChoice, OUTPUT_RATE,
+                                  SampleSpan)
+from flightdvr.live_preview import Listening
 from flightdvr.assembly import Item
 from flightdvr.flow_layout import Mode, Stage
 from flightdvr.jobs import Job, JobStatus
@@ -1910,3 +1912,85 @@ def test_choosing_before_the_restored_output_appears_wins(
         again.set_view_mode(Mode.CLASSIC)
     finally:
         again.close()
+
+
+# -- stage A: monitoring binds to the selected output, not source focus --------
+
+
+def _two_recordings_with_music(window, app, tmp_path, monkeypatch,
+                               presets=("master", "edit")):
+    """Output A on recording 1 and output B on recording 2, each with its own
+    read track and preset."""
+    for index, sid in ((0, "r-a"), (1, "r-b")):
+        window.clips[index].selects = [Select(1.0, 5.0, sid.upper(), sid=sid)]
+        tick(window, index)
+    window.set_view_mode(Mode.FLOW)
+    app.processEvents()
+    first, second = [output.target for output in window._working_outputs()]
+    for target, preset, name in ((first, presets[0], "a.wav"),
+                                 (second, presets[1], "b.wav")):
+        asset = an_asset(tmp_path / name)
+        window.output_plan.set_choices(
+            target, preset, ExportSettings(),
+            MusicChoice(mode=AudioMode.REPLACE, asset=asset,
+                        passage=SampleSpan(0, 4 * 44_100, 44_100)))
+    return first, second
+
+
+def test_monitoring_output_b_uses_b_s_recording_without_loading_it(
+        window, app, tmp_path, monkeypatch):
+    first, second = _two_recordings_with_music(window, app, tmp_path,
+                                               monkeypatch)
+    window.set_view_mode(Mode.FLOW)
+    window._select_working_target(first)
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+    loads = []
+    real_load = window.player.load
+    window.player.load = lambda *a, **k: (loads.append(a), real_load(*a, **k))
+    window._select_working_target(second)
+    app.processEvents()
+    # W5 leaves source focus where it was; monitoring must not follow it.
+    assert window._trim_clip is not window.clips[1]
+    assert loads == []
+    assert window._monitor_refusal(second) == ""
+    snapshot = window._new_monitor_snapshot(second)
+    assert snapshot.sequence.occurrences[0].fingerprint == \
+        window.clips[1].fingerprint
+    plan, samples = window._monitor_plan(second, Listening.MIX)
+    assert plan is not None and samples == 4 * OUTPUT_RATE
+    assert plan.asset.track == tmp_path / "b.wav"
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_monitoring_asks_the_output_s_own_preset(window, app, tmp_path,
+                                                 monkeypatch):
+    first, second = _two_recordings_with_music(
+        window, app, tmp_path, monkeypatch, presets=("edit", "social"))
+    window.set_view_mode(Mode.FLOW)
+    window._select_working_target(first)
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+    assert window._monitor_refusal(first) == ""
+    # Asked while A is shown, B still answers with its own preset.
+    assert "Social" in window._monitor_refusal(second)
+    window._select_working_target(second)
+    app.processEvents()
+    assert "Social" in window._monitor_refusal(second)
+    # Refused, and kept.
+    assert window._planned_music(second).mode is AudioMode.REPLACE
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_an_assembly_is_monitored_from_the_output_page(window, app):
+    target = assembly_target(window, app)
+    window._sidebar_target = target
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+    assert window._output_recipe is not None
+    assert window._output_recipe.target == target
+    assert not window._joined_assemble_active()
+    assert window._assembly_monitor_sequence(target) is \
+        window._output_recipe.sequence
+    assert "Assembly monitoring needs" not in window._monitor_refusal(target)
+    window.set_view_mode(Mode.CLASSIC)
