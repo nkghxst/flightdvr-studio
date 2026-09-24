@@ -19,13 +19,18 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QAbstractScrollArea, QHBoxLayout, QHeaderView, QLabel,
+    QAbstractItemView, QAbstractScrollArea, QDialog, QDialogButtonBox,
+    QHBoxLayout, QHeaderView, QLabel, QScrollArea,
     QProgressBar, QPushButton, QSizePolicy, QSpacerItem, QTableWidget,
     QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .jobs import Job, JobStatus
 from .widgets import GAP, TIGHT, dim
+
+DETAILS_NOTE = ("Read-only. Editing the planned output it came from does not "
+                "reach it.")
+GONE_NOTE = "That job has left the queue."
 
 # Classic's queue is a strip under the work, so its table is kept short. A page
 # that is only the queue lifts that, and the table grows with its rows.
@@ -144,6 +149,16 @@ class QueuePanel(QWidget):
         clear.clicked.connect(lambda *_: self.clear_requested.emit())
         row.addWidget(clear)
         row.addStretch(1)
+        # Classic's strip has no room for what a job was submitted with, so
+        # it is read in a window of its own: the same presentation Flow's
+        # Queue page shows, and as read-only.
+        self.settings_button = QPushButton("View settings…")
+        self.settings_button.setToolTip(
+            "What the selected job was submitted with. Read-only.")
+        self.settings_button.setEnabled(False)
+        self.settings_button.clicked.connect(
+            lambda *_: self.open_settings_dialog())
+        row.addWidget(self.settings_button)
         layout.addLayout(row)
 
         # What a selected job was submitted with, read from the job itself.
@@ -154,9 +169,7 @@ class QueuePanel(QWidget):
         details.setSpacing(TIGHT)
         self.details_title = QLabel("")
         details.addWidget(self.details_title)
-        self.details_note = dim(QLabel(
-            "Read-only. Editing the planned output it came from does not "
-            "reach it."))
+        self.details_note = dim(QLabel(DETAILS_NOTE))
         self.details_note.setWordWrap(True)
         details.addWidget(self.details_note)
         self.details_body = QLabel("")
@@ -198,6 +211,8 @@ class QueuePanel(QWidget):
         self._fills_page = False
         self._strip_was_open: bool | None = None
         self._shown_job: Job | None = None
+        self._details_home = layout
+        self.settings_dialog: QDialog | None = None
         self.table.itemSelectionChanged.connect(self._on_selection)
 
     # -- the queue as a page (Flow) ---------------------------------------------
@@ -210,6 +225,10 @@ class QueuePanel(QWidget):
         The body stays open, because collapsing it would empty the page.
         """
         fills = bool(fills)
+        if fills:
+            # Flow's page shows the details itself; one presentation cannot
+            # be in two places.
+            self.close_settings_dialog()
         if fills and not self._fills_page:
             # Classic's own choice, open or closed, comes back with the strip.
             self._strip_was_open = self.toggle.isChecked()
@@ -235,6 +254,7 @@ class QueuePanel(QWidget):
                 self.toggle.setChecked(self._strip_was_open)
                 self._strip_was_open = None
         self.toggle.setEnabled(not fills)
+        self.settings_button.setVisible(not fills)
         self.details.setVisible(fills and self._shown_job is not None)
         self.body.layout().invalidate()
 
@@ -250,21 +270,89 @@ class QueuePanel(QWidget):
         return self._jobs[row] if 0 <= row < len(self._jobs) else None
 
     def _on_selection(self) -> None:
+        self.settings_button.setEnabled(self.selected_job() is not None)
         self.job_selected.emit(self.selected_job())
 
     def show_details(self, title: str, lines: list[str]) -> None:
         """Say what the selected job was submitted with. The window words it."""
         self._shown_job = self.selected_job()
         self.details_title.setText(f"<b>{title}</b>")
+        self.details_note.setText(DETAILS_NOTE)
         self.details_body.setText("\n".join(lines))
-        self.details.setVisible(self._fills_page)
+        self.details.setVisible(self._fills_page or self._dialog_open)
 
     def clear_details(self) -> None:
-        self._shown_job = None
+        shown, self._shown_job = self._shown_job, None
         self.details_title.setText("")
         self.details_body.setText("")
         self.details_music.hide()
+        if self._dialog_open:
+            # Said, rather than going blank or moving to a neighbour: the
+            # window was showing one job, and that job is what it talks about.
+            if shown is not None and shown not in self._jobs:
+                self.details_note.setText(GONE_NOTE)
+            elif self.details_note.text() != GONE_NOTE:
+                # A rebuild clears more than once; the first clear already
+                # said what happened to the job this window was showing.
+                self.details_note.setText(
+                    "Select one job in the queue to see its settings.")
+            return
         self.details.hide()
+
+    @property
+    def _dialog_open(self) -> bool:
+        return (self.settings_dialog is not None
+                and self.settings_dialog.isVisible())
+
+    def open_settings_dialog(self) -> QDialog:
+        """Read the selected job's submitted settings in a window.
+
+        The details presentation itself moves into the window and back, so
+        what it says is exactly what Flow's Queue page says, for the same job
+        and by the same route: the selection, which follows the job and not
+        its row. Nothing in it starts, removes or plays anything.
+        """
+        dialog = self.settings_dialog
+        if dialog is None:
+            dialog = self.settings_dialog = QDialog(self)
+            dialog.setWindowTitle("Submitted settings")
+            dialog.setModal(False)
+            column = QVBoxLayout(dialog)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            dialog.scroll = scroll
+            column.addWidget(scroll, 1)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            buttons.rejected.connect(dialog.close)
+            column.addWidget(buttons)
+            dialog.finished.connect(lambda *_: self._take_details_back())
+            dialog.resize(560, 520)
+        if dialog.scroll.widget() is not self.details:
+            self._details_home.removeWidget(self.details)
+            dialog.scroll.setWidget(self.details)
+        dialog.show()
+        dialog.raise_()
+        self.details.show()
+        # What is selected now, said now.
+        self.job_selected.emit(self.selected_job())
+        return dialog
+
+    def close_settings_dialog(self) -> None:
+        if self._dialog_open:
+            self.settings_dialog.close()
+        self._take_details_back()
+
+    def _take_details_back(self) -> None:
+        dialog = self.settings_dialog
+        if dialog is None or dialog.scroll.widget() is not self.details:
+            return
+        dialog.scroll.takeWidget()
+        # Back where it lives, above the tail that takes a page's slack.
+        self._details_home.insertWidget(
+            self._details_home.count() - 1, self.details)
+        self.details_note.setText(DETAILS_NOTE)
+        self.details.setVisible(self._fills_page and self._shown_job is not None)
 
     def adopt_details_music(self, widget: QWidget) -> None:
         """Hold the read-only music presentation, above the playback note."""

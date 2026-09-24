@@ -3120,3 +3120,187 @@ def test_the_music_band_keeps_its_rows_together(window, app):
     assert spare > 60, "the fixture left no spare height to place"
     assert gap < 120, f"{gap}px between the track row and the lanes"
     window.set_view_mode(Mode.CLASSIC)
+
+
+# -- Classic's read-only Queue settings window (W4, R09) -------------------------
+
+
+def test_classic_queue_settings_window_follows_its_job_and_changes_nothing(
+        tmp_path, monkeypatch):
+    from test_music_wiring import (
+        QApplication as _QApp, _FakeProbe, _NoProbe, _NoScan, _NoStrip,
+        a_clip, exact_a, tick, two_ranges, warnings_from)
+    from PySide6.QtWidgets import QPushButton
+    from flightdvr.media import find_tools
+    import flightdvr.ui as ui
+
+    app = _QApp.instance() or _QApp([])
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(ui, "MusicAssetProbe", _FakeProbe)
+    monkeypatch.setattr(ui, "ScanWorker", _NoScan)
+    monkeypatch.setattr(ui, "HardwareProbe", _NoProbe)
+    monkeypatch.setattr(ui, "FilmstripLoader", _NoStrip)
+    monkeypatch.setattr("flightdvr.updates.should_check", lambda *a, **k: False)
+    card, out = tmp_path / "card", tmp_path / "out"
+    card.mkdir()
+    out.mkdir()
+    window = ui.MainWindow(find_tools())
+    try:
+        window.source_combo.insertItem(0, str(card), str(card))
+        window.source_combo.setCurrentIndex(0)
+        window._ready = True
+        for name in ("hdz_001.ts", "hdz_002.ts"):
+            window._add_clip(window._scan_generation, a_clip(name, card))
+        window._scan_done(window._scan_generation, 2)
+        window.export_panel.out_edit.setCurrentText(str(out))
+        window.export_panel.preset_buttons["master"].setChecked(True)
+        monkeypatch.setattr(window.player, "load", lambda *a, **k: None)
+        window.show()
+        a, b = two_ranges(window)
+        window.output_plan.set_choices(a, "master", window.current_settings(),
+                                       exact_a(tmp_path))
+        tick(window, 0)
+        said = warnings_from(monkeypatch)
+        window._add_to_queue()
+        app.processEvents()
+        assert said == [] and len(window.jobs) == 2
+        first, second = window.jobs
+        statuses = [job.status for job in window.jobs]
+
+        panel = window.queue_panel
+        panel.open_queue()
+        assert not panel.settings_button.isEnabled()
+        panel.table.selectRow(1)
+        app.processEvents()
+        assert panel.settings_button.isEnabled()
+        panel.settings_button.click()
+        app.processEvents()
+        dialog = panel.settings_dialog
+        assert dialog.isVisible()
+        assert second.out_path.name in panel.details_title.text()
+        # Read-only: no action in the window can start, remove or play. The
+        # music view's own More… only shows and hides.
+        labels = {button.text() for button in dialog.findChildren(QPushButton)}
+        assert labels <= {"Close", "&Close", "More…"}
+        assert not any(word in label for label in labels
+                       for word in ("Start", "Remove", "Play", "Listen"))
+
+        # The first job leaves: row 0 is now the second job, and the window
+        # still speaks about the second job — by identity, not by row.
+        window.jobs.remove(first)
+        panel.rebuild(window.jobs)
+        app.processEvents()
+        assert second.out_path.name in panel.details_title.text()
+
+        # Its own job leaves: it says so rather than going to a neighbour.
+        window.jobs.remove(second)
+        panel.rebuild(window.jobs)
+        app.processEvents()
+        assert panel.details_note.text() == "That job has left the queue."
+        assert panel.details_title.text() == ""
+
+        dialog.close()
+        app.processEvents()
+        assert panel.details.parentWidget() is panel.body
+        assert [job.status for job in (first, second)] == statuses
+        assert not window.jobs
+    finally:
+        window.close()
+
+
+def test_entering_flow_takes_the_settings_back_to_its_page(tmp_path,
+                                                           monkeypatch):
+    from test_music_wiring import (
+        QApplication as _QApp, _NoProbe, _NoScan, _NoStrip, a_clip)
+    from flightdvr.jobs import Job
+    from flightdvr.media import find_tools
+    import flightdvr.ui as ui
+
+    app = _QApp.instance() or _QApp([])
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(ui, "ScanWorker", _NoScan)
+    monkeypatch.setattr(ui, "HardwareProbe", _NoProbe)
+    monkeypatch.setattr(ui, "FilmstripLoader", _NoStrip)
+    monkeypatch.setattr("flightdvr.updates.should_check", lambda *a, **k: False)
+    window = ui.MainWindow(find_tools())
+    try:
+        card = tmp_path / "card"
+        card.mkdir()
+        window._add_clip(window._scan_generation, a_clip("hdz_001.ts", card))
+        window._scan_done(window._scan_generation, 1)
+        window.show()
+        panel = window.queue_panel
+        panel.open_settings_dialog()
+        app.processEvents()
+        assert panel.settings_dialog.isVisible()
+        window.set_view_mode(Mode.FLOW)
+        app.processEvents()
+        assert not panel.settings_dialog.isVisible()
+        assert panel.details.parentWidget() is panel.body
+        assert not panel.settings_button.isVisible()
+        window.set_view_mode(Mode.CLASSIC)
+    finally:
+        window.close()
+
+
+# -- R11: compact Output folds destination, naming and colour (W4) ---------------
+
+
+def test_compact_flow_output_folds_and_keeps_the_filename_and_actions(
+        window, app):
+    shown_flow(window, app, 1060, 700)
+    window._show_stage(Stage.OUTPUT)
+    settled(app)
+    panel = window.export_panel
+    assert panel.folding and panel.folded
+    assert panel.fold_button.isVisible()
+    for hidden in (panel.colour_box, panel.out_edit, panel.template_edit,
+                   panel.subfolder_check, panel.date_check):
+        assert not hidden.isVisible(), hidden
+    # What stays in view: the resolved name, the preset's explanation, the
+    # estimate and the actions.
+    assert panel.template_example.isVisible()
+    assert panel.template_example.text().startswith("e.g. ")
+    assert panel.preset_help.isVisible()
+    assert panel.estimate_label.isVisible()
+    assert panel.add_button.isVisible()
+
+    before = panel.capture()
+    changed = []
+    panel.settings_changed.connect(lambda *_: changed.append("settings"))
+    panel.output_changed.connect(lambda *_: changed.append("output"))
+    panel.fold_button.click()
+    settled(app)
+    assert panel.out_edit.isVisible() and panel.colour_box.isVisible()
+    panel.fold_button.click()
+    settled(app)
+    assert not panel.out_edit.isVisible()
+    assert panel.capture() == before and changed == []
+
+
+def test_classic_output_is_never_folded(window, app):
+    shown_flow(window, app, 1060, 700)
+    window.set_view_mode(Mode.CLASSIC)
+    settled(app)
+    panel = window.export_panel
+    assert not panel.folding and not panel.fold_button.isVisible()
+    assert panel.out_edit.isVisible() and panel.colour_box.isVisible()
+    assert panel.template_edit.isVisible()
+
+
+def test_roomy_flow_output_stays_unfolded(window, app):
+    shown_flow(window, app, 1440, 940)
+    window._show_stage(Stage.OUTPUT)
+    settled(app)
+    panel = window.export_panel
+    controls = panel.scroller.widget()
+    if panel.folding:
+        # Folded only because the unfolded panel does not fit here either.
+        assert controls.sizeHint().height() + window._output_fold_saves > (
+            panel.scroller.viewport().height())
+    else:
+        assert panel.out_edit.isVisible()

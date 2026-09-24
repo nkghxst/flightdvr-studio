@@ -35,7 +35,7 @@ from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import (
-    QPoint, QRect, QRectF, QSettings, Qt, QThread, QTimer, Signal,
+    QEvent, QPoint, QRect, QRectF, QSettings, Qt, QThread, QTimer, Signal,
 )
 from PySide6.QtGui import (
     QAction, QActionGroup, QColor, QIcon, QImage, QKeySequence, QPainter,
@@ -119,7 +119,9 @@ from .session import (
     apply_settings, apply_to, capture_from, capture_settings, for_source,
     missing_from, recent_sessions, remember,
 )
+from .range_lanes import LaneRange
 from .shortcuts import SHORTCUT_GROUPS
+from .target_choices import SavedMusic, decode_outputs, encode_outputs
 from .waveform_data import WaveformAssetKey, WaveformRequest, WaveformStatus
 from .sequence_plan import (
     OccurrenceId, Resolution, SequencePlan, SequencePlanError, SequenceTerminal,
@@ -226,6 +228,23 @@ def _occurrence_words(clip) -> str:
 
 def _seconds(samples: int, rate: int) -> str:
     return f"{samples / rate:.3f} s"
+
+
+def _untouched_levels(captured: MusicChoice, stored: MusicChoice) -> MusicChoice:
+    """A typed edit, without the panel's whole-percent rounding of the levels
+    nobody touched.
+
+    The panel reads every field back on any edit, and it can only show a
+    level to the nearest percent. Typing a fade on an output whose recording
+    level is exactly 1/7 must not quietly make it 7/50 — a saved choice
+    would change because it was looked at.
+    """
+    kept = {}
+    for name in ("music_level", "dvr_level"):
+        exact = getattr(stored, name)
+        if getattr(captured, name) == Fraction(round(float(exact) * 100), 100):
+            kept[name] = exact
+    return replace(captured, **kept) if kept else captured
 
 
 def submitted_music_numbers(audio, output_samples: int) -> list[str]:
@@ -388,6 +407,19 @@ class MainWindow(QMainWindow):
         self._envelope_tried: set = set()
         self._envelope_probe: MusicAssetProbe | None = None
         self._envelope_generation = 0
+        # Saved tracks not yet confirmed to be the same bytes. Each record has
+        # its own revision; a check's result lands only on the records it was
+        # started for, in the session it was started in, and one at a time.
+        self._pending_music: dict[OutputTarget, tuple[int, SavedMusic]] = {}
+        self._pending_revision = 0
+        self._pending_checks: list[tuple] = []
+        self._pending_probe: MusicAssetProbe | None = None
+        self._pending_request: tuple | None = None
+        self._check_generation = 0
+        self._session_generation = 0
+        # Stored outputs this version could not read, kept as they were.
+        self._unread_outputs: list = []
+        self._restored_selection: OutputTarget | None = None
         self._music_binding: LiveMusicBinding | None = None
         self._music_audition = False
         self.music_editor = None
@@ -409,6 +441,22 @@ class MainWindow(QMainWindow):
         self._picture_frame = None
         self.flow_source_note = None
         self._music_band_was_open: bool | None = None
+        self._size_before_band = None
+        self._classic_list_place: tuple[int, int] | None = None
+        self._list_before_band = 0
+        self._holding = False
+        self._refit_on_regrow = False
+        # What Classic's column measurably could not hold of the picture.
+        self._classic_fit: int | None = None
+        # What folding Flow's Output saved, to know when unfolding fits.
+        self._output_fold_saves = 0
+        # Classic's list folded to its summary while Music needs the room
+        # (approved 24 September): how tall the window must be for a complete
+        # row again, and whether someone asked for the list back meanwhile.
+        self._fold_need = 0
+        self._fold_suppressed = False
+        self._making_room = False
+        self._room_pending = False
         self._viewport_home = None
         self.sidebar_working = None
         self.sidebar_submitted = None
@@ -890,6 +938,7 @@ class MainWindow(QMainWindow):
         panel.review_requested.connect(self._set_review)
         panel.length_filter_changed.connect(self._refresh_review_filter)
         panel.mode_requested.connect(self.set_browser_mode)
+        panel.unfold_requested.connect(self._on_unfold_requested)
         head = panel.table.horizontalHeader()
         head.geometriesChanged.connect(self._fit_clip_column)
         head.sectionResized.connect(
@@ -953,6 +1002,10 @@ class MainWindow(QMainWindow):
         takes everything the picture cannot use.
         """
         column = QWidget()
+        # The picture's height follows the column's width by itself; this
+        # tells it when the column's height comes back, as it does when
+        # Classic's Music band closes and hands its room back.
+        column.installEventFilter(self)
         layout = QVBoxLayout(column)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(INNER)
@@ -976,6 +1029,9 @@ class MainWindow(QMainWindow):
             self._on_sequence_scrub_requested)
         view.trim_changed.connect(self._on_trim_changed)
         view.select_picked.connect(self._pick_select)
+        view.range_lanes.range_clicked.connect(self._on_lane_clicked)
+        view.range_lanes.range_stepped.connect(
+            lambda sid: self._on_lane_clicked(sid, None))
         view.select_added.connect(self._add_select)
         view.select_removed.connect(self._remove_select)
         view.select_renamed.connect(self._rename_select)
@@ -1043,9 +1099,326 @@ class MainWindow(QMainWindow):
         view = self.preview_view
         view.track_requested.connect(self._choose_music_track)
         view.music_changed.connect(self._on_music_changed)
-        view.music_band.toggled.connect(lambda *_: self._relayout())
+        view.music_band_changing.connect(self._before_music_band)
+        view.music_band.toggled.connect(self._on_music_band_toggled)
         self._build_live_preview()
         return view.music_band
+
+    def _on_music_band_toggled(self, open_: bool) -> None:
+        """Make room for the band from the picture, not from the screen.
+
+        Classic's band sits under the whole split, and the picture had
+        already sized itself against the full column: opening the band grew
+        the window by the band's height (913 to 1060, measured). Now the
+        picture leaves that room as it leaves room for the list, and the View
+        menu's Music entry says what the band says.
+        """
+        action = getattr(self, "music_action", None)
+        if action is not None and action.isChecked() != bool(open_):
+            blocked = action.blockSignals(True)
+            action.setChecked(bool(open_))
+            action.blockSignals(blocked)
+        if self._view_mode is Mode.CLASSIC:
+            # Shallow before it is shown, so its first request is the
+            # shallow one.
+            self.preview_view.set_music_presentation(Presentation.CLASSIC)
+            if open_:
+                was = self._size_before_band or self.size()
+                QTimer.singleShot(0, lambda: self._make_music_room(was))
+            else:
+                self._restore_classic_picture()
+        self._relayout()
+
+    def _say_music_growth(self, was) -> None:
+        """Never silently: if even the shallow band did not fit, say by how
+        much, and what makes room without it."""
+        grown = self.height() - was.height()
+        if grown > 0 and self._view_mode is Mode.CLASSIC:
+            self.statusBar().showMessage(
+                f"Music needed {grown} px more than the window had, so the "
+                "window grew. View ▸ Clip list: Collapsed makes room without "
+                "growing it.", 12000)
+
+    def _before_music_band(self, _open: bool) -> None:
+        self._size_before_band = self.size()
+        self._list_before_band = self.browser_panel.table.height()
+
+    def _make_music_room(self, was, tries: int = 4) -> None:
+        # Folding waits for this to finish: mid-way, the picture has not yet
+        # given up what it will, and a list short of a row now may not be.
+        self._making_room = True
+        try:
+            self._make_music_room_step(was, tries)
+        finally:
+            self._making_room = self._room_pending
+        if not self._making_room:
+            self._check_list_fold()
+
+    def _make_music_room_step(self, was, tries: int) -> None:
+        """Take what the band needed from the picture, exactly.
+
+        Measured rather than predicted: the window grows by what the band
+        could not find, so that is what the picture gives up — never through
+        its floor — and the window is given its size back. What cannot be
+        found that way is said, not hidden.
+        """
+        self._room_pending = False
+        box = self.preview_view.preview_box
+        band = self.preview_view.music_band
+        if (self._view_mode is not Mode.CLASSIC or not band.isChecked()
+                or box.parentWidget() is not self._left_column):
+            return
+        # How far the window's own minimum now stands over the size it had:
+        # read, not converged on, so the picture gives up exactly that.
+        over = max(self.height(), self.minimumSizeHint().height()) - was.height()
+        floor = box.content_floor()
+        panel = self.browser_panel
+        # And what the list lost to the band: that is the picture's to give,
+        # down to its floor, before the list gives any of its rows. Measured
+        # natively, the list otherwise went from two rows to none.
+        lost = self._list_before_band - panel.table.height()
+        if over <= 0 and lost > 0 and box.height() > floor and tries > 0:
+            self._classic_fit = max(floor, box.height() - lost)
+            box.set_height_cap(self._classic_height_cap())
+            self._room_pending = True
+            QTimer.singleShot(
+                120, lambda: self._make_music_room(was, tries - 1))
+            return
+        if over > 0 and tries > 0:
+            if box.height() > floor:
+                self._classic_fit = max(floor, box.height() - over)
+                box.set_height_cap(self._classic_height_cap())
+            elif panel.minimumHeight() > panel.minimumSizeHint().height():
+                # The picture is at its floor: the list's reserve is what is
+                # left, down to what the list's own controls need — never
+                # through them.
+                panel.setMinimumHeight(max(panel.minimumSizeHint().height(),
+                                           panel.minimumHeight() - over))
+            else:
+                self._say_music_growth(was)
+                return
+            self._keep_window_size(was)
+            # Again once that has settled: the first answer can be a few
+            # pixels short while the layouts catch up.
+            self._room_pending = True
+            QTimer.singleShot(
+                120, lambda: self._make_music_room(was, tries - 1))
+            return
+        self._say_music_growth(was)
+
+    def _classic_height_cap(self) -> int | None:
+        """Expanded's ceiling, and whatever the column measurably cannot
+        hold, whichever is lower."""
+        box = self.preview_view.preview_box
+        caps = [cap for cap in (
+            box.content_floor()
+            if self._layout_state.browser is BrowserMode.EXPANDED else None,
+            self._classic_fit) if cap is not None]
+        return min(caps) if caps else None
+
+    def _fit_output_folding(self) -> None:
+        """Flow's Output folds destination, naming and colour when they would
+        push the preset's options and the actions apart; Classic keeps them
+        inline, as it always has. Measured against the panel's own room, and
+        unfolded again only when the unfolded panel would fit — so it does not
+        flicker at the boundary. A fold someone opened stays open."""
+        panel = self.export_panel
+        if self._view_mode is not Mode.FLOW:
+            panel.set_folding(False)
+            return
+        room = panel.scroller.viewport().height()
+        controls = panel.scroller.widget()
+        if room <= 0 or controls is None:
+            return
+        if not panel.folding:
+            unfolded = controls.sizeHint().height()
+            if unfolded > room:
+                panel.set_folding(True)
+                self._output_fold_saves = max(
+                    0, unfolded - controls.sizeHint().height())
+        elif (not panel.fold_button.isChecked()
+              and controls.sizeHint().height() + self._output_fold_saves
+              <= room):
+            panel.set_folding(False)
+
+    def _fit_classic_picture(self, tries: int = 4) -> None:
+        """Keep the picture's bottom edge inside its column.
+
+        Measured natively, Classic's column could be laid out taller than it
+        was: at 1440x913 the list took its 288px preference beside a 380px
+        picture in a 619px column, and the picture lost its bottom 55px — at
+        the base as well. Opening Music then took its room the same way, by
+        hiding more of the picture. So the overrun is read after layout and
+        the picture gives up exactly that, never through its own floor, and
+        takes it back when there is room again.
+        """
+        box = self.preview_view.preview_box
+        column = self._left_column
+        if (self._view_mode is not Mode.CLASSIC or column is None
+                or box.parentWidget() is not column
+                or not column.isVisible() or column.height() <= 0):
+            return
+        clearance = column.height() - (box.geometry().bottom() + 1)
+        body = self.preview_view.music_body
+        if (clearance < 0 and box.height() <= box.content_floor()
+                and self.preview_view.music_band.isChecked()
+                and body.maximumHeight() > body.minimumHeight()):
+            # The picture has nothing left to give: the open band's body
+            # scrolls in what remains, down to its track row.
+            body.setMaximumHeight(max(body.minimumHeight(),
+                                      body.height() + clearance))
+            if tries > 0:
+                QTimer.singleShot(
+                    40, lambda: self._fit_classic_picture(tries - 1))
+            return
+        if clearance < 0 and box.height() > box.content_floor():
+            fit = max(box.content_floor(), box.height() + clearance)
+        elif clearance > 0 and self._classic_fit is not None:
+            fit = box.height() + clearance
+            if fit >= box.useful_height(box.width()):
+                fit = None
+        else:
+            return
+        if fit == self._classic_fit:
+            return
+        self._classic_fit = fit
+        box.set_height_cap(self._classic_height_cap())
+        if tries > 0:
+            QTimer.singleShot(40, lambda: self._fit_classic_picture(tries - 1))
+
+    def _restore_classic_picture(self) -> None:
+        """The picture as the list mode has it, with the band closed."""
+        box = self.preview_view.preview_box
+        if box.parentWidget() is not self._left_column:
+            return
+        self._fold_suppressed = False
+        if self.browser_panel.folded:
+            self._set_list_folded(False)
+        box.set_list_room(self._classic_list_room())
+        self._classic_fit = None
+        box.set_height_cap(self._classic_height_cap())
+        self.browser_panel.setMinimumHeight(self._classic_list_minimum())
+        # Hiding the band's body can hand the column its height back before
+        # this runs, or only on the next layout pass: both are covered.
+        box.refit()
+        self._refit_on_regrow = True
+
+    def _fully_visible_rows(self) -> int:
+        table = self.browser_panel.table
+        viewport = table.viewport().rect()
+        return sum(1 for row in range(table.rowCount())
+                   if not table.isRowHidden(row)
+                   and viewport.contains(table.visualRect(
+                       table.model().index(row, 0)).adjusted(0, 0, -1, -1)))
+
+    def _check_list_fold(self, tries: int = 6) -> None:
+        """Keep a complete row in Classic's list while Music is open, and
+        fold the list to its summary only when none can be found.
+
+        Approved on 24 September for compact Classic. A missing row is taken
+        first from the picture above its floor, then from the band's body
+        down to its track row; only when both are at their least does the
+        list fold. It unfolds once what could be taken back again covers what
+        the list needs beyond its summary line — decided from the room, not
+        from a remembered size, so a resize either way settles once.
+        """
+        panel = self.browser_panel
+        box = self.preview_view.preview_box
+        body = self.preview_view.music_body
+        wanted = (self._view_mode is Mode.CLASSIC
+                  and self.preview_view.music_band.isChecked()
+                  and self._layout_state.browser is not BrowserMode.COLLAPSED
+                  and not self._fold_suppressed
+                  and box.parentWidget() is self._left_column)
+        if panel.folded:
+            reclaim = (max(0, box.height() - box.content_floor())
+                       + max(0, body.height() - body.minimumHeight()))
+            if not wanted or reclaim >= self._fold_need:
+                self._set_list_folded(False)
+            return
+        if (self._making_room or not wanted or not panel.table.isVisible()
+                or panel.table.rowCount() == 0
+                or self._fully_visible_rows() > 0):
+            return
+        table = panel.table
+        smallest_row = round(MIN_THUMB_WIDTH * 9 / 16) + 6
+        short = max(1, smallest_row - table.viewport().height())
+        floor = box.content_floor()
+        if tries > 0 and box.height() > floor:
+            self._classic_fit = max(floor, box.height() - short)
+            box.set_height_cap(self._classic_height_cap())
+        elif tries > 0 and body.height() > body.minimumHeight():
+            body.setMaximumHeight(max(body.minimumHeight(),
+                                      body.height() - short))
+        else:
+            # Nothing left to give without clipping a control: the summary
+            # stands in, and what unfolding would need is remembered.
+            chrome = table.height() - table.viewport().height()
+            self._fold_need = max(
+                1, chrome + smallest_row
+                - panel.summary_bar.sizeHint().height())
+            self._set_list_folded(True)
+            return
+        QTimer.singleShot(60, lambda: self._check_list_fold(tries - 1))
+
+    def _set_list_folded(self, folded: bool) -> None:
+        panel = self.browser_panel
+        panel.show_folded(folded)
+        panel.setMinimumHeight(self._classic_list_minimum())
+        box = self.preview_view.preview_box
+        if box.parentWidget() is self._left_column:
+            box.set_list_room(self._classic_list_room())
+        self._refresh_browser_summary()
+        if not folded:
+            # Its rows were hidden, not rebuilt: the selection and scroll are
+            # the ones it had. Keep the selected row in view.
+            item = self.table.item(self.table.currentRow(), 0)
+            if item is not None:
+                self.table.scrollToItem(item)
+        self._relayout()
+
+    def _on_unfold_requested(self) -> None:
+        """"Show clips" on the folded summary: the list comes back, and stays
+        back until Music is closed, however little room it has."""
+        self._fold_suppressed = True
+        self._set_list_folded(False)
+        self.table.setFocus()
+
+    def _classic_list_minimum(self) -> int:
+        """The list's own reserve: none while it is collapsed or folded to
+        one line, which is otherwise 150px kept for a list that is not
+        there."""
+        if (self._layout_state.browser is BrowserMode.COLLAPSED
+                or self.browser_panel.folded):
+            return 0
+        return MIN_LIST_HEIGHT
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt naming)
+        if (watched is self._left_column and self._refit_on_regrow
+                and event.type() == QEvent.Type.Resize
+                and event.size().height() > event.oldSize().height()):
+            self._refit_on_regrow = False
+            # Whatever was measured while the band still stood there is
+            # measured again now the column is whole.
+            self._classic_fit = None
+            self.preview_view.preview_box.set_height_cap(
+                self._classic_height_cap())
+            self._refit_classic_picture()
+            QTimer.singleShot(0, self._fit_classic_picture)
+        return super().eventFilter(watched, event)
+
+    def _refit_classic_picture(self) -> None:
+        box = self.preview_view.preview_box
+        if box.parentWidget() is self._left_column:
+            box.refit()
+
+    def _classic_list_room(self) -> int:
+        """What Classic's picture leaves under it: the list, or the one-line
+        summary that stands in for it."""
+        if (self._layout_state.browser is BrowserMode.COLLAPSED
+                or self.browser_panel.folded):
+            return self.browser_panel.summary_bar.sizeHint().height()
+        return MIN_LIST_HEIGHT
 
     @property
     def music_panel(self) -> QWidget:
@@ -1133,6 +1506,16 @@ class MainWindow(QMainWindow):
                 self._music_reading[target] = self._music_reading.pop(previous)
             if previous in self._music_trouble:
                 self._music_trouble[target] = self._music_trouble.pop(previous)
+            if previous in self._pending_music:
+                # With its revision, and with the check under way told where
+                # it went: otherwise the result arrives for a key nothing
+                # holds and the output reads as being checked for ever.
+                self._pending_music[target] = self._pending_music.pop(previous)
+                request = self._pending_request
+                if request is not None and previous in request[3]:
+                    waiting = dict(request[3])
+                    waiting[target] = waiting.pop(previous)
+                    self._pending_request = (*request[:3], waiting)
         self._assembly_music_target = target
         self.output_plan.select(target)
 
@@ -1215,10 +1598,255 @@ class MainWindow(QMainWindow):
             self.output_plan.set_choices(
                 target, planned.preset_key, planned.settings, choice)
             self._prune_envelopes()
+            self._touch_outputs()
             return
         preset, settings = self._seed_defaults()
         self.output_plan.set_choices(target, preset, settings, choice)
         self._prune_envelopes()
+        self._touch_outputs()
+
+    # -- each output's choices, saved and reopened ------------------------------
+
+    def _touch_outputs(self) -> None:
+        """A planned output changed: written with the marks, and quietly.
+
+        Not `_touch_session`, which says the scan is unfinished when refused.
+        Showing a clip during a rescan stores an empty choice for it, and that
+        is not an edit anyone made or needs to hear about.
+        """
+        if self.session is not None and self._decisions_editable():
+            self._session_timer.start()
+
+    def _capture_outputs(self) -> None:
+        """Every planned output, from the plan itself — never the panel.
+
+        An output whose saved track is still unconfirmed is written back as it
+        was read (with any edit made meanwhile), not as the stand-in shown.
+        """
+        plan = self.output_plan
+        entries = [(plan.get(target), self._pending_saved(target))
+                   for target in plan.targets]
+        selected = (self._sidebar_target
+                    if self._sidebar_target in plan.targets
+                    else self._restored_selection)
+        stored = encode_outputs(entries, selected)
+        self.session.outputs = stored["outputs"] + list(self._unread_outputs)
+        self.session.selected_output = stored.get("selected_output")
+
+    def _pending_saved(self, target) -> SavedMusic | None:
+        pending = self._pending_music.get(target)
+        return pending[1] if pending is not None else None
+
+    def _quiesce_outputs(self) -> None:
+        """Stop everything bound to the outgoing session's outputs.
+
+        Before anything of the next one is installed: a gesture, a track read
+        or a check still running would otherwise land on whatever now has its
+        target's name.
+        """
+        editor = self.music_editor
+        if editor is not None and editor.gesture_active:
+            editor.cancel_gesture()
+        self._stop_music_probe()
+        self._stop_pending_checks()
+        self._session_generation += 1
+        self._pending_music.clear()
+        self._music_reading.clear()
+        self._music_trouble.clear()
+        self._unread_outputs = []
+        self._restored_selection = None
+        self.output_plan = OutputPlan()
+        self._assembly_music_target = None
+        self._sidebar_target = None
+        self._music_target = None
+
+    def _restore_outputs(self, found: Session) -> list[str]:
+        """Install a session's outputs whole, replacing rather than merging.
+
+        Only targets and choices: nothing is selected for editing, loaded into
+        a panel, played or queued here. Returns what could not be read.
+        """
+        read = decode_outputs(found.outputs, found.selected_output,
+                              hw_encoder=self.hw_encoder)
+        problems = list(read.problems)
+        for one in read.outputs:
+            target, planned = one.target, one.planned
+            if target.is_assembly:
+                if self._assembly_music_target is not None:
+                    problems.append("a second Assembly output was not read")
+                    continue
+                # Tracked as the binding's own, so the first refresh selects
+                # or rekeys it instead of refusing it as foreign or seeding
+                # it with the panel's defaults.
+                self._assembly_music_target = target
+            self.output_plan.set_choices(
+                target, planned.preset_key, planned.settings, planned.music)
+            if one.pending is not None:
+                self._pending_revision += 1
+                self._pending_music[target] = (self._pending_revision,
+                                               one.pending)
+        self._unread_outputs = list(read.unread)
+        if read.selected is not None:
+            self._sidebar_target = read.selected
+            self.output_plan.select(read.selected)
+            # Held until its output exists: ticks are not part of a session,
+            # so a reopened Flow may list nothing yet. Chosen again when it
+            # appears, unless someone has chosen something else first.
+            self._restored_selection = read.selected
+        self._queue_pending_checks()
+        return problems
+
+    def _show_restored_output(self) -> None:
+        """Once identities and choices are in place, show what was selected.
+
+        Choosing is loading, as it is from the sidebar: nothing is edited,
+        focused elsewhere, played or queued.
+        """
+        if self._view_mode is Mode.FLOW:
+            # The reopened session's own panel values are what new outputs
+            # start from now, not the previous session's.
+            self._flow_defaults = (self._preset_key(), self.current_settings())
+            self._refresh_sidebar()
+            target = self._sidebar_target
+            if target is not None and target in self._active_targets():
+                self.output_sidebar.select(target)
+                self.export_panel.select_target(target)
+                self._load_target(target)
+                self._sync_music_panel()
+
+    def _keep_pending_requests(self, target, choice: MusicChoice) -> MusicChoice:
+        """An edit to an output whose saved track is not confirmed yet.
+
+        A level, fade, policy or mode edit is kept on the saved record, so the
+        passage it cannot see survives it. Removing the track, or choosing
+        Original or No sound, is a different choice and supersedes it.
+        """
+        pending = self._pending_music.get(target)
+        if pending is None:
+            return choice
+        revision, saved = pending
+        if (choice.track != saved.track
+                or choice.mode not in (AudioMode.REPLACE, AudioMode.MIX)):
+            self._supersede_pending(target)
+            return choice
+        saved = saved.with_requests(choice)
+        self._pending_music[target] = (revision, saved)
+        return saved.requested
+
+    def _supersede_pending(self, target) -> None:
+        if self._pending_music.pop(target, None) is not None:
+            self._music_reading.pop(target, None)
+            self._music_trouble.pop(target, None)
+
+    def _queue_pending_checks(self) -> None:
+        """One read per saved track, in plan order, one at a time."""
+        keys = []
+        for target, (_revision, saved) in self._pending_music.items():
+            key = (saved.track, saved.sha256, saved.stream_index)
+            if key not in keys:
+                keys.append(key)
+            self._music_reading[target] = saved.track
+        self._pending_checks = keys
+        self._next_pending_check()
+
+    def _next_pending_check(self) -> None:
+        while self._pending_checks and self._pending_probe is None:
+            key = self._pending_checks.pop(0)
+            waiting = {target: revision for target, (revision, saved)
+                       in self._pending_music.items()
+                       if (saved.track, saved.sha256, saved.stream_index) == key}
+            if not waiting:
+                continue
+            track = key[0]
+            if not track.is_file():
+                self._pending_settled(waiting, (
+                    f"The saved track {track.name} is not there any more. "
+                    "Choose it again."))
+                continue
+            self._check_generation += 1
+            generation = self._check_generation
+            # The same single read that validates and draws a chosen track.
+            request = WaveformRequest(generation=generation,
+                                      request_key=str(track))
+            probe = MusicAssetProbe(self.tools, track, generation, self,
+                                    waveform_request=request)
+            probe.waveform_ready.connect(self._pending_checked)
+            probe.failed.connect(self._pending_failed)
+            self._pending_probe = probe
+            self._pending_request = (generation, self._session_generation,
+                                     key, waiting)
+            probe.start()
+        self._after_pending_change()
+
+    def _current_pending_request(self, generation: int):
+        request = self._pending_request
+        if (request is None or generation != request[0]
+                or request[1] != self._session_generation):
+            return None
+        self._pending_probe = None
+        self._pending_request = None
+        return request
+
+    def _pending_checked(self, inspection) -> None:
+        """A saved track has been read again. Adopted only if it is the same."""
+        request = self._current_pending_request(inspection.request.generation)
+        if request is None:
+            return
+        asset = inspection.asset
+        adopted = False
+        for target, revision in request[3].items():
+            current = self._pending_music.get(target)
+            if current is None or current[0] != revision:
+                continue
+            saved = current[1]
+            reason = saved.mismatch(asset)
+            if reason:
+                self._pending_settled({target: revision}, (
+                    f"The saved track {saved.track.name} cannot be used: "
+                    f"{reason}. Choose it again."))
+                continue
+            del self._pending_music[target]
+            self._music_reading.pop(target, None)
+            self._music_trouble.pop(target, None)
+            self._store_music(target, saved.resolved(asset))
+            adopted = True
+        if adopted:
+            self._take_envelope(WaveformAssetKey.from_asset(asset), inspection)
+        self._next_pending_check()
+
+    def _pending_failed(self, generation: int, reason: str) -> None:
+        request = self._current_pending_request(generation)
+        if request is None:
+            return
+        self._pending_settled(request[3], (
+            f"The saved track {request[2][0].name} could not be read: "
+            f"{reason}. Choose it again."))
+        self._next_pending_check()
+
+    def _pending_settled(self, waiting: dict, trouble: str) -> None:
+        """Not confirmed. The record stays exactly as saved, and says why."""
+        for target, revision in waiting.items():
+            current = self._pending_music.get(target)
+            if current is None or current[0] != revision:
+                continue
+            self._music_reading.pop(target, None)
+            self._music_trouble[target] = trouble
+
+    def _after_pending_change(self) -> None:
+        target = self._music_target
+        if target is not None and not self._music_syncing:
+            self._sync_music_panel()
+        self._refresh_sidebar()
+        self._refresh_export_markers()
+
+    def _stop_pending_checks(self) -> None:
+        probe, self._pending_probe = self._pending_probe, None
+        self._pending_request = None
+        self._pending_checks = []
+        if probe is not None:
+            if probe.isRunning():
+                self._retain_probe_thread(probe)
+            probe.stop()
 
     # -- each output's own preset and settings ---------------------------------
 
@@ -1300,6 +1928,7 @@ class MainWindow(QMainWindow):
             music = (self.output_plan.get(target).music
                      if target in self.output_plan.targets else MusicChoice())
             self.output_plan.set_choices(target, preset, settings, music)
+            self._touch_outputs()
         elif target is None:
             self._flow_defaults = (preset, settings)
 
@@ -1358,8 +1987,10 @@ class MainWindow(QMainWindow):
     def _show_music_state(self, target: OutputTarget) -> None:
         """One line about acquisition, and one about what the export will do."""
         if target in self._music_reading:
+            reading = self._music_reading[target].name
             self.preview_view.show_track_status(
-                f"Reading {self._music_reading[target].name}…")
+                f"Checking the saved track {reading}…"
+                if target in self._pending_music else f"Reading {reading}…")
         elif target in self._music_trouble:
             self.preview_view.show_track_status(self._music_trouble[target])
         else:
@@ -1396,7 +2027,9 @@ class MainWindow(QMainWindow):
         if self._refuse_while_rebuilding():
             self._sync_music_panel()
             return
-        self.music_editor.commit(self.music_panel.capture())
+        self.music_editor.commit(
+            _untouched_levels(self.music_panel.capture(),
+                              self._planned_music(target)))
 
     def _on_music_committed(self, choice: MusicChoice, kind) -> None:
         """The one place an edit to the music is stored and heard.
@@ -1412,6 +2045,7 @@ class MainWindow(QMainWindow):
         if self._refuse_while_rebuilding():
             self._sync_music_panel()
             return
+        choice = self._keep_pending_requests(target, choice)
         self._store_music(target, choice)
         self._show_music_numbers(choice)
         in_place = (self._music_binding is not None
@@ -1713,6 +2347,7 @@ class MainWindow(QMainWindow):
         if not chosen:
             return
         track = Path(chosen)
+        self._supersede_pending(target)
         self._store_music(
             target, replace(self._planned_music(target), track=track,
                             mode=AudioMode.REPLACE, asset=None, passage=None))
@@ -2577,6 +3212,17 @@ class MainWindow(QMainWindow):
         # Moving the panels asks for more room for a moment either way; the
         # window keeps its size unless the new arrangement truly needs more.
         was = self.size()
+        if self._view_mode is Mode.CLASSIC and chosen is Mode.FLOW:
+            # Where Classic's list was, to come back to. Flow's list has its
+            # own geometry and moves the scroll; measured natively, a round
+            # trip came back one row off (6 to 5) with nothing changed.
+            table = self.browser_panel.table
+            self._classic_list_place = (
+                table.currentRow(), table.verticalScrollBar().value())
+        # A fold is Classic's; the list goes to Flow as a list.
+        if self.browser_panel.folded:
+            self.browser_panel.show_folded(False)
+            self.browser_panel.setMinimumHeight(MIN_LIST_HEIGHT)
         # The mode is recorded first. The sidebar only does its work while
         # Flow is the mode, so refreshing before this was refreshing into a
         # guard that had every right to refuse — and the list arrived empty.
@@ -2584,6 +3230,9 @@ class MainWindow(QMainWindow):
         # Output's "For:" belongs to Flow; Classic keeps its familiar single
         # set of controls.
         self.export_panel.set_target_selector_visible(chosen is Mode.FLOW)
+        # Flow's Music page is the band; closing it from a menu would leave
+        # that page with nothing on it.
+        self.music_action.setEnabled(chosen is Mode.CLASSIC)
         self.export_panel.set_add_label(
             "Queue this output" if chosen is Mode.FLOW else "Add to queue")
         if chosen is Mode.FLOW:
@@ -2606,6 +3255,9 @@ class MainWindow(QMainWindow):
             # Flow's short pages need the controls beside the picture closed
             # up; nothing is hidden. Classic gets its arrangement back.
             self.preview_view.set_flow_controls(True)
+            # The filmstrip is on Trim's page alone in Flow, and there each
+            # range gets its own lane under it.
+            self.preview_view.range_lanes.set_wanted(True)
             band = self.preview_view.music_band
             self._music_band_was_open = band.isChecked()
             band.setChecked(True)
@@ -2625,6 +3277,8 @@ class MainWindow(QMainWindow):
                 self._apply_choices(*self._flow_defaults)
                 self._flow_defaults = None
             self._flow_host.hide()
+            # Classic's filmstrip is the reference's: the recording alone.
+            self.preview_view.range_lanes.set_wanted(False)
             # Back to the strip before it goes home, for the same reason.
             self.queue_panel.set_fills_page(False)
             self.preview_view.set_flow_controls(False)
@@ -2645,6 +3299,23 @@ class MainWindow(QMainWindow):
         self._relayout()
         self._fit_music_presentation()
         self._keep_window_size(was)
+        if chosen is Mode.CLASSIC and self._classic_list_place is not None:
+            # After the layouts above have settled, so it is not moved again.
+            QTimer.singleShot(0, self._restore_classic_list_place)
+
+    def _restore_classic_list_place(self) -> None:
+        """Classic's list where it was, if the same recording is selected.
+
+        A different selection made in Flow is a choice to respect: then the
+        selected row is only kept in view, as it already is.
+        """
+        place, self._classic_list_place = self._classic_list_place, None
+        if place is None or self._view_mode is not Mode.CLASSIC:
+            return
+        row, scroll = place
+        table = self.browser_panel.table
+        if table.currentRow() == row:
+            table.verticalScrollBar().setValue(scroll)
 
     def _show_stage(self, stage) -> None:
         """Show one stage. Navigation alone changes nothing but what is seen."""
@@ -2686,6 +3357,8 @@ class MainWindow(QMainWindow):
                 "Space does the same once the picture has focus.")
             self._sync_music_panel()
         self._show_source_note()
+        QTimer.singleShot(0, self._fit_output_folding)
+        QTimer.singleShot(0, self._check_list_fold)
         back, forward = flow_neighbours(chosen, self._offered_stages)
         self.flow_shell.set_steps(back is not None, forward is not None)
         self._show_page_actions(chosen)
@@ -3104,10 +3777,8 @@ class MainWindow(QMainWindow):
         # still in its Flow frame: set once it was back in the column, it was
         # worked out against the column's height from before Flow, and the
         # window grew by the difference (913 to 924, natively).
-        box.set_list_room(MIN_LIST_HEIGHT)
-        box.set_height_cap(box.content_floor()
-                           if self._layout_state.browser is BrowserMode.EXPANDED
-                           else None)
+        box.set_list_room(self._classic_list_room())
+        box.set_height_cap(self._classic_height_cap())
         # It may be in any page's region, or in none at all after Queue, so it
         # is detached by parent rather than removed from one known layout.
         if box.parentWidget() is not None:
@@ -3291,6 +3962,8 @@ class MainWindow(QMainWindow):
         those once, where the numbers are.
         """
         if target in self._music_reading:
+            if target in self._pending_music:
+                return f"Checking {self._music_reading[target].name}…"
             return f"Reading {self._music_reading[target].name}…"
         if target in self._music_trouble:
             return "Music could not be read"
@@ -3317,6 +3990,12 @@ class MainWindow(QMainWindow):
             for output in outputs:
                 self._ensure_target_choices(output.target)
             active = [output.target for output in outputs]
+            restored = self._restored_selection
+            if (restored is not None and restored in active
+                    and self._sidebar_target in (None, restored)):
+                self._sidebar_target = restored
+                self._restored_selection = None
+                self._apply_choices(*self._choices_for(restored))
             if (self._sidebar_target is not None
                     and self._sidebar_target not in active):
                 # The chosen output stopped existing. Nothing is chosen now —
@@ -3374,6 +4053,8 @@ class MainWindow(QMainWindow):
         if self._refuse_joined_source_action():
             return
         self._sidebar_target = target
+        # A person's choice outranks the one read back from the file.
+        self._restored_selection = None
         self.output_sidebar.select(target)
         self.export_panel.select_target(target)
         self._load_target(target)
@@ -3607,8 +4288,15 @@ class MainWindow(QMainWindow):
         self.queue_action.setCheckable(True)
         self.queue_action.toggled.connect(self._on_queue_action)
 
-        # No Music entry. Music is not built, and a menu item that toggles
-        # nothing is worse than an absent one.
+        # The band's own toggle, mirrored both ways like the queue's. Flow's
+        # Music page always shows the band, so it is Classic's control.
+        self.music_action = view_menu.addAction("Music")
+        self.music_action.setCheckable(True)
+        # Built before the band; the band starts closed and reports every
+        # change after that through `_on_music_band_toggled`.
+        self.music_action.setChecked(False)
+        self.music_action.toggled.connect(
+            lambda on: self.preview_view.music_band.setChecked(bool(on)))
 
         view_menu.addSeparator()
         reset_action = view_menu.addAction("Restore default layout")
@@ -3663,6 +4351,10 @@ class MainWindow(QMainWindow):
         # The whole list, not `trim_in = trim_out = 0`. Those are a view onto
         # the select being edited, so zeroing them leaves every other select on
         # the clip — which is the same leak again, one range further along.
+        #
+        # The outputs likewise, and first: nothing still bound to the old
+        # session's outputs may land on the new one's.
+        self._quiesce_outputs()
         for clip in self.clips:
             clip.selects = []
             clip.current = 0
@@ -3687,6 +4379,11 @@ class MainWindow(QMainWindow):
         if apply_settings(found, self.export_panel):
             self._on_preset_changed()
         restored = apply_to(found, self.clips)
+        # Installed whole before anything shows a clip, an output or the
+        # Assembly: each of those seeds an empty choice for a target it finds
+        # missing, and a seeded default is exactly what must not stand in for
+        # a saved one.
+        unread = self._restore_outputs(found)
         for clip in self.clips:
             self._mark_trim_in_table(clip)
             self._mark_review_in_table(clip)
@@ -3697,8 +4394,14 @@ class MainWindow(QMainWindow):
         # After the trims, because the assembly names ranges and the ranges
         # only exist once apply_to has put them back on the clips.
         self._refresh_assembly()
+        self._show_restored_output()
 
         notes = []
+        if unread:
+            notes.append(
+                f"{len(unread)} saved output"
+                f"{' was' if len(unread) == 1 else 's were'} not restored "
+                f"({unread[0]})")
         if restored:
             notes.append(f"{restored} trim{'' if restored == 1 else 's'} "
                          "restored from your last visit")
@@ -3778,6 +4481,7 @@ class MainWindow(QMainWindow):
         if self._decisions_editable():
             capture_from(self.session, self.clips)
             capture_settings(self.session, self.export_panel, self.clips)
+            self._capture_outputs()
         # Otherwise this is a rescan still in progress. Its clips carry no
         # decisions yet, and `capture_from` reads a clip with no ranges and no
         # review as one whose marks were deliberately cleared — so reading the
@@ -3921,6 +4625,42 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._relayout()
 
+    def event(self, event) -> bool:  # noqa: D102
+        handled = super().event(event)
+        if event.type() == QEvent.Type.LayoutRequest and not self._holding:
+            QTimer.singleShot(0, self._hold_minimum)
+        return handled
+
+    def _hold_minimum(self) -> None:
+        """The window's least size, counting Classic's picture at its floor.
+
+        The layout's own minimum counts the picture at the height it has
+        now, which its width earned. Made narrower and shorter in one move —
+        a snap, a restore, a resize — the window was held to that old height
+        before the new width could shrink it: 1120x760 came out 837 tall,
+        measured natively. The picture yields down to its floor as soon as
+        the width arrives, so that floor is what the minimum counts.
+        """
+        if self._closing:
+            return
+        self._holding = True
+        try:
+            box = self.preview_view.preview_box
+            # The figure Qt itself would hold the window to — its layout's
+            # total minimum, not minimumSizeHint, which widened a window
+            # coming back from Flow by 3px (measured natively) — less, in
+            # Classic, the picture above its floor.
+            least = self.layout().totalMinimumSize()
+            height = least.height()
+            if (self._view_mode is Mode.CLASSIC
+                    and box.parentWidget() is self._left_column):
+                height -= max(0, box.height() - box.content_floor())
+            if (self.minimumWidth(), self.minimumHeight()) != (
+                    least.width(), height):
+                self.setMinimumSize(least.width(), max(0, height))
+        finally:
+            self._holding = False
+
     def _relayout(self) -> None:
         """Everything whose size depends on another widget's size.
 
@@ -3934,6 +4674,9 @@ class MainWindow(QMainWindow):
         # list they ended up in. The frame is deferred for the same reason.
         QTimer.singleShot(0, self._sync_thumbnail_size)
         QTimer.singleShot(0, self._fit_music_presentation)
+        QTimer.singleShot(0, self._fit_classic_picture)
+        QTimer.singleShot(0, self._fit_output_folding)
+        QTimer.singleShot(0, self._check_list_fold)
 
     def _sync_thumbnail_size(self) -> None:
         """Fit the thumbnails to the space the list actually has.
@@ -3964,6 +4707,7 @@ class MainWindow(QMainWindow):
             self.live_preview.close()
         self._stop_music_probe()
         self._stop_envelope_probe()
+        self._stop_pending_checks()
         # First, because it is the one holding a decoder open on the card.
         self.player.shutdown()
         self._flight_scan_ready = False
@@ -4051,6 +4795,15 @@ class MainWindow(QMainWindow):
         self.export_panel.set_hardware(found)
         if found:
             self.hw_encoder, self.hw_label = found
+            # Outputs read back or planned before this machine's encoder was
+            # known learn it now; a file never supplies it.
+            for target in self.output_plan.targets:
+                planned = self.output_plan.get(target)
+                if not planned.settings.hw_encoder:
+                    self.output_plan.set_choices(
+                        target, planned.preset_key,
+                        replace(planned.settings, hw_encoder=self.hw_encoder),
+                        planned.music)
 
     # -- source handling ------------------------------------------------------
 
@@ -4490,6 +5243,11 @@ class MainWindow(QMainWindow):
         ceiling instead, which is the one thing that does hand the list room.
         """
         mode = BrowserMode(mode)
+        # A choice made while folded is the person's: the fold gives way
+        # to it, and is decided again for the new arrangement.
+        self._fold_suppressed = False
+        if self.browser_panel.folded:
+            self.browser_panel.show_folded(False)
         self._layout_state = self._layout_state.with_browser(mode)
         self.browser_panel.show_mode(mode)
         action = self.browser_mode_actions.get(mode)
@@ -4503,10 +5261,20 @@ class MainWindow(QMainWindow):
         # goes through the preview's content floor, so every control it holds
         # stays usable and the picture letterboxes rather than distorting.
         box = self.preview_box
-        if mode is BrowserMode.EXPANDED:
-            box.set_height_cap(box.content_floor())
-        else:
-            box.set_height_cap(None)
+        was = self.size()
+        # Measured afresh for this mode's arrangement.
+        self._classic_fit = None
+        box.set_height_cap(self._classic_height_cap())
+        # Collapsed hands the list's reserve back to the picture; the
+        # summary line is all that is left under it.
+        self.browser_panel.setMinimumHeight(self._classic_list_minimum())
+        if box.parentWidget() is self._left_column:
+            box.set_list_room(self._classic_list_room())
+            if (self._view_mode is Mode.CLASSIC
+                    and self.preview_view.music_band.isChecked()):
+                # The mode's cap replaced the one the band's room was taken
+                # with; take it again at this mode's arrangement.
+                QTimer.singleShot(0, lambda: self._make_music_room(was))
 
         # The splitter is deliberately not touched here. No mode wants a
         # different split, and re-imposing the computed one moved it by a
@@ -4539,12 +5307,19 @@ class MainWindow(QMainWindow):
             self.browser_panel.set_summary("No clip selected")
             return
         ranges = len(clip.real_selects)
-        parts = [clip.path.name, REVIEW_LABELS[clip.review]]
+        # The recording's name goes last: a long one is what gets cut on a
+        # narrow list, and its review state and range must stay readable
+        # (the whole line, name included, is on hover).
+        parts = [REVIEW_LABELS[clip.review]]
         if ranges:
-            parts.append(f"{ranges} range" + ("s" if ranges != 1 else ""))
+            current = min(clip.current, ranges - 1)
+            named = clip.real_selects[current].name
+            parts.append(f"range {current + 1} of {ranges}"
+                         + (f" ({named})" if named else ""))
         shown = sum(1 for row in range(self.table.rowCount())
                     if not self.table.isRowHidden(row))
         parts.append(f"{shown} of {len(self.clips)} shown")
+        parts.append(clip.path.name)
         item = self.table.item(self.table.currentRow(), 0)
         icon = item.icon() if item is not None else None
         pixmap = None
@@ -4654,6 +5429,7 @@ class MainWindow(QMainWindow):
         self.trim_bar.set_clip(clip.duration, clip.trim_in, clip.out_point)
         self._show_selects()
         self.trim_bar.set_strip(Filmstrip())
+        self.preview_view.range_lanes.set_strip(None)
         self._strip = Filmstrip()
         self._activity = None
         self.preview_view.show_activity("")
@@ -4696,6 +5472,7 @@ class MainWindow(QMainWindow):
                 self.frame_view.set_message("no frames")
             return
         self.trim_bar.set_strip(strip)
+        self.preview_view.range_lanes.set_strip(strip)
         self._strip = strip
         if self._music_target is not None and self.music_editor is not None:
             self._show_music_picture(self._music_target)
@@ -5327,6 +6104,7 @@ class MainWindow(QMainWindow):
     def _show_selects(self) -> None:
         """Put the clip's ranges on the bar and say which is being edited."""
         clip = self._trim_clip
+        self._show_lanes()
         if clip is None:
             self.preview_view.show_selects(0, 0, "")
             return
@@ -5344,6 +6122,45 @@ class MainWindow(QMainWindow):
         self.preview_view.show_selects(len(ranges), clip.current,
                                        editing.name if editing else "",
                                        nameable=bool(clip.real_selects))
+
+    def _show_lanes(self) -> None:
+        """One lane per real range, by identity. A whole recording has no
+        range to put on a clock of its own."""
+        clip = self._trim_clip
+        lanes = self.preview_view.range_lanes
+        if clip is None:
+            lanes.set_ranges((), "")
+            return
+        real = clip.real_selects
+        editing = (clip.selects[clip.current].sid
+                   if real and clip.current < len(clip.selects) else "")
+        lanes.set_ranges(
+            [LaneRange(one.sid, one.name, one.start, one.end or clip.duration)
+             for one in real], editing)
+
+    def _on_lane_clicked(self, sid: str, source) -> None:
+        """A lane was pressed, or stepped to with Up and Down.
+
+        Resolved by the range's identity at the moment of the press, never by
+        a row number: the lanes were drawn from an order that a rename, a
+        removal or a reorder may since have changed. Another range becomes
+        the one being edited; inside the one already being edited, the
+        playhead moves to the moment pressed — short of the exclusive end.
+        """
+        clip = self._trim_clip
+        if clip is None:
+            return
+        index = next((i for i, one in enumerate(clip.selects)
+                      if one.sid == sid), None)
+        if index is None:
+            return
+        if index != clip.current or source is None:
+            self._pick_select(index)
+            return
+        chosen = clip.selects[index]
+        end = chosen.end or clip.duration
+        last = end - 1.0 / max(1.0, clip.fps)
+        self._jump(max(chosen.start, min(source, last)))
 
     def _pick_select(self, index: int) -> None:
         if self._refuse_joined_source_action():
@@ -5409,6 +6226,8 @@ class MainWindow(QMainWindow):
         if clip is None or not clip.selects:
             return
         clip.selects[clip.current].name = name
+        # The lane's title only: the name field is being typed in.
+        self._show_lanes()
         self._touch_session()
 
     def _set_in(self) -> None:
