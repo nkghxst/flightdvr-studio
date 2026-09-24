@@ -296,6 +296,14 @@ def vertical_output_size(clip: ClipInfo) -> tuple[int, int]:
     return _vertical_output_size(clip.width, clip.height)
 
 
+def vertical_join_canvas(clips: list[ClipInfo]) -> tuple[int, int]:
+    """The portrait canvas selected by the joined export filtergraph."""
+    return _vertical_output_size(
+        max((clip.width for clip in clips), default=0),
+        max((clip.height for clip in clips), default=0),
+    )
+
+
 def vertical_crop(clip: ClipInfo, position: int = 50) -> VerticalCrop:
     """Build the crop used by both the preview overlay and ffmpeg.
 
@@ -639,10 +647,7 @@ def join_filtergraph(
     whether a recording is full range is a property of that recording.
     """
     if vertical:
-        width, height = _vertical_output_size(
-            max((c.width for c in clips), default=0),
-            max((c.height for c in clips), default=0),
-        )
+        width, height = vertical_join_canvas(clips)
         fps = max((c.fps for c in clips if c.fps), default=60.0)
     else:
         width, height, fps = join_target_format(clips)
