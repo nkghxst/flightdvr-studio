@@ -147,10 +147,21 @@ def test_actual_slow_recipe_preserves_every_source_ordinal(
     control_filter = (
         f"scale={VIEW.width}:{VIEW.height}:flags=neighbor,"
         f"fps=30,setpts=2*PTS,fps={expected_cadence}")
+    ffmpeg_help = subprocess.run(
+        [str(tools.ffmpeg), "-hide_banner", "-h", "full"],
+        capture_output=True, text=True, timeout=20)
+    assert ffmpeg_help.returncode == 0, ffmpeg_help.stderr
+    options = ffmpeg_help.stdout + ffmpeg_help.stderr
+    if "-fps_mode" in options:
+        passthrough = ["-fps_mode", "passthrough"]
+    elif "-vsync" in options:
+        passthrough = ["-vsync", "0"]
+    else:
+        pytest.skip("this ffmpeg exposes no passthrough muxing option")
     control = _frames([
         str(tools.ffmpeg), "-hide_banner", "-nostdin", "-v", "error",
         "-i", str(source), "-an", "-vf", control_filter,
-        "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt",
+        *passthrough, "-f", "rawvideo", "-pix_fmt",
         "rgb24", "pipe:1",
     ], VIEW.width, VIEW.height)
     control_ordinals = [_ordinal(frame, VIEW.width, 2) for frame in control]
