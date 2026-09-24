@@ -359,8 +359,9 @@ class BrowserPanel(QWidget):
         self.summary_label.setMinimumWidth(0)
         self.summary_label.setSizePolicy(QSizePolicy.Policy.Ignored,
                                          QSizePolicy.Policy.Preferred)
+        # The line takes the rest of the row; a stretch beside it had kept
+        # half, and cut the review state off at 1120x760.
         row.addWidget(self.summary_label, 1)
-        row.addStretch(1)
         return bar
 
     def _reopen(self) -> None:
