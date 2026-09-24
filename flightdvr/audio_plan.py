@@ -296,6 +296,14 @@ def _resolve_configured_audio(
     )
 
 
+# The presets a configured music/audio choice is exported and monitored for.
+# All are nominal-1x outputs: their picture may be recropped, rescaled or
+# re-encoded, but output time is source time, so one finished-time sound plan
+# serves them all. Social waits for its size budget (stage B), bundles for
+# per-member submission (stage C); Remux copies streams and Slow has no sound.
+CONFIGURED_AUDIO_PRESETS = frozenset({"master", "edit", "upload", "vertical"})
+
+
 def resolve_monitor_audio_plan(
     choice: MusicChoice,
     output_samples: int,
@@ -303,16 +311,13 @@ def resolve_monitor_audio_plan(
     source_has_audio: bool,
     preset_key: str,
 ) -> OutputAudioPlan:
-    """Resolve an audition without granting a joined export capability.
+    """Resolve an audition under the same preset rule as its export.
 
-    A monitor can be bound to a compiled multi-occurrence output in S3, while
-    the export path remains deliberately bounded to one range until S4.  This
-    entry point shares the actual sample calculation; it does not accept the
-    export-only ``joined`` or ``bundle`` switches and therefore cannot weaken
-    their refusal by accident.
+    The monitor never serves a bundle, so it asks the shared capability for a
+    single output; it shares the actual sample calculation as well.
     """
     _validate_plan_request(choice, output_samples)
-    if preset_key != "master":
+    if not configured_audio_export_supported(preset_key):
         raise ValueError(
             f"music/audio choices are not supported for {preset_key} monitoring")
     return _resolve_configured_audio(
@@ -327,12 +332,11 @@ def configured_audio_export_supported(
 ) -> bool:
     """Whether one configured choice can be rendered by this output route.
 
-    Joined Master output is still the nominal 1x sequence contract: presets
-    which change crop, cadence or time remain outside this capability.  Keep
-    this decision shared with the panel so controls and worker authority cannot
-    drift into a silent drop.
+    Ordinary and joined outputs alike, on the nominal-1x presets above. Keep
+    this decision shared with the panel, the monitor and the worker so the
+    controls and the export authority cannot drift into a silent drop.
     """
-    return preset_key == "master" and not bundle
+    return preset_key in CONFIGURED_AUDIO_PRESETS and not bundle
 
 
 def resolve_audio_plan(
@@ -344,7 +348,7 @@ def resolve_audio_plan(
     joined: bool = False,
     bundle: bool = False,
 ) -> OutputAudioPlan:
-    """Resolve choices for a bounded nominal-1x Master export."""
+    """Resolve choices for a nominal-1x export on a supported preset."""
     _validate_plan_request(choice, output_samples)
     if not configured_audio_export_supported(
             preset_key, joined=joined, bundle=bundle):

@@ -61,8 +61,10 @@ from PySide6.QtWidgets import (
 
 from .audio_plan import (
     OUTPUT_RATE, AudioAsset, AudioMode, MusicChoice, SampleSpan,
-    ShortTrackPolicy, configured_audio_export_supported,
+    CONFIGURED_AUDIO_PRESETS, ShortTrackPolicy,
+    configured_audio_export_supported,
 )
+from .presets import PRESET_ORDER, PRESETS
 from .widgets import INNER, TIGHT, dim
 
 
@@ -84,9 +86,10 @@ SHORT_TRACK_LABELS: list[tuple[ShortTrackPolicy, str]] = [
     (ShortTrackPolicy.PLAY_ONCE, "Play once"),
 ]
 
-# Configured audio belongs to nominal-1x Master outputs. The resolver owns the
-# capability rule; this panel only explains a refusal rather than duplicating
-# a subtly different matrix.
+# The resolver owns which presets carry configured audio
+# (`CONFIGURED_AUDIO_PRESETS`); this panel only explains a refusal rather than
+# duplicating a subtly different matrix. This is the default a bare panel
+# assumes, not a second allow-list.
 SUPPORTED_PRESET = "master"
 
 
@@ -323,7 +326,7 @@ class MusicPanel(QWidget):
         reason = self._refusal(preset_key, joined, bundle)
         preview_only = bool(
             reason and audition and joined and not bundle
-            and preset_key == SUPPORTED_PRESET)
+            and preset_key in CONFIGURED_AUDIO_PRESETS)
         self._supported = reason == "" or preview_only
         message = (
             "Preview only: Assembly music can be auditioned here; joined "
@@ -353,10 +356,18 @@ class MusicPanel(QWidget):
         if bundle:
             return ("Music is not exported for a delivery bundle yet. Each "
                     "member would need its own choice.")
-        if preset_key != SUPPORTED_PRESET:
-            return (f"Music is not exported for the {preset_key} preset yet. "
-                    "Master is the one that carries it.")
-        return ""
+        # Why, per preset, and what does carry it. The choice itself is kept.
+        reasons = {
+            "social": "Social's file-size budget does not account for it yet",
+            "remux": "Remux copies the recording's streams unchanged",
+            "slowmo": "Slow motion has no sound",
+        }
+        why = reasons.get(preset_key, "this preset does not carry it")
+        carried = ", ".join(PRESETS[key].label for key in PRESET_ORDER
+                            if key in CONFIGURED_AUDIO_PRESETS)
+        return (f"Music is not exported for "
+                f"{PRESETS[preset_key].label if preset_key in PRESETS else preset_key}"
+                f": {why}. {carried} carry it; your choice is kept.")
 
     # -- showing and reading the widgets --------------------------------------
 

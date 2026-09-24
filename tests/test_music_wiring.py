@@ -627,9 +627,9 @@ def test_an_unsupported_preset_refuses_instead_of_dropping_the_music(
     probe.deliver()
     app.processEvents()
 
-    # Music is exported for Master only; every other preset refuses, and the
+    # Social is refused until its size budget carries music (stage B); the
     # panel is the one place that rule is written.
-    window.export_panel.preset_buttons["upload"].setChecked(True)
+    window.export_panel.preset_buttons["social"].setChecked(True)
     app.processEvents()
 
     said = warnings_from(monkeypatch)
@@ -638,7 +638,7 @@ def test_an_unsupported_preset_refuses_instead_of_dropping_the_music(
 
     assert window.jobs == [], "a refused action still queued something"
     assert said and "Nothing has been queued" in said[0]
-    assert "upload" in said[0]
+    assert "Social" in said[0]
 
 
 def test_a_track_still_being_read_refuses_the_action_upfront(
