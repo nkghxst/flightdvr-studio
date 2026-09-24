@@ -234,6 +234,13 @@ def test_actual_vertical_recipe_crops_source_before_preview_reduction(
 def test_colour_modes_match_their_export_picture_on_generated_swatches(
         tmp_path: Path):
     tools = _tools()
+    filters = subprocess.run(
+        [str(tools.ffmpeg), "-hide_banner", "-filters"],
+        capture_output=True, text=True, timeout=20)
+    assert filters.returncode == 0, filters.stderr
+    if not any(line.split()[1:2] == ["zscale"]
+               for line in filters.stdout.splitlines()):
+        pytest.skip("Rec.709 export/preview needs this ffmpeg's zscale filter")
     width, height = 320, 180
     swatches = ((35, 80, 190), (210, 60, 35),
                 (40, 180, 75), (195, 150, 35))
