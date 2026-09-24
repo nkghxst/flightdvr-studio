@@ -5282,7 +5282,10 @@ class MainWindow(QMainWindow):
             self.browser_panel.set_summary("No clip selected")
             return
         ranges = len(clip.real_selects)
-        parts = [clip.path.name, REVIEW_LABELS[clip.review]]
+        # The recording's name goes last: a long one is what gets cut on a
+        # narrow list, and its review state and range must stay readable
+        # (the whole line, name included, is on hover).
+        parts = [REVIEW_LABELS[clip.review]]
         if ranges:
             current = min(clip.current, ranges - 1)
             named = clip.real_selects[current].name
@@ -5291,6 +5294,7 @@ class MainWindow(QMainWindow):
         shown = sum(1 for row in range(self.table.rowCount())
                     if not self.table.isRowHidden(row))
         parts.append(f"{shown} of {len(self.clips)} shown")
+        parts.append(clip.path.name)
         item = self.table.item(self.table.currentRow(), 0)
         icon = item.icon() if item is not None else None
         pixmap = None
