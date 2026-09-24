@@ -34,6 +34,7 @@ class SequenceStrip(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._plan: SequencePlan | None = None
+        self._display_factor = 1
         self._position = 0.0
         self.setMinimumHeight(42)
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
@@ -58,10 +59,14 @@ class SequenceStrip(QWidget):
             return ()
         starts = [float(item.output.start)
                   for item in self._plan.occurrences]
-        return tuple(starts + [float(self._plan.total_duration)])
+        return tuple(value * self._display_factor for value in
+                     starts + [float(self._plan.total_duration)])
 
-    def set_plan(self, plan: SequencePlan | None) -> None:
+    def set_plan(self, plan: SequencePlan | None, display_factor: int = 1) -> None:
+        if display_factor < 1:
+            raise ValueError("display factor must be positive")
         self._plan = plan
+        self._display_factor = display_factor
         self._position = 0.0
         self.setEnabled(plan is not None)
         self.update()
@@ -69,7 +74,7 @@ class SequenceStrip(QWidget):
     def set_position(self, seconds: float) -> None:
         if self._plan is None:
             return
-        total = float(self._plan.total_duration)
+        total = float(self._plan.total_duration) * self._display_factor
         self._position = max(0.0, min(float(seconds), total))
         self.update()
 
@@ -83,7 +88,7 @@ class SequenceStrip(QWidget):
             return
         if not math.isfinite(numeric):
             return
-        total = float(self._plan.total_duration)
+        total = float(self._plan.total_duration) * self._display_factor
         bounded = max(0.0, min(numeric, total))
         self.scrub_requested.emit(self._plan.revision, bounded)
 
@@ -92,7 +97,8 @@ class SequenceStrip(QWidget):
             return
         width = max(1, self.width() - 2)
         ratio = max(0.0, min(float(x) - 1.0, width)) / width
-        self.request_position(ratio * float(self._plan.total_duration))
+        self.request_position(
+            ratio * float(self._plan.total_duration) * self._display_factor)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: D102
         if event.button() == Qt.MouseButton.LeftButton and self._plan is not None:
@@ -126,15 +132,15 @@ class SequenceStrip(QWidget):
                              "Add at least two resolved Assembly rows")
             return
 
-        total = float(plan.total_duration)
+        total = float(plan.total_duration) * self._display_factor
         if total <= 0:
             return
         colours = (QColor("#3b82f6"), QColor("#14b8a6"), QColor("#8b5cf6"))
         for index, occurrence in enumerate(plan.occurrences):
             left = bounds.left() + bounds.width() * (
-                float(occurrence.output.start) / total)
+                float(occurrence.output.start) * self._display_factor / total)
             right = bounds.left() + bounds.width() * (
-                float(occurrence.output.end) / total)
+                float(occurrence.output.end) * self._display_factor / total)
             colour = colours[index % len(colours)]
             colour.setAlpha(145)
             painter.fillRect(QRectF(left, bounds.top(), max(1.0, right - left),

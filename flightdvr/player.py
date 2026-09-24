@@ -62,7 +62,8 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 from .media import (
     NO_WINDOW, ClipInfo, Tools, frame_rate_mode, request_stop, stop_process,
 )
-from .presets import VerticalCrop
+from .presets import VerticalCrop, colour_filters
+from .preview_recipe import PictureOccurrence, PreviewRecipe, PictureTerminal
 from .sequence_plan import (
     OccurrenceId, SequencePlan, SequencePlanError, SequenceTerminal,
 )
@@ -353,6 +354,45 @@ def build_command(tools: Tools, clip: ClipInfo, start: float,
     return command
 
 
+def build_recipe_command(tools: Tools, clip: ClipInfo, start: float,
+                         size: PreviewSize, recipe: PreviewRecipe,
+                         picture: PictureOccurrence) -> list[str]:
+    """Decode one output occurrence without discarding source frames first."""
+    fast, accurate = seek_pair(start)
+    filters = []
+    if picture.crop is not None:
+        crop = picture.crop
+        filters.append(f"crop={crop.width}:{crop.height}:{crop.x}:{crop.y}")
+        filters.append(
+            f"scale={recipe.canvas[0]}:{recipe.canvas[1]}:flags=lanczos")
+    else:
+        filters += [
+            f"scale={recipe.canvas[0]}:{recipe.canvas[1]}:"
+            "force_original_aspect_ratio=decrease:flags=lanczos",
+            f"pad={recipe.canvas[0]}:{recipe.canvas[1]}:(ow-iw)/2:(oh-ih)/2",
+        ]
+    filters += colour_filters(recipe.colour, clip, "rgb24")
+    filters += ["setsar=1"]
+    if recipe.time_factor != 1:
+        filters.append(f"setpts={recipe.time_factor}*PTS")
+    filters += [
+        f"fps={float(recipe.cadence):g}",
+        f"scale={size.width}:{size.height}:"
+        "force_original_aspect_ratio=decrease:flags=lanczos",
+        f"pad={size.width}:{size.height}:(ow-iw)/2:(oh-ih)/2",
+    ]
+    command = [str(tools.ffmpeg), "-hide_banner", "-nostdin", "-v", "error"]
+    if fast > 0.01:
+        command += ["-ss", f"{fast:.3f}"]
+    command += ["-copyts", "-start_at_zero", "-i", str(clip.path)]
+    if accurate > 0.01:
+        command += ["-ss", f"{accurate:.3f}"]
+    return command + [
+        "-an", "-vf", ",".join(filters), *frame_rate_mode(tools, "cfr"),
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+    ]
+
+
 def build_frame_window_command(tools: Tools, clip: ClipInfo,
                                window: FrameWindow,
                                size: PreviewSize) -> list[str]:
@@ -491,7 +531,9 @@ class DecodeWorker(QThread):
 
     def __init__(self, tools: Tools, clip: ClipInfo, start: float,
                  size: PreviewSize, generation: int,
-                 frames: queue.Queue, fps: int = PREVIEW_FPS, parent=None):
+                 frames: queue.Queue, fps: int = PREVIEW_FPS, parent=None,
+                 recipe: PreviewRecipe | None = None,
+                 picture: PictureOccurrence | None = None):
         super().__init__(parent)
         self.tools = tools
         self.clip = clip
@@ -500,6 +542,8 @@ class DecodeWorker(QThread):
         self.generation = generation
         self.frames = frames
         self.fps = fps
+        self.recipe = recipe
+        self.picture = picture
         self._cancel = False
         self._process: subprocess.Popen | None = None
 
@@ -519,8 +563,14 @@ class DecodeWorker(QThread):
         request_stop(self._process)
 
     def run(self) -> None:  # noqa: D102  (QThread entry point)
-        command = build_command(self.tools, self.clip, self.start_at,
-                                self.size, self.fps)
+        if self.recipe is None:
+            command = build_command(self.tools, self.clip, self.start_at,
+                                    self.size, self.fps)
+        else:
+            assert self.picture is not None
+            command = build_recipe_command(
+                self.tools, self.clip, self.start_at, self.size,
+                self.recipe, self.picture)
         try:
             proc = subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -547,7 +597,9 @@ class DecodeWorker(QThread):
         try:
             for frame in read_frames(proc.stdout, self.size.frame_bytes,
                                      should_stop=lambda: self._cancel):
-                when = seconds_for_index(index, self.start_at, self.fps)
+                supply_rate = (float(self.recipe.cadence) * self.recipe.time_factor
+                               if self.recipe is not None else self.fps)
+                when = seconds_for_index(index, self.start_at, supply_rate)
                 index += 1
                 # A timeout rather than a bare put: the queue filling is how
                 # back-pressure works, but a blocked put would ignore stop().
@@ -712,6 +764,9 @@ class PreviewPlayer(QObject):
     sequence_frame_ready = Signal(
         object, str, object, float, float
     )  # image, revision, occurrence, output seconds, source seconds
+    output_frame_ready = Signal(
+        object, object, int, object, float, float
+    )  # image, material key, binding epoch, occurrence, output, source
     precise_frame_ready = Signal(object, float, int)  # image, seconds, source frame
     precise_loading = Signal(bool)
     precise_failed = Signal(str)
@@ -753,6 +808,9 @@ class PreviewPlayer(QObject):
         self._sequence_active: _SequenceLane | None = None
         self._sequence_next: _SequenceLane | None = None
         self._sequence_pending_start: _SequenceStart | None = None
+        self._picture_recipe: PreviewRecipe | None = None
+        self._picture_binding = 0
+        self._inspect_recipe_once = False
 
         self._frame_size = PreviewSize(*FRAME_CACHE_SIZE)
         self._frame_cache = FrameCache()
@@ -805,6 +863,9 @@ class PreviewPlayer(QObject):
             resolved[occurrence.id] = clip
 
         self.stop()
+        self._picture_recipe = None
+        self._picture_binding += 1
+        self._timer.setInterval(max(1, 1000 // PREVIEW_FPS))
         # A stopped source DecodeWorker can report after its thread unwinds.
         # Joined playback may be capacity-gated and therefore not create a new
         # worker immediately, so fence the old source generation explicitly.
@@ -817,6 +878,38 @@ class PreviewPlayer(QObject):
         self.position = max(0.0, min(float(position), total))
         self._playclock.jump_to(self.position)
         self._starved = True
+
+    def load_recipe(
+        self, recipe: PreviewRecipe,
+        clips_by_occurrence: Mapping[OccurrenceId, ClipInfo],
+        position: float = 0.0,
+    ) -> None:
+        """Bind transformed Output to this same player and sequence lanes."""
+        self.load_sequence(recipe.sequence, clips_by_occurrence)
+        self._picture_recipe = recipe
+        self._picture_binding += 1
+        self.position = max(0.0, min(float(position), float(recipe.duration)))
+        self._playclock.jump_to(self.position)
+        self._timer.setInterval(max(1, round(1000 / float(recipe.cadence))))
+
+    def inspect_recipe(self, seconds: float, view_width: int = 0) -> None:
+        """Decode one transformed still at a nonterminal output position."""
+        if self._picture_recipe is None:
+            return
+        self.seek(seconds)
+        if self.position >= float(self._picture_recipe.duration):
+            return
+        self._inspect_recipe_once = True
+        self.play(view_width)
+
+    @property
+    def recipe_key(self) -> tuple | None:
+        return (self._picture_recipe.material_key
+                if self._picture_recipe is not None else None)
+
+    @property
+    def recipe_binding(self) -> int:
+        return self._picture_binding
 
     @property
     def sequence_revision(self) -> str | None:
@@ -832,12 +925,19 @@ class PreviewPlayer(QObject):
         if self.is_playing:
             return
         if self._sequence_plan is not None:
-            if self.position >= float(self._sequence_plan.total_duration):
+            total = (self._picture_recipe.duration if self._picture_recipe
+                     else self._sequence_plan.total_duration)
+            if self.position >= float(total):
                 return
             self._clear_frame_cache()
             self._idle.stop()
             if view_width > 0 and self._sequence_active is None:
-                self.size = choose_size(view_width)
+                chosen = choose_size(view_width)
+                if (self._picture_recipe is not None
+                        and self._picture_recipe.canvas[1]
+                        > self._picture_recipe.canvas[0]):
+                    chosen = PreviewSize(chosen.height, chosen.width)
+                self.size = chosen
             if self._sequence_active is None:
                 self._request_sequence_active(self.position)
             self._playclock.jump_to(self.position)
@@ -881,6 +981,7 @@ class PreviewPlayer(QObject):
         self.pause() if self.is_playing else self.play(view_width)
 
     def stop(self) -> None:
+        self._inspect_recipe_once = False
         was_playing = self.is_playing
         self.is_playing = False
         self._timer.stop()
@@ -1082,6 +1183,8 @@ class PreviewPlayer(QObject):
         self._retire_sequence_lanes()
         self._sequence_plan = None
         self._sequence_clips = {}
+        self._picture_recipe = None
+        self._picture_binding += 1
 
     def _retire_sequence_lane(self, lane: _SequenceLane | None) -> None:
         if lane is None:
@@ -1170,9 +1273,16 @@ class PreviewPlayer(QObject):
         frames: queue.Queue = queue.Queue(maxsize=QUEUE_FRAMES)
         self._generation += 1
         generation = self._generation
-        worker = self._make_worker(
-            self.tools, clip, request.source_start, self.size,
-            generation, frames, PREVIEW_FPS, self)
+        if self._picture_recipe is None:
+            worker = self._make_worker(
+                self.tools, clip, request.source_start, self.size,
+                generation, frames, PREVIEW_FPS, self)
+        else:
+            worker = self._make_worker(
+                self.tools, clip, request.source_start, self.size,
+                generation, frames, PREVIEW_FPS, self,
+                recipe=self._picture_recipe,
+                picture=self._picture_recipe.occurrence(occurrence.id))
         worker.failed.connect(self._sequence_worker_failed)
         worker.ended.connect(self._sequence_worker_ended)
         if hasattr(worker, "finished"):
@@ -1196,10 +1306,12 @@ class PreviewPlayer(QObject):
         if plan is None:
             return
         try:
-            location = plan.locate_output(output_seconds)
+            location = (self._picture_recipe.map_output_time(output_seconds)
+                        if self._picture_recipe is not None else
+                        plan.locate_output(output_seconds))
         except SequencePlanError:
             return
-        if isinstance(location, SequenceTerminal):
+        if isinstance(location, (SequenceTerminal, PictureTerminal)):
             return
         self._queue_sequence_start(_SequenceStart(
             self._sequence_epoch,
@@ -1235,13 +1347,15 @@ class PreviewPlayer(QObject):
         plan = self._sequence_plan
         if plan is None:
             return
-        target = max(0.0, min(float(seconds), float(plan.total_duration)))
+        total = (self._picture_recipe.duration if self._picture_recipe
+                 else plan.total_duration)
+        target = max(0.0, min(float(seconds), float(total)))
         self._cancel_frame_window()
         self._retire_sequence_lanes()
         self.position = target
         self._playclock.jump_to(target)
         self._starved = True
-        if self.is_playing and target < float(plan.total_duration):
+        if self.is_playing and target < float(total):
             self._request_sequence_active(target)
         elif self.is_playing:
             self._finish_sequence()
@@ -1266,8 +1380,10 @@ class PreviewPlayer(QObject):
         self.failed.emit(message)
 
     def _sequence_output_time(self, occurrence, source_seconds: float) -> float:
-        return (float(occurrence.output.start)
-                + source_seconds - float(occurrence.source.start))
+        factor = (self._picture_recipe.time_factor
+                  if self._picture_recipe is not None else 1)
+        return factor * (float(occurrence.output.start)
+                         + source_seconds - float(occurrence.source.start))
 
     def _pick_sequence(
         self, lane: _SequenceLane, wanted: float,
@@ -1323,7 +1439,8 @@ class PreviewPlayer(QObject):
         if plan is None:
             return
         was_playing = self.is_playing
-        self.position = float(plan.total_duration)
+        self.position = float(self._picture_recipe.duration
+                              if self._picture_recipe else plan.total_duration)
         self._playclock.jump_to(self.position)
         self.is_playing = False
         self._timer.stop()
@@ -1424,17 +1541,21 @@ class PreviewPlayer(QObject):
         plan = self._sequence_plan
         if plan is None:
             return
+        total = (self._picture_recipe.duration if self._picture_recipe
+                 else plan.total_duration)
         wanted = min(
             self._playclock.advance(starved=self._starved),
-            float(plan.total_duration),
+            float(total),
         )
-        if wanted >= float(plan.total_duration) - 1e-9:
-            self.playback_tick.emit(float(plan.total_duration), False)
+        if wanted >= float(total) - 1e-9:
+            self.playback_tick.emit(float(total), False)
             self._finish_sequence()
             return
 
         try:
-            location = plan.locate_output(wanted)
+            location = (self._picture_recipe.map_output_time(wanted)
+                        if self._picture_recipe is not None else
+                        plan.locate_output(wanted))
         except SequencePlanError:
             self._sequence_worker_failed(
                 self._sequence_active.generation
@@ -1442,7 +1563,7 @@ class PreviewPlayer(QObject):
                 "The joined output clock no longer resolves",
             )
             return
-        if isinstance(location, SequenceTerminal):
+        if isinstance(location, (SequenceTerminal, PictureTerminal)):
             self._finish_sequence()
             return
 
@@ -1464,7 +1585,9 @@ class PreviewPlayer(QObject):
                 return
 
         occurrence = plan.get_occurrence(active.occurrence)
-        remaining = float(occurrence.output.end) - wanted
+        factor = (self._picture_recipe.time_factor
+                  if self._picture_recipe is not None else 1)
+        remaining = factor * float(occurrence.output.end) - wanted
         if remaining <= SEQUENCE_PREROLL_SECONDS + 1e-9:
             self._request_sequence_preroll()
 
@@ -1473,9 +1596,19 @@ class PreviewPlayer(QObject):
         self.position = wanted
         if frame is not None:
             output_seconds, source_seconds, data = frame
-            self.sequence_frame_ready.emit(
-                self._to_image(data), plan.revision, active.occurrence,
-                output_seconds, source_seconds)
+            image = self._to_image(data)
+            if self._picture_recipe is not None:
+                self.output_frame_ready.emit(
+                    image, self._picture_recipe.material_key,
+                    self._picture_binding, active.occurrence,
+                    output_seconds, source_seconds)
+                if self._inspect_recipe_once:
+                    self._inspect_recipe_once = False
+                    self.pause()
+            else:
+                self.sequence_frame_ready.emit(
+                    image, plan.revision, active.occurrence,
+                    output_seconds, source_seconds)
         elif active.ended and active.pending is None and active.frames.empty():
             # A source ended before its nominal half-open occurrence boundary.
             # Do not silently skip that material to the next row.

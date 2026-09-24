@@ -1829,6 +1829,55 @@ def test_an_ordinary_planned_output_is_not_read_on_source_time(window, app):
     assert window.context_for_working(first).bound_to_sequence is False
 
 
+def test_selected_output_binds_picture_recipe_and_restores_source(
+        window, app, monkeypatch):
+    first, second = two_planned_targets(window, app)
+    in_flow(window, app)
+    window._select_working_target(second)
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+
+    recipe = window._output_recipe
+    assert recipe is not None and recipe.target == second
+    assert recipe.sequence.occurrences[0].source.start == 2
+    assert window.player.recipe_key == recipe.material_key
+    assert window.preview_view.sequence_strip.seams == (0.0, 4.0)
+    assert "Selected output picture" in window.flow_source_note.text()
+    assert window.context_for_working(second).bound_to_sequence
+    assert len(window.findChildren(type(window.player))) == 1
+
+    inspected = []
+    monkeypatch.setattr(window.player, "inspect_recipe",
+                        lambda *args: inspected.append(args))
+    window.preview_view.sequence_strip.request_position(1.0)
+    assert inspected and inspected[-1][0] == 1.0
+    window.preview_view.sequence_strip.request_position(4.0)
+    assert len(inspected) == 1, "terminal must request no source frame"
+
+    window._show_stage(Stage.TRIM)
+    app.processEvents()
+    assert window._output_recipe is None
+    assert window.player.recipe_key is None
+    assert window._sidebar_target == second
+    assert window.context_for_working(first).bound_to_sequence is False
+
+
+def test_slow_selected_output_strip_uses_display_time(window, app):
+    first, _second = two_planned_targets(window, app)
+    in_flow(window, app)
+    window._select_working_target(first)
+    window.output_plan.set_choices(
+        first, "slowmo", window.current_settings(), MusicChoice())
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+
+    recipe = window._output_recipe
+    assert recipe is not None and recipe.time_factor == 2
+    assert recipe.duration == 8
+    assert window.preview_view.sequence_strip.seams == (0.0, 8.0)
+    assert recipe.map_output_time(4).source == 3
+
+
 def test_the_fixed_actions_say_what_this_page_can_do(window, app):
     """All versus one must be unmistakable, and neither is called "render":
     queued work waits for Start. Queue's own page cannot queue more, and
