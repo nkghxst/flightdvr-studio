@@ -183,26 +183,26 @@ class ExportPanel(QWidget):
             grid.setColumnStretch(column, 1 if column == columns else 0)
 
     def _fit_presets(self) -> None:
-        """As many preset buttons to a row as the width holds."""
+        """As many preset buttons to a row as the width holds.
+
+        The grid is asked, not predicted: it charges its own spacing and the
+        style its own margins, and a sum of button hints came out 1px wide
+        on macOS.
+        """
         box = getattr(self, "_preset_box", None)
         if box is None:
             return
         margins = box.contentsMargins()
+        inner = box.layout().contentsMargins()
         room = (self.scroller.viewport().width() - margins.left()
-                - margins.right() - 2)
+                - margins.right() - inner.left() - inner.right())
         if room <= 0:
             return
-        spacing = self._preset_grid.horizontalSpacing()
-        spacing = spacing if spacing >= 0 else 6
-        widths = [self.preset_buttons[key].sizeHint().width()
-                  for key in PRESET_ORDER]
-        for columns in range(len(widths), 0, -1):
-            # A grid column is as wide as its widest button, in every row.
-            column_widths = [max(widths[i::columns])
-                             for i in range(columns)]
-            if sum(column_widths) + spacing * (columns - 1) <= room:
+        for columns in range(len(PRESET_ORDER), 0, -1):
+            self._arrange_presets(columns)
+            self._preset_grid.invalidate()
+            if self.preset_row.minimumSizeHint().width() <= room:
                 break
-        self._arrange_presets(columns)
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt naming)
         if (watched is self.scroller.viewport()
