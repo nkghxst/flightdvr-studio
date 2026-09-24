@@ -35,7 +35,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QThread, Qt
+from PySide6.QtCore import QPoint, QSettings, QThread, Qt
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -76,6 +76,13 @@ def window(app, tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    # Windows NativeFormat ignores the usual default-format/path redirection.
+    # Patch the module's factory before construction so stage navigation never
+    # reads or writes the user's real FlightDVR window settings.
+    monkeypatch.setattr(
+        "flightdvr.ui.QSettings",
+        lambda *args, **kwargs: QSettings(
+            str(tmp_path / "flow-settings.ini"), QSettings.Format.IniFormat))
     monkeypatch.setattr("flightdvr.ui.ScanWorker", wiring._NoScan)
     monkeypatch.setattr("flightdvr.ui.HardwareProbe", wiring._NoProbe)
     monkeypatch.setattr("flightdvr.ui.FilmstripLoader", wiring._NoStrip)
@@ -1878,6 +1885,115 @@ def test_slow_selected_output_strip_uses_display_time(window, app):
     assert recipe.map_output_time(4).source == 3
 
 
+def test_selected_picture_survives_music_output_stage_moves(window, app):
+    first, _second = two_planned_targets(window, app)
+    in_flow(window, app)
+    window._select_working_target(first)
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+    recipe = window._output_recipe
+    assert recipe is not None
+    binding = window.player.recipe_binding
+    for stage in (Stage.MUSIC, Stage.OUTPUT, Stage.MUSIC):
+        window._show_stage(stage)
+        app.processEvents()
+        assert window._output_recipe is not None
+        assert window._output_recipe.material_key == recipe.material_key
+        assert window.player.recipe_binding == binding
+        assert window.preview_view.sequence_strip.plan is recipe.sequence
+        assert window._active_context(stage).bound_to_sequence
+    window._show_stage(Stage.ASSEMBLE)
+    app.processEvents()
+    assert window._output_recipe is None, (
+        "ordinary output picture must not impersonate Assembly")
+
+
+def test_selected_assembly_picture_survives_assemble_music_output(
+        window, app):
+    make_aba_assembly(window, app)
+    in_flow(window, app)
+    window._show_stage(Stage.MUSIC)
+    target = window._working_outputs()[0].target
+    window._select_working_target(target)
+    app.processEvents()
+    recipe = window._output_recipe
+    assert recipe is not None
+    assert [one.fingerprint for one in recipe.sequence.occurrences] == [
+        window.clips[0].fingerprint, window.clips[1].fingerprint,
+        window.clips[0].fingerprint]
+    binding = window.player.recipe_binding
+    for stage in (Stage.ASSEMBLE, Stage.OUTPUT, Stage.MUSIC):
+        window._show_stage(stage)
+        app.processEvents()
+        assert window._output_recipe is not None
+        assert window._output_recipe.material_key == recipe.material_key
+        assert window.player.recipe_binding == binding
+        assert window.preview_view.sequence_strip.plan is recipe.sequence
+
+
+def test_output_picture_identity_fences_a_b_a_and_stale_frames(
+        window, app, monkeypatch):
+    first, second = two_planned_targets(window, app)
+    in_flow(window, app)
+    window._select_working_target(first)
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+    original = window._output_recipe
+    assert original is not None
+    original_binding = window.player.recipe_binding
+    painted = []
+    monkeypatch.setattr(window.frame_view, "set_image",
+                        lambda image: painted.append(image))
+    image = QImage(2, 2, QImage.Format.Format_RGB32)
+    window._select_working_target(second)
+    app.processEvents()
+    assert window._output_recipe is not None
+    assert window._output_recipe.target == second
+    window._preview_output_frame_ready(
+        image, original.material_key, original_binding,
+        original.sequence.occurrences[0].id, 0.0, 1.0)
+    assert not painted, "old target painted over the new selected output"
+
+    window._select_working_target(first)
+    app.processEvents()
+    assert window._output_recipe is not None
+    assert window._output_recipe.material_key == original.material_key
+    assert window.player.recipe_binding > original_binding
+    window._preview_output_frame_ready(
+        image, original.material_key, original_binding,
+        original.sequence.occurrences[0].id, 0.0, 1.0)
+    assert not painted, "old A callback passed after an A/B/A target roundtrip"
+    window._preview_output_frame_ready(
+        image, original.material_key, window.player.recipe_binding,
+        original.sequence.occurrences[0].id, 0.0, 1.0)
+    assert painted == [image]
+
+
+def test_audio_and_quality_edits_do_not_restart_selected_picture(window, app):
+    first, _second = two_planned_targets(window, app)
+    in_flow(window, app)
+    window._select_working_target(first)
+    window._show_stage(Stage.OUTPUT)
+    app.processEvents()
+    recipe = window._output_recipe
+    assert recipe is not None
+    binding = window.player.recipe_binding
+    window._store_music(first, MusicChoice(mode=AudioMode.NO_SOUND))
+    window._refresh_sidebar()
+    app.processEvents()
+    assert window.player.recipe_binding == binding
+    assert window._output_recipe.material_key == recipe.material_key
+
+    planned = window.output_plan.get(first)
+    quality = planned.settings
+    quality.master_crf += 1
+    window.output_plan.set_choices(first, planned.preset_key, quality,
+                                   planned.music)
+    window._refresh_output_picture()
+    assert window.player.recipe_binding == binding
+    assert window._output_recipe.material_key == recipe.material_key
+
+
 def test_the_fixed_actions_say_what_this_page_can_do(window, app):
     """All versus one must be unmistakable, and neither is called "render":
     queued work waits for Start. Queue's own page cannot queue more, and
@@ -3353,3 +3469,217 @@ def test_roomy_flow_output_stays_unfolded(window, app):
             panel.scroller.viewport().height())
     else:
         assert panel.out_edit.isVisible()
+
+
+def test_w5_native_generated_output_acceptance(window, app, tmp_path):
+    """Opt-in native-only artifact run; no real card, settings or device media."""
+    import json
+    import time
+    import subprocess
+
+    from PySide6.QtCore import QTimer
+    from flightdvr.media import find_tools
+    from flightdvr.player import PreviewSize, build_recipe_command, choose_size
+    from tests.test_preview_recipe_media import (
+        SOURCE, BITS, BLOCK, MARK_X, MARK_Y, STEP, _marked_frame,
+    )
+
+    destination = os.environ.get("FLIGHTDVR_W5_NATIVE_DIR")
+    if not destination:
+        pytest.skip("opt-in generated native acceptance")
+    assert app.platformName() == "windows", "offscreen is not native acceptance"
+    theme = os.environ.get("FLIGHTDVR_W5_THEME", "unlabelled")
+    artifact_dir = Path(destination)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    tools = find_tools()
+    source = tmp_path / "native-90fps.nut"
+    raw = b"".join(_marked_frame(index) for index in range(90))
+    made = subprocess.run([
+        str(tools.ffmpeg), "-hide_banner", "-nostdin", "-v", "error", "-y",
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "320x180",
+        "-r", "90", "-i", "pipe:0", "-an", "-c:v", "ffv1",
+        "-level", "3", "-g", "1", str(source),
+    ], input=raw, capture_output=True, timeout=40)
+    assert made.returncode == 0, made.stderr.decode("utf-8", "replace")
+    clip = ClipInfo(source, source.stat().st_size, datetime(2026, 9, 24),
+                    duration=1.0, width=SOURCE[0], height=SOURCE[1],
+                    fps=90.0, video_codec="ffv1")
+    window._add_clip(window._scan_generation, clip)
+    row = next(row for row in range(window.table.rowCount())
+               if window.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+               == str(source))
+    tick(window, row)
+    in_flow(window, app)
+    target = next(one.target for one in window._working_outputs()
+                  if one.pieces[0].path == source)
+    window._select_working_target(target)
+    window.export_panel.preset_buttons["slowmo"].click()
+    assert window.output_plan.get(target).preset_key == "slowmo"
+
+    def ordinal(image: QImage) -> int:
+        value = 0
+        scale = image.width() / SOURCE[0]
+        y = int((MARK_Y + BLOCK // 2) * scale)
+        for bit in range(BITS):
+            x = int((MARK_X + bit * STEP + BLOCK // 2) * scale)
+            if image.pixelColor(x, y).red() > 127:
+                value |= 1 << bit
+        return value
+
+    original_size = window.size()
+    results = []
+    for label, width, height in (("normal", 1440, 940),
+                                 ("compact", 1060, 700)):
+        window.resize(width, height)
+        window.show()
+        window._show_stage(Stage.OUTPUT)
+        settled(app)
+        recipe = window._output_recipe
+        assert recipe is not None and recipe.target == target
+        assert recipe.cadence == 45 and recipe.duration == 2
+        assert window.frame_view.aspect == pytest.approx(16 / 9)
+        assert window.frame_view.vertical_crop is None
+        assert window.preview_view.sequence_strip.seams == (0.0, 2.0)
+        assert window.export_panel.add_button.isVisible()
+        assert window.flow_shell.secondary_button.isVisible()
+
+        chosen = choose_size(window.frame_view.width())
+        supply_size = PreviewSize(chosen.width, chosen.height)
+        supply_command = build_recipe_command(
+            tools, clip, 0.0, supply_size, recipe,
+            recipe.occurrences[0])
+        supply_started = time.perf_counter()
+        direct = subprocess.run(
+            supply_command, capture_output=True, timeout=40)
+        supply_elapsed = time.perf_counter() - supply_started
+        assert direct.returncode == 0, direct.stderr.decode("utf-8", "replace")
+        assert len(direct.stdout) == 90 * supply_size.frame_bytes
+
+        painted, heartbeat, ended, failures, ticks = [], [], [], [], []
+        timer = QTimer(window)
+        timer.setInterval(10)
+        timer.timeout.connect(lambda: heartbeat.append(time.perf_counter()))
+
+        def on_frame(image, key, binding, occurrence, output, source_time):
+            if key == recipe.material_key:
+                painted.append((time.perf_counter(), ordinal(image),
+                                output, source_time, occurrence.ordinal))
+
+        window.player.output_frame_ready.connect(on_frame)
+        window.player.ended.connect(lambda: ended.append(time.perf_counter()))
+        window.player.failed.connect(failures.append)
+        window.player.playback_tick.connect(
+            lambda position, starved: ticks.append(
+                (time.perf_counter(), position, starved)))
+        timer.start()
+        started = time.perf_counter()
+        window._toggle_play()
+        shot = artifact_dir / f"{theme}-{label}-output.png"
+        captured = False
+        while not ended and not failures and time.perf_counter() - started < 20:
+            QTest.qWait(20)
+            if painted and not captured:
+                app.processEvents()
+                assert window.grab().save(str(shot))
+                captured = True
+        timer.stop()
+        window.player.output_frame_ready.disconnect(on_frame)
+        diagnostics = {
+            "elapsed": round(time.perf_counter() - started, 3),
+            "painted": len(painted),
+            "last_output": painted[-1][2] if painted else None,
+            "player_position": window.player.position,
+            "player_playing": window.player.is_playing,
+            "worker_running": (window.player._sequence_active.worker.isRunning()
+                               if window.player._sequence_active else None),
+            "queue_size": (window.player._sequence_active.frames.qsize()
+                           if window.player._sequence_active else None),
+            "pending_frame": (window.player._sequence_active.pending[0]
+                              if window.player._sequence_active
+                              and window.player._sequence_active.pending
+                              else None),
+            "worker_ended": (window.player._sequence_active.ended
+                             if window.player._sequence_active else None),
+            "starved": window.player._starved,
+            "timer_active": window.player._timer.isActive(),
+            "status": window.statusBar().currentMessage(),
+            "failures": failures,
+            "tick_count": len(ticks),
+            "starved_tick_count": sum(one[2] for one in ticks),
+            "last_ticks": ticks[-8:],
+            "first_paint_delay": (painted[0][0] - started if painted else None),
+            "last_paint_delay": (painted[-1][0] - started if painted else None),
+        }
+        assert ended, f"{label}: playback did not reach terminal: {diagnostics}"
+        assert painted, f"{label}: no transformed picture painted"
+        assert captured and shot.stat().st_size > 0
+        assert window.preview_view.sequence_strip.position == pytest.approx(2.0)
+        assert not window.player.is_playing
+        results.append({
+            "theme": theme, "size_case": label,
+            "requested_window": [width, height],
+            "actual_window": [window.width(), window.height()],
+            "picture_widget": [window.frame_view.width(),
+                               window.frame_view.height()],
+            "supplied_cadence": 45, "source_picture_count": 90,
+            "direct_supply_seconds": round(supply_elapsed, 3),
+            "direct_supply_frame_count": len(direct.stdout) // supply_size.frame_bytes,
+            "direct_supply_size": [supply_size.width, supply_size.height],
+            "painted_count": len(painted),
+            "painted_ordinals": [one[1] for one in painted],
+            "painted_output_seconds": [one[2] for one in painted],
+            "painted_source_seconds": [one[3] for one in painted],
+            "tick_count": len(ticks),
+            "starved_tick_count": sum(one[2] for one in ticks),
+            "first_paint_delay_seconds": round(painted[0][0] - started, 3),
+            "last_paint_delay_seconds": round(painted[-1][0] - started, 3),
+            "max_ui_heartbeat_gap_ms": round(
+                max((b - a for a, b in zip(heartbeat, heartbeat[1:])),
+                    default=0) * 1000, 3),
+            "elapsed_seconds": round(ended[0] - started, 3),
+            "screenshot": str(shot),
+            "palette_window": app.palette().window().color().name(),
+            "palette_text": app.palette().windowText().color().name(),
+        })
+        window.player.seek(0.0)
+        window.preview_view.sequence_strip.set_position(0.0)
+    # Exercise actual controls after the timing sample so interaction does not
+    # masquerade as a slow decoder or alter the measured two-second run.
+    strip = window.preview_view.sequence_strip
+    QTest.mouseClick(
+        strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+        QPoint(strip.width() // 2, strip.height() // 2))
+    settled(app)
+    assert 0.8 < window.player.position < 1.2
+    recipe_key = window._output_recipe.material_key
+    QTest.mouseClick(window.flow_shell.stage_buttons[Stage.MUSIC],
+                     Qt.MouseButton.LeftButton)
+    settled(app)
+    assert window._output_recipe.material_key == recipe_key
+    QTest.mouseClick(window.flow_shell.stage_buttons[Stage.OUTPUT],
+                     Qt.MouseButton.LeftButton)
+    settled(app)
+    assert window._output_recipe.material_key == recipe_key
+    window.player.pause()
+    assert not window.player.is_playing
+    window.raise_()
+    window.activateWindow()
+    QTest.mouseClick(window.frame_view, Qt.MouseButton.LeftButton)
+    settled(app)
+    assert window.frame_view.hasFocus(), "native window did not grant picture focus"
+    QTest.keyClick(window.frame_view, Qt.Key.Key_Space)
+    settled(app)
+    assert window.player.is_playing
+    QTest.keyClick(window.frame_view, Qt.Key.Key_Space)
+    settled(app)
+    assert not window.player.is_playing
+    QTest.keyClick(window.frame_view, Qt.Key.Key_Escape)
+    settled(app)
+    assert not window.player.is_playing
+    window.resize(original_size)
+    window.set_view_mode(Mode.CLASSIC)
+    settled(app)
+    assert not [thread for thread in window.findChildren(QThread)
+                if thread.isRunning()]
+    (artifact_dir / f"{theme}-results.json").write_text(
+        json.dumps(results, indent=2), encoding="utf-8")

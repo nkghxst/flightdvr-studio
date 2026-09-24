@@ -71,6 +71,19 @@ def test_slow_is_a_derived_clock_not_a_rewritten_sequence():
         assert isinstance(result.map_output_time(4), PictureTerminal)
 
 
+def test_integer_sample_endpoints_keep_slow_seams_half_open():
+    a, b = clip("A.ts", span=(2, 4)), clip("B.ts", span=(5, 8))
+    result = recipe([a, b, a], "slowmo")
+    rate = 48_000
+    for sample, ordinal in (
+        (0, 0), (4 * rate - 1, 0), (4 * rate, 1),
+        (10 * rate - 1, 1), (10 * rate, 2), (14 * rate - 1, 2),
+    ):
+        assert result.map_output_time(Fraction(sample, rate)).occurrence.ordinal == ordinal
+    assert isinstance(result.map_output_time(Fraction(14 * rate, rate)),
+                      PictureTerminal)
+
+
 def test_vertical_uses_source_crop_and_export_canvas():
     result = recipe([clip("portrait.ts")], "vertical")
     crop = result.occurrences[0].crop

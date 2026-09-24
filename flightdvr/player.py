@@ -187,6 +187,7 @@ class _SequenceLane:
     frames: queue.Queue
     pending: tuple[float, bytes] | None = None
     ended: bool = False
+    last_output: float | None = None
 
 
 @dataclass(frozen=True)
@@ -386,7 +387,10 @@ def build_recipe_command(tools: Tools, clip: ClipInfo, start: float,
         command += ["-ss", f"{fast:.3f}"]
     command += ["-copyts", "-start_at_zero", "-i", str(clip.path)]
     if accurate > 0.01:
-        command += ["-ss", f"{accurate:.3f}"]
+        # This output-side seek is evaluated on the filtered presentation
+        # clock. Slow has already doubled that clock, so a source-time seek
+        # must be doubled too; otherwise asking for source 0.2 starts at 0.1.
+        command += ["-ss", f"{accurate * recipe.time_factor:.3f}"]
     return command + [
         "-an", "-vf", ",".join(filters), *frame_rate_mode(tools, "cfr"),
         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
@@ -1596,6 +1600,7 @@ class PreviewPlayer(QObject):
         self.position = wanted
         if frame is not None:
             output_seconds, source_seconds, data = frame
+            active.last_output = output_seconds
             image = self._to_image(data)
             if self._picture_recipe is not None:
                 self.output_frame_ready.emit(
@@ -1610,13 +1615,25 @@ class PreviewPlayer(QObject):
                     image, plan.revision, active.occurrence,
                     output_seconds, source_seconds)
         elif active.ended and active.pending is None and active.frames.empty():
-            # A source ended before its nominal half-open occurrence boundary.
-            # Do not silently skip that material to the next row.
-            self._sequence_worker_failed(
-                active.generation,
-                "The joined preview source ended before its occurrence boundary",
+            # The final picture of a half-open cadence interval precedes the
+            # occurrence boundary. Let the clock cross that last interval;
+            # an earlier EOF still fails rather than skipping missing media.
+            boundary = factor * float(occurrence.output.end)
+            cadence = (self._picture_recipe.cadence
+                       if self._picture_recipe is not None else 0)
+            complete_last_interval = (
+                active.last_output is not None and cadence > 0 and
+                boundary - active.last_output <= 1.0 / cadence + 1e-6
             )
-            return
+            if complete_last_interval:
+                self._starved = False
+                starved = False
+            else:
+                self._sequence_worker_failed(
+                    active.generation,
+                    "The joined preview source ended before its occurrence boundary",
+                )
+                return
         self.playback_tick.emit(wanted, starved)
 
     def _pick(self, wanted: float) -> tuple[float, bytes] | None:

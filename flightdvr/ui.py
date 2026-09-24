@@ -2088,7 +2088,13 @@ class MainWindow(QMainWindow):
         self.music_panel.set_asset(choice.asset)
 
     def _rearm_after_structural(self) -> None:
-        if self._joined_assemble_active():
+        if self._output_picture_active() and self._output_recipe is not None:
+            coordinate = self._picture_monitor_coordinate(
+                self.preview_view.sequence_strip.position)
+            if coordinate is not None:
+                self._prepare_monitoring(
+                    coordinate, play=self.player.is_playing)
+        elif self._joined_assemble_active():
             self._prepare_monitoring(
                 self.preview_view.sequence_strip.position,
                 play=self.player.is_playing)
@@ -2849,6 +2855,17 @@ class MainWindow(QMainWindow):
         self.preview_view.show_monitoring(not status.muted, status.reason)
 
     def _on_listen_toggled(self, listening: bool) -> None:
+        if self._output_picture_active() and self._output_recipe is not None:
+            coordinate = self._picture_monitor_coordinate(
+                self.preview_view.sequence_strip.position)
+            if listening and coordinate is not None:
+                self._prepare_monitoring(
+                    coordinate, play=self.player.is_playing)
+            else:
+                self.live_preview.set_muted(True)
+                self.live_preview.pause()
+            self._show_monitoring()
+            return
         if self._joined_assemble_active():
             position = self.preview_view.sequence_strip.position
             if listening:
@@ -2870,6 +2887,17 @@ class MainWindow(QMainWindow):
     def _on_listening_changed(self, name: str) -> None:
         """A rebuilt mix begins at the picture, never at its own zero."""
         self.live_preview.set_listening(Listening(name))
+        if self._output_picture_active() and self._output_recipe is not None:
+            coordinate = self._picture_monitor_coordinate(
+                self.preview_view.sequence_strip.position)
+            if coordinate is not None:
+                if self.preview_view.listen_check.isChecked():
+                    self._prepare_monitoring(
+                        coordinate, play=self.player.is_playing)
+                else:
+                    self._seek_monitoring(coordinate)
+            self._show_monitoring()
+            return
         if self._joined_assemble_active():
             position = self.preview_view.sequence_strip.position
             if self.preview_view.listen_check.isChecked():
@@ -2892,6 +2920,20 @@ class MainWindow(QMainWindow):
         """Return both sides once, preserving existing Play/Listen intentions."""
         was_playing = self.player.is_playing
         was_listening = self.preview_view.listen_check.isChecked()
+        if self._output_picture_active() and self._output_recipe is not None:
+            self.player.seek(0.0)
+            self.preview_view.sequence_strip.set_position(0.0)
+            self.live_preview.restart()
+            self._monitor_rearm_required = False
+            if was_listening:
+                self.live_preview.set_muted(False)
+                if was_playing:
+                    self.live_preview.play()
+            if was_playing:
+                self.player.play(self.frame_view.width())
+            self._show_monitoring()
+            self._show_source_note()
+            return
         if self._joined_assemble_active():
             plan = self._sequence_plan
             if plan is None:
@@ -3214,8 +3256,10 @@ class MainWindow(QMainWindow):
             return
         if self._view_mode is Mode.FLOW and chosen is not Mode.FLOW:
             if self._flow_stage is Stage.ASSEMBLE:
+                if self._output_recipe is not None:
+                    self._leave_output_picture()
                 self._leave_sequence_scrub()
-            elif self._flow_stage is Stage.OUTPUT:
+            elif self._flow_stage in (Stage.MUSIC, Stage.OUTPUT):
                 self._leave_output_picture()
         # Moving the panels asks for more room for a moment either way; the
         # window keeps its size unless the new arrangement truly needs more.
@@ -3330,11 +3374,18 @@ class MainWindow(QMainWindow):
         if stage is None or stage not in self._flow_slots:
             return
         chosen = Stage(stage)
+        working_stages = (Stage.ASSEMBLE, Stage.MUSIC, Stage.OUTPUT)
+        had_recipe = self._output_recipe is not None
         if (self._flow_stage is Stage.ASSEMBLE
-                and chosen is not Stage.ASSEMBLE):
+                and chosen is not Stage.ASSEMBLE
+                and (chosen not in working_stages or not had_recipe)):
+            if had_recipe:
+                self._leave_output_picture()
             self._leave_sequence_scrub()
-        if (self._flow_stage is Stage.OUTPUT
-                and chosen is not Stage.OUTPUT):
+        elif (self._flow_stage in (Stage.MUSIC, Stage.OUTPUT)
+              and (chosen not in working_stages
+                   or (chosen is Stage.ASSEMBLE and self._output_recipe is not None
+                       and not self._output_recipe.target.is_assembly))):
             self._leave_output_picture()
         self._flow_stage = chosen
         was = self.size()
@@ -3354,18 +3405,23 @@ class MainWindow(QMainWindow):
         self.settings_store.setValue("flow_stage", chosen.value)
         if chosen is Stage.ASSEMBLE:
             self._refresh_sequence_plan()
+            if self._output_picture_active():
+                self._refresh_output_picture()
             self.play_button.setToolTip(
                 "Play or pause the assembled picture in joined output time.\n"
                 "Listen previews its joined sound; the finished exported file "
                 "is not previewed.")
             # A row is an occurrence now, not an instruction to retarget the
             # source editor.  Its start is a useful joined position.
-            self._on_assembly_choice()
-        elif chosen is Stage.OUTPUT:
+            if not had_recipe:
+                self._on_assembly_choice()
+        elif chosen in (Stage.MUSIC, Stage.OUTPUT):
             self._refresh_output_picture()
             self.play_button.setToolTip(
                 "Play or pause this selected output's picture. The finished "
                 "exported file is not previewed.")
+            if chosen is Stage.MUSIC:
+                self._sync_music_panel()
         else:
             self.preview_view.sequence_strip.hide()
             self.play_button.setToolTip(
@@ -3518,7 +3574,24 @@ class MainWindow(QMainWindow):
 
     def _output_picture_active(self) -> bool:
         return (self._view_mode is Mode.FLOW
-                and self._flow_stage is Stage.OUTPUT)
+                and (self._flow_stage in (Stage.MUSIC, Stage.OUTPUT)
+                     or (self._flow_stage is Stage.ASSEMBLE
+                         and self._sidebar_target is not None
+                         and self._sidebar_target.is_assembly)))
+
+    def _picture_monitor_coordinate(self, display_seconds: float) -> float | None:
+        """Feed W3 its established clock while picture time stays output-time."""
+        recipe = self._output_recipe
+        if recipe is None or recipe.time_factor != 1:
+            return None  # Whole Slow has no configured sound.
+        if recipe.target.is_assembly:
+            return display_seconds
+        try:
+            found = recipe.map_output_time(display_seconds)
+        except (TypeError, ValueError, SequencePlanError):
+            return None
+        return (None if isinstance(found, PictureTerminal)
+                else float(found.source))
 
     def _refresh_output_picture(self) -> None:
         """Bind the selected queue-resolved material, or make no picture claim."""
@@ -3568,6 +3641,9 @@ class MainWindow(QMainWindow):
         self.player.load_recipe(recipe, clips)
         self._output_recipe = recipe
         self._output_clips = clips
+        if target.is_assembly:
+            self._sequence_plan = sequence
+            self._sequence_target = target
         strip.set_plan(sequence, recipe.time_factor)
         strip.show()
         self.frame_view.set_vertical_crop(None)
@@ -3578,6 +3654,7 @@ class MainWindow(QMainWindow):
             self.live_preview.pause()
             self.live_preview.set_muted(True)
             self._show_monitoring()
+        self._sync_music_panel()
         self._show_source_note()
 
     def _leave_output_picture(self) -> None:
@@ -3690,6 +3767,21 @@ class MainWindow(QMainWindow):
                  one.source.start, one.source.end,
                  one.output.start, one.output.end)
                 for one in value.occurrences)
+        recipe = self._output_recipe
+        if (recipe is not None and recipe.target == output.target
+                and shape(recipe.sequence) == shape(plan)):
+            # Stage navigation does not manufacture a new material revision.
+            # W3's joined sound can share this nominal sequence while the
+            # transformed picture keeps its existing decoder and binding.
+            self._bind_assembly_music_target(output.target)
+            self._sequence_plan = recipe.sequence
+            self._sequence_target = output.target
+            if strip.plan is not recipe.sequence:
+                strip.set_plan(recipe.sequence, recipe.time_factor)
+            strip.show()
+            self._sync_music_panel()
+            self._show_source_note()
+            return
         if old is not None and shape(old) == shape(plan):
             self._bind_assembly_music_target(output.target)
             self._sequence_target = output.target
@@ -3917,17 +4009,22 @@ class MainWindow(QMainWindow):
         Browse and Trim already show source and are not captioned: a line
         under every page is a line nobody reads.
         """
-        if stage is Stage.OUTPUT and self._output_recipe is not None:
+        if (stage in (Stage.ASSEMBLE, Stage.MUSIC, Stage.OUTPUT)
+                and self._output_recipe is not None):
             recipe = self._output_recipe
             position = self.preview_view.sequence_strip.position
             label = PRESETS[recipe.preset_key].label
             suffix = f" {recipe.warning}." if recipe.warning else ""
+            hearing = (self.live_preview is not None
+                       and self.live_preview.status.playing
+                       and not self.live_preview.status.muted)
+            sound = ("sound is previewed" if hearing
+                     else "sound is not active")
             return (
                 f"Selected output picture · {label} · "
                 f"{human_duration(position)} of "
                 f"{human_duration(float(recipe.duration))}. "
-                "This is not the finished exported file; sound is not "
-                f"previewed here.{suffix}")
+                f"This is not the finished file; {sound}.{suffix}")
         if stage is not Stage.ASSEMBLE:
             context = self._active_context(stage)
             # The context decides, not the page's name. Source inspection is
@@ -4156,7 +4253,7 @@ class MainWindow(QMainWindow):
             self._sidebar_building = False
         if self._joined_assemble_active():
             self._refresh_sequence_plan()
-        elif self._output_picture_active():
+        if self._output_picture_active():
             self._refresh_output_picture()
 
     def _on_sidebar_choice(self, target=None) -> None:
@@ -4178,9 +4275,6 @@ class MainWindow(QMainWindow):
         nothing and starts no sound.
         """
         if self._sidebar_building or target is None:
-            return
-        if self._joined_assemble_active():
-            self._refuse_joined_source_action()
             return
         self._sidebar_target = target
         # A person's choice outranks the one read back from the file.
@@ -4237,7 +4331,9 @@ class MainWindow(QMainWindow):
             return
         occurrence = plan.occurrences[row]
         self.preview_view.sequence_strip.request_position(
-            float(occurrence.output.start))
+            float(occurrence.output.start) * (
+                self._output_recipe.time_factor
+                if self._output_recipe is not None else 1))
 
     def _build_export_panel(self) -> QWidget:
         panel = self.export_panel = ExportPanel(self)
@@ -5846,6 +5942,13 @@ class MainWindow(QMainWindow):
             recipe = self._output_recipe
             if recipe is not None and self.player.recipe_key == recipe.material_key:
                 self.preview_view.sequence_strip.set_position(seconds)
+                coordinate = self._picture_monitor_coordinate(seconds)
+                if (coordinate is not None and not self._monitor_tick_active):
+                    self._monitor_tick_active = True
+                    try:
+                        self._drive_monitoring(coordinate)
+                    finally:
+                        self._monitor_tick_active = False
                 self._show_source_note()
             return
         if self._joined_assemble_active():
@@ -6051,6 +6154,18 @@ class MainWindow(QMainWindow):
 
     def _preview_state_changed(self, playing: bool) -> None:
         if self._output_picture_active():
+            if self.live_preview is not None:
+                if (playing and self.preview_view.listen_check.isChecked()
+                        and not self.live_preview.status.playing):
+                    coordinate = self._picture_monitor_coordinate(
+                        self.preview_view.sequence_strip.position)
+                    if coordinate is not None:
+                        self._prepare_monitoring(coordinate, play=True)
+                elif not playing:
+                    self.live_preview.pause()
+                self._show_monitoring()
+            if playing:
+                self._clear_precise_frame()
             self.play_button.setText("Pause" if playing else "Play")
             self._show_source_note()
             return
@@ -6086,6 +6201,10 @@ class MainWindow(QMainWindow):
             self._clear_precise_frame()
             self.frame_view.set_message("output picture unavailable")
             self.statusBar().showMessage(f"Output preview: {message}", 8000)
+            if self.live_preview is not None:
+                self.live_preview.pause()
+                self._monitor_rearm_required = True
+                self._show_monitoring()
             return
         self._clear_precise_frame()
         self.frame_view.set_message("could not play this clip")
@@ -6099,6 +6218,10 @@ class MainWindow(QMainWindow):
 
     def _preview_ended(self) -> None:
         if self._output_picture_active():
+            if self.live_preview is not None:
+                self.live_preview.pause()
+                self._monitor_rearm_required = True
+                self._show_monitoring()
             recipe = self._output_recipe
             if recipe is not None:
                 self.preview_view.sequence_strip.set_position(
