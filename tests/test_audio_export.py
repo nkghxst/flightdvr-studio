@@ -845,3 +845,63 @@ def test_edit_dnxhr_carries_music_as_exact_pcm(tools, tmp_path, media):
     assert [s["codec_name"] for s in video] == ["dnxhd"]
     assert [s["codec_name"] for s in sound] == ["pcm_s16le"]
     assert count_pcm_samples(tools, out) == (38_400, "")
+
+
+def test_cancel_during_the_real_pcm_count_keeps_the_destination(
+        media, tools, tmp_path, monkeypatch):
+    """Cancelled while the real PCM decode is running, after FFmpeg has
+    written the whole file: nothing is published, the previous destination,
+    a finished neighbour and the queued job are untouched, and only this
+    job's own partial is removed."""
+    out = tmp_path / "edit.mov"
+    sentinel = b"previous destination"
+    out.write_bytes(sentinel)
+    neighbour = tmp_path / "finished-earlier.mov"
+    neighbour.write_bytes(b"someone else's finished file")
+    job = Job([media.source], "edit", ExportSettings(edit_codec="prores_lt"),
+              out, audio=choice(media.asset, AudioMode.REPLACE))
+    queued = Job([media.silent], "edit", ExportSettings(edit_codec="prores_lt"),
+                 tmp_path / "queued.mov",
+                 audio=choice(media.asset, AudioMode.MIX))
+    queued_before = deepcopy(queued)
+    worker = ExportWorker(tools, [job, queued], tmp_path / "work")
+
+    real_popen = subprocess.Popen
+    decodes = []
+
+    def slow_decode(command, *args, **kwargs):
+        # Only the count's decode is slowed: read at playback speed.
+        if "s16le" in command and "-map" in command:
+            command = list(command)
+            command.insert(command.index("-i"), "-re")
+            proc = real_popen(command, *args, **kwargs)
+            decodes.append(proc)
+            return proc
+        return real_popen(command, *args, **kwargs)
+
+    monkeypatch.setattr(audio_export.subprocess, "Popen", slow_decode)
+    part = out.with_name("edit.flightdvr-part.mov")
+    result = []
+    runner = threading.Thread(
+        target=lambda: result.append(worker._run_job(0, job)), daemon=True)
+    runner.start()
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and not decodes:
+        time.sleep(0.01)
+    assert decodes, "the PCM count never started"
+    assert decodes[0].poll() is None, "the decode finished before cancel"
+    assert worker._process is None          # FFmpeg itself has finished
+    assert part.exists() and part.stat().st_size > 0
+    worker.cancel()
+    runner.join(timeout=10)
+    assert not runner.is_alive(), "cancel was not seen during the count"
+    assert result == [(False, "Cancelled")]
+    assert decodes[0].poll() is not None, "the decode was left running"
+    assert decodes[0].returncode != 0, "the decode ran to its end, unstopped"
+    assert out.read_bytes() == sentinel
+    assert neighbour.read_bytes() == b"someone else's finished file"
+    assert not part.exists()
+    assert queued.status is JobStatus.PENDING
+    assert (queued.settings, queued.audio, queued.out_path) == (
+        queued_before.settings, queued_before.audio, queued_before.out_path)
+    assert not (tmp_path / "queued.mov").exists()
