@@ -6778,6 +6778,13 @@ class MainWindow(QMainWindow):
         self._refresh_vertical_overlay()
         self._refresh_export_markers()
         self._update_estimate()
+        # Whether music is carried, and so monitored, depends on the preset.
+        # Classic has no page change to read the verdict again; this press is
+        # the only moment it changes. With nothing being edited there is no
+        # verdict to change.
+        if self._music_target is not None:
+            self._sync_music_panel()
+            self._sync_live_preview()
 
     def _on_export_settings_changed(self) -> None:
         """Refresh both the estimate and any source-space preview guidance."""

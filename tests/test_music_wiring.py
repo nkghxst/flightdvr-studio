@@ -1994,3 +1994,26 @@ def test_an_assembly_is_monitored_from_the_output_page(window, app):
         window._output_recipe.sequence
     assert "Assembly monitoring needs" not in window._monitor_refusal(target)
     window.set_view_mode(Mode.CLASSIC)
+
+
+def test_a_classic_preset_change_updates_the_panel_and_monitor_at_once(
+        window, monkeypatch, tmp_path, app):
+    """Classic has no page change to re-read the verdict: the preset press
+    itself must, both ways."""
+    focus(window, 0)
+    probe = choose_track(window, monkeypatch, tmp_path / "song.mp3")
+    probe.deliver()
+    app.processEvents()
+    panel = window.music_panel
+    assert panel.supported and not panel.unsupported_label.text()
+
+    window.export_panel.preset_buttons["social"].setChecked(True)
+    app.processEvents()
+    assert not panel.supported
+    assert "Social" in panel.unsupported_label.text()
+    assert "Social" in window.live_preview.status.reason
+
+    window.export_panel.preset_buttons["upload"].setChecked(True)
+    app.processEvents()
+    assert panel.supported and not panel.unsupported_label.text()
+    assert not window.live_preview.status.reason
