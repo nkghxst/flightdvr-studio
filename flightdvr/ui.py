@@ -107,6 +107,7 @@ from .presets import (
     vertical_problems,
 )
 from .player import PreviewPlayer, exact_timestamp
+from .preview_recipe import PreviewRecipe, PictureTerminal, make_preview_recipe
 from .preview_panel import PreviewView
 from .queue_panel import QueuePanel
 from .assembly import absent, default_items, export_piece, present, resolve
@@ -461,6 +462,7 @@ class MainWindow(QMainWindow):
         self.sidebar_working = None
         self.sidebar_submitted = None
         self._sidebar_target: OutputTarget | None = None
+        self._source_focus_deferred = False
         # What a newly planned output starts with in Flow: the panel as it
         # stood on entering Flow, or as edited with nothing selected. Never
         # whichever output happened to be loaded when a list was repainted.
@@ -475,6 +477,8 @@ class MainWindow(QMainWindow):
         self._sequence_occurrence: OccurrenceId | None = None
         self._sequence_source_seconds: float | None = None
         self._sequence_loaded_clip: ClipInfo | None = None
+        self._output_recipe: PreviewRecipe | None = None
+        self._output_clips: dict[OccurrenceId, ClipInfo] = {}
         # Classic's split, kept while Flow is holding its children. An empty
         # splitter serialises as an empty splitter, so saving in Flow without
         # this threw away the proportions the person had chosen.
@@ -515,6 +519,7 @@ class MainWindow(QMainWindow):
         self.player.frame_ready.connect(self._preview_frame_ready)
         self.player.sequence_frame_ready.connect(
             self._preview_sequence_frame_ready)
+        self.player.output_frame_ready.connect(self._preview_output_frame_ready)
         self.player.playback_tick.connect(self._preview_playback_tick)
         self.player.precise_frame_ready.connect(self._precise_frame_ready)
         self.player.precise_loading.connect(self._precise_loading)
@@ -1552,7 +1557,10 @@ class MainWindow(QMainWindow):
         target rather than from whatever the panels happen to be showing, which
         is what makes an A to B to A round trip give A back unchanged.
         """
-        sequence = (self._sequence_plan
+        sequence = (self._output_recipe.sequence
+                    if (self._output_recipe is not None
+                        and target == self._output_recipe.target)
+                    else self._sequence_plan
                     if target == self._sequence_target else None)
         occurrences = occurrences_of(sequence)
         return SelectedContext(
@@ -2081,7 +2089,13 @@ class MainWindow(QMainWindow):
         self.music_panel.set_asset(choice.asset)
 
     def _rearm_after_structural(self) -> None:
-        if self._joined_assemble_active():
+        if self._output_picture_active() and self._output_recipe is not None:
+            coordinate = self._picture_monitor_coordinate(
+                self.preview_view.sequence_strip.position)
+            if coordinate is not None:
+                self._prepare_monitoring(
+                    coordinate, play=self.player.is_playing)
+        elif self._joined_assemble_active():
             self._prepare_monitoring(
                 self.preview_view.sequence_strip.position,
                 play=self.player.is_playing)
@@ -2842,6 +2856,17 @@ class MainWindow(QMainWindow):
         self.preview_view.show_monitoring(not status.muted, status.reason)
 
     def _on_listen_toggled(self, listening: bool) -> None:
+        if self._output_picture_active() and self._output_recipe is not None:
+            coordinate = self._picture_monitor_coordinate(
+                self.preview_view.sequence_strip.position)
+            if listening and coordinate is not None:
+                self._prepare_monitoring(
+                    coordinate, play=self.player.is_playing)
+            else:
+                self.live_preview.set_muted(True)
+                self.live_preview.pause()
+            self._show_monitoring()
+            return
         if self._joined_assemble_active():
             position = self.preview_view.sequence_strip.position
             if listening:
@@ -2863,6 +2888,17 @@ class MainWindow(QMainWindow):
     def _on_listening_changed(self, name: str) -> None:
         """A rebuilt mix begins at the picture, never at its own zero."""
         self.live_preview.set_listening(Listening(name))
+        if self._output_picture_active() and self._output_recipe is not None:
+            coordinate = self._picture_monitor_coordinate(
+                self.preview_view.sequence_strip.position)
+            if coordinate is not None:
+                if self.preview_view.listen_check.isChecked():
+                    self._prepare_monitoring(
+                        coordinate, play=self.player.is_playing)
+                else:
+                    self._seek_monitoring(coordinate)
+            self._show_monitoring()
+            return
         if self._joined_assemble_active():
             position = self.preview_view.sequence_strip.position
             if self.preview_view.listen_check.isChecked():
@@ -2885,6 +2921,20 @@ class MainWindow(QMainWindow):
         """Return both sides once, preserving existing Play/Listen intentions."""
         was_playing = self.player.is_playing
         was_listening = self.preview_view.listen_check.isChecked()
+        if self._output_picture_active() and self._output_recipe is not None:
+            self.player.seek(0.0)
+            self.preview_view.sequence_strip.set_position(0.0)
+            self.live_preview.restart()
+            self._monitor_rearm_required = False
+            if was_listening:
+                self.live_preview.set_muted(False)
+                if was_playing:
+                    self.live_preview.play()
+            if was_playing:
+                self.player.play(self.frame_view.width())
+            self._show_monitoring()
+            self._show_source_note()
+            return
         if self._joined_assemble_active():
             plan = self._sequence_plan
             if plan is None:
@@ -3205,10 +3255,13 @@ class MainWindow(QMainWindow):
             return
         if chosen is Mode.FLOW and not self._offered_stages:
             return
-        if (self._view_mode is Mode.FLOW
-                and self._flow_stage is Stage.ASSEMBLE
-                and chosen is not Mode.FLOW):
-            self._leave_sequence_scrub()
+        if self._view_mode is Mode.FLOW and chosen is not Mode.FLOW:
+            if self._flow_stage is Stage.ASSEMBLE:
+                if self._output_recipe is not None:
+                    self._leave_output_picture()
+                self._leave_sequence_scrub()
+            elif self._flow_stage in (Stage.MUSIC, Stage.OUTPUT):
+                self._leave_output_picture()
         # Moving the panels asks for more room for a moment either way; the
         # window keeps its size unless the new arrangement truly needs more.
         was = self.size()
@@ -3227,6 +3280,8 @@ class MainWindow(QMainWindow):
         # Flow is the mode, so refreshing before this was refreshing into a
         # guard that had every right to refuse — and the list arrived empty.
         self._view_mode = chosen
+        if chosen is Mode.CLASSIC:
+            self._restore_deferred_source_focus()
         # Output's "For:" belongs to Flow; Classic keeps its familiar single
         # set of controls.
         self.export_panel.set_target_selector_visible(chosen is Mode.FLOW)
@@ -3322,10 +3377,22 @@ class MainWindow(QMainWindow):
         if stage is None or stage not in self._flow_slots:
             return
         chosen = Stage(stage)
+        working_stages = (Stage.ASSEMBLE, Stage.MUSIC, Stage.OUTPUT)
+        had_recipe = self._output_recipe is not None
         if (self._flow_stage is Stage.ASSEMBLE
-                and chosen is not Stage.ASSEMBLE):
+                and chosen is not Stage.ASSEMBLE
+                and (chosen not in working_stages or not had_recipe)):
+            if had_recipe:
+                self._leave_output_picture()
             self._leave_sequence_scrub()
+        elif (self._flow_stage in (Stage.MUSIC, Stage.OUTPUT)
+              and (chosen not in working_stages
+                   or (chosen is Stage.ASSEMBLE and self._output_recipe is not None
+                       and not self._output_recipe.target.is_assembly))):
+            self._leave_output_picture()
         self._flow_stage = chosen
+        if chosen in (Stage.BROWSE, Stage.TRIM):
+            self._restore_deferred_source_focus()
         was = self.size()
         self.flow_shell.set_stage(chosen)
         # Browse puts the list beside the picture. Measured natively, side by
@@ -3343,13 +3410,23 @@ class MainWindow(QMainWindow):
         self.settings_store.setValue("flow_stage", chosen.value)
         if chosen is Stage.ASSEMBLE:
             self._refresh_sequence_plan()
+            if self._output_picture_active():
+                self._refresh_output_picture()
             self.play_button.setToolTip(
                 "Play or pause the assembled picture in joined output time.\n"
                 "Listen previews its joined sound; the finished exported file "
                 "is not previewed.")
             # A row is an occurrence now, not an instruction to retarget the
             # source editor.  Its start is a useful joined position.
-            self._on_assembly_choice()
+            if not had_recipe:
+                self._on_assembly_choice()
+        elif chosen in (Stage.MUSIC, Stage.OUTPUT):
+            self._refresh_output_picture()
+            self.play_button.setToolTip(
+                "Play or pause this selected output's picture. The finished "
+                "exported file is not previewed.")
+            if chosen is Stage.MUSIC:
+                self._sync_music_panel()
         else:
             self.preview_view.sequence_strip.hide()
             self.play_button.setToolTip(
@@ -3500,6 +3577,108 @@ class MainWindow(QMainWindow):
             return []
         return working_outputs(pieces, joined=joined)
 
+    def _output_picture_active(self) -> bool:
+        return (self._view_mode is Mode.FLOW
+                and (self._flow_stage in (Stage.MUSIC, Stage.OUTPUT)
+                     or (self._flow_stage is Stage.ASSEMBLE
+                         and self._sidebar_target is not None
+                         and self._sidebar_target.is_assembly)))
+
+    def _picture_monitor_coordinate(self, display_seconds: float) -> float | None:
+        """Feed W3 its established clock while picture time stays output-time."""
+        recipe = self._output_recipe
+        if recipe is None or recipe.time_factor != 1:
+            return None  # Whole Slow has no configured sound.
+        if recipe.target.is_assembly:
+            return display_seconds
+        try:
+            found = recipe.map_output_time(display_seconds)
+        except (TypeError, ValueError, SequencePlanError):
+            return None
+        return (None if isinstance(found, PictureTerminal)
+                else float(found.source))
+
+    def _refresh_output_picture(self) -> None:
+        """Bind the selected queue-resolved material, or make no picture claim."""
+        if not self._output_picture_active():
+            return
+        target = self._sidebar_target
+        output = next((one for one in self._working_outputs()
+                       if one.target == target), None)
+        strip = self.preview_view.sequence_strip
+        if output is None or target not in self.output_plan.targets:
+            self._leave_output_picture()
+            self.frame_view.set_message("choose an output")
+            self._show_source_note()
+            return
+        # A stable revision is essential: rebuilding the sidebar or editing
+        # music alone must not retire a playing picture.
+        material = tuple((str(getattr(piece, "clip", piece).path),
+                          getattr(piece, "clip", piece).fingerprint,
+                          getattr(piece, "clip", piece).trim_in,
+                          getattr(piece, "clip", piece).out_point)
+                         for piece in output.pieces)
+        revision = "w5-" + hashlib.sha256(
+            repr((target, material)).encode("utf-8")).hexdigest()[:20]
+        try:
+            sequence = compile_sequence(
+                output, resolution=Resolution.success(), revision=revision)
+            clips = {one.id: self._sequence_clip(one)
+                     for one in sequence.occurrences}
+            if any(clip is None for clip in clips.values()):
+                raise SequencePlanError("a selected source is unresolved")
+            recipe = make_preview_recipe(
+                self.output_plan.get(target), output, sequence, clips)
+        except (KeyError, TypeError, ValueError, SequencePlanError) as problem:
+            self._leave_output_picture()
+            self.frame_view.set_message("output picture unavailable")
+            self.statusBar().showMessage(
+                f"Output picture unavailable: {problem}", 6000)
+            self._show_source_note()
+            return
+        if (self._output_recipe is not None
+                and self._output_recipe.material_key == recipe.material_key
+                and self.player.recipe_key == recipe.material_key):
+            strip.show()
+            return
+        self._sharpen_timer.stop()
+        self._clear_precise_frame()
+        self.player.load_recipe(recipe, clips)
+        self._output_recipe = recipe
+        self._output_clips = clips
+        if target.is_assembly:
+            self._sequence_plan = sequence
+            self._sequence_target = target
+        strip.set_plan(sequence, recipe.time_factor)
+        strip.show()
+        self.frame_view.set_vertical_crop(None)
+        self.frame_view.set_aspect(recipe.canvas[0] / recipe.canvas[1])
+        self.preview_box.updateGeometry()
+        self.frame_view.set_message("press Play to preview this output")
+        if self.live_preview is not None:
+            self.live_preview.pause()
+            self.live_preview.set_muted(True)
+            self._show_monitoring()
+        self._sync_music_panel()
+        self._show_source_note()
+
+    def _leave_output_picture(self) -> None:
+        """Retire output provenance and restore the unchanged source editor."""
+        was_bound = self._output_recipe is not None
+        self._output_recipe = None
+        self._output_clips = {}
+        self.preview_view.sequence_strip.hide()
+        if was_bound:
+            self.player.clear_sequence()
+            if self._trim_clip is not None:
+                self.player.load(self._trim_clip, position=self.trim_bar.playhead)
+                if self._trim_clip.width and self._trim_clip.height:
+                    self.frame_view.set_aspect(
+                        self._trim_clip.width / self._trim_clip.height)
+                    self.preview_box.updateGeometry()
+                self._refresh_vertical_overlay()
+                self._show_frame(self.trim_bar.playhead)
+
     # -- Flow Assemble joined-position inspection ----------------------------
 
     def _joined_assemble_active(self) -> bool:
@@ -3537,8 +3716,10 @@ class MainWindow(QMainWindow):
         self._show_source_note()
 
     def _refuse_joined_source_action(self) -> bool:
-        """Keep source-edit and playback routes out of joined inspection."""
-        if not self._joined_assemble_active():
+        """Keep source actions off both output-clock picture routes."""
+        if not (self._joined_assemble_active()
+                or (self._output_picture_active()
+                    and self._output_recipe is not None)):
             return False
         self.player.pause()
         if self.live_preview is not None:
@@ -3546,8 +3727,9 @@ class MainWindow(QMainWindow):
             self.live_preview.set_muted(True)
             self._show_monitoring()
         self.statusBar().showMessage(
-            "Joined scrubbing is paused; return to Browse or Trim for source "
-            "playback and trim controls.", 5000)
+            "Output inspection is paused; return to Browse or Trim for "
+            "source playback and trim controls.",
+            5000)
         return True
 
     def _refresh_sequence_plan(self) -> None:
@@ -3590,6 +3772,21 @@ class MainWindow(QMainWindow):
                  one.source.start, one.source.end,
                  one.output.start, one.output.end)
                 for one in value.occurrences)
+        recipe = self._output_recipe
+        if (recipe is not None and recipe.target == output.target
+                and shape(recipe.sequence) == shape(plan)):
+            # Stage navigation does not manufacture a new material revision.
+            # W3's joined sound can share this nominal sequence while the
+            # transformed picture keeps its existing decoder and binding.
+            self._bind_assembly_music_target(output.target)
+            self._sequence_plan = recipe.sequence
+            self._sequence_target = output.target
+            if strip.plan is not recipe.sequence:
+                strip.set_plan(recipe.sequence, recipe.time_factor)
+            strip.show()
+            self._sync_music_panel()
+            self._show_source_note()
+            return
         if old is not None and shape(old) == shape(plan):
             self._bind_assembly_music_target(output.target)
             self._sequence_target = output.target
@@ -3650,6 +3847,22 @@ class MainWindow(QMainWindow):
     def _on_sequence_scrub_requested(self, revision: str,
                                      output_seconds: float) -> None:
         """Map a revision-bound output point onto the one existing player."""
+        if self._output_picture_active():
+            recipe = self._output_recipe
+            if (recipe is None or revision != recipe.sequence.revision
+                    or self.player.recipe_key != recipe.material_key):
+                return
+            try:
+                location = recipe.map_output_time(output_seconds)
+            except (TypeError, ValueError, OverflowError, SequencePlanError):
+                return
+            self.player.pause()
+            self.preview_view.sequence_strip.set_position(output_seconds)
+            if not isinstance(location, PictureTerminal):
+                self.player.inspect_recipe(
+                    output_seconds, self.frame_view.width())
+            self._show_source_note()
+            return
         plan = self._sequence_plan
         if (not self._joined_assemble_active() or plan is None
                 or revision != plan.revision):
@@ -3801,6 +4014,22 @@ class MainWindow(QMainWindow):
         Browse and Trim already show source and are not captioned: a line
         under every page is a line nobody reads.
         """
+        if (stage in (Stage.ASSEMBLE, Stage.MUSIC, Stage.OUTPUT)
+                and self._output_recipe is not None):
+            recipe = self._output_recipe
+            position = self.preview_view.sequence_strip.position
+            label = PRESETS[recipe.preset_key].label
+            suffix = f" {recipe.warning}." if recipe.warning else ""
+            hearing = (self.live_preview is not None
+                       and self.live_preview.status.playing
+                       and not self.live_preview.status.muted)
+            sound = ("sound is previewed" if hearing
+                     else "sound is not active")
+            return (
+                f"Selected output picture · {label} · "
+                f"{human_duration(position)} of "
+                f"{human_duration(float(recipe.duration))}. "
+                f"This is not the finished file; {sound}.{suffix}")
         if stage is not Stage.ASSEMBLE:
             context = self._active_context(stage)
             # The context decides, not the page's name. Source inspection is
@@ -4029,6 +4258,8 @@ class MainWindow(QMainWindow):
             self._sidebar_building = False
         if self._joined_assemble_active():
             self._refresh_sequence_plan()
+        if self._output_picture_active():
+            self._refresh_output_picture()
 
     def _on_sidebar_choice(self, target=None) -> None:
         """A card was chosen in the sidebar."""
@@ -4050,8 +4281,6 @@ class MainWindow(QMainWindow):
         """
         if self._sidebar_building or target is None:
             return
-        if self._refuse_joined_source_action():
-            return
         self._sidebar_target = target
         # A person's choice outranks the one read back from the file.
         self._restored_selection = None
@@ -4059,9 +4288,11 @@ class MainWindow(QMainWindow):
         self.export_panel.select_target(target)
         self._load_target(target)
         self._focus_piece(target.items[0].fingerprint, target.items[0].sid)
+        if self._output_picture_active():
+            self._refresh_output_picture()
 
     def _focus_piece(self, fingerprint: str, sid: str) -> None:
-        """Focus one range of one recording, through the table's own handlers.
+        """Focus a target's source identity without crossing picture clocks.
 
         Both lists that offer something to choose come through here, so there
         is only one way to become focused and no second one to disagree with
@@ -4073,6 +4304,24 @@ class MainWindow(QMainWindow):
             clip = self.clip_by_path.get(item.data(Qt.ItemDataRole.UserRole))
             if clip is None or clip.fingerprint != fingerprint:
                 continue
+            if self._output_picture_active():
+                # Selecting a working output is not a source seek. Keep the
+                # table/range identity for the next source page, but do not
+                # let its selection timer load a decoder over the bound recipe.
+                previous = self.table.blockSignals(True)
+                try:
+                    self.table.setCurrentCell(row, 0)
+                finally:
+                    self.table.blockSignals(previous)
+                self._select_timer.stop()
+                if sid:
+                    for index, chosen in enumerate(clip.real_selects):
+                        if chosen.sid == sid:
+                            clip.current = index
+                            break
+                self._source_focus_deferred = True
+                return
+            self._source_focus_deferred = False
             self.table.setCurrentCell(row, 0)
             self._load_selected_clip()
             if sid:
@@ -4081,6 +4330,16 @@ class MainWindow(QMainWindow):
                         self._pick_select(index)
                         break
             return
+
+    def _restore_deferred_source_focus(self) -> None:
+        """Materialize a working choice only after returning to source time."""
+        if not self._source_focus_deferred:
+            return
+        self._source_focus_deferred = False
+        self._load_selected_clip()
+        clip = self._highlighted_clip()
+        if clip is not None and clip.selects:
+            self._pick_select(clip.current)
 
     def _on_assembly_choice(self) -> None:
         """Choosing an Assembly occurrence scrubs to its joined start."""
@@ -4105,7 +4364,9 @@ class MainWindow(QMainWindow):
             return
         occurrence = plan.occurrences[row]
         self.preview_view.sequence_strip.request_position(
-            float(occurrence.output.start))
+            float(occurrence.output.start) * (
+                self._output_recipe.time_factor
+                if self._output_recipe is not None else 1))
 
     def _build_export_panel(self) -> QWidget:
         panel = self.export_panel = ExportPanel(self)
@@ -5538,6 +5799,22 @@ class MainWindow(QMainWindow):
         self.frame_view.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _toggle_play(self) -> None:
+        if self._output_picture_active():
+            recipe = self._output_recipe
+            if recipe is None or self.player.recipe_key != recipe.material_key:
+                self.statusBar().showMessage(
+                    "Choose a resolved output to preview", 4000)
+                return
+            if self.player.is_playing:
+                self.player.pause()
+                return
+            position = self.preview_view.sequence_strip.position
+            if abs(position - float(recipe.duration)) < 1e-9:
+                self.player.seek(0.0)
+                self.preview_view.sequence_strip.set_position(0.0)
+            self._focus_player()
+            self.player.play(self.frame_view.width())
+            return
         if self._joined_assemble_active():
             plan = self._sequence_plan
             if plan is None:
@@ -5581,6 +5858,10 @@ class MainWindow(QMainWindow):
         self.player.toggle(self.frame_view.width())
 
     def _stop_preview(self) -> None:
+        if self._output_picture_active():
+            self.player.stop()
+            self._show_source_note()
+            return
         if self._joined_assemble_active():
             self.player.stop()
             self._show_source_note()
@@ -5630,6 +5911,8 @@ class MainWindow(QMainWindow):
         self._update_trim_labels()
 
     def _preview_frame_ready(self, image, seconds: float) -> None:
+        if self._output_picture_active():
+            return
         self._clear_precise_frame()
         self.frame_view.set_image(image)
         if self._joined_assemble_active():
@@ -5662,12 +5945,45 @@ class MainWindow(QMainWindow):
         # to the last painted frame when a future frame is pending.
         self._show_source_note()
 
+    def _preview_output_frame_ready(
+        self, image, material_key: tuple, binding: int,
+        occurrence_id: OccurrenceId, output_seconds: float,
+        _source_seconds: float,
+    ) -> None:
+        """Paint only this target's current transformed occurrence."""
+        recipe = self._output_recipe
+        if (not self._output_picture_active() or recipe is None
+                or material_key != recipe.material_key
+                or binding != self.player.recipe_binding
+                or self.player.recipe_key != material_key):
+            return
+        try:
+            recipe.sequence.get_occurrence(occurrence_id)
+        except SequencePlanError:
+            return
+        self._clear_precise_frame()
+        self.frame_view.set_image(image)
+        self._show_source_note()
+
     def _preview_playback_tick(self, seconds: float, _starved: bool) -> None:
         """Service sound once from the video player's existing timer clock.
 
         Painting deliberately remains separate: the public player position,
         trim marker and still authority continue to name the frame on screen.
         """
+        if self._output_picture_active():
+            recipe = self._output_recipe
+            if recipe is not None and self.player.recipe_key == recipe.material_key:
+                self.preview_view.sequence_strip.set_position(seconds)
+                coordinate = self._picture_monitor_coordinate(seconds)
+                if (coordinate is not None and not self._monitor_tick_active):
+                    self._monitor_tick_active = True
+                    try:
+                        self._drive_monitoring(coordinate)
+                    finally:
+                        self._monitor_tick_active = False
+                self._show_source_note()
+            return
         if self._joined_assemble_active():
             if self._monitor_tick_active:
                 return
@@ -5696,6 +6012,8 @@ class MainWindow(QMainWindow):
     def _precise_frame_ready(self, image, seconds: float,
                              frame_number: int) -> None:
         """Paint the exact source frame and make it the trim authority."""
+        if self._output_picture_active():
+            return
         if self._joined_assemble_active():
             # PreviewPlayer's frame-generation fence proves this belongs to
             # its current load/seek.  Do not promote a joined source frame to
@@ -5868,6 +6186,22 @@ class MainWindow(QMainWindow):
         self._update_trim_labels()
 
     def _preview_state_changed(self, playing: bool) -> None:
+        if self._output_picture_active():
+            if self.live_preview is not None:
+                if (playing and self.preview_view.listen_check.isChecked()
+                        and not self.live_preview.status.playing):
+                    coordinate = self._picture_monitor_coordinate(
+                        self.preview_view.sequence_strip.position)
+                    if coordinate is not None:
+                        self._prepare_monitoring(coordinate, play=True)
+                elif not playing:
+                    self.live_preview.pause()
+                self._show_monitoring()
+            if playing:
+                self._clear_precise_frame()
+            self.play_button.setText("Pause" if playing else "Play")
+            self._show_source_note()
+            return
         if self._joined_assemble_active():
             if self.live_preview is not None:
                 if (playing
@@ -5896,6 +6230,15 @@ class MainWindow(QMainWindow):
         self.play_button.setText("Pause" if playing else "Play")
 
     def _preview_failed(self, message: str) -> None:
+        if self._output_picture_active():
+            self._clear_precise_frame()
+            self.frame_view.set_message("output picture unavailable")
+            self.statusBar().showMessage(f"Output preview: {message}", 8000)
+            if self.live_preview is not None:
+                self.live_preview.pause()
+                self._monitor_rearm_required = True
+                self._show_monitoring()
+            return
         self._clear_precise_frame()
         self.frame_view.set_message("could not play this clip")
         self.statusBar().showMessage(f"Preview: {message}", 8000)
@@ -5907,6 +6250,17 @@ class MainWindow(QMainWindow):
         self._show_frame(self.trim_bar.playhead)
 
     def _preview_ended(self) -> None:
+        if self._output_picture_active():
+            if self.live_preview is not None:
+                self.live_preview.pause()
+                self._monitor_rearm_required = True
+                self._show_monitoring()
+            recipe = self._output_recipe
+            if recipe is not None:
+                self.preview_view.sequence_strip.set_position(
+                    float(recipe.duration))
+                self._show_source_note()
+            return
         if self._joined_assemble_active():
             if self.live_preview is not None:
                 # EOF is an immediate sink fence.  The terminal is not a
@@ -6407,6 +6761,8 @@ class MainWindow(QMainWindow):
         if self._ready:
             self._capture_choices()
         self._refresh_sidebar()
+        if self._output_picture_active():
+            self._refresh_output_picture()
         if not self._ready:
             return
         key = key or self._preset_key()
@@ -6419,12 +6775,17 @@ class MainWindow(QMainWindow):
         """Refresh both the estimate and any source-space preview guidance."""
         if self._ready:
             self._capture_choices()
+        if self._output_picture_active():
+            self._refresh_output_picture()
         self._refresh_vertical_overlay()
         self._update_estimate()
 
     def _refresh_vertical_overlay(self) -> None:
         """Give the preview the same source-space crop the export will use."""
         clip = self._trim_clip
+        if (self._output_picture_active() and self._output_recipe is not None):
+            self.frame_view.set_vertical_crop(None)
+            return
         if not self._ready or clip is None or self._preset_key() != "vertical":
             self.frame_view.set_vertical_crop(None)
             return

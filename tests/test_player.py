@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import io
 from datetime import datetime
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,8 @@ from PySide6.QtCore import QObject, Qt, Signal
 
 from flightdvr.media import ClipInfo, Tools
 from flightdvr.assembly import Item
+from flightdvr.output_plan import OutputTarget
+from flightdvr.preview_recipe import PictureOccurrence, PreviewRecipe
 from flightdvr.audio_plan import OUTPUT_RATE, SampleSpan
 from flightdvr.player import (
     FRAME_CACHE_MAX_FRAMES, FRAME_CACHE_SIZE, PREVIEW_FPS, PREVIEW_SIZES,
@@ -635,6 +638,15 @@ class LingeringWorker(FakeWorker):
         self.finished.emit()
 
 
+class RecipeWorker(FakeWorker):
+    """Observe the recipe passed to the existing bounded decoder lane."""
+
+    def __init__(self, *args, recipe, picture, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.recipe = recipe
+        self.picture = picture
+
+
 class FakeFrameWorker(QObject):
     ready = Signal(int, object)
     failed = Signal(int, str)
@@ -745,6 +757,32 @@ def sequence_player(fake_clock, worker_type=FakeWorker):
     instance.load_sequence(plan, clips)
     instance.workers = made
     return instance, plan
+
+
+def recipe_player(fake_clock, cadence=30):
+    from flightdvr.player import PreviewPlayer
+    made = []
+
+    def factory(*args, **kwargs):
+        worker = RecipeWorker(*args, **kwargs)
+        made.append(worker)
+        return worker
+
+    instance = PreviewPlayer(
+        TOOLS, clock=fake_clock, worker_factory=factory,
+        frame_worker_factory=FakeFrameWorker)
+    plan, clips = aba_sequence("recipe-aba")
+    pictures = tuple(PictureOccurrence(
+        one.id, one.fingerprint, one.source_path, one.source,
+        1280, 720, Fraction(60), True, None)
+        for one in plan.occurrences)
+    recipe = PreviewRecipe(
+        OutputTarget.assembly(one.item for one in plan.occurrences),
+        plan, pictures, "slowmo", "passthrough", (1280, 720),
+        Fraction(cadence), 2, ("recipe-aba", cadence))
+    instance.load_recipe(recipe, clips)
+    instance.workers = made
+    return instance, recipe
 
 
 def fill_sequence_lane(instance, lane, *source_times):
@@ -1089,6 +1127,99 @@ def test_a_frame_becomes_an_image_that_owns_its_pixels(qt_app):
 
 
 # -- joined output-time playback --------------------------------------------
+
+def test_recipe_doubled_seams_retain_a_b_a_identity_and_terminal(qt_app):
+    p, recipe = recipe_player(FakeClock(), cadence=45)
+    assert p._timer.interval() == 22, "90-to-45 supply needs a 45 Hz timer"
+    events = []
+    p.output_frame_ready.connect(
+        lambda _image, key, binding, occurrence, output, source:
+        events.append((key, binding, occurrence, output, source)))
+    p.play(view_width=640)
+    assert p.workers[0].recipe is recipe
+    assert p.workers[0].picture.id.ordinal == 0
+    fill_sequence_lane(p, p._sequence_active, 10.0)
+    p._tick()
+    assert events[-1][2:] == (
+        recipe.sequence.occurrences[0].id, pytest.approx(0.0),
+        pytest.approx(10.0))
+
+    # The exact display seam at six is B, not the end of the first A.
+    p.seek(6.0)
+    assert p._sequence_active.occurrence.ordinal == 1
+    fill_sequence_lane(p, p._sequence_active, 2.0)
+    p._tick()
+    assert events[-1][2:] == (
+        recipe.sequence.occurrences[1].id, pytest.approx(6.0),
+        pytest.approx(2.0))
+    p.seek(10.0)
+    assert p._sequence_active.occurrence.ordinal == 2
+    fill_sequence_lane(p, p._sequence_active, 10.0)
+    p._tick()
+    assert events[-1][2:] == (
+        recipe.sequence.occurrences[2].id, pytest.approx(10.0),
+        pytest.approx(10.0))
+    assert events[-1][2] != events[0][2], "repeated A lost occurrence identity"
+
+    count = len(p.workers)
+    p.seek(16.0)
+    assert not p.is_playing and p.position == pytest.approx(16.0)
+    assert len(p.workers) == count, "terminal started a source decoder"
+    assert p._sequence_active is None and p._sequence_next is None
+
+
+def test_recipe_paused_scrub_decodes_one_frame_then_settles(qt_app):
+    p, recipe = recipe_player(FakeClock())
+    events = []
+    p.output_frame_ready.connect(lambda *event: events.append(event))
+    p.inspect_recipe(6.0, view_width=640)
+    assert p.is_playing and p._sequence_active.occurrence.ordinal == 1
+    fill_sequence_lane(p, p._sequence_active, 2.0)
+    p._tick()
+    assert len(events) == 1
+    assert events[0][3] == recipe.sequence.occurrences[1].id
+    assert not p.is_playing and not p._timer.isActive()
+    count = len(p.workers)
+    p.inspect_recipe(16.0)
+    assert len(p.workers) == count and not p.is_playing
+
+
+def test_recipe_final_half_open_picture_reaches_terminal_but_early_eof_fails(qt_app):
+    fake = FakeClock()
+    p, _recipe = recipe_player(fake, cadence=30)
+    ended, failures = [], []
+    p.ended.connect(lambda: ended.append(True))
+    p.failed.connect(failures.append)
+    p.seek(15.96)
+    p.play(view_width=640)
+    lane = p._sequence_active
+    fill_sequence_lane(p, lane, 12 + 59 / 60)
+    fake.tick(0.01)
+    p._tick()
+    fake.tick(0.01)
+    p._tick()
+    assert lane.last_output == pytest.approx(15 + 29 / 30)
+    lane.worker.ended.emit(lane.generation)
+    fake.tick(0.01)
+    p._tick()
+    assert not failures and not p._starved
+    fake.tick(0.04)
+    p._tick()
+    assert ended and not failures and p.position == pytest.approx(16)
+
+    fake = FakeClock()
+    early, _recipe = recipe_player(fake, cadence=30)
+    complaints = []
+    early.failed.connect(complaints.append)
+    early.seek(15.8)
+    early.play(view_width=640)
+    lane = early._sequence_active
+    fill_sequence_lane(early, lane, 12.9)
+    early._tick()
+    lane.worker.ended.emit(lane.generation)
+    fake.tick(0.01)
+    early._tick()
+    assert complaints and "before its occurrence boundary" in complaints[0]
 
 def test_joined_due_frames_cross_the_following_occurrence_seam_once(qt_app):
     """A deterministic due-frame fixture proves the seam, not live cadence."""
