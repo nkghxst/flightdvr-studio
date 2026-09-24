@@ -1081,3 +1081,40 @@ def test_the_preset_buttons_wrap_to_the_width_they_have(qt_app):
         assert panel._preset_columns == len(PRESET_ORDER)
     finally:
         panel.close()
+
+
+def test_a_flow_round_trip_puts_classic_s_list_back_where_it_was(qt_app):
+    """Sol's review of 9553790: 6 came back as 5. Flow's list moves the
+    scroll (done explicitly here, as offscreen geometry may not); Classic
+    puts it back when the selection is the same, and respects a different
+    one chosen in Flow."""
+    from flightdvr.flow_layout import Mode
+    window = many_clips_window(qt_app, BrowserMode.NORMAL, (1120, 760))
+    table = window.browser_panel.table
+    bar = table.verticalScrollBar()
+    try:
+        table.setCurrentCell(8, 0)
+        table.selectRow(8)
+        qt_app.processEvents()
+        bar.setValue(min(bar.maximum(), 6))
+        before = bar.value()
+        assert before > 0
+        window.set_view_mode(Mode.FLOW)
+        qt_app.processEvents()
+        bar.setValue(0)                          # Flow's own geometry
+        window.set_view_mode(Mode.CLASSIC)
+        for _ in range(4):
+            qt_app.processEvents()
+        assert table.currentRow() == 8 and bar.value() == before
+
+        window.set_view_mode(Mode.FLOW)
+        qt_app.processEvents()
+        table.setCurrentCell(1, 0)               # a different choice in Flow
+        bar.setValue(0)
+        window.set_view_mode(Mode.CLASSIC)
+        for _ in range(4):
+            qt_app.processEvents()
+        assert table.currentRow() == 1 and bar.value() != before
+    finally:
+        window.close()
+        assert_no_threads_left(window)

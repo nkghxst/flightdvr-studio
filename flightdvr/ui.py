@@ -442,6 +442,7 @@ class MainWindow(QMainWindow):
         self.flow_source_note = None
         self._music_band_was_open: bool | None = None
         self._size_before_band = None
+        self._classic_list_place: tuple[int, int] | None = None
         self._list_before_band = 0
         self._holding = False
         self._refit_on_regrow = False
@@ -3211,6 +3212,13 @@ class MainWindow(QMainWindow):
         # Moving the panels asks for more room for a moment either way; the
         # window keeps its size unless the new arrangement truly needs more.
         was = self.size()
+        if self._view_mode is Mode.CLASSIC and chosen is Mode.FLOW:
+            # Where Classic's list was, to come back to. Flow's list has its
+            # own geometry and moves the scroll; measured natively, a round
+            # trip came back one row off (6 to 5) with nothing changed.
+            table = self.browser_panel.table
+            self._classic_list_place = (
+                table.currentRow(), table.verticalScrollBar().value())
         # A fold is Classic's; the list goes to Flow as a list.
         if self.browser_panel.folded:
             self.browser_panel.show_folded(False)
@@ -3291,6 +3299,23 @@ class MainWindow(QMainWindow):
         self._relayout()
         self._fit_music_presentation()
         self._keep_window_size(was)
+        if chosen is Mode.CLASSIC and self._classic_list_place is not None:
+            # After the layouts above have settled, so it is not moved again.
+            QTimer.singleShot(0, self._restore_classic_list_place)
+
+    def _restore_classic_list_place(self) -> None:
+        """Classic's list where it was, if the same recording is selected.
+
+        A different selection made in Flow is a choice to respect: then the
+        selected row is only kept in view, as it already is.
+        """
+        place, self._classic_list_place = self._classic_list_place, None
+        if place is None or self._view_mode is not Mode.CLASSIC:
+            return
+        row, scroll = place
+        table = self.browser_panel.table
+        if table.currentRow() == row:
+            table.verticalScrollBar().setValue(scroll)
 
     def _show_stage(self, stage) -> None:
         """Show one stage. Navigation alone changes nothing but what is seen."""
