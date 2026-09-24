@@ -147,20 +147,33 @@ def audio_filter_args(plan: OutputAudioPlan, *, source_seek_samples: int = 0
 
 
 def validate_expected_audio(tools: Tools, path: Path,
-                            plan: OutputAudioPlan, *, cancelled=lambda: False
+                            plan: OutputAudioPlan, *, cancelled=lambda: False,
+                            expected_codec: str = "aac",
                             ) -> tuple[bool, str]:
-    """The existing video validator's audio counterpart before publication."""
-    command = [
-        str(tools.ffprobe), "-v", "error", "-count_frames", "-show_streams",
-        "-of", "json", str(path),
-    ]
+    """The existing video validator's audio counterpart before publication.
+
+    Refuses rather than guesses: a probe that fails or says something
+    unreadable is never taken as "no audio", which would pass a No sound plan
+    on a file nobody checked. Exactly one audio stream when sound is
+    expected and none otherwise, in the codec this preset promises.
+
+    The extent check is per codec. AAC keeps its existing whole-frame rule;
+    PCM has no such frames, so it is counted exactly by decoding it.
+    """
+    pcm = expected_codec == "pcm_s16le"
+    # Audio streams only: counting frames over every stream decoded the whole
+    # picture as well, which on an Edit mezzanine is the expensive part.
+    command = [str(tools.ffprobe), "-v", "error", "-select_streams", "a"]
+    if not pcm:
+        command.append("-count_frames")
+    command += ["-show_streams", "-of", "json", str(path)]
     proc = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         creationflags=NO_WINDOW,
     )
     while True:
         try:
-            stdout, _stderr = proc.communicate(timeout=0.05)
+            stdout, stderr = proc.communicate(timeout=0.05)
             break
         except subprocess.TimeoutExpired:
             if cancelled():
@@ -171,33 +184,178 @@ def validate_expected_audio(tools: Tools, path: Path,
                     proc.kill()
                     proc.communicate()
                 return False, "Cancelled"
+    if proc.returncode != 0:
+        detail = (stderr or "").strip().splitlines()[-1:] or ["no detail"]
+        return False, f"could not read the finished audio: {detail[0][:200]}"
     try:
-        streams = json.loads(stdout).get("streams", [])
-    except json.JSONDecodeError:
-        streams = []
-    audio = [s for s in streams if s.get("codec_type") == "audio"]
+        parsed = json.loads(stdout)
+        streams = parsed["streams"]
+        if not isinstance(streams, list):
+            raise TypeError("streams is not a list")
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return False, "could not read the finished audio: unreadable probe"
+    audio = [s for s in streams
+             if isinstance(s, dict) and s.get("codec_type") == "audio"]
+    if len(audio) != len(streams):
+        return False, "could not read the finished audio: unreadable probe"
     expected = (plan.mode in (AudioMode.REPLACE, AudioMode.MIX)
                 or plan.mode is AudioMode.ORIGINAL and plan.source_has_audio)
     if expected and not audio:
         return False, "ffmpeg produced no audio for the submitted audio plan"
     if not expected and audio:
         return False, "ffmpeg produced audio for a No sound plan"
-    if audio:
-        rate = int(audio[0].get("sample_rate") or 0)
-        channels = int(audio[0].get("channels") or 0)
-        if rate != plan.output.rate or channels != 2:
-            return False, f"ffmpeg produced unexpected audio format: {rate} Hz, {channels} channels"
-        try:
-            frames = int(audio[0].get("nb_read_frames") or 0)
-        except (TypeError, ValueError):
-            frames = 0
-        decoded_samples = frames * AUDIO_FRAME_SAMPLES
-        if (frames <= 0
-                or abs(decoded_samples - plan.output.samples)
-                > AUDIO_SAMPLE_TOLERANCE):
+    if not audio:
+        return True, ""
+    if len(audio) != 1:
+        return False, f"ffmpeg produced {len(audio)} audio streams, not one"
+    stream = audio[0]
+    try:
+        codec = str(stream["codec_name"])
+        rate = int(stream["sample_rate"])
+        channels = int(stream["channels"])
+    except (KeyError, TypeError, ValueError):
+        return False, "could not read the finished audio: missing stream details"
+    if codec != expected_codec:
+        return False, (f"ffmpeg produced {codec} audio where this preset "
+                       f"promises {expected_codec}")
+    if rate != plan.output.rate or channels != 2:
+        return False, f"ffmpeg produced unexpected audio format: {rate} Hz, {channels} channels"
+    if pcm:
+        counted, message = count_pcm_samples(tools, path, cancelled=cancelled)
+        if counted is None:
+            return False, message
+        if counted != plan.output.samples:
             return False, (
                 "ffmpeg produced the wrong audio extent: "
-                f"{decoded_samples} decoded samples for a "
+                f"{counted} decoded samples for a "
                 f"{plan.output.samples}-sample plan"
             )
+        return True, ""
+    try:
+        frames = int(stream.get("nb_read_frames") or 0)
+    except (TypeError, ValueError):
+        frames = 0
+    decoded_samples = frames * AUDIO_FRAME_SAMPLES
+    if (frames <= 0
+            or abs(decoded_samples - plan.output.samples)
+            > AUDIO_SAMPLE_TOLERANCE):
+        return False, (
+            "ffmpeg produced the wrong audio extent: "
+            f"{decoded_samples} decoded samples for a "
+            f"{plan.output.samples}-sample plan"
+        )
     return True, ""
+
+
+PCM_CHUNK_BYTES = 1 << 16
+PCM_STDERR_TAIL = 4096
+
+
+def count_pcm_samples(tools: Tools, path: Path, *, cancelled=lambda: False
+                      ) -> tuple[int | None, str]:
+    """Per-channel sample frames in the first audio stream, counted exactly.
+
+    Decoded to 16-bit stereo-interleaved bytes on a pipe and counted in
+    bounded chunks, never held: a mezzanine's sound is not read into memory.
+    No rate or channel conversion is forced, so what is counted is what the
+    file holds (the stream was already checked to be 48 kHz stereo s16le).
+
+    Cancellation is observed while a read is waiting: the pipe is drained by
+    a reader thread and this function polls the cancel flag between its
+    reports. On cancel, failure or an exception the child is terminated,
+    then killed if it lingers, and both reader threads are joined. A decode
+    that fails or leaves a partial sample frame is never a count.
+    """
+    import queue
+    import threading
+
+    command = [str(tools.ffmpeg), "-hide_banner", "-nostdin", "-v", "error",
+               "-i", str(path), "-map", "0:a:0", "-f", "s16le", "-"]
+    proc = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        creationflags=NO_WINDOW,
+    )
+    reports: queue.Queue = queue.Queue(maxsize=8)
+    stop = threading.Event()
+    tail = bytearray()
+
+    def read_stdout() -> None:
+        try:
+            while not stop.is_set():
+                data = proc.stdout.read(PCM_CHUNK_BYTES)
+                while not stop.is_set():
+                    try:
+                        reports.put(len(data), timeout=0.05)
+                        break
+                    except queue.Full:
+                        continue
+                if not data:
+                    return
+        except (OSError, ValueError):
+            reports.put(-1)
+
+    def read_stderr() -> None:
+        try:
+            for line in iter(proc.stderr.readline, b""):
+                tail.extend(line)
+                del tail[:-PCM_STDERR_TAIL]
+        except (OSError, ValueError):
+            pass
+
+    readers = [threading.Thread(target=read_stdout, daemon=True),
+               threading.Thread(target=read_stderr, daemon=True)]
+    for reader in readers:
+        reader.start()
+
+    def settle(kill: bool) -> None:
+        stop.set()
+        if kill and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        for reader in readers:
+            reader.join(timeout=2)
+        for pipe in (proc.stdout, proc.stderr):
+            try:
+                pipe.close()
+            except OSError:
+                pass
+
+    total = 0
+    try:
+        while True:
+            if cancelled():
+                settle(kill=True)
+                return None, "Cancelled"
+            try:
+                size = reports.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if size < 0:
+                settle(kill=True)
+                return None, "could not read the finished audio"
+            if size == 0:
+                break
+            total += size
+        while proc.poll() is None:
+            if cancelled():
+                settle(kill=True)
+                return None, "Cancelled"
+            try:
+                proc.wait(timeout=0.05)
+            except subprocess.TimeoutExpired:
+                continue
+    except BaseException:
+        settle(kill=True)
+        raise
+    settle(kill=False)
+    if proc.returncode != 0:
+        detail = bytes(tail).decode("utf-8", "replace").strip().splitlines()
+        return None, ("could not decode the finished audio: "
+                      + (detail[-1][:200] if detail else f"exit {proc.returncode}"))
+    if total % 4:
+        return None, "the finished audio ends part-way through a sample"
+    return total // 4, ""

@@ -279,7 +279,9 @@ def test_levels_stay_exact_fractions(panel):
 
 @pytest.mark.parametrize("context,fragment", [
     (dict(bundle=True), "delivery bundle"),
-    (dict(preset_key="social"), "social"),
+    (dict(preset_key="social"), "Social"),
+    (dict(preset_key="remux"), "Remux copies"),
+    (dict(preset_key="slowmo"), "Slow motion has no sound"),
 ])
 def test_an_unsupported_context_is_shown_and_locked(panel, context, fragment):
     """The same refusals the resolver makes, said before the commit rather

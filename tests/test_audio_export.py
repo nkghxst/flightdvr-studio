@@ -579,3 +579,329 @@ def test_cancelling_after_the_real_graph_starts_is_atomic_and_keeps_other_job(
     assert queued.out_path == queued_before.out_path
     print("cancelled live graph after part bytes:", observed_size,
           "destination bytes:", len(sentinel))
+
+
+# -- stage A: codec-aware validation and the exact PCM count -------------------
+
+from flightdvr import audio_export  # noqa: E402
+from flightdvr.audio_export import (  # noqa: E402
+    count_pcm_samples, validate_expected_audio)
+from flightdvr.audio_plan import OutputAudioPlan  # noqa: E402
+
+PCM_SAMPLES = 6 * 48_000        # 288000, the six-second Edit extent
+
+
+def _pcm_plan(mode=AudioMode.REPLACE, samples=PCM_SAMPLES, source=True):
+    return OutputAudioPlan(mode, SampleSpan(0, samples, OUTPUT_RATE), source)
+
+
+def _write_stereo(path: Path, samples: int) -> None:
+    """Authored in Python, not trimmed by FFmpeg: the length is the literal
+    asked for. Distinct non-silent channels, as in the retained oracle."""
+    data = array("h")
+    for n in range(samples):
+        data.append(12_000 if n % 48 < 24 else -12_000)
+        data.append(6_000 if n % 34 < 17 else -3_000)
+    with wave.open(str(path), "wb") as target:
+        target.setnchannels(2)
+        target.setsampwidth(2)
+        target.setframerate(48_000)
+        target.writeframes(data.tobytes())
+
+
+def _edit_mov(tools, tmp_path: Path, name: str, samples: int, *,
+              codec: str = "pcm_s16le", extra_audio: bool = False) -> Path:
+    wav = tmp_path / f"{name}.wav"
+    _write_stereo(wav, samples)
+    out = tmp_path / f"{name}.mov"
+    command = [str(tools.ffmpeg), "-hide_banner", "-nostdin", "-v", "error",
+               "-y", "-f", "lavfi", "-i", "color=c=navy:s=160x96:r=30:d=6",
+               "-i", str(wav)]
+    if extra_audio:
+        command += ["-i", str(wav)]
+    command += ["-map", "0:v", "-map", "1:a"]
+    if extra_audio:
+        command += ["-map", "2:a"]
+    command += ["-c:v", "prores_ks", "-profile:v", "1",
+                "-pix_fmt", "yuv422p10le", "-c:a", codec]
+    if codec == "aac":
+        command += ["-b:a", "192k"]
+    run(command + [str(out)])
+    return out
+
+
+@pytest.mark.parametrize("samples,accepted", [
+    (PCM_SAMPLES, True), (PCM_SAMPLES - 1, False), (PCM_SAMPLES + 1, False)])
+def test_edit_pcm_extent_is_exact_to_one_sample(tools, tmp_path, samples,
+                                                accepted):
+    """The retained oracle's three lengths (287999 / 288000 / 288001).
+
+    All three have 282 PCM frames in MOV, so the AAC rule (frames x 1024,
+    within 1024) accepts every one of them; putting that rule back for PCM
+    fails the two controls here."""
+    path = _edit_mov(tools, tmp_path, f"pcm-{samples}", samples)
+    assert count_pcm_samples(tools, path) == (samples, "")
+    ok, message = validate_expected_audio(
+        tools, path, _pcm_plan(), expected_codec="pcm_s16le")
+    assert ok is accepted, message
+    if not accepted:
+        assert f"{samples} decoded samples" in message
+
+
+def test_edit_refuses_compressed_audio_in_its_mov(tools, tmp_path):
+    path = _edit_mov(tools, tmp_path, "aac-in-mov", PCM_SAMPLES, codec="aac")
+    ok, message = validate_expected_audio(
+        tools, path, _pcm_plan(), expected_codec="pcm_s16le")
+    assert not ok and "aac audio where this preset promises pcm_s16le" in message
+
+
+def test_a_second_audio_stream_is_refused(tools, tmp_path):
+    path = _edit_mov(tools, tmp_path, "two-streams", PCM_SAMPLES,
+                     extra_audio=True)
+    ok, message = validate_expected_audio(
+        tools, path, _pcm_plan(), expected_codec="pcm_s16le")
+    assert not ok and "2 audio streams" in message
+
+
+def test_sound_and_silence_must_match_the_plan(tools, tmp_path):
+    with_sound = _edit_mov(tools, tmp_path, "sound", PCM_SAMPLES)
+    ok, message = validate_expected_audio(
+        tools, with_sound, _pcm_plan(AudioMode.NO_SOUND),
+        expected_codec="pcm_s16le")
+    assert not ok and "No sound" in message
+    silent = tmp_path / "silent.mov"
+    run([str(tools.ffmpeg), "-hide_banner", "-nostdin", "-v", "error", "-y",
+         "-f", "lavfi", "-i", "color=c=navy:s=160x96:r=30:d=1",
+         "-c:v", "prores_ks", "-profile:v", "1", str(silent)])
+    ok, message = validate_expected_audio(
+        tools, silent, _pcm_plan(), expected_codec="pcm_s16le")
+    assert not ok and "no audio" in message
+    assert validate_expected_audio(
+        tools, silent, _pcm_plan(AudioMode.NO_SOUND),
+        expected_codec="pcm_s16le") == (True, "")
+
+
+def test_a_failed_probe_is_never_no_sound(tools, tmp_path):
+    """A file that cannot be read is not a file with no audio."""
+    missing = tmp_path / "never-written.mov"
+    ok, message = validate_expected_audio(
+        tools, missing, _pcm_plan(AudioMode.NO_SOUND),
+        expected_codec="pcm_s16le")
+    assert not ok and "could not read" in message
+
+
+class _FakeProbe:
+    def __init__(self, stdout: str, returncode: int = 0):
+        self.stdout, self.returncode = stdout, returncode
+
+    def communicate(self, timeout=None):
+        return self.stdout, ""
+
+
+@pytest.mark.parametrize("stdout", [
+    "not json", "{}", '{"streams": 7}', '{"streams": ["x"]}'])
+def test_an_unreadable_probe_is_never_no_sound(monkeypatch, stdout):
+    monkeypatch.setattr(audio_export.subprocess, "Popen",
+                        lambda *a, **k: _FakeProbe(stdout))
+    ok, message = validate_expected_audio(
+        find_tools(), Path("x.mov"), _pcm_plan(AudioMode.NO_SOUND))
+    assert not ok and "could not read" in message
+
+
+def test_missing_stream_details_are_refused(monkeypatch):
+    probe = json.dumps({"streams": [{"codec_type": "audio",
+                                     "codec_name": "aac"}]})
+    monkeypatch.setattr(audio_export.subprocess, "Popen",
+                        lambda *a, **k: _FakeProbe(probe))
+    ok, message = validate_expected_audio(find_tools(), Path("x.mp4"),
+                                          _pcm_plan())
+    assert not ok and "missing stream details" in message
+
+
+def test_the_probe_reads_audio_streams_only(monkeypatch):
+    """Counting frames across every stream decoded the whole picture."""
+    seen = []
+
+    def capture(command, **_kwargs):
+        seen.append(command)
+        return _FakeProbe(json.dumps({"streams": []}))
+
+    monkeypatch.setattr(audio_export.subprocess, "Popen", capture)
+    validate_expected_audio(find_tools(), Path("x.mp4"),
+                            _pcm_plan(AudioMode.NO_SOUND))
+    command = seen[0]
+    at = command.index("-select_streams")
+    assert command[at + 1] == "a"
+
+
+def test_cancel_is_seen_while_the_pcm_read_is_waiting(monkeypatch, tools):
+    """A real child that writes nothing: the read blocks, and cancelling must
+    still return promptly and stop the child."""
+    import sys
+
+    launched = []
+    real_popen = subprocess.Popen
+
+    def silent_child(_command, **kwargs):
+        proc = real_popen([sys.executable, "-c",
+                           "import time; time.sleep(60)"], **kwargs)
+        launched.append(proc)
+        return proc
+
+    monkeypatch.setattr(audio_export.subprocess, "Popen", silent_child)
+    before = set(threading.enumerate())
+    started = time.monotonic()
+    counted, message = count_pcm_samples(
+        tools, Path("x.mov"),
+        cancelled=lambda: time.monotonic() > started + 0.3)
+    elapsed = time.monotonic() - started
+    assert (counted, message) == (None, "Cancelled")
+    assert elapsed < 4.0, elapsed
+    assert launched and launched[0].poll() is not None, "child left running"
+    leftover = [t for t in threading.enumerate()
+                if t not in before and t.is_alive()]
+    assert not leftover, leftover
+
+
+def test_a_failed_pcm_decode_is_not_a_count(tools, tmp_path):
+    broken = tmp_path / "broken.mov"
+    broken.write_bytes(b"\x00" * 4096)
+    counted, message = count_pcm_samples(tools, broken)
+    assert counted is None and "could not decode" in message
+
+
+def test_a_probe_that_exits_badly_is_never_no_sound(monkeypatch):
+    """Readable JSON from a probe that failed is still a failed probe."""
+    monkeypatch.setattr(audio_export.subprocess, "Popen",
+                        lambda *a, **k: _FakeProbe('{"streams": []}', 1))
+    ok, message = validate_expected_audio(
+        find_tools(), Path("x.mov"), _pcm_plan(AudioMode.NO_SOUND))
+    assert not ok and "could not read" in message
+
+
+# -- stage A: Edit carries configured audio as exact PCM, through the worker --
+
+
+def export_edit(tools, tmp_path, clip, audio, *, codec="prores_lt", name=None):
+    out = tmp_path / f"edit-{name or audio.mode.value}.mov"
+    job = Job([clip], "edit", ExportSettings(edit_codec=codec), out,
+              audio=audio)
+    worker = ExportWorker(tools, [job], tmp_path / "work")
+    ok, message = worker._run_job(0, job)
+    assert ok, message
+    return out
+
+
+def _probe_streams_of(tools, path: Path) -> list[dict]:
+    found = run([str(tools.ffprobe), "-v", "error", "-show_streams",
+                 "-show_format", "-of", "json", str(path)])
+    return json.loads(found.stdout)
+
+
+@pytest.mark.parametrize("mode", list(AudioMode))
+def test_edit_exports_each_mode_as_exact_pcm_in_mov(media, tools, tmp_path,
+                                                    mode):
+    audio = (MusicChoice(mode=mode)
+             if mode in (AudioMode.ORIGINAL, AudioMode.NO_SOUND)
+             else choice(media.asset, mode))
+    out = export_edit(tools, tmp_path, media.source, audio)
+    probed = _probe_streams_of(tools, out)
+    assert "mov" in probed["format"]["format_name"]
+    video = [s for s in probed["streams"] if s["codec_type"] == "video"]
+    sound = [s for s in probed["streams"] if s["codec_type"] == "audio"]
+    assert [s["codec_name"] for s in video] == ["prores"]
+    if mode is AudioMode.NO_SOUND:
+        assert sound == []
+        return
+    assert [(s["codec_name"], int(s["sample_rate"]), int(s["channels"]))
+            for s in sound] == [("pcm_s16le", 48_000, 2)]
+    # Exact, not within an AAC frame: 0.8 s at 48 kHz is 38400.
+    assert count_pcm_samples(tools, out) == (38_400, "")
+    if mode is AudioMode.REPLACE:
+        samples = _decode_mono(tools, out)
+        # Output 0.05 s is song 0.15 s: the passage starts at song 0.1 s, in
+        # the 880 Hz block (literal fixture layout, not the resolver).
+        assert _dominant(samples, 2_400) == 880
+
+
+def test_edit_dnxhr_carries_music_as_exact_pcm(tools, tmp_path, media):
+    """A DNxHR representative: DNxHR needs a standard frame size, so its own
+    small 1280x720 source with sound."""
+    source = tmp_path / "hd.ts"
+    run([str(tools.ffmpeg), "-hide_banner", "-nostdin", "-v", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=1.2",
+         "-f", "lavfi", "-i", "sine=f=330:r=48000:d=1.2",
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-f", "mpegts", str(source)])
+    clip = ClipInfo(source, source.stat().st_size, datetime.now(), 1.2,
+                    1280, 720, 30, "h264", "aac", "yuv420p", "tv")
+    clip.trim_in, clip.trim_out = TRIM_IN, TRIM_OUT
+    out = export_edit(tools, tmp_path, clip,
+                      choice(media.asset, AudioMode.REPLACE),
+                      codec="dnxhr_sq", name="dnxhr")
+    probed = _probe_streams_of(tools, out)
+    video = [s for s in probed["streams"] if s["codec_type"] == "video"]
+    sound = [s for s in probed["streams"] if s["codec_type"] == "audio"]
+    assert [s["codec_name"] for s in video] == ["dnxhd"]
+    assert [s["codec_name"] for s in sound] == ["pcm_s16le"]
+    assert count_pcm_samples(tools, out) == (38_400, "")
+
+
+def test_cancel_during_the_real_pcm_count_keeps_the_destination(
+        media, tools, tmp_path, monkeypatch):
+    """Cancelled while the real PCM decode is running, after FFmpeg has
+    written the whole file: nothing is published, the previous destination,
+    a finished neighbour and the queued job are untouched, and only this
+    job's own partial is removed."""
+    out = tmp_path / "edit.mov"
+    sentinel = b"previous destination"
+    out.write_bytes(sentinel)
+    neighbour = tmp_path / "finished-earlier.mov"
+    neighbour.write_bytes(b"someone else's finished file")
+    job = Job([media.source], "edit", ExportSettings(edit_codec="prores_lt"),
+              out, audio=choice(media.asset, AudioMode.REPLACE))
+    queued = Job([media.silent], "edit", ExportSettings(edit_codec="prores_lt"),
+                 tmp_path / "queued.mov",
+                 audio=choice(media.asset, AudioMode.MIX))
+    queued_before = deepcopy(queued)
+    worker = ExportWorker(tools, [job, queued], tmp_path / "work")
+
+    real_popen = subprocess.Popen
+    decodes = []
+
+    def slow_decode(command, *args, **kwargs):
+        # Only the count's decode is slowed: read at playback speed.
+        if "s16le" in command and "-map" in command:
+            command = list(command)
+            command.insert(command.index("-i"), "-re")
+            proc = real_popen(command, *args, **kwargs)
+            decodes.append(proc)
+            return proc
+        return real_popen(command, *args, **kwargs)
+
+    monkeypatch.setattr(audio_export.subprocess, "Popen", slow_decode)
+    part = out.with_name("edit.flightdvr-part.mov")
+    result = []
+    runner = threading.Thread(
+        target=lambda: result.append(worker._run_job(0, job)), daemon=True)
+    runner.start()
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and not decodes:
+        time.sleep(0.01)
+    assert decodes, "the PCM count never started"
+    assert decodes[0].poll() is None, "the decode finished before cancel"
+    assert worker._process is None          # FFmpeg itself has finished
+    assert part.exists() and part.stat().st_size > 0
+    worker.cancel()
+    runner.join(timeout=10)
+    assert not runner.is_alive(), "cancel was not seen during the count"
+    assert result == [(False, "Cancelled")]
+    assert decodes[0].poll() is not None, "the decode was left running"
+    assert decodes[0].returncode != 0, "the decode ran to its end, unstopped"
+    assert out.read_bytes() == sentinel
+    assert neighbour.read_bytes() == b"someone else's finished file"
+    assert not part.exists()
+    assert queued.status is JobStatus.PENDING
+    assert (queued.settings, queued.audio, queued.out_path) == (
+        queued_before.settings, queued_before.audio, queued_before.out_path)
+    assert not (tmp_path / "queued.mov").exists()

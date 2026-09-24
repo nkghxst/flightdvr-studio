@@ -39,7 +39,7 @@ from flightdvr.audio_plan import (  # noqa: E402
 from flightdvr.presets import (  # noqa: E402
     LEVELS, PASSTHROUGH, PRESET_ORDER, REC709, SEEK_LEAD_IN, ExportSettings,
     build_commands, colour_filters, estimate_output_size, output_path,
-    target_video_bitrate,
+    target_video_bitrate, vertical_crop,
 )
 
 TOOLS = Tools(Path("ffmpeg"), Path("ffprobe"))
@@ -913,3 +913,345 @@ def test_one_range_exports_to_the_name_it_always_did():
     name = output_path(Path("/out"), select_stem(piece, 0, 1), "upload",
                        subfolders=False, flight_date=None).name
     assert name == "hdz_048_upload.mp4"
+
+
+
+# -- stage A: configured audio on Master, Edit, Upload and Vertical -------------
+
+# Captured from `build_commands` at the unchanged base 27ee42c for Master's
+# ordinary configured audio, before stage A moved that code into a shared
+# helper. Literals, not recomputed: moving the code must not change a byte.
+MASTER_ORDINARY_AUDIO_AT_BASE = {'mix': [['ffmpeg',
+          '-hide_banner',
+          '-nostdin',
+          '-y',
+          '-fflags',
+          '+genpts',
+          '-analyzeduration',
+          '100M',
+          '-probesize',
+          '100M',
+          '-ss',
+          '10.000',
+          '-copyts',
+          '-start_at_zero',
+          '-i',
+          'hdz_022.ts',
+          '-i',
+          'music.wav',
+          '-ss',
+          '12.000',
+          '-t',
+          '6.000',
+          '-vf',
+          'scale=in_range=full:out_range=limited,format=yuv420p',
+          '-c:v',
+          'libx264',
+          '-preset',
+          'slow',
+          '-crf',
+          '18',
+          '-profile:v',
+          'high',
+          '-fps_mode',
+          'cfr',
+          '-r',
+          '60',
+          '-filter_complex',
+          '[1:a:0]atrim=start_sample=176400:end_sample=441000,asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=end_sample=288000,aloop=loop=-1:size=288000:start=0,atrim=end_sample=288000,afade=t=in:ss=0:ns=48000:curve=tri,afade=t=out:ss=192000:ns=96000:curve=tri,volume=0.75,asetpts=PTS+576000/48000/TB[music];[0:a:0]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=start_sample=576000:end_sample=864000,asetpts=PTS-STARTPTS,apad=whole_len=288000,atrim=end_sample=288000,volume=0.25,asetpts=PTS+576000/48000/TB[dvr];[music][dvr]amix=inputs=2:duration=longest:normalize=0,atrim=end_sample=288000[planned_audio]',
+          '-map',
+          '0:v:0',
+          '-map',
+          '[planned_audio]',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '192k',
+          '-ac',
+          '2',
+          '-movflags',
+          '+faststart',
+          'out.mp4']],
+ 'no_sound': [['ffmpeg',
+               '-hide_banner',
+               '-nostdin',
+               '-y',
+               '-fflags',
+               '+genpts',
+               '-analyzeduration',
+               '100M',
+               '-probesize',
+               '100M',
+               '-ss',
+               '10.000',
+               '-copyts',
+               '-start_at_zero',
+               '-i',
+               'hdz_022.ts',
+               '-ss',
+               '12.000',
+               '-t',
+               '6.000',
+               '-vf',
+               'scale=in_range=full:out_range=limited,format=yuv420p',
+               '-c:v',
+               'libx264',
+               '-preset',
+               'slow',
+               '-crf',
+               '18',
+               '-profile:v',
+               'high',
+               '-fps_mode',
+               'cfr',
+               '-r',
+               '60',
+               '-an',
+               '-movflags',
+               '+faststart',
+               'out.mp4']],
+ 'original': [['ffmpeg',
+               '-hide_banner',
+               '-nostdin',
+               '-y',
+               '-fflags',
+               '+genpts',
+               '-analyzeduration',
+               '100M',
+               '-probesize',
+               '100M',
+               '-ss',
+               '10.000',
+               '-copyts',
+               '-start_at_zero',
+               '-i',
+               'hdz_022.ts',
+               '-ss',
+               '12.000',
+               '-t',
+               '6.000',
+               '-vf',
+               'scale=in_range=full:out_range=limited,format=yuv420p',
+               '-c:v',
+               'libx264',
+               '-preset',
+               'slow',
+               '-crf',
+               '18',
+               '-profile:v',
+               'high',
+               '-fps_mode',
+               'cfr',
+               '-r',
+               '60',
+               '-c:a',
+               'aac',
+               '-b:a',
+               '192k',
+               '-ac',
+               '2',
+               '-af',
+               'aresample=48000:async=1:first_pts=0,apad=whole_len=864000,atrim=end_sample=864000',
+               '-movflags',
+               '+faststart',
+               'out.mp4']],
+ 'replace': [['ffmpeg',
+              '-hide_banner',
+              '-nostdin',
+              '-y',
+              '-fflags',
+              '+genpts',
+              '-analyzeduration',
+              '100M',
+              '-probesize',
+              '100M',
+              '-ss',
+              '10.000',
+              '-copyts',
+              '-start_at_zero',
+              '-i',
+              'hdz_022.ts',
+              '-i',
+              'music.wav',
+              '-ss',
+              '12.000',
+              '-t',
+              '6.000',
+              '-vf',
+              'scale=in_range=full:out_range=limited,format=yuv420p',
+              '-c:v',
+              'libx264',
+              '-preset',
+              'slow',
+              '-crf',
+              '18',
+              '-profile:v',
+              'high',
+              '-fps_mode',
+              'cfr',
+              '-r',
+              '60',
+              '-filter_complex',
+              '[1:a:0]atrim=start_sample=176400:end_sample=441000,asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=end_sample=288000,aloop=loop=-1:size=288000:start=0,atrim=end_sample=288000,afade=t=in:ss=0:ns=48000:curve=tri,afade=t=out:ss=192000:ns=96000:curve=tri,volume=0.75,asetpts=PTS+576000/48000/TB[music];[music]anull[planned_audio]',
+              '-map',
+              '0:v:0',
+              '-map',
+              '[planned_audio]',
+              '-c:a',
+              'aac',
+              '-b:a',
+              '192k',
+              '-ac',
+              '2',
+              '-movflags',
+              '+faststart',
+              'out.mp4']]}
+
+
+def _ordinary_audio_case(mode: AudioMode, preset: str = "master",
+                         settings: ExportSettings | None = None,
+                         source_has_audio: bool = True):
+    clip = boxpro_clip(duration=20.0)
+    if not source_has_audio:
+        clip.audio_codec = ""
+    clip.trim_in, clip.trim_out = 12.0, 18.0
+    if mode in (AudioMode.REPLACE, AudioMode.MIX):
+        asset = AudioAsset(Path("music.wav"), "a" * 64, 0, 44_100, 2,
+                           20 * 44_100)
+        choice = MusicChoice(asset=asset, mode=mode,
+                             passage=SampleSpan(4 * 44_100, 10 * 44_100,
+                                                44_100),
+                             music_level=Fraction(3, 4),
+                             dvr_level=Fraction(1, 4))
+    else:
+        choice = MusicChoice(mode=mode)
+    plan = resolve_audio_plan(choice, 6 * OUTPUT_RATE,
+                              source_has_audio=source_has_audio,
+                              preset_key=preset)
+    return build_commands(TOOLS, clip, preset, settings or ExportSettings(),
+                          Path("out.mp4" if preset != "edit" else "out.mov"),
+                          Path("work"), audio_plan=plan)
+
+
+@pytest.mark.parametrize("mode", list(AudioMode))
+def test_master_ordinary_audio_commands_are_unchanged_from_the_base(
+        mode, monkeypatch):
+    # The literals were captured with an ffmpeg that has -fps_mode; an older
+    # one (4.4) spells the same option -vsync. Pin the spelling, not the
+    # machine's ffmpeg, so the comparison is about this change alone.
+    import flightdvr.media as media
+    monkeypatch.setattr(media, "_fps_mode_supported", lambda _ffmpeg: True)
+    assert _ordinary_audio_case(mode) == MASTER_ORDINARY_AUDIO_AT_BASE[mode.value]
+
+
+def _without_audio(command: list[str]) -> list[str]:
+    """The command with every audio decision removed, to compare picture."""
+    out, skip = [], 0
+    audio_flags = {"-c:a", "-b:a", "-ac", "-af", "-filter_complex"}
+    for index, token in enumerate(command):
+        if skip:
+            skip -= 1
+            continue
+        if token in audio_flags:
+            skip = 1
+            continue
+        if token == "-map":
+            skip = 1
+            continue
+        if token in ("-an",):
+            continue
+        if token == "-i" and command[index + 1] == "music.wav":
+            skip = 1
+            continue
+        out.append(token)
+    return out
+
+
+@pytest.mark.parametrize("preset,codec", [
+    ("edit", ["-c:a", "pcm_s16le", "-ac", "2"]),
+    ("upload", ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]),
+    ("vertical", ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]),
+])
+@pytest.mark.parametrize("mode", list(AudioMode))
+def test_stage_a_presets_carry_configured_audio_and_keep_their_picture(
+        preset, codec, mode):
+    command = _ordinary_audio_case(mode, preset)[0]
+    legacy = build_commands(
+        TOOLS, _legacy_clip(), preset, ExportSettings(),
+        Path("out.mp4" if preset != "edit" else "out.mov"), Path("work"))[0]
+    # The picture arguments are the preset's own, exactly as before.
+    assert _without_audio(command) == _without_audio(legacy)
+    inputs = [command[i + 1] for i, token in enumerate(command) if token == "-i"]
+    if mode in (AudioMode.REPLACE, AudioMode.MIX):
+        # Music is input 1, before the source's output-side seek and length.
+        assert inputs == ["hdz_022.ts", "music.wav"]
+        assert command.index("music.wav") < command.index("-t")
+        graph = command[command.index("-filter_complex") + 1]
+        assert graph.startswith("[1:a:0]atrim=start_sample=176400:end_sample=441000")
+        # 12 s of source seek compensated on the music's timestamps.
+        assert "asetpts=PTS+576000/48000/TB" in graph
+        assert command[command.index("-map"):command.index("-map") + 4] == [
+            "-map", "0:v:0", "-map", "[planned_audio]"]
+        at = command.index("-c:a")
+        assert command[at:at + len(codec)] == codec
+    elif mode is AudioMode.NO_SOUND:
+        assert inputs == ["hdz_022.ts"] and "-an" in command
+        assert "-c:a" not in command
+    else:
+        assert inputs == ["hdz_022.ts"]
+        at = command.index("-c:a")
+        assert command[at:at + len(codec)] == codec
+        assert command[at + len(codec)] == "-af"
+        assert "apad=whole_len=864000,atrim=end_sample=864000" in command[
+            at + len(codec) + 1]
+    if preset == "edit":
+        assert "aac" not in command
+        assert command[-1] == "out.mov"
+
+
+def _legacy_clip():
+    clip = boxpro_clip(duration=20.0)
+    clip.trim_in, clip.trim_out = 12.0, 18.0
+    return clip
+
+
+def test_vertical_music_keeps_the_source_crop_on_the_picture():
+    command = _ordinary_audio_case(AudioMode.REPLACE, "vertical")[0]
+    picture = command[command.index("-vf") + 1]
+    crop = vertical_crop(_legacy_clip(), 50)
+    assert picture.startswith(
+        f"crop={crop.width}:{crop.height}:{crop.x}:{crop.y},"
+        f"scale={crop.output_width}:{crop.output_height}:flags=lanczos")
+
+
+def test_upload_music_keeps_its_enlargement():
+    command = _ordinary_audio_case(
+        AudioMode.MIX, "upload", ExportSettings(upload_height=1080))[0]
+    assert "scale=-2:1080:flags=lanczos" in command[command.index("-vf") + 1]
+
+
+@pytest.mark.parametrize("preset", ["edit", "upload", "vertical"])
+def test_joined_stage_a_presets_put_music_after_every_source(preset):
+    first = boxpro_clip(path=Path("a.ts"), duration=3.0)
+    middle = boxpro_clip(path=Path("b.ts"), duration=2.0, audio_codec="")
+    third = boxpro_clip(path=Path("a.ts"), duration=3.0)
+    spans = (SampleSpan(0, 144_000, OUTPUT_RATE),
+             SampleSpan(144_000, 240_000, OUTPUT_RATE),
+             SampleSpan(240_000, 384_000, OUTPUT_RATE))
+    sequence = SimpleNamespace(
+        occurrences=tuple(SimpleNamespace(sample_span=span) for span in spans),
+        total_samples=384_000)
+    asset = AudioAsset(Path("music.wav"), "a" * 64, 0, 44_100, 2, 8 * 44_100)
+    plan = resolve_audio_plan(
+        MusicChoice(asset=asset, passage=SampleSpan(44_100, 3 * 44_100, 44_100),
+                    mode=AudioMode.MIX),
+        384_000, source_has_audio=True, preset_key=preset, joined=True)
+    command = build_commands(
+        TOOLS, first, preset, ExportSettings(), Path("out"), Path("work"),
+        clips=[first, middle, third], audio_plan=plan, sequence=sequence)[0]
+    inputs = [command[i + 1] for i, token in enumerate(command) if token == "-i"]
+    assert inputs == ["a.ts", "b.ts", "a.ts", "music.wav"]
+    graph = command[command.index("-filter_complex") + 1]
+    assert "[3:a:0]" in graph and "[1:a:0]atrim" not in graph
+    at = command.index("-c:a")
+    assert command[at + 1] == ("pcm_s16le" if preset == "edit" else "aac")

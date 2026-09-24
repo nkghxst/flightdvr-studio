@@ -481,7 +481,9 @@ class ExportWorker(QThread):
                 try:
                     ok, message = validate_expected_audio(
                         self.tools, temp_path, audio_plan,
-                        cancelled=lambda: self._cancel)
+                        cancelled=lambda: self._cancel,
+                        expected_codec=("pcm_s16le" if job.preset_key == "edit"
+                                        else "aac"))
                 except (OSError, subprocess.SubprocessError) as exc:
                     return False, f"Could not check the finished audio: {exc}"
                 if not ok:

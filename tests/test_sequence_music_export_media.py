@@ -168,12 +168,18 @@ def _choice(fixture: JoinedFixture, mode: AudioMode,
     )
 
 
+def _settings() -> ExportSettings:
+    return ExportSettings(
+        master_speed="ultrafast", upload_speed="ultrafast",
+        vertical_speed="ultrafast", edit_codec="prores_lt",
+        colour=PASSTHROUGH)
+
+
 def _export(tools, fixture: JoinedFixture, tmp_path: Path, name: str,
-            choice: MusicChoice) -> Path:
-    target = tmp_path / f"{name}.mp4"
+            choice: MusicChoice, preset: str = "master") -> Path:
+    target = tmp_path / f"{name}{'.mov' if preset == 'edit' else '.mp4'}"
     job = Job(
-        fixture.pieces, "master",
-        ExportSettings(master_speed="ultrafast", colour=PASSTHROUGH),
+        fixture.pieces, preset, _settings(),
         target, audio=choice, target=fixture.target,
         sequence=fixture.sequence,
     )
@@ -189,13 +195,14 @@ def _export(tools, fixture: JoinedFixture, tmp_path: Path, name: str,
 def _stream_facts(tools, path: Path) -> dict:
     result = _run([
         str(tools.ffprobe), "-v", "error", "-show_entries",
-        "stream=codec_type,codec_name,sample_rate,channels,duration:format=duration",
+        "stream=codec_type,codec_name,width,height,sample_rate,channels,duration:format=duration",
         "-of", "json", str(path),
     ])
     return json.loads(result.stdout)
 
 
-def _video_frames(tools, path: Path) -> tuple[list[Fraction], list[str]]:
+def _video_frames(tools, path: Path, *, scaled: bool = False
+                 ) -> tuple[list[Fraction], list[str]]:
     timing = json.loads(_run([
         str(tools.ffprobe), "-v", "error", "-select_streams", "v:0",
         "-show_entries", "stream=time_base:frame=best_effort_timestamp",
@@ -207,8 +214,9 @@ def _video_frames(tools, path: Path) -> tuple[list[Fraction], list[str]]:
            for frame in timing["frames"]]
     raw = _run([
         str(tools.ffmpeg), "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-i", str(path), "-map", "0:v:0", "-pix_fmt", "rgb24",
-        "-f", "rawvideo", "-",
+        "-i", str(path), "-map", "0:v:0",
+        *(["-vf", f"scale={WIDTH}:{HEIGHT}"] if scaled else []),
+        "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
     ], text=False).stdout
     frame_bytes = WIDTH * HEIGHT * 3
     assert len(raw) % frame_bytes == 0
@@ -282,25 +290,49 @@ def _dominates(samples: array, seconds: float, wanted: int,
     )
 
 
-def test_published_master_modes_follow_literal_a_b_a_finished_time(
-        tools, joined_fixture, tmp_path):
-    fixture = joined_fixture
-    outputs = {
+def _export_modes(tools, fixture, tmp_path, preset: str = "master"):
+    return {
         "original": _export(
             tools, fixture, tmp_path, "original",
-            _choice(fixture, AudioMode.ORIGINAL)),
+            _choice(fixture, AudioMode.ORIGINAL), preset),
         "no_sound": _export(
             tools, fixture, tmp_path, "no-sound",
-            _choice(fixture, AudioMode.NO_SOUND)),
+            _choice(fixture, AudioMode.NO_SOUND), preset),
         "replace_loop": _export(
             tools, fixture, tmp_path, "replace-loop",
-            _choice(fixture, AudioMode.REPLACE, ShortTrackPolicy.LOOP)),
+            _choice(fixture, AudioMode.REPLACE, ShortTrackPolicy.LOOP), preset),
         "mix_once": _export(
             tools, fixture, tmp_path, "mix-once",
-            _choice(fixture, AudioMode.MIX, ShortTrackPolicy.PLAY_ONCE)),
+            _choice(fixture, AudioMode.MIX, ShortTrackPolicy.PLAY_ONCE), preset),
     }
 
-    pts, labels = _video_frames(tools, outputs["mix_once"])
+
+def test_published_master_modes_follow_literal_a_b_a_finished_time(
+        tools, joined_fixture, tmp_path):
+    _assert_literal_a_b_a(tools, joined_fixture,
+                          _export_modes(tools, joined_fixture, tmp_path))
+
+
+# Stage A: the same literal Assembly on the other presets that carry it. Edit
+# is PCM in MOV and so is held to the exact 384000 samples.
+STAGE_A_ASSEMBLY = {
+    "edit": ("pcm_s16le", (WIDTH, HEIGHT)),
+    "upload": ("aac", (1920, 1080)),
+    "vertical": ("aac", (720, 1280)),
+}
+
+
+@pytest.mark.parametrize("preset", sorted(STAGE_A_ASSEMBLY))
+def test_stage_a_presets_follow_the_same_literal_a_b_a(
+        tools, joined_fixture, tmp_path, preset):
+    _assert_literal_a_b_a(
+        tools, joined_fixture,
+        _export_modes(tools, joined_fixture, tmp_path, preset), preset)
+
+
+def _assert_literal_a_b_a(tools, fixture, outputs, preset: str = "master"):
+    pts, labels = _video_frames(tools, outputs["mix_once"],
+                                scaled=preset != "master")
     assert _video_oracle(pts, labels), _transitions(pts, labels)
     # Negative net: swapped order, missing repeated A, and a one-frame seam
     # extension are all rejected by the produced-file oracle.
@@ -325,11 +357,20 @@ def test_published_master_modes_follow_literal_a_b_a_finished_time(
             assert len(audio) == 1
             assert (int(audio[0]["sample_rate"]), int(audio[0]["channels"])) == (
                 OUTPUT_RATE, 2)
+            if preset != "master":
+                assert audio[0]["codec_name"] == STAGE_A_ASSEMBLY[preset][0]
+        if preset != "master":
+            video = [s for s in streams if s.get("codec_type") == "video"][0]
+            assert (int(video["width"]), int(video["height"])
+                    ) == STAGE_A_ASSEMBLY[preset][1]
 
     original = _decode_mono(tools, outputs["original"])
     replace = _decode_mono(tools, outputs["replace_loop"])
     mixed = _decode_mono(tools, outputs["mix_once"])
     assert min(len(original), len(replace), len(mixed)) >= EXPECTED_SAMPLES
+    if preset == "edit":
+        # PCM: exact, not merely at least.
+        assert len(original) == len(replace) == len(mixed) == EXPECTED_SAMPLES
 
     # Original is A tone / explicit B silence / repeated A tone.
     for point in (0.5, 1.5, 2.5, 5.5, 6.5, 7.5):
@@ -457,8 +498,9 @@ def test_cancelling_a_live_joined_graph_preserves_the_previous_file(
     }, sort_keys=True))
 
 
+@pytest.mark.parametrize("preset", ["master", "edit"])
 def test_hardcoded_music_input_one_is_caught_before_publication(
-        tools, joined_fixture, tmp_path, monkeypatch):
+        tools, joined_fixture, tmp_path, monkeypatch, preset):
     """Input 1 is silent B, not music; the old assumption must be observable."""
     import flightdvr.audio_export as audio_export
 
@@ -472,10 +514,9 @@ def test_hardcoded_music_input_one_is_caught_before_publication(
             source_seek_samples=source_seek_samples, output_label=output_label)
 
     monkeypatch.setattr(audio_export, "planned_audio_chains", hardcoded)
-    target = tmp_path / "wrong-index.mp4"
+    target = tmp_path / f"wrong-index{'.mov' if preset == 'edit' else '.mp4'}"
     job = Job(
-        fixture.pieces, "master",
-        ExportSettings(master_speed="ultrafast", colour=PASSTHROUGH),
+        fixture.pieces, preset, _settings(),
         target, audio=_choice(fixture, AudioMode.REPLACE),
         target=fixture.target, sequence=fixture.sequence,
     )

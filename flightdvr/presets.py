@@ -1116,6 +1116,37 @@ def build_commands(
         # Resampling and channel layout are already done in the graph.
         return ["-c:a", "pcm_s16le"] if pcm else ["-c:a", "aac", "-b:a", bitrate]
 
+    def configured_sound(codec: list[str]) -> list[str] | None:
+        """One ordinary output's configured-audio arguments, or None.
+
+        None leaves the preset on its existing route: legacy keep-audio when
+        nothing is configured, and the joined graph (which already carries
+        the plan) for an Assembly. Every stage-A preset — Master, Edit,
+        Upload, Vertical — sounds the same way here, differing only in
+        `codec`; their picture arguments are untouched.
+        """
+        if audio_plan is None or joined:
+            return None
+        if audio_plan.mode.value in ("replace", "mix"):
+            from .audio_export import audio_filter_args
+            seek = round(max(0.0, clip.trim_in) * audio_plan.output.rate)
+            return (audio_filter_args(audio_plan, source_seek_samples=seek)
+                    + codec)
+        if audio_plan.mode.value == "no_sound":
+            return ["-an"]
+        source_total = audio_plan.output.samples + round(
+            max(0.0, clip.trim_in) * audio_plan.output.rate)
+        return codec + [
+            "-af", (
+                f"aresample={audio_plan.output.rate}:async=1:first_pts=0,"
+                f"apad=whole_len={source_total},"
+                f"atrim=end_sample={source_total}"
+            ),
+        ]
+
+    aac_192 = ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+    pcm_16 = ["-c:a", "pcm_s16le", "-ac", "2"]
+
     def timing(override: int = 0) -> list[str]:
         if not joined:
             return _fps_args(tools, clip, override)
@@ -1128,9 +1159,12 @@ def build_commands(
     if preset_key == "edit":
         label, codec_args, pix_fmt, _ = EDIT_CODECS[settings.edit_codec]
         filters, mapped = picture(pix_fmt)
+        sound_args = configured_sound(pcm_16)
+        if sound_args is None:
+            sound_args = sound("192k", mapped, pcm=True)
         return [
             head + filters + codec_args + timing()
-            + sound("192k", mapped, pcm=True) + [str(out_path)]
+            + sound_args + [str(out_path)]
         ]
 
     if preset_key == "master":
@@ -1142,27 +1176,8 @@ def build_commands(
                 "-c:v", "libx264", "-preset", settings.master_speed,
                 "-crf", str(settings.master_crf), "-profile:v", "high",
             ]
-        if audio_plan is not None and not joined:
-            from .audio_export import audio_filter_args
-            if audio_plan.mode.value in ("replace", "mix"):
-                seek = round(max(0.0, clip.trim_in) * audio_plan.output.rate)
-                sound_args = (audio_filter_args(audio_plan,
-                                                 source_seek_samples=seek)
-                              + ["-c:a", "aac", "-b:a", "192k", "-ac", "2"])
-            elif audio_plan.mode.value == "no_sound":
-                sound_args = ["-an"]
-            else:
-                source_total = audio_plan.output.samples + round(
-                    max(0.0, clip.trim_in) * audio_plan.output.rate)
-                sound_args = [
-                    "-c:a", "aac", "-b:a", "192k", "-ac", "2",
-                    "-af", (
-                        f"aresample={audio_plan.output.rate}:async=1:first_pts=0,"
-                        f"apad=whole_len={source_total},"
-                        f"atrim=end_sample={source_total}"
-                    ),
-                ]
-        else:
+        sound_args = configured_sound(aac_192)
+        if sound_args is None:
             sound_args = sound("192k", mapped)
         return [
             head + filters + video + timing() + sound_args
@@ -1183,8 +1198,11 @@ def build_commands(
                 "-c:v", "libx264", "-preset", settings.upload_speed,
                 "-crf", str(settings.upload_crf), "-profile:v", "high",
             ]
+        sound_args = configured_sound(aac_192)
+        if sound_args is None:
+            sound_args = sound("192k", mapped)
         return [
-            head + filters + video + timing() + sound("192k", mapped)
+            head + filters + video + timing() + sound_args
             + ["-movflags", "+faststart", str(out_path)]
         ]
 
@@ -1197,8 +1215,11 @@ def build_commands(
                 "-c:v", "libx264", "-preset", settings.vertical_speed,
                 "-crf", str(settings.vertical_crf), "-profile:v", "high",
             ]
+        sound_args = configured_sound(aac_192)
+        if sound_args is None:
+            sound_args = sound("192k", mapped)
         return [
-            head + filters + video + timing() + sound("192k", mapped)
+            head + filters + video + timing() + sound_args
             + ["-movflags", "+faststart", str(out_path)]
         ]
 
