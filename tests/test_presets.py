@@ -1134,7 +1134,13 @@ def _ordinary_audio_case(mode: AudioMode, preset: str = "master",
 
 
 @pytest.mark.parametrize("mode", list(AudioMode))
-def test_master_ordinary_audio_commands_are_unchanged_from_the_base(mode):
+def test_master_ordinary_audio_commands_are_unchanged_from_the_base(
+        mode, monkeypatch):
+    # The literals were captured with an ffmpeg that has -fps_mode; an older
+    # one (4.4) spells the same option -vsync. Pin the spelling, not the
+    # machine's ffmpeg, so the comparison is about this change alone.
+    import flightdvr.media as media
+    monkeypatch.setattr(media, "_fps_mode_supported", lambda _ffmpeg: True)
     assert _ordinary_audio_case(mode) == MASTER_ORDINARY_AUDIO_AT_BASE[mode.value]
 
 
