@@ -2217,3 +2217,78 @@ def test_a_real_change_to_the_value_still_replaces_the_typing(
     assert box.value() == 2.0
     assert box.lineEdit().text() == "2.00 s"
     window.hide()
+
+
+# -- P1: Classic's shallow band shows the lane it is for -----------------------
+
+
+def classic_band(window, monkeypatch, tmp_path, app):
+    from flightdvr.music_timeline import Presentation
+
+    target = with_track(window, monkeypatch, tmp_path, app)
+    window._store_music(target, replace(window._planned_music(target),
+                                        mode=AudioMode.MIX))
+    window._show_music_numbers(window._planned_music(target))
+    window.show()
+    window.resize(1440, 913)
+    window.preview_view.music_band.setChecked(True)
+    for _ in range(40):
+        app.processEvents()
+    view = window.preview_view
+    assert view.music_timeline.presentation is Presentation.CLASSIC
+    return target, view
+
+
+def in_band_view(view, widget) -> int:
+    """How many of the widget's rows the band's viewport actually shows."""
+    from PySide6.QtCore import QPoint
+
+    port = view.music_body.viewport()
+    top = widget.mapTo(port, QPoint(0, 0)).y()
+    return max(0, min(top + widget.height(), port.height()) - max(top, 0))
+
+
+def test_classic_band_shows_the_whole_lane_within_its_approved_depth(
+        window, monkeypatch, tmp_path, app):
+    from flightdvr.preview_panel import CLASSIC_MUSIC_MAXIMUM
+
+    _target, view = classic_band(window, monkeypatch, tmp_path, app)
+    lane = view.music_timeline.music
+    assert view.music_body.maximumHeight() == CLASSIC_MUSIC_MAXIMUM
+    assert lane.isVisible() and view.music_editor.editable
+    assert in_band_view(view, lane) == lane.height(), (
+        "the music lane and its fade handles are below the band's fold")
+    window.hide()
+
+
+def test_a_classic_refusal_sits_above_the_lane(
+        window, monkeypatch, tmp_path, app):
+    target, view = classic_band(window, monkeypatch, tmp_path, app)
+    note = view.music_silence_note
+    assert "Listen" in note.text()
+    window.export_panel.preset_buttons["social"].setChecked(True)
+    for _ in range(20):
+        app.processEvents()
+    assert "Social" in note.text()
+    assert in_band_view(view, note) == note.height(), (
+        "the refusal is below the band's fold")
+    assert window._planned_music(target).mode is AudioMode.MIX, "choice kept"
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    for _ in range(20):
+        app.processEvents()
+    assert "Social" not in note.text()
+    window.hide()
+
+
+def test_folding_the_list_gives_the_band_its_depth_back(
+        window, monkeypatch, tmp_path, app):
+    from flightdvr.preview_panel import CLASSIC_MUSIC_MAXIMUM
+
+    _target, view = classic_band(window, monkeypatch, tmp_path, app)
+    body = view.music_body
+    # What keeping a list row does: the band is held to its track row.
+    body.setMaximumHeight(body.minimumHeight())
+    window._set_list_folded(True)
+    assert body.maximumHeight() == CLASSIC_MUSIC_MAXIMUM
+    window._set_list_folded(False)
+    window.hide()

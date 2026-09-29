@@ -617,6 +617,9 @@ class PreviewView(QObject):
         """
         self.music_silence_note.setText(
             reason or (LISTENING_PREVIEW if listening else QUIET_PREVIEW))
+        if bool(reason) != self._note_is_reason:
+            self._note_is_reason = bool(reason)
+            self._place_note()
         if self.listen_check.isChecked() != listening:
             blocked = self.listen_check.blockSignals(True)
             self.listen_check.setChecked(listening)
@@ -686,7 +689,7 @@ class PreviewView(QObject):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.music_content = QWidget()
-        body = QVBoxLayout(self.music_content)
+        body = self._music_rows = QVBoxLayout(self.music_content)
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(INNER)
 
@@ -712,6 +715,7 @@ class PreviewView(QObject):
         self.music_silence_note = dim(QLabel(SILENT_PREVIEW))
         self.music_silence_note.setWordWrap(True)
         body.addWidget(self.music_silence_note)
+        self._note_is_reason = False
 
         # One editor for every way the music is shown. The lanes are its
         # visual presentation; the numbers below are another view of the
@@ -769,12 +773,30 @@ class PreviewView(QObject):
             # the font's and the style's.
             self.music_body.setMinimumHeight(max(
                 CLASSIC_MUSIC_MINIMUM, self.track_button.sizeHint().height()))
-            self.music_body.setMaximumHeight(CLASSIC_MUSIC_MAXIMUM)
+            self.restore_classic_reach()
         else:
             self.music_body.setMinimumHeight(MUSIC_BAND_MINIMUM)
             self.music_body.setMaximumHeight(16777215)
         self._music_band_margins()
         self._arrange_music()
+
+    def restore_classic_reach(self) -> None:
+        """Let Classic's band have its approved depth again, after the list
+        keeping a row held it down to its track row."""
+        self.music_body.setMaximumHeight(CLASSIC_MUSIC_MAXIMUM)
+
+    def _place_note(self) -> None:
+        """Classic's band is 120px: the track and listening rows and the
+        shallow lane with its handles fill it. The standing listening note
+        goes under the lane there; a refusal or a problem goes above it, so
+        what stops the music is never below the band's fold. Everywhere else
+        the note stays above the lanes."""
+        rows, note = self._music_rows, self.music_silence_note
+        below = (self.music_timeline.presentation is Presentation.CLASSIC
+                 and not self._note_is_reason)
+        rows.removeWidget(note)
+        at = rows.indexOf(self.music_timeline)
+        rows.insertWidget(at + 1 if below else at, note)
 
     def _arrange_music(self) -> None:
         # The numbers are behind More… in the compact presentation, and in
@@ -791,6 +813,7 @@ class PreviewView(QObject):
         else:
             panel.restore_primary()
         panel.setVisible(timeline.shows_more)
+        self._place_note()
 
     def show_track_status(self, text: str) -> None:
         """What the acquisition is doing, in words a person can act on."""

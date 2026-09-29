@@ -57,6 +57,7 @@ from .music_edit import (
 from .widgets import INNER, TIGHT, dim
 
 HANDLE_REACH = 6          # pixels either side of a handle that pick it up
+CLASSIC_LANE_DEPTH = 40   # the shallow band's music lane, as approved
 
 
 class Presentation(str, Enum):
@@ -321,7 +322,16 @@ class _Lane(QWidget):
         self.active = self.handles()[0] if self.handles() else None
 
     def sizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
-        return QSize(200, self.height_hint)
+        return QSize(200, self.height())
+
+    def set_depth(self, height: int | None) -> None:
+        """How deep the lane is drawn; None is its own depth. Handles are
+        picked up by where they are across, so a shallower lane is exactly
+        as usable."""
+        height = self.height_hint if height is None else int(height)
+        self.setMinimumHeight(height)
+        self.setMaximumHeight(height)
+        self.updateGeometry()
 
     # Subclasses: the lane's clock, handles and how a handle moves.
     def span(self) -> SampleSpan | None:
@@ -767,6 +777,9 @@ class MusicTimeline(QWidget):
         for widget in (self.song_caption, self.song, self.song_note):
             widget.setVisible(not classic and not folded)
         self.legend.setVisible(mode is not Presentation.SUBMITTED)
+        # Classic's band is the shallow one: the same lane, less deep, so it
+        # fits under a picture and a list that already share the window.
+        self.music.set_depth(CLASSIC_LANE_DEPTH if classic else None)
 
     @property
     def shows_more(self) -> bool:

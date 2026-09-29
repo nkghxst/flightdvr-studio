@@ -1369,6 +1369,11 @@ class MainWindow(QMainWindow):
     def _set_list_folded(self, folded: bool) -> None:
         panel = self.browser_panel
         panel.show_folded(folded)
+        if folded and self._view_mode is Mode.CLASSIC:
+            # The band gave up its body to keep a list row; the row is folded
+            # away now, so the band has that room back. It had stayed at its
+            # track row, with the lane below its fold (1120x760, natively).
+            self.preview_view.restore_classic_reach()
         panel.setMinimumHeight(self._classic_list_minimum())
         box = self.preview_view.preview_box
         if box.parentWidget() is self._left_column:
