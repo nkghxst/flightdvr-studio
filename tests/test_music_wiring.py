@@ -817,10 +817,16 @@ def test_the_summary_names_the_output_and_disappears_again(
 # -- what is deliberately absent ----------------------------------------------
 
 def test_the_band_says_the_preview_is_silent(window):
-    """Drawing no transport is not enough; unexplained silence reads as a bug."""
+    """Drawing no transport is not enough; unexplained silence reads as a bug.
+
+    P1: it says why (listening is off) and how to hear it, and no longer
+    claims the picture is the source's with no sound at all, which stopped
+    being true when an output's picture and monitoring arrived."""
     said = window.preview_view.music_silence_note.text()
     assert "no sound" in said
     assert "finished file" in said
+    assert "Listen" in said
+    assert "source picture" not in said
 
 
 def test_no_monitor_state_reaches_the_settings_or_the_choice(

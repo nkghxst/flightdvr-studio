@@ -3701,6 +3701,7 @@ class MainWindow(QMainWindow):
                     self.preview_box.updateGeometry()
                 self._refresh_vertical_overlay()
                 self._show_frame(self.trim_bar.playhead)
+        self._show_picture_identity()
 
     # -- Flow Assemble joined-position inspection ----------------------------
 
@@ -4178,7 +4179,43 @@ class MainWindow(QMainWindow):
             return self.context_for_working(target)
         return nothing_selected("choose an output to see it")
 
+    def _output_view_bound(self) -> bool:
+        """An output's picture is what is shown beside the controls column."""
+        return self._output_picture_active() and self._output_recipe is not None
+
+    def _show_picture_identity(self) -> None:
+        """Say whose picture this is, on whose clock.
+
+        Choosing an output on Music or Output leaves the recording in source
+        focus alone (W5), so the column beside the picture kept naming that
+        recording — output B shown, recording A named, and In/Out ready to
+        edit A. While an output's picture is bound, the column names that
+        output, its preset and the output's clock, and says the recording is
+        its source. Source focus itself is not moved.
+        """
+        view = self.preview_view
+        bound = self._output_view_bound()
+        view.set_output_picture(bound)
+        if not bound:
+            self._update_trim_labels()
+            return
+        recipe = self._output_recipe
+        target = recipe.target
+        label = (self._target_label(target) if not target.is_assembly
+                 else f"Assembly · {len(target.items)} rows")
+        preset = PRESETS[recipe.preset_key].label
+        position = view.sequence_strip.position
+        self.trim_title.setText(f"Output: {label}")
+        self.trim_title.setToolTip("The output selected in the list; the "
+                                   "recording in focus is unchanged.")
+        self.trim_position.setText(
+            f"output {human_duration(position)} of "
+            f"{human_duration(float(recipe.duration))}")
+        self.trim_position.setToolTip("This output's own clock, from zero.")
+        self.trim_summary.setText(f"{preset} · not the finished file")
+
     def _show_source_note(self) -> None:
+        self._show_picture_identity()
         if self.flow_source_note is None:
             return
         text = self._source_note(self._flow_stage)
@@ -6656,7 +6693,12 @@ class MainWindow(QMainWindow):
         clip = self._trim_clip
         if clip is None:
             return
+        if self._output_view_bound():
+            # The column speaks for the output while its picture is shown.
+            self._show_picture_identity()
+            return
         self.trim_title.setText(clip.path.name)
+        self.trim_title.setToolTip("")
         if self._precise_frame_number is not None:
             self.trim_position.setText(
                 f"{exact_timestamp(self.trim_bar.playhead)}\nsource frame "

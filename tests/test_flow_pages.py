@@ -3310,7 +3310,7 @@ def test_a_short_music_page_folds_and_more_unfolds_without_choosing(window, app)
     from flightdvr.music_timeline import Presentation
     first, _second = planned_pair(window, app)
     window.show()
-    window.resize(1402, 700)
+    window.resize(1402, 660)  # P1: one-line captions freed ~60px at 700
     settled(app)
     window._select_working_target(first)
     window._show_stage(Stage.MUSIC)
@@ -3913,3 +3913,52 @@ def test_the_one_output_action_is_music_s_alone(window, app):
         settled(app)
         assert not window.flow_shell.selected_button.isVisible(), stage
     window.set_view_mode(Mode.CLASSIC)
+
+
+# -- P1: the column beside the picture speaks for the picture shown ------------
+
+def test_an_output_s_picture_is_named_as_that_output_not_the_focused_source(
+        window, app):
+    from flightdvr.preview_panel import OUTPUT_PICTURE_KEYS, PICTURE_KEYS
+
+    first, second = planned_pair(window, app)
+    window.show()
+    window._show_stage(Stage.TRIM)
+    window._select_working_target(first)
+    settled(app)
+    source = window._trim_clip
+    view = window.preview_view
+    window._show_stage(Stage.OUTPUT)
+    settled(app)
+    window._select_working_target(second)
+    window._show_stage(Stage.MUSIC)
+    settled(app)
+    assert window._trim_clip is source, "source focus is not moved to B"
+    other = next(c for c in window.clips
+                 if c.fingerprint == second.items[0].fingerprint)
+    assert window.trim_title.text().startswith("Output: ")
+    assert other.path.name in window.trim_title.text()
+    assert source.path.name not in window.trim_title.text()
+    assert window.trim_position.text().startswith("output ")
+    # A source-side refresh (ten call sites: a trim change, a frame step, a
+    # scan) does not put the focused recording's name back over the output.
+    window._update_trim_labels()
+    assert window.trim_title.text().startswith("Output: ")
+    assert source.path.name not in window.trim_title.text()
+    assert view.focus_note.text() == OUTPUT_PICTURE_KEYS
+    buttons = [button for button, _tip in view._source_edits]
+    assert [b.text() for b in buttons] == ["In", "Out", "Reset"]
+    assert not any(b.isEnabled() for b in buttons)
+    assert "Trim" in buttons[0].toolTip()
+    # Back on Trim the picture is the recording in source focus again (W5
+    # moves focus to B's recording there, as deferred), and so is the column,
+    # with its edits on.
+    window._show_stage(Stage.TRIM)
+    settled(app)
+    assert window.trim_title.text() == window._trim_clip.path.name
+    assert view.focus_note.text() == PICTURE_KEYS
+    assert all(b.isEnabled() for b in buttons)
+    window.set_view_mode(Mode.CLASSIC)
+    settled(app)
+    assert window.trim_title.text() == window._trim_clip.path.name
+    assert all(b.isEnabled() for b in buttons)
