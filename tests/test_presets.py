@@ -742,6 +742,18 @@ def test_a_silent_join_still_uses_each_clip_s_sound():
     assert "[1:v]trim=start=2.000:duration=60.000," in graph
 
 
+def test_a_joined_clip_s_sound_keeps_a_late_start():
+    """P2d: sound that starts after the picture keeps that delay. It was moved
+    to start at zero (asetpts=PTS-STARTPTS), 8.7 ms early on a measured file;
+    now it is moved by the trim's own start and resampling fills the gap."""
+    from flightdvr.presets import join_filtergraph
+    clips = two_clips()
+    graph, _v, _a = join_filtergraph(clips, ExportSettings(), "yuv420p")
+    assert "asetpts=PTS-STARTPTS" not in graph
+    assert "atrim=start=0.000:duration=212.700,asetpts=PTS-0.000/TB," in graph
+    assert "aresample=48000:async=1:first_pts=0" in graph
+
+
 def _joined_audio_case(mode: AudioMode):
     first = boxpro_clip(path=Path("a.ts"), duration=3.0)
     middle = boxpro_clip(path=Path("b.ts"), duration=2.0, audio_codec="")

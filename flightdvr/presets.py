@@ -743,8 +743,13 @@ def join_filtergraph(
                 chains.append(f"[{index}:a]anullsink")
             continue
         if clip.has_audio:
+            # Moved by the trim's own start, not by the first sample kept, so
+            # sound that starts after the picture keeps that delay; the
+            # resampler fills the gap before it. Moved to its first sample, a
+            # whole clip's sound 8.7 ms after its picture was joined 8.7 ms
+            # early (P2d, measured).
             audio = [f"atrim=start={start:.3f}:duration={duration:.3f}",
-                     "asetpts=PTS-STARTPTS",
+                     f"asetpts=PTS-{start:.3f}/TB",
                      f"aresample={JOIN_SAMPLE_RATE}:async=1:first_pts=0",
                      "aformat=sample_fmts=fltp:channel_layouts=stereo"]
             if sequence is not None:
