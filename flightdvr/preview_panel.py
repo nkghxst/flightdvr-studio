@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QBoxLayout, QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpacerItem,
@@ -620,6 +620,12 @@ class PreviewView(QObject):
         if bool(reason) != self._note_is_reason:
             self._note_is_reason = bool(reason)
             self._place_note()
+        if reason:
+            # What stops the music is never left scrolled out of the band,
+            # wherever the band was scrolled to for the numbers. After the
+            # layout has placed it: the note may just have moved.
+            QTimer.singleShot(0, lambda: self.music_body.ensureWidgetVisible(
+                self.music_silence_note, 0, 0))
         if self.listen_check.isChecked() != listening:
             blocked = self.listen_check.blockSignals(True)
             self.listen_check.setChecked(listening)

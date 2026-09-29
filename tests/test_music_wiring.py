@@ -2292,3 +2292,22 @@ def test_folding_the_list_gives_the_band_its_depth_back(
     assert body.maximumHeight() == CLASSIC_MUSIC_MAXIMUM
     window._set_list_folded(False)
     window.hide()
+
+
+def test_a_refusal_brings_itself_into_the_band_s_view(
+        window, monkeypatch, tmp_path, app):
+    """The band was scrolled down to the numbers; a refusal arrives. It is
+    shown where it can be read, not left above the band's fold."""
+    target, view = classic_band(window, monkeypatch, tmp_path, app)
+    body = view.music_body
+    body.verticalScrollBar().setValue(body.verticalScrollBar().maximum())
+    app.processEvents()
+    note = view.music_silence_note
+    assert in_band_view(view, note) < note.height(), "fixture never scrolled"
+    window.export_panel.preset_buttons["remux"].setChecked(True)
+    for _ in range(20):
+        app.processEvents()
+    assert "Remux" in note.text()
+    assert in_band_view(view, note) == note.height()
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    window.hide()
