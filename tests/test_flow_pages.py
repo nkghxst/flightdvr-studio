@@ -3940,6 +3940,8 @@ def test_an_output_s_picture_is_named_as_that_output_not_the_focused_source(
     assert other.path.name in window.trim_title.text()
     assert source.path.name not in window.trim_title.text()
     assert window.trim_position.text().startswith("output ")
+    # The recording facts under the title are B's own recording's, and say so.
+    assert window.clip_format.text().startswith(f"from {other.path.name} · ")
     # A source-side refresh (ten call sites: a trim change, a frame step, a
     # scan) does not put the focused recording's name back over the output.
     window._update_trim_labels()

@@ -4184,6 +4184,16 @@ class MainWindow(QMainWindow):
             return self.context_for_working(target)
         return nothing_selected("choose an output to see it")
 
+    def _show_clip_facts(self, clip, source_of: bool = False) -> None:
+        """A recording's format, size and date under the picture's title.
+        Beside an output's picture they are that output's recording's, and
+        say so, rather than the recording in source focus."""
+        prefix = f"from {clip.path.name} · " if source_of else ""
+        self.clip_format.setText(
+            f"{prefix}{clip.format_label} · {clip.size_label}")
+        self.clip_format.setToolTip(f"{clip.format_detail}\n{clip.size_label}")
+        self.clip_date.setText(clip.modified.strftime("%d %b %Y  %H:%M"))
+
     def _output_view_bound(self) -> bool:
         """An output's picture is what is shown beside the controls column."""
         return self._output_picture_active() and self._output_recipe is not None
@@ -4203,9 +4213,19 @@ class MainWindow(QMainWindow):
         view.set_output_picture(bound)
         if not bound:
             self._update_trim_labels()
+            if self._trim_clip is not None:
+                self._show_clip_facts(self._trim_clip)
             return
         recipe = self._output_recipe
         target = recipe.target
+        if target.is_assembly:
+            self.clip_format.setText(f"from {len(target.items)} Assembly rows")
+            self.clip_format.setToolTip("")
+            self.clip_date.setText("")
+        else:
+            own = self._monitor_clip(target)
+            if own is not None:
+                self._show_clip_facts(own, source_of=True)
         label = (self._target_label(target) if not target.is_assembly
                  else f"Assembly · {len(target.items)} rows")
         preset = PRESETS[recipe.preset_key].label
@@ -5743,9 +5763,7 @@ class MainWindow(QMainWindow):
         self._clear_precise_frame()
         # Static for as long as this clip is the one loaded, so it is written
         # here rather than alongside the playhead.
-        self.clip_format.setText(f"{clip.format_label} · {clip.size_label}")
-        self.clip_format.setToolTip(f"{clip.format_detail}\n{clip.size_label}")
-        self.clip_date.setText(clip.modified.strftime("%d %b %Y  %H:%M"))
+        self._show_clip_facts(clip)
 
         # Whatever was playing is a different clip now.
         self.player.load(clip, position=clip.trim_in)
