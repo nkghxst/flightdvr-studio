@@ -554,3 +554,147 @@ def _join_report(tools_, source, info, clips, choice, sequence, out, ids,
         "command: " + " ".join(command[1:]),
     ]
     return "\n".join(lines)
+
+
+# -- P2d: a whole clip in a join is its picture ---------------------------------
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("20.000333", 20.000333), (None, 0.0), ("N/A", 0.0), ("nan", 0.0),
+    ("inf", 0.0), ("0", 0.0), ("-1.5", 0.0),
+])
+def test_probe_records_the_picture_s_own_duration(monkeypatch, tmp_path,
+                                                   value, expected):
+    import json as _json
+
+    def fake(*args, **kwargs):
+        stream = {"codec_type": "video", "codec_name": "h264", "width": 1280,
+                  "height": 720, "avg_frame_rate": "30/1",
+                  "start_time": "1.471333"}
+        if value is not None:
+            stream["duration"] = value
+        return _FakeProbe(_json.dumps({
+            "format": {"duration": "20.071666", "start_time": "1.400000"},
+            "streams": [stream, {"codec_type": "audio", "codec_name": "aac",
+                                 "start_time": "1.400000"}]}))
+
+    monkeypatch.setattr(media_module.subprocess, "Popen", fake)
+    path = tmp_path / "z.ts"
+    path.write_bytes(b"z")
+    info = media_module.probe(
+        media_module.Tools(Path("ffmpeg"), Path("ffprobe")), path)
+    assert info.video_duration == pytest.approx(expected)
+    assert info.duration == pytest.approx(20.071666), "the file's own"
+
+
+_SECONDS, _BURST = 4, 60  # a 2 kHz burst at frame 60's instant (2.0 s)
+
+
+def _offset_source(tools_, root, name, video_delay=0.0, audio_delay=0.0,
+                   with_audio=True) -> Path:
+    """Frame-index bars at 30 fps; a tone with a burst at frame 60's time on
+    its own clock; each stream delayed as asked when muxed to a TS."""
+    video, audio = root / f"{name}-v.mkv", root / f"{name}-a.wav"
+    geq = ("geq=lum='if(bitand(floor(N/pow(2,floor(X/32))),1),235,16)'"
+           ":cb=128:cr=128")
+    subprocess.run([str(tools_.ffmpeg), "-v", "error", "-y", "-f", "lavfi",
+                    "-i", f"color=black:s={_W}x{_H}:r=30:d={_SECONDS}",
+                    "-vf", geq, "-c:v", "libx264", "-preset", "ultrafast",
+                    "-qp", "0", "-g", "30", str(video)], check=True)
+    burst = _BURST / 30
+    tone = (f"aevalsrc='0.1*sin(2*PI*300*t)+if(gte(t,{burst})*"
+            f"lt(t,{burst + 0.2}),0.6*sin(2*PI*2000*t),0)'"
+            f":s=48000:d={_SECONDS}")
+    subprocess.run([str(tools_.ffmpeg), "-v", "error", "-y", "-f", "lavfi",
+                    "-i", tone, "-ac", "2", str(audio)], check=True)
+    source = root / f"{name}.ts"
+    command = [str(tools_.ffmpeg), "-v", "error", "-y"]
+    if video_delay:
+        command += ["-itsoffset", str(video_delay)]
+    command += ["-i", str(video)]
+    if with_audio:
+        if audio_delay:
+            command += ["-itsoffset", str(audio_delay)]
+        command += ["-i", str(audio), "-map", "0:v", "-map", "1:a",
+                    "-c:v", "copy", "-c:a", "aac"]
+    else:
+        command += ["-map", "0:v", "-c:v", "copy"]
+    subprocess.run(command + ["-f", "mpegts", str(source)], check=True)
+    assert _ordinal_ids(tools_, source) == list(range(_SECONDS * 30)), "fixture"
+    return source
+
+
+@pytest.fixture(scope="module")
+def whole_clip_sources(tmp_path_factory):
+    from flightdvr.media import find_tools
+
+    tools_ = find_tools()
+    root = tmp_path_factory.mktemp("whole")
+    found = {
+        "picture_late": _offset_source(tools_, root, "picture-late",
+                                       video_delay=0.05),
+        "sound_late": _offset_source(tools_, root, "sound-late",
+                                     audio_delay=0.03),
+        "picture_only": _offset_source(tools_, root, "picture-only",
+                                       with_audio=False),
+    }
+    import json as _json
+    late = _json.loads(subprocess.run(
+        [str(tools_.ffprobe), "-v", "error", "-show_entries",
+         "format=duration:stream=codec_type,duration", "-of", "json",
+         str(found["picture_late"])], check=True, capture_output=True,
+        text=True).stdout)
+    picture = next(float(s["duration"]) for s in late["streams"]
+                   if s["codec_type"] == "video")
+    assert float(late["format"]["duration"]) - picture > 0.05, (
+        "the file runs past its picture", late)
+    return tools_, found
+
+
+def _whole_join(tools_, sources, mode, tmp_path, name):
+    from flightdvr.audio_plan import MusicChoice
+    from flightdvr.media import probe
+    from flightdvr.output_plan import working_outputs
+    from flightdvr.presets import PASSTHROUGH
+    from flightdvr.sequence_plan import Resolution, compile_sequence
+
+    clips = [probe(tools_, source) for source in sources]
+    output = working_outputs(clips, joined=True)[0]
+    sequence = compile_sequence(output, revision="p2d",
+                                resolution=Resolution.success())
+    out = tmp_path / f"{name}-{mode}.mp4"
+    job = Job(clips, "master",
+              ExportSettings(master_speed="ultrafast", colour=PASSTHROUGH),
+              out, audio=MusicChoice(mode=AudioMode(mode)),
+              target=output.target, sequence=sequence)
+    ok, message = ExportWorker(tools_, [job], tmp_path / "work")._run_job(0, job)
+    assert ok, message
+    return out
+
+
+def _streams(tools_, path) -> dict:
+    import json as _json
+    found = _json.loads(subprocess.run(
+        [str(tools_.ffprobe), "-v", "error", "-show_entries",
+         "stream=codec_type,start_time,duration", "-of", "json", str(path)],
+        check=True, capture_output=True, text=True).stdout)["streams"]
+    return {s["codec_type"]: s for s in found}
+
+
+@pytest.mark.parametrize("mode", ["original", "no_sound"])
+@pytest.mark.parametrize("order", ["AA", "ABA"])
+def test_a_whole_clip_join_shows_each_picture_once(whole_clip_sources,
+                                                   tmp_path, order, mode):
+    """P2d: the whole clip's extent was the file's, which runs past its last
+    picture; with the recording's sound in, the join filled the difference
+    with the picture repeated at the seam (1202 frames for 1200)."""
+    tools_, found = whole_clip_sources
+    a, b = found["picture_late"], found["picture_only"]
+    sources = [a, a] if order == "AA" else [a, b, a]
+    out = _whole_join(tools_, sources, mode, tmp_path, order)
+    assert _ordinal_ids(tools_, out) == (
+        list(range(_SECONDS * 30)) * len(sources))
+    streams = _streams(tools_, out)
+    if "audio" in streams:
+        assert float(streams["audio"]["duration"]) == pytest.approx(
+            float(streams["video"]["duration"]), abs=0.002)

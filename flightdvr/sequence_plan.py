@@ -501,7 +501,23 @@ def _source_span(clip: Any, item: Item, index: int) -> TimeSpan:
         raise SequencePlanError(
             f"piece {index} has range material but target requests the whole clip"
         )
-    return TimeSpan(Fraction(0), duration)
+    return TimeSpan(Fraction(0), _whole_clip_end(clip, index, duration))
+
+
+def _whole_clip_end(clip: Any, index: int, duration: Fraction) -> Fraction:
+    """Where a whole clip ends on the source clock, whose zero is its first
+    picture: the end of its last picture (`ClipInfo.video_duration`) when
+    that is known, not the file's duration, which also counts sound before
+    and after the picture. Measured (P2d): the file's duration made a joined
+    whole clip's sound up to 71 ms longer than its picture, and the join
+    filled that with one or two repeated pictures at the seam."""
+    raw = getattr(clip, "video_duration", None)
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+        return duration
+    if not math.isfinite(raw) or raw <= 0:
+        return duration
+    picture = _fraction(float(raw), f"piece {index} picture duration")
+    return picture if picture <= duration else duration
 
 
 def _source_path(clip: Any, index: int) -> str:

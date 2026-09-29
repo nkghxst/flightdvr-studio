@@ -357,6 +357,15 @@ class ClipInfo:
     # Measured: AAC's encoder priming alone gives 0.021333 s.
     video_start: float = 0.0
 
+    # Seconds from the picture's first frame to the end of its last, on the
+    # same clock: ffprobe's video-stream duration. Zero when that is absent,
+    # "N/A", not finite or not positive (Matroska, for one, leaves it out).
+    # `duration` is the whole file's, from its earliest stream to its latest,
+    # so it also counts sound before the first picture and after the last.
+    # Measured (P2d): a 600-frame picture, stream duration 20.000333, in
+    # files whose `duration` was 20.019 to 20.072.
+    video_duration: float = 0.0
+
     # -- trimming --------------------------------------------------------------
 
     # trim_in and trim_out are the select currently being edited, and mean
@@ -671,6 +680,8 @@ def _probe_once(
                 info.duration = _to_float(stream.get("duration"))
             info.video_start = video_origin(fmt.get("start_time"),
                                             stream.get("start_time"))
+            picture = _finite(stream.get("duration"))
+            info.video_duration = picture if picture and picture > 0 else 0.0
         elif kind == "audio" and not info.audio_codec:
             info.audio_codec = stream.get("codec_name", "")
 

@@ -253,6 +253,34 @@ def test_whole_recording_ranges_and_repeated_same_source_items_stay_distinct():
     ]
 
 
+def test_a_whole_clip_ends_with_its_picture_when_that_is_known():
+    """P2d: the file's duration also counts sound after the last picture."""
+    whole = clip("late.ts", 20.071666)
+    whole.video_duration = 20.000333
+    ranged = clip("late.ts", 20.071666, (5, 0), sid="open")
+    ranged.video_duration = 20.000333
+    plan = compile_output(output(
+        [item_for(whole), item_for(ranged, "open")], [whole, ranged]))
+    assert plan.occurrences[0].source == TimeSpan(Fraction(0),
+                                                  Fraction("20.000333"))
+    assert plan.occurrences[0].sample_span.samples == 960016
+    # A range the user chose keeps its own end; only the whole clip changes.
+    assert plan.occurrences[1].source.end == Fraction("20.071666")
+
+
+@pytest.mark.parametrize("picture", [0.0, -1.0, float("nan"), 25.0, None,
+                                     "20", True])
+def test_a_whole_clip_without_a_believable_picture_length_keeps_the_file_s(
+        picture):
+    whole = clip("unknown.ts", 20.071666)
+    if picture is None:
+        del whole.video_duration
+    else:
+        whole.video_duration = picture
+    plan = compile_output(output([item_for(whole)], [whole]))
+    assert plan.occurrences[0].source.end == Fraction("20.071666")
+
+
 def test_resolution_success_and_gaps_are_explicit_and_gaps_refuse_compilation():
     found = clip("resolved.ts", 5)
     working = output([item_for(found)], [found])
