@@ -718,13 +718,28 @@ def test_each_clip_in_a_join_is_trimmed_accurately():
         clips=clips,
     )[0]
     assert "42.000" in command, "no fast seek to a lead-in before the in point"
-    # P2c: every input keeps its file's clock, and the trim is stated on it
-    # (44 s), not as seconds after the seek (2 s), which ffmpeg rebased
-    # differently depending on whether the input's sound was used.
-    assert command[command.index("-copyts") + 1] == "-start_at_zero"
-    assert command.index("-copyts") < command.index("-i")
+    # P2c: seconds after the seek, capped again at the range's length once
+    # the rate is set. No global clock: -copyts retimed FFmpeg 4.4.2's last
+    # pictures.
+    assert "-copyts" not in command
     graph = command[command.index("-filter_complex") + 1]
-    assert "trim=start=44.000:duration=60.000" in graph
+    assert "[1:v]trim=start=2.000:duration=60.000," in graph
+    assert graph.split("[v1]")[0].endswith(",trim=duration=60.000")
+
+
+def test_a_silent_join_still_uses_each_clip_s_sound():
+    """P2c: ffmpeg rebased a seeked input differently when its sound was not
+    used, so a join that is not heard uses and discards it."""
+    clips = two_clips()
+    clips[1].trim_in, clips[1].trim_out = 44.0, 104.0
+    assert all(clip.has_audio for clip in clips)
+    command = build_commands(
+        TOOLS, clips[0], "master", ExportSettings(keep_audio=False),
+        Path("out.mp4"), Path("work"), clips=clips,
+    )[0]
+    graph = command[command.index("-filter_complex") + 1]
+    assert "[0:a]anullsink" in graph and "[1:a]anullsink" in graph
+    assert "[1:v]trim=start=2.000:duration=60.000," in graph
 
 
 def _joined_audio_case(mode: AudioMode):
@@ -1336,4 +1351,7 @@ def test_a_joined_export_with_the_recording_s_sound_trims_from_each_picture():
     silent, _v, _a = join_filtergraph([first, second],
                                       ExportSettings(keep_audio=False),
                                       "yuv420p")
-    assert "trim=start=0.000:" in silent and "0.021" not in silent
+    # P2c: a join that is not heard still uses each clip's sound, so it gets
+    # the same rebasing and the same trims (see `join_inputs`).
+    assert "trim=start=0.021:" in silent and "trim=start=0.050:" in silent
+    assert "atrim" not in silent and "[1:a]anullsink" in silent

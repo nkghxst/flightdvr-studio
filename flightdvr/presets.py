@@ -613,18 +613,16 @@ def _clip_timing(clip: ClipInfo) -> tuple[float, float, float]:
 def join_inputs(clips: list[ClipInfo]) -> list[str]:
     """Input arguments for a join: one -i per clip, each with its own seek.
 
-    Every input keeps its file's own timestamps, counted from the file's
-    start (-copyts -start_at_zero), so each clip's trims in
-    `join_filtergraph` are stated on one known clock. Left to ffmpeg, a
-    seeked input was rebased by the seek alone when only its picture was
-    used, but by the seek and the file's start time when its sound was used
+    FFmpeg 7.1 rebases a seeked input by the seek alone when only its picture
+    is used, but by the seek and the file's start time when its sound is used
     too: measured, first frame after "-ss 4" at 1.421333 s against 0.021333
-    s on the same file. Trims written as seconds after the seek then chose
-    pictures 1.4 s early on a transport stream starting at 1.4 s: a trimmed
-    join's second range began at frame 138 where 180 was asked for, in
-    every route that did not read the recording's sound.
+    s on the same file (FFmpeg 4.4.1 gave 0.021333 either way). `join_filtergraph` therefore has every clip that has
+    sound use it, heard or not, so one rebasing holds in every route. (A
+    global -copyts gave one clock as well, but FFmpeg 4.4.2 then retimed the
+    joined output's last pictures and repeated one: measured, 151 frames for
+    150.)
     """
-    args: list[str] = ["-copyts", "-start_at_zero"]
+    args: list[str] = []
     for clip in clips:
         seek, _, _ = _clip_timing(clip)
         args += ["-fflags", "+genpts", "-analyzeduration", "100M",
@@ -693,22 +691,16 @@ def join_filtergraph(
     labels: list[str] = []
 
     for index, clip in enumerate(clips):
-        _, _lead_in, duration = _clip_timing(clip)
-        # Stated on the file's own clock (`join_inputs` keeps it), not as
-        # seconds after the input seek. That clock counts from the file's
-        # start when the recording's sound is in the graph, and from its
-        # picture when it is not (the single-clip route measures the same,
-        # see `_input_args`); so with the sound in, both trims start at the
-        # picture's first frame, video_start later.
-        start = max(0.0, clip.trim_in) if clip.trim_in > 0.01 else 0.0
-        if want_source_audio:
-            start += clip.video_start
-
-        # The comment this replaces said a joined segment could come out one
-        # frame short and called the seam itself correct. Measured with every
-        # frame carrying its index (P2c), the seam was not correct in every
-        # route: see `join_inputs`. With the clock stated, each range is its
-        # exact frames, first to last, in every route.
+        _, start, duration = _clip_timing(clip)
+        # Seconds after the input seek, on the rebasing a clip gets when its
+        # sound is used (see `join_inputs`): the file's start is zero, so the
+        # picture starts video_start later, and both trims start there. Every
+        # clip with sound uses it (below, discarded when not heard), so this
+        # holds in every route. It had held only where the sound was heard:
+        # measured with every frame carrying its index (P2c), No sound and
+        # Replace began a trimmed join's second range at frame 138 for 180.
+        # The comment this replaces called the seam itself correct.
+        start += clip.video_start
         video = [f"trim=start={start:.3f}:duration={duration:.3f}",
                  "setpts=PTS-STARTPTS"]
         if vertical:
@@ -736,10 +728,19 @@ def join_filtergraph(
                 f"fps={fps:g}",
                 f"format={pix_fmt}",
             ]
+        # The range's own length again, after the rate is set. With a clip's
+        # sound used and discarded, FFmpeg 4.4.1's fps filter repeated a
+        # seeked clip's last picture until its input ended: measured, 163
+        # frames for 150 in a two-range join. This cap only removes pictures
+        # past the range; FFmpeg 7.1 gave none to remove.
+        video.append(f"trim=duration={duration:.3f}")
         chains.append(f"[{index}:v]{','.join(video)}[v{index}]")
         labels.append(f"[v{index}]")
 
         if not want_source_audio:
+            if clip.has_audio:
+                # Used and discarded: see `join_inputs` for why it is used.
+                chains.append(f"[{index}:a]anullsink")
             continue
         if clip.has_audio:
             audio = [f"atrim=start={start:.3f}:duration={duration:.3f}",
