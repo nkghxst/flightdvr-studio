@@ -2017,3 +2017,197 @@ def test_a_classic_preset_change_updates_the_panel_and_monitor_at_once(
     app.processEvents()
     assert panel.supported and not panel.unsupported_label.text()
     assert not window.live_preview.status.reason
+
+
+# -- P1: a typed number is one edit, committed once, to the output it was for --
+
+
+def typed_start(window, monkeypatch, tmp_path, app):
+    """Clip 0 with a read track, a 1 s fade in and a 1/7 recording level, the
+    window shown so key events reach the boxes as they do for a person."""
+    from fractions import Fraction
+
+    target = with_track(window, monkeypatch, tmp_path, app)
+    base = window._planned_music(target)
+    window._store_music(target, replace(
+        base, mode=AudioMode.MIX, fade_in_samples=48_000,
+        fade_out_samples=12_345, dvr_level=Fraction(1, 7)))
+    window._show_music_numbers(window._planned_music(target))
+    window.show()
+    window.preview_view.music_band.setChecked(True)
+    app.processEvents()
+    assert window.music_panel.fade_in.isVisible()
+    assert window.music_panel.fade_in.isEnabled()
+    commits = []
+    real = window._store_music
+    monkeypatch.setattr(window, "_store_music", lambda t, c: (
+        commits.append((t, c.fade_in_samples)), real(t, c))[1])
+    return target, commits
+
+
+def type_into(box, app, text, finish=None):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    box.setFocus()
+    app.processEvents()
+    box.selectAll()
+    QTest.keyClicks(box, text)
+    app.processEvents()
+    if finish is not None:
+        QTest.keyClick(box, finish)
+        app.processEvents()
+
+
+@pytest.mark.parametrize("finish", ["enter", "tab"])
+def test_typing_half_a_second_stores_24000_samples_once(
+        window, monkeypatch, tmp_path, app, finish):
+    from fractions import Fraction
+
+    from PySide6.QtCore import Qt
+
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    box = window.music_panel.fade_in
+    key = Qt.Key.Key_Return if finish == "enter" else Qt.Key.Key_Tab
+    type_into(box, app, "0.5", key)
+
+    stored = window._planned_music(target)
+    assert stored.fade_in_samples == 24_000
+    assert commits == [(target, 24_000)], "one edit, one commit"
+    # Nothing nobody touched moves.
+    assert stored.fade_out_samples == 12_345
+    assert stored.dvr_level == Fraction(1, 7)
+    assert box.text() == "0.50 s"
+    window.hide()
+
+
+def test_a_half_typed_number_commits_nothing_and_survives(
+        window, monkeypatch, tmp_path, app):
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    box = window.music_panel.fade_in
+    type_into(box, app, "0.")
+    assert commits == []
+    assert window._planned_music(target).fade_in_samples == 48_000
+    assert box.lineEdit().text().startswith("0."), box.lineEdit().text()
+    window.hide()
+
+
+def test_typing_zero_is_a_real_zero(window, monkeypatch, tmp_path, app):
+    from PySide6.QtCore import Qt
+
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    type_into(window.music_panel.fade_in, app, "0", Qt.Key.Key_Return)
+    assert window._planned_music(target).fade_in_samples == 0
+    assert commits == [(target, 0)]
+    window.hide()
+
+
+def test_text_that_is_not_a_number_stores_nothing(
+        window, monkeypatch, tmp_path, app):
+    from PySide6.QtCore import Qt
+
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    box = window.music_panel.fade_in
+    type_into(box, app, "abc", Qt.Key.Key_Return)
+    assert commits == []
+    assert window._planned_music(target).fade_in_samples == 48_000
+    assert box.value() == 1.0
+    window.hide()
+
+
+def test_arrow_and_typed_fades_reach_the_same_value(
+        window, monkeypatch, tmp_path, app):
+    """The pointer/keyboard route that already worked still does, and
+    agrees with typing."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    box = window.music_panel.fade_in
+    box.setSingleStep(0.5)
+    box.setFocus()
+    QTest.keyClick(box, Qt.Key.Key_Down)
+    app.processEvents()
+    arrowed = window._planned_music(target).fade_in_samples
+    type_into(box, app, "1", Qt.Key.Key_Return)
+    type_into(box, app, "0.5", Qt.Key.Key_Return)
+    assert arrowed == window._planned_music(target).fade_in_samples == 24_000
+    box.setSingleStep(1.0)
+    window.hide()
+
+
+def test_a_target_change_mid_edit_never_moves_the_text_to_the_other_output(
+        window, monkeypatch, tmp_path, app):
+    """Typed but not confirmed, then the band shows another output: the
+    other output's number is shown, and neither output takes 0.5."""
+    from PySide6.QtCore import Qt
+
+    first, commits = typed_start(window, monkeypatch, tmp_path, app)
+    box = window.music_panel.fade_in
+    type_into(box, app, "0.5")
+    focus(window, 1)
+    app.processEvents()
+    second = window._music_target
+    assert second != first
+    shown = window._planned_music(second).fade_in_samples
+    QTest_key = Qt.Key.Key_Return
+    from PySide6.QtTest import QTest
+    QTest.keyClick(box, QTest_key)
+    app.processEvents()
+    assert window._planned_music(first).fade_in_samples == 48_000
+    assert window._planned_music(second).fade_in_samples == shown
+    assert all(samples != 24_000 for _t, samples in commits)
+    window.hide()
+
+
+def test_typing_a_fade_does_not_reach_a_submitted_job(
+        window, monkeypatch, tmp_path, app):
+    from PySide6.QtCore import Qt
+
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    tick(window, 0)
+    window._add_to_queue()
+    assert window.jobs
+    submitted = window.jobs[-1].audio
+    type_into(window.music_panel.fade_in, app, "0.5", Qt.Key.Key_Return)
+    assert window._planned_music(target).fade_in_samples == 24_000
+    assert window.jobs[-1].audio == submitted
+    assert submitted.fade_in_samples == 48_000
+    window.hide()
+
+
+def test_a_refresh_of_the_same_output_mid_typing_keeps_the_typing(
+        window, monkeypatch, tmp_path, app):
+    """Something else re-shows the same output while a person is part-way
+    through a number: what they typed stays, and finishes as they meant."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    box = window.music_panel.fade_in
+    type_into(box, app, "0.2")
+    window._sync_music_panel()
+    app.processEvents()
+    assert box.lineEdit().text().startswith("0.2"), box.lineEdit().text()
+    QTest.keyClicks(box, "5")
+    QTest.keyClick(box, Qt.Key.Key_Return)
+    app.processEvents()
+    assert window._planned_music(target).fade_in_samples == 12_000
+    assert commits == [(target, 12_000)]
+    window.hide()
+
+
+def test_a_real_change_to_the_value_still_replaces_the_typing(
+        window, monkeypatch, tmp_path, app):
+    """The guard above is for the same value only: when the stored fade really
+    changes underneath (another route edited it), the box shows the truth."""
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    box = window.music_panel.fade_in
+    type_into(box, app, "0.2")
+    window._store_music(target, replace(window._planned_music(target),
+                                        fade_in_samples=96_000))
+    window._show_music_numbers(window._planned_music(target))
+    app.processEvents()
+    assert box.value() == 2.0
+    assert box.lineEdit().text() == "2.00 s"
+    window.hide()

@@ -134,6 +134,10 @@ class MusicPanel(QWidget):
         self._fade_in_samples = MusicChoice().fade_in_samples
         self._fade_out_samples = MusicChoice().fade_out_samples
         self._passage: SampleSpan | None = None
+        # Which output the boxes last showed, so a reload of the same one can
+        # leave a number somebody is part-way through typing alone.
+        self._shown_target: str | None = None
+        self._previous_target: str | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -154,6 +158,16 @@ class MusicPanel(QWidget):
         outer.addWidget(self._build_passage_box())
         outer.addWidget(self._build_levels_box())
         outer.addStretch(1)
+
+        # A typed number is one edit, finished by Enter, Tab or leaving the
+        # box. With keyboard tracking on, every keystroke was a value: typing
+        # "0.5" committed 0 at the first key, the window wrote the stored
+        # choice back into the boxes, and the rest of the typing landed on
+        # "0.00" and was lost. Arrows, the wheel and the step buttons still
+        # commit at once; only typing waits to be finished.
+        for spin in (self.passage_start, self.passage_end, self.music_level,
+                     self.dvr_level, self.fade_in, self.fade_out):
+            spin.setKeyboardTracking(False)
 
         self._show_choice()
 
@@ -275,6 +289,7 @@ class MusicPanel(QWidget):
             raise TypeError("load needs a MusicChoice")
         self._choice = choice
         self._asset = choice.asset
+        self._previous_target, self._shown_target = self._shown_target, target
         self.set_context(target=target, preset_key=preset_key, joined=joined,
                          bundle=bundle, audition=audition)
         self._show_choice()
@@ -454,13 +469,31 @@ class MusicPanel(QWidget):
             if policy >= 0:
                 self.short_track_combo.setCurrentIndex(policy)
 
-            self.music_level.setValue(round(float(choice.music_level) * 100))
-            self.dvr_level.setValue(round(float(choice.dvr_level) * 100))
-            self.fade_in.setValue(seconds_of(choice.fade_in_samples))
-            self.fade_out.setValue(seconds_of(choice.fade_out_samples))
+            self._show_number(self.music_level,
+                              round(float(choice.music_level) * 100))
+            self._show_number(self.dvr_level,
+                              round(float(choice.dvr_level) * 100))
+            self._show_number(self.fade_in, seconds_of(choice.fade_in_samples))
+            self._show_number(self.fade_out,
+                              seconds_of(choice.fade_out_samples))
         finally:
             self._loading = was
         self._apply_enabled()
+
+    def _show_number(self, spin, value) -> None:
+        """Show a stored number, unless somebody is typing this same one.
+
+        A reload of the same output, while its box has focus and holds typing
+        nobody has finished, would put the stored number back over what is
+        being typed. Only when the stored value is unchanged is the typing
+        left alone: a real change underneath, or another output, is shown.
+        """
+        same_output = self._previous_target == self._shown_target
+        typing = (same_output and spin.hasFocus()
+                  and spin.lineEdit().isModified())
+        if typing and spin.valueFromText(spin.textFromValue(value)) == spin.value():
+            return
+        spin.setValue(value)
 
     def _apply_enabled(self) -> None:
         """What can be edited, given the mode, the asset and the context."""
