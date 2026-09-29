@@ -57,6 +57,7 @@ from .music_edit import (
 from .widgets import INNER, TIGHT, dim
 
 HANDLE_REACH = 6          # pixels either side of a handle that pick it up
+CLASSIC_LANE_DEPTH = 40   # the shallow band's music lane, as approved
 
 
 class Presentation(str, Enum):
@@ -321,7 +322,16 @@ class _Lane(QWidget):
         self.active = self.handles()[0] if self.handles() else None
 
     def sizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
-        return QSize(200, self.height_hint)
+        return QSize(200, self.height())
+
+    def set_depth(self, height: int | None) -> None:
+        """How deep the lane is drawn; None is its own depth. Handles are
+        picked up by where they are across, so a shallower lane is exactly
+        as usable."""
+        height = self.height_hint if height is None else int(height)
+        self.setMinimumHeight(height)
+        self.setMaximumHeight(height)
+        self.updateGeometry()
 
     # Subclasses: the lane's clock, handles and how a handle moves.
     def span(self) -> SampleSpan | None:
@@ -688,6 +698,14 @@ class MusicTimeline(QWidget):
         layout.addWidget(self.picture)
         self.music_caption = dim(QLabel("Music — as the finished output carries it"))
         layout.addWidget(self.music_caption)
+        # One line each. `dim` wraps and grows a label, which suits a note;
+        # a caption measured natively at 32 and 48px for one line of text,
+        # and at the compact size that was the waveform's room.
+        for caption in (self.output_caption, self.picture_caption,
+                        self.music_caption):
+            caption.setWordWrap(False)
+            caption.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                  QSizePolicy.Policy.Fixed)
         self.music = OutputMusicLane(editor)
         layout.addWidget(self.music)
         self.legend = dim(QLabel(
@@ -696,7 +714,7 @@ class MusicTimeline(QWidget):
         self.legend.setWordWrap(True)
         layout.addWidget(self.legend)
 
-        more_row = QHBoxLayout()
+        more_row = self.more_row = QHBoxLayout()
         more_row.setSpacing(INNER)
         self.more_button = QPushButton("More…")
         self.more_button.setCheckable(True)
@@ -717,6 +735,7 @@ class MusicTimeline(QWidget):
 
         self._presentation = Presentation.FULL
         self._more = False
+        self._picture_elsewhere = False
         self.set_presentation(Presentation.FULL)
 
     @property
@@ -726,6 +745,15 @@ class MusicTimeline(QWidget):
     def set_presentation(self, presentation: Presentation) -> None:
         self._presentation = Presentation(presentation)
         self._arrange()
+
+    def set_picture_elsewhere(self, elsewhere: bool) -> None:
+        """Whether the output's picture is already shown, on this same clock,
+        just above the band. At the compact size the band then does not show
+        it a second time: that room is the waveform's."""
+        elsewhere = bool(elsewhere)
+        if elsewhere != self._picture_elsewhere:
+            self._picture_elsewhere = elsewhere
+            self._arrange()
 
     def _show_more(self, on: bool) -> None:
         self._more = on
@@ -739,15 +767,23 @@ class MusicTimeline(QWidget):
         submitted = mode is Presentation.SUBMITTED
         # A job's picture is its finished file, which is not shown here; the
         # music is what this presentation is for.
+        twice = compact and self._picture_elsewhere
         for widget in (self.picture_caption, self.picture):
-            widget.setVisible(not classic and not submitted)
+            widget.setVisible(not classic and not submitted and not twice)
         self.output_caption.setVisible(not classic)
+        # Classic's shallow band spends its 120px on the rows above and the
+        # lane itself: with this caption the lane showed 36 of its 40px at
+        # 1440x913 (natively). The legend under the lane says what it is.
+        self.music_caption.setVisible(not classic)
         for widget in (self.more_button, self.more_note):
             widget.setVisible(compact)
         self.more_note.setVisible(folded)
         for widget in (self.song_caption, self.song, self.song_note):
             widget.setVisible(not classic and not folded)
         self.legend.setVisible(mode is not Presentation.SUBMITTED)
+        # Classic's band is the shallow one: the same lane, less deep, so it
+        # fits under a picture and a list that already share the window.
+        self.music.set_depth(CLASSIC_LANE_DEPTH if classic else None)
 
     @property
     def shows_more(self) -> bool:

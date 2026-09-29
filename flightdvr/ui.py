@@ -456,6 +456,9 @@ class MainWindow(QMainWindow):
         # row again, and whether someone asked for the list back meanwhile.
         self._fold_need = 0
         self._fold_suppressed = False
+        # What folding for Music set aside, and the height that costs back.
+        self._music_hidden = None
+        self._music_disclosed = 0
         self._making_room = False
         self._room_pending = False
         self._viewport_home = None
@@ -1338,7 +1341,10 @@ class MainWindow(QMainWindow):
         if panel.folded:
             reclaim = (max(0, box.height() - box.content_floor())
                        + max(0, body.height() - body.minimumHeight()))
-            if not wanted or reclaim >= self._fold_need:
+            # Unfolding also gives back what folding set aside for Music (the
+            # list's filter rows, the picture's secondary lines). Counting it
+            # is what keeps unfold -> refold from going round.
+            if not wanted or reclaim >= self._fold_need + self._music_disclosed:
                 self._set_list_folded(False)
             return
         if (self._making_room or not wanted or not panel.table.isVisible()
@@ -1369,6 +1375,12 @@ class MainWindow(QMainWindow):
     def _set_list_folded(self, folded: bool) -> None:
         panel = self.browser_panel
         panel.show_folded(folded)
+        self._disclose_for_music(folded and self._view_mode is Mode.CLASSIC)
+        if folded and self._view_mode is Mode.CLASSIC:
+            # The band gave up its body to keep a list row; the row is folded
+            # away now, so the band has that room back. It had stayed at its
+            # track row, with the lane below its fold (1120x760, natively).
+            self.preview_view.restore_classic_reach()
         panel.setMinimumHeight(self._classic_list_minimum())
         box = self.preview_view.preview_box
         if box.parentWidget() is self._left_column:
@@ -1381,6 +1393,55 @@ class MainWindow(QMainWindow):
             if item is not None:
                 self.table.scrollToItem(item)
         self._relayout()
+
+    def _disclose_for_music(self, on: bool) -> None:
+        """What Classic sets aside while its list is folded for Music.
+
+        At 1120x760 the fold alone left the band at its track row: the list's
+        Show/Mark and Length rows stayed, and the picture sat at a floor its
+        secondary lines held up (the lane 0 of 40px in view, natively). While
+        folded, those rows step aside with the list — their filter state is
+        untouched, the folded summary still says what is selected, how far
+        through review and which range, and Show clips brings all of it back
+        — and the picture's column closes up. Undone exactly on unfold.
+        """
+        view = self.preview_view
+        if on == (self._music_hidden is not None):
+            return
+        if on:
+            box = view.preview_box
+            floor_before = box.content_floor()
+            hidden, rows = [], 0
+            for row in self.browser_panel._rows[1:]:
+                widgets = self._layout_widgets(row)
+                shown = [w for w in widgets if w.isVisible()]
+                if shown:
+                    rows += max(w.height() for w in shown) + INNER
+                for widget in shown:
+                    widget.hide()
+                    hidden.append(widget)
+            self._music_hidden = hidden
+            view.set_compact_controls(True)
+            self._music_disclosed = rows + max(
+                0, floor_before - box.content_floor())
+        else:
+            for widget in self._music_hidden:
+                widget.show()
+            self._music_hidden = None
+            self._music_disclosed = 0
+            view.set_compact_controls(False)
+
+    @staticmethod
+    def _layout_widgets(layout) -> list:
+        """Every widget a layout holds, through its nested layouts."""
+        found = []
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            if item.widget() is not None:
+                found.append(item.widget())
+            elif item.layout() is not None:
+                found.extend(MainWindow._layout_widgets(item.layout()))
+        return found
 
     def _on_unfold_requested(self) -> None:
         """"Show clips" on the folded summary: the list comes back, and stays
@@ -1982,7 +2043,8 @@ class MainWindow(QMainWindow):
             self._music_audition = audition
             self.music_panel.load(
                 choice, target=name, preset_key=preset_key,
-                joined=joined, bundle=bundle, audition=audition)
+                joined=joined, bundle=bundle, audition=audition,
+                identity=target)
             self.music_panel.set_asset(choice.asset)
             self._load_music_editor(target, choice, name)
             self._show_music_state(target)
@@ -2085,7 +2147,8 @@ class MainWindow(QMainWindow):
         name, preset_key, joined, bundle = self._music_context()
         self.music_panel.load(
             choice, target=name, preset_key=preset_key, joined=joined,
-            bundle=bundle, audition=self._music_audition)
+            bundle=bundle, audition=self._music_audition,
+            identity=self._music_target)
         self.music_panel.set_asset(choice.asset)
 
     def _rearm_after_structural(self) -> None:
@@ -3121,6 +3184,7 @@ class MainWindow(QMainWindow):
         shell.back_requested.connect(lambda: self._step_stage(-1))
         shell.next_requested.connect(lambda: self._step_stage(1))
         shell.primary_activated.connect(self._commit_all_planned)
+        shell.selected_activated.connect(self._commit_selected)
         shell.secondary_activated.connect(self._cancel)
         layout.addWidget(shell, 1)
 
@@ -3283,6 +3347,7 @@ class MainWindow(QMainWindow):
         # A fold is Classic's; the list goes to Flow as a list.
         if self.browser_panel.folded:
             self.browser_panel.show_folded(False)
+            self._disclose_for_music(False)
             self.browser_panel.setMinimumHeight(MIN_LIST_HEIGHT)
         # The mode is recorded first. The sidebar only does its work while
         # Flow is the mode, so refreshing before this was refreshing into a
@@ -3552,10 +3617,24 @@ class MainWindow(QMainWindow):
                 primary_enabled=False,
                 secondary="Cancel this render", secondary_enabled=running)
             return
+        selected = self._sidebar_target
+        chosen = selected is not None and selected in self._active_targets()
+        # Music edits one output, so it offers that one on its own, beside
+        # (never instead of) the batch. Output has its own button in its panel.
         self.flow_shell.set_actions(
             primary=f"Queue all planned ({planned})",
             primary_enabled=planned > 0,
-            secondary="Cancel render", secondary_enabled=running)
+            secondary="Cancel render", secondary_enabled=running,
+            selected="Queue this output" if stage is Stage.MUSIC else "",
+            selected_enabled=chosen,
+            selected_tip=(f"Queue {self._target_label(selected)} only"
+                          if chosen else "Choose an output first"))
+
+    def _target_label(self, target) -> str:
+        """A planned output's own name, as its card shows it."""
+        return next((output.label for output in self._working_outputs()
+                     if output.target == target), "this output")
+
     def _step_stage(self, direction: int) -> None:
         back, forward = flow_neighbours(self._flow_stage, self._offered_stages)
         self._show_stage(forward if direction > 0 else back)
@@ -3686,6 +3765,7 @@ class MainWindow(QMainWindow):
                     self.preview_box.updateGeometry()
                 self._refresh_vertical_overlay()
                 self._show_frame(self.trim_bar.playhead)
+        self._show_picture_identity()
 
     # -- Flow Assemble joined-position inspection ----------------------------
 
@@ -4163,7 +4243,63 @@ class MainWindow(QMainWindow):
             return self.context_for_working(target)
         return nothing_selected("choose an output to see it")
 
+    def _show_clip_facts(self, clip, source_of: bool = False) -> None:
+        """A recording's format, size and date under the picture's title.
+        Beside an output's picture they are that output's recording's, and
+        say so, rather than the recording in source focus."""
+        prefix = f"from {clip.path.name} · " if source_of else ""
+        self.clip_format.setText(
+            f"{prefix}{clip.format_label} · {clip.size_label}")
+        self.clip_format.setToolTip(f"{clip.format_detail}\n{clip.size_label}")
+        self.clip_date.setText(clip.modified.strftime("%d %b %Y  %H:%M"))
+
+    def _output_view_bound(self) -> bool:
+        """An output's picture is what is shown beside the controls column."""
+        return self._output_picture_active() and self._output_recipe is not None
+
+    def _show_picture_identity(self) -> None:
+        """Say whose picture this is, on whose clock.
+
+        Choosing an output on Music or Output leaves the recording in source
+        focus alone (W5), so the column beside the picture kept naming that
+        recording — output B shown, recording A named, and In/Out ready to
+        edit A. While an output's picture is bound, the column names that
+        output, its preset and the output's clock, and says the recording is
+        its source. Source focus itself is not moved.
+        """
+        view = self.preview_view
+        bound = self._output_view_bound()
+        view.set_output_picture(bound)
+        if not bound:
+            self._update_trim_labels()
+            if self._trim_clip is not None:
+                self._show_clip_facts(self._trim_clip)
+            return
+        recipe = self._output_recipe
+        target = recipe.target
+        if target.is_assembly:
+            self.clip_format.setText(f"from {len(target.items)} Assembly rows")
+            self.clip_format.setToolTip("")
+            self.clip_date.setText("")
+        else:
+            own = self._monitor_clip(target)
+            if own is not None:
+                self._show_clip_facts(own, source_of=True)
+        label = (self._target_label(target) if not target.is_assembly
+                 else f"Assembly · {len(target.items)} rows")
+        preset = PRESETS[recipe.preset_key].label
+        position = view.sequence_strip.position
+        self.trim_title.setText(f"Output: {label}")
+        self.trim_title.setToolTip("The output selected in the list; the "
+                                   "recording in focus is unchanged.")
+        self.trim_position.setText(
+            f"output {human_duration(position)} of "
+            f"{human_duration(float(recipe.duration))}")
+        self.trim_position.setToolTip("This output's own clock, from zero.")
+        self.trim_summary.setText(f"{preset} · not the finished file")
+
     def _show_source_note(self) -> None:
+        self._show_picture_identity()
         if self.flow_source_note is None:
             return
         text = self._source_note(self._flow_stage)
@@ -4298,6 +4434,8 @@ class MainWindow(QMainWindow):
         self._focus_piece(target.items[0].fingerprint, target.items[0].sid)
         if self._output_picture_active():
             self._refresh_output_picture()
+        if self._view_mode is Mode.FLOW and self._flow_stage is not None:
+            self._show_page_actions(self._flow_stage)
 
     def _focus_piece(self, fingerprint: str, sid: str) -> None:
         """Focus a target's source identity without crossing picture clocks.
@@ -5517,6 +5655,7 @@ class MainWindow(QMainWindow):
         self._fold_suppressed = False
         if self.browser_panel.folded:
             self.browser_panel.show_folded(False)
+            self._disclose_for_music(False)
         self._layout_state = self._layout_state.with_browser(mode)
         self.browser_panel.show_mode(mode)
         action = self.browser_mode_actions.get(mode)
@@ -5684,9 +5823,7 @@ class MainWindow(QMainWindow):
         self._clear_precise_frame()
         # Static for as long as this clip is the one loaded, so it is written
         # here rather than alongside the playhead.
-        self.clip_format.setText(f"{clip.format_label} · {clip.size_label}")
-        self.clip_format.setToolTip(f"{clip.format_detail}\n{clip.size_label}")
-        self.clip_date.setText(clip.modified.strftime("%d %b %Y  %H:%M"))
+        self._show_clip_facts(clip)
 
         # Whatever was playing is a different clip now.
         self.player.load(clip, position=clip.trim_in)
@@ -6639,7 +6776,12 @@ class MainWindow(QMainWindow):
         clip = self._trim_clip
         if clip is None:
             return
+        if self._output_view_bound():
+            # The column speaks for the output while its picture is shown.
+            self._show_picture_identity()
+            return
         self.trim_title.setText(clip.path.name)
+        self.trim_title.setToolTip("")
         if self._precise_frame_number is not None:
             self.trim_position.setText(
                 f"{exact_timestamp(self.trim_bar.playhead)}\nsource frame "

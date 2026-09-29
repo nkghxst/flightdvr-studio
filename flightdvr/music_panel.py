@@ -134,6 +134,12 @@ class MusicPanel(QWidget):
         self._fade_in_samples = MusicChoice().fade_in_samples
         self._fade_out_samples = MusicChoice().fade_out_samples
         self._passage: SampleSpan | None = None
+        # Which output the boxes last showed, so a reload of the same one can
+        # leave a number somebody is part-way through typing alone.
+        # The output itself (its stable identity, not its label: two outputs
+        # can share a label), for this load and the one before it.
+        self._shown_target = None
+        self._previous_target = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -155,9 +161,58 @@ class MusicPanel(QWidget):
         outer.addWidget(self._build_levels_box())
         outer.addStretch(1)
 
+        # A typed number is one edit, finished by Enter, Tab or leaving the
+        # box. With keyboard tracking on, every keystroke was a value: typing
+        # "0.5" committed 0 at the first key, the window wrote the stored
+        # choice back into the boxes, and the rest of the typing landed on
+        # "0.00" and was lost. Arrows, the wheel and the step buttons still
+        # commit at once; only typing waits to be finished.
+        for spin in (self.passage_start, self.passage_end, self.music_level,
+                     self.dvr_level, self.fade_in, self.fade_out):
+            spin.setKeyboardTracking(False)
+
         self._show_choice()
 
     # -- construction ---------------------------------------------------------
+
+    def _primary_row(self, caption: str, combo: QComboBox) -> QWidget:
+        """A label and its combo as one piece, so the compact band can show
+        the same control beside More… rather than a copy of it."""
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(TIGHT)
+        layout.addWidget(QLabel(caption))
+        layout.addWidget(combo)
+        layout.addStretch(1)
+        return row
+
+    def take_primary(self) -> list[QWidget]:
+        """Sound and If shorter, out of their boxes, for the caller to place.
+
+        The compact band keeps these beside More… while the numbers go behind
+        it, as approved. They are the same widgets: one value, never two.
+        `restore_primary` puts them back exactly where they were.
+        """
+        if getattr(self, "_primary_homes", None) is None:
+            homes = []
+            for row in (self.sound_row, self.short_track_row):
+                form = row.parentWidget().layout()
+                index = form.getWidgetPosition(row)[0]
+                homes.append((row, form, index))
+            self._primary_homes = homes
+            for row, form, _index in homes:
+                form.removeWidget(row)
+        return [row for row, _form, _index in self._primary_homes]
+
+    def restore_primary(self) -> None:
+        homes = getattr(self, "_primary_homes", None)
+        if homes is None:
+            return
+        self._primary_homes = None
+        for row, form, index in homes:
+            form.insertRow(index, row)
+            row.show()
 
     def _build_sound_box(self) -> QWidget:
         box = QGroupBox("Sound")
@@ -168,7 +223,8 @@ class MusicPanel(QWidget):
         for mode, label, _ in MODE_LABELS:
             self.mode_combo.addItem(label, mode)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-        form.addRow("Sound:", self.mode_combo)
+        self.sound_row = self._primary_row("Sound:", self.mode_combo)
+        form.addRow(self.sound_row)
 
         self.mode_help = dim(QLabel(""))
         self.mode_help.setWordWrap(True)
@@ -208,7 +264,9 @@ class MusicPanel(QWidget):
         for policy, label in SHORT_TRACK_LABELS:
             self.short_track_combo.addItem(label, policy)
         self.short_track_combo.currentIndexChanged.connect(self._on_edited)
-        form.addRow("If shorter:", self.short_track_combo)
+        self.short_track_row = self._primary_row("If shorter:",
+                                                 self.short_track_combo)
+        form.addRow(self.short_track_row)
 
         self.passage_note = dim(QLabel(
             "The passage needs the track's own sample clock, so it can only be "
@@ -265,7 +323,8 @@ class MusicPanel(QWidget):
 
     def load(self, choice: MusicChoice, *, target: str = "",
              preset_key: str = SUPPORTED_PRESET, joined: bool = False,
-             bundle: bool = False, audition: bool = False) -> None:
+             bundle: bool = False, audition: bool = False,
+             identity=None) -> None:
         """Show a choice. Emits nothing: the person has not chosen anything.
 
         The context arrives with the choice because whether music is offerable
@@ -275,6 +334,10 @@ class MusicPanel(QWidget):
             raise TypeError("load needs a MusicChoice")
         self._choice = choice
         self._asset = choice.asset
+        # `identity` is the output being edited; the label is only what it is
+        # called. Without an identity the label is all there is to go on.
+        key = identity if identity is not None else target
+        self._previous_target, self._shown_target = self._shown_target, key
         self.set_context(target=target, preset_key=preset_key, joined=joined,
                          bundle=bundle, audition=audition)
         self._show_choice()
@@ -454,13 +517,31 @@ class MusicPanel(QWidget):
             if policy >= 0:
                 self.short_track_combo.setCurrentIndex(policy)
 
-            self.music_level.setValue(round(float(choice.music_level) * 100))
-            self.dvr_level.setValue(round(float(choice.dvr_level) * 100))
-            self.fade_in.setValue(seconds_of(choice.fade_in_samples))
-            self.fade_out.setValue(seconds_of(choice.fade_out_samples))
+            self._show_number(self.music_level,
+                              round(float(choice.music_level) * 100))
+            self._show_number(self.dvr_level,
+                              round(float(choice.dvr_level) * 100))
+            self._show_number(self.fade_in, seconds_of(choice.fade_in_samples))
+            self._show_number(self.fade_out,
+                              seconds_of(choice.fade_out_samples))
         finally:
             self._loading = was
         self._apply_enabled()
+
+    def _show_number(self, spin, value) -> None:
+        """Show a stored number, unless somebody is typing this same one.
+
+        A reload of the same output, while its box has focus and holds typing
+        nobody has finished, would put the stored number back over what is
+        being typed. Only when the stored value is unchanged is the typing
+        left alone: a real change underneath, or another output, is shown.
+        """
+        same_output = self._previous_target == self._shown_target
+        typing = (same_output and spin.hasFocus()
+                  and spin.lineEdit().isModified())
+        if typing and spin.valueFromText(spin.textFromValue(value)) == spin.value():
+            return
+        spin.setValue(value)
 
     def _apply_enabled(self) -> None:
         """What can be edited, given the mode, the asset and the context."""

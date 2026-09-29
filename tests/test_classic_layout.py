@@ -1118,3 +1118,122 @@ def test_a_flow_round_trip_puts_classic_s_list_back_where_it_was(qt_app):
     finally:
         window.close()
         assert_no_threads_left(window)
+
+
+# -- P1: what folding for Music sets aside, and brings back (29 September) -----
+
+
+def _filter_widgets(window):
+    panel = window.browser_panel
+    return [panel.review_filter, *panel.review_buttons.values(),
+            panel.review_count_label, panel.min_length, panel.max_length,
+            panel.show_unknown, panel.reset_length]
+
+
+def test_folding_for_music_sets_the_filter_rows_and_secondary_lines_aside(
+        qt_app):
+    window = many_clips_window(qt_app, BrowserMode.NORMAL, (1120, 760))
+    panel, view = window.browser_panel, window.preview_view
+    try:
+        window.show()
+        view.music_band.setChecked(True)
+        qt_app.processEvents()
+        panel.review_filter.setCurrentIndex(1)       # a filter the person set
+        panel.min_length.setValue(3)
+        state = (panel.review_filter.currentIndex(), panel.min_length.value())
+        before = [w.isVisible() for w in _filter_widgets(window)]
+        assert all(before)
+        window._set_list_folded(True)
+        qt_app.processEvents()
+        assert not any(w.isVisible() for w in _filter_widgets(window))
+        assert not view.clip_format.isVisible()
+        assert not view.clip_date.isVisible()
+        # Every control stays: Play and Grab still side by side, In/Out/Reset.
+        assert view.play_button.isVisible() and view.still_button.isVisible()
+        assert all(b.isVisible() for b, _tip in view._source_edits)
+        assert (view.play_button.mapTo(window, view.play_button.rect().topLeft()).y()
+                == view.still_button.mapTo(window, view.still_button.rect().topLeft()).y())
+        # The summary still says what is selected; restore is one press away.
+        assert panel.summary_bar.isVisible() and panel.reopen_button.isVisible()
+        assert window._music_disclosed > 0
+        panel.reopen_button.click()
+        qt_app.processEvents()
+        assert not panel.folded
+        assert [w.isVisible() for w in _filter_widgets(window)] == before
+        assert view.clip_format.isVisible() and view.clip_date.isVisible()
+        assert (panel.review_filter.currentIndex(),
+                panel.min_length.value()) == state, "filter state kept"
+        assert window._music_disclosed == 0
+    finally:
+        panel.min_length.setValue(0)
+        panel.review_filter.setCurrentIndex(0)
+        view.music_band.setChecked(False)
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_closing_music_or_leaving_classic_brings_the_rows_back(qt_app):
+    from flightdvr.flow_layout import Mode
+    window = many_clips_window(qt_app, BrowserMode.NORMAL, (1120, 760))
+    panel, view = window.browser_panel, window.preview_view
+    try:
+        window.show()
+        view.music_band.setChecked(True)
+        qt_app.processEvents()
+        window._set_list_folded(True)
+        view.music_band.setChecked(False)
+        qt_app.processEvents()
+        window._check_list_fold()
+        assert not panel.folded
+        assert panel.review_filter.isVisible() and view.clip_format.isVisible()
+        view.music_band.setChecked(True)
+        qt_app.processEvents()
+        window._set_list_folded(True)
+        window.set_view_mode(Mode.FLOW)
+        qt_app.processEvents()
+        window.set_view_mode(Mode.CLASSIC)
+        qt_app.processEvents()
+        assert window._music_hidden is None
+        assert view.clip_format.isVisible()
+        # And a list mode chosen while folded, which also unfolds.
+        view.music_band.setChecked(True)
+        qt_app.processEvents()
+        window._set_list_folded(True)
+        window.set_browser_mode(BrowserMode.EXPANDED)
+        qt_app.processEvents()
+        assert window._music_hidden is None
+        assert panel.review_filter.isVisible() and view.clip_format.isVisible()
+        window.set_browser_mode(BrowserMode.NORMAL)
+    finally:
+        view.music_band.setChecked(False)
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_unfolding_counts_what_the_fold_set_aside(qt_app):
+    """Room that only exists because the rows are set aside is not room to
+    unfold into: unfolding brings them back, and the fold would come again."""
+    window = many_clips_window(qt_app, BrowserMode.NORMAL, (1120, 760))
+    panel, view = window.browser_panel, window.preview_view
+    try:
+        window.show()
+        view.music_band.setChecked(True)
+        qt_app.processEvents()
+        window._set_list_folded(True)
+        qt_app.processEvents()
+        window._fold_need = 1
+        box, body = view.preview_box, view.music_body
+        spare = (max(0, box.height() - box.content_floor())
+                 + max(0, body.height() - body.minimumHeight()))
+        # Enough for the list alone, not for the list and what came back.
+        window._fold_need = max(1, spare)
+        window._music_disclosed = 1
+        window._check_list_fold()
+        assert panel.folded, "unfolded into room that the rows would retake"
+        window._music_disclosed = 0
+        window._check_list_fold()
+        assert not panel.folded
+    finally:
+        view.music_band.setChecked(False)
+        window.close()
+        assert_no_threads_left(window)

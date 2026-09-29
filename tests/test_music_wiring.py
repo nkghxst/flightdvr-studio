@@ -817,10 +817,16 @@ def test_the_summary_names_the_output_and_disappears_again(
 # -- what is deliberately absent ----------------------------------------------
 
 def test_the_band_says_the_preview_is_silent(window):
-    """Drawing no transport is not enough; unexplained silence reads as a bug."""
+    """Drawing no transport is not enough; unexplained silence reads as a bug.
+
+    P1: it says why (listening is off) and how to hear it, and no longer
+    claims the picture is the source's with no sound at all, which stopped
+    being true when an output's picture and monitoring arrived."""
     said = window.preview_view.music_silence_note.text()
     assert "no sound" in said
     assert "finished file" in said
+    assert "Listen" in said
+    assert "source picture" not in said
 
 
 def test_no_monitor_state_reaches_the_settings_or_the_choice(
@@ -2017,3 +2023,374 @@ def test_a_classic_preset_change_updates_the_panel_and_monitor_at_once(
     app.processEvents()
     assert panel.supported and not panel.unsupported_label.text()
     assert not window.live_preview.status.reason
+
+
+# -- P1: a typed number is one edit, committed once, to the output it was for --
+
+
+def typed_start(window, monkeypatch, tmp_path, app):
+    """Clip 0 with a read track, a 1 s fade in and a 1/7 recording level, the
+    window shown so key events reach the boxes as they do for a person."""
+    from fractions import Fraction
+
+    target = with_track(window, monkeypatch, tmp_path, app)
+    base = window._planned_music(target)
+    window._store_music(target, replace(
+        base, mode=AudioMode.MIX, fade_in_samples=48_000,
+        fade_out_samples=12_345, dvr_level=Fraction(1, 7)))
+    window._show_music_numbers(window._planned_music(target))
+    window.show()
+    window.preview_view.music_band.setChecked(True)
+    app.processEvents()
+    assert window.music_panel.fade_in.isVisible()
+    assert window.music_panel.fade_in.isEnabled()
+    commits = []
+    real = window._store_music
+    monkeypatch.setattr(window, "_store_music", lambda t, c: (
+        commits.append((t, c.fade_in_samples)), real(t, c))[1])
+    return target, commits
+
+
+def type_into(box, app, text, finish=None):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    box.setFocus()
+    app.processEvents()
+    box.selectAll()
+    QTest.keyClicks(box, text)
+    app.processEvents()
+    if finish is not None:
+        QTest.keyClick(box, finish)
+        app.processEvents()
+
+
+@pytest.mark.parametrize("finish", ["enter", "tab"])
+def test_typing_half_a_second_stores_24000_samples_once(
+        window, monkeypatch, tmp_path, app, finish):
+    from fractions import Fraction
+
+    from PySide6.QtCore import Qt
+
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    box = window.music_panel.fade_in
+    key = Qt.Key.Key_Return if finish == "enter" else Qt.Key.Key_Tab
+    type_into(box, app, "0.5", key)
+
+    stored = window._planned_music(target)
+    assert stored.fade_in_samples == 24_000
+    assert commits == [(target, 24_000)], "one edit, one commit"
+    # Nothing nobody touched moves.
+    assert stored.fade_out_samples == 12_345
+    assert stored.dvr_level == Fraction(1, 7)
+    assert box.text() == "0.50 s"
+    window.hide()
+
+
+def test_a_half_typed_number_commits_nothing_and_survives(
+        window, monkeypatch, tmp_path, app):
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    box = window.music_panel.fade_in
+    type_into(box, app, "0.")
+    assert commits == []
+    assert window._planned_music(target).fade_in_samples == 48_000
+    assert box.lineEdit().text().startswith("0."), box.lineEdit().text()
+    window.hide()
+
+
+def test_typing_zero_is_a_real_zero(window, monkeypatch, tmp_path, app):
+    from PySide6.QtCore import Qt
+
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    type_into(window.music_panel.fade_in, app, "0", Qt.Key.Key_Return)
+    assert window._planned_music(target).fade_in_samples == 0
+    assert commits == [(target, 0)]
+    window.hide()
+
+
+def test_text_that_is_not_a_number_stores_nothing(
+        window, monkeypatch, tmp_path, app):
+    from PySide6.QtCore import Qt
+
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    box = window.music_panel.fade_in
+    type_into(box, app, "abc", Qt.Key.Key_Return)
+    assert commits == []
+    assert window._planned_music(target).fade_in_samples == 48_000
+    assert box.value() == 1.0
+    window.hide()
+
+
+def test_arrow_and_typed_fades_reach_the_same_value(
+        window, monkeypatch, tmp_path, app):
+    """The pointer/keyboard route that already worked still does, and
+    agrees with typing."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    box = window.music_panel.fade_in
+    box.setSingleStep(0.5)
+    box.setFocus()
+    QTest.keyClick(box, Qt.Key.Key_Down)
+    app.processEvents()
+    arrowed = window._planned_music(target).fade_in_samples
+    type_into(box, app, "1", Qt.Key.Key_Return)
+    type_into(box, app, "0.5", Qt.Key.Key_Return)
+    assert arrowed == window._planned_music(target).fade_in_samples == 24_000
+    box.setSingleStep(1.0)
+    window.hide()
+
+
+def test_a_target_change_mid_edit_never_moves_the_text_to_the_other_output(
+        window, monkeypatch, tmp_path, app):
+    """Typed but not confirmed, then the band shows another output: the
+    other output's number is shown, and neither output takes 0.5."""
+    from PySide6.QtCore import Qt
+
+    first, commits = typed_start(window, monkeypatch, tmp_path, app)
+    box = window.music_panel.fade_in
+    type_into(box, app, "0.5")
+    focus(window, 1)
+    app.processEvents()
+    second = window._music_target
+    assert second != first
+    shown = window._planned_music(second).fade_in_samples
+    QTest_key = Qt.Key.Key_Return
+    from PySide6.QtTest import QTest
+    QTest.keyClick(box, QTest_key)
+    app.processEvents()
+    assert window._planned_music(first).fade_in_samples == 48_000
+    assert window._planned_music(second).fade_in_samples == shown
+    assert all(samples != 24_000 for _t, samples in commits)
+    window.hide()
+
+
+def test_typing_a_fade_does_not_reach_a_submitted_job(
+        window, monkeypatch, tmp_path, app):
+    from PySide6.QtCore import Qt
+
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    tick(window, 0)
+    window._add_to_queue()
+    assert window.jobs
+    submitted = window.jobs[-1].audio
+    type_into(window.music_panel.fade_in, app, "0.5", Qt.Key.Key_Return)
+    assert window._planned_music(target).fade_in_samples == 24_000
+    assert window.jobs[-1].audio == submitted
+    assert submitted.fade_in_samples == 48_000
+    window.hide()
+
+
+def test_a_refresh_of_the_same_output_mid_typing_keeps_the_typing(
+        window, monkeypatch, tmp_path, app):
+    """Something else re-shows the same output while a person is part-way
+    through a number: what they typed stays, and finishes as they meant."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    box = window.music_panel.fade_in
+    type_into(box, app, "0.2")
+    window._sync_music_panel()
+    app.processEvents()
+    assert box.lineEdit().text().startswith("0.2"), box.lineEdit().text()
+    QTest.keyClicks(box, "5")
+    QTest.keyClick(box, Qt.Key.Key_Return)
+    app.processEvents()
+    assert window._planned_music(target).fade_in_samples == 12_000
+    assert commits == [(target, 12_000)]
+    window.hide()
+
+
+def test_a_real_change_to_the_value_still_replaces_the_typing(
+        window, monkeypatch, tmp_path, app):
+    """The guard above is for the same value only: when the stored fade really
+    changes underneath (another route edited it), the box shows the truth."""
+    target, commits = typed_start(window, monkeypatch, tmp_path, app)
+    box = window.music_panel.fade_in
+    type_into(box, app, "0.2")
+    window._store_music(target, replace(window._planned_music(target),
+                                        fade_in_samples=96_000))
+    window._show_music_numbers(window._planned_music(target))
+    app.processEvents()
+    assert box.value() == 2.0
+    assert box.lineEdit().text() == "2.00 s"
+    window.hide()
+
+
+# -- P1: Classic's shallow band shows the lane it is for -----------------------
+
+
+def classic_band(window, monkeypatch, tmp_path, app):
+    from flightdvr.music_timeline import Presentation
+
+    target = with_track(window, monkeypatch, tmp_path, app)
+    window._store_music(target, replace(window._planned_music(target),
+                                        mode=AudioMode.MIX))
+    window._show_music_numbers(window._planned_music(target))
+    window.show()
+    window.resize(1440, 913)
+    window.preview_view.music_band.setChecked(True)
+    for _ in range(40):
+        app.processEvents()
+    view = window.preview_view
+    assert view.music_timeline.presentation is Presentation.CLASSIC
+    return target, view
+
+
+def in_band_view(view, widget) -> int:
+    """How many of the widget's rows the band's viewport actually shows."""
+    from PySide6.QtCore import QPoint
+
+    port = view.music_body.viewport()
+    top = widget.mapTo(port, QPoint(0, 0)).y()
+    return max(0, min(top + widget.height(), port.height()) - max(top, 0))
+
+
+def test_classic_band_shows_the_whole_lane_within_its_approved_depth(
+        window, monkeypatch, tmp_path, app):
+    from flightdvr.preview_panel import CLASSIC_MUSIC_MAXIMUM
+
+    _target, view = classic_band(window, monkeypatch, tmp_path, app)
+    lane = view.music_timeline.music
+    assert view.music_body.maximumHeight() == CLASSIC_MUSIC_MAXIMUM
+    assert lane.isVisible() and view.music_editor.editable
+    assert in_band_view(view, lane) == lane.height(), (
+        "the music lane and its fade handles are below the band's fold")
+    window.hide()
+
+
+def test_a_classic_refusal_sits_above_the_lane(
+        window, monkeypatch, tmp_path, app):
+    target, view = classic_band(window, monkeypatch, tmp_path, app)
+    note = view.music_silence_note
+    assert "Listen" in note.text()
+    window.export_panel.preset_buttons["social"].setChecked(True)
+    for _ in range(20):
+        app.processEvents()
+    assert "Social" in note.text()
+    assert in_band_view(view, note) == note.height(), (
+        "the refusal is below the band's fold")
+    # And it did not get there by scrolling the track and Listen rows away.
+    for row in (view.track_button, view.listen_check):
+        assert in_band_view(view, row) == row.height(), row
+    assert window._planned_music(target).mode is AudioMode.MIX, "choice kept"
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    for _ in range(20):
+        app.processEvents()
+    assert "Social" not in note.text()
+    window.hide()
+
+
+def test_folding_the_list_gives_the_band_its_depth_back(
+        window, monkeypatch, tmp_path, app):
+    from flightdvr.preview_panel import CLASSIC_MUSIC_MAXIMUM
+
+    _target, view = classic_band(window, monkeypatch, tmp_path, app)
+    body = view.music_body
+    # What keeping a list row does: the band is held to its track row.
+    body.setMaximumHeight(body.minimumHeight())
+    window._set_list_folded(True)
+    assert body.maximumHeight() == CLASSIC_MUSIC_MAXIMUM
+    window._set_list_folded(False)
+    window.hide()
+
+
+def test_a_refusal_brings_itself_into_the_band_s_view(
+        window, monkeypatch, tmp_path, app):
+    """The band was scrolled down to the numbers; a refusal arrives. It is
+    shown where it can be read, not left above the band's fold."""
+    target, view = classic_band(window, monkeypatch, tmp_path, app)
+    body = view.music_body
+    body.verticalScrollBar().setValue(body.verticalScrollBar().maximum())
+    app.processEvents()
+    note = view.music_silence_note
+    assert in_band_view(view, note) < note.height(), "fixture never scrolled"
+    window.export_panel.preset_buttons["remux"].setChecked(True)
+    for _ in range(20):
+        app.processEvents()
+    assert "Remux" in note.text()
+    assert in_band_view(view, note) == note.height()
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    window.hide()
+
+
+def test_a_new_arrangement_of_the_band_starts_at_its_track_and_listen_rows(
+        window, monkeypatch, tmp_path, app):
+    from flightdvr.music_timeline import Presentation
+
+    target, view = classic_band(window, monkeypatch, tmp_path, app)
+    body = view.music_body
+    body.verticalScrollBar().setValue(body.verticalScrollBar().maximum())
+    app.processEvents()
+    assert in_band_view(view, view.listen_check) < view.listen_check.height()
+    view.set_music_presentation(Presentation.FULL)
+    view.set_music_presentation(Presentation.CLASSIC)
+    for _ in range(10):
+        app.processEvents()
+    for row in (view.track_button, view.listen_check):
+        assert in_band_view(view, row) == row.height(), row
+    # A relayout of the same arrangement leaves a person's scroll alone.
+    body.verticalScrollBar().setValue(10)
+    view.set_music_presentation(Presentation.CLASSIC)
+    assert body.verticalScrollBar().value() == 10
+    window.hide()
+
+
+def test_a_same_label_on_a_different_output_never_takes_the_typing(
+        window, monkeypatch, tmp_path, app):
+    """Sol's finding on 8f32a35, reproduced as found: two recordings with the
+    same file name in different folders are two outputs with one label, and
+    the same stored choice. Typing left unfinished on the first must not land
+    on the second."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from flightdvr.output_plan import OutputTarget
+
+    first, _commits = typed_start(window, monkeypatch, tmp_path, app)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    other = window.clips[1]
+    other.path = elsewhere / window.clips[0].path.name
+    second = OutputTarget.clip_or_range(other.fingerprint, "")
+    assert second != first
+    window._store_music(second, window._planned_music(first))
+    box = window.music_panel.fade_in
+    label = window.music_panel.target_label.text()
+    type_into(box, app, "0.5")
+    focus(window, 1)
+    app.processEvents()
+    assert window._music_target == second
+    assert window.music_panel.target_label.text() == label, "same label"
+    QTest.keyClick(box, Qt.Key.Key_Return)
+    app.processEvents()
+    assert window._planned_music(second).fade_in_samples == 48_000
+    assert window._planned_music(first).fade_in_samples == 48_000
+    window.hide()
+
+
+def test_a_rename_of_the_same_output_keeps_the_typing(
+        window, monkeypatch, tmp_path, app):
+    """The other side: the label changes (the range is renamed), the output
+    does not, and the unfinished typing stays."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    target, _commits = typed_start(window, monkeypatch, tmp_path, app)
+    assert target.items[0].sid == "r-1"
+    box = window.music_panel.fade_in
+    type_into(box, app, "0.2")
+    window.clips[0].selects[0].name = "renamed"
+    window._sync_music_panel()
+    app.processEvents()
+    assert window._music_target == target
+    assert "renamed" in window.music_panel.target_label.text()
+    assert box.lineEdit().text().startswith("0.2"), box.lineEdit().text()
+    QTest.keyClicks(box, "5")
+    QTest.keyClick(box, Qt.Key.Key_Return)
+    app.processEvents()
+    assert window._planned_music(target).fade_in_samples == 12_000
+    window.hide()

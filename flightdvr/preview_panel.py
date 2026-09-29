@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QBoxLayout, QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpacerItem,
@@ -82,10 +82,16 @@ class ControlsColumn(QWidget):
 
 
 # Said whenever monitoring is not running for an ordinary reason.
-SILENT_PREVIEW = (
-    "The preview above is the source picture and has no sound. Music is heard "
-    "in the finished file."
-)
+# What the sound is doing when nothing is wrong. The preview used to say it
+# had no sound at all; since the monitor it can, when asked, so the standing
+# note says which of the two it is and how to change it.
+QUIET_PREVIEW = ("Listening is off, so the preview plays with no sound. Tick "
+                 "Listen to hear this output; the finished file is not "
+                 "affected either way.")
+LISTENING_PREVIEW = ("Listening to this output as it plays. The level here is "
+                     "for monitoring; it does not change the file.")
+# Kept for callers that only need the quiet wording.
+SILENT_PREVIEW = QUIET_PREVIEW
 
 
 # What the sidebar says about where the keys are going.
@@ -97,6 +103,11 @@ SILENT_PREVIEW = (
 # Enter keeps a name and Escape puts the old one back, because neither did
 # anything at all.
 PICTURE_KEYS = "Silent · click the picture, then Space plays"
+# The same hint for an output's picture: whether it is heard is the listening
+# row's to say, so this one makes no claim about sound.
+OUTPUT_PICTURE_KEYS = "Click the picture, then Space plays this output"
+SOURCE_EDITS_ELSEWHERE = ("In, Out and Reset edit the recording's ranges on "
+                          "Trim. This picture is the selected output.")
 NAMING_KEYS = "Naming a range · Enter keeps it, Esc puts back the last one"
 
 
@@ -173,6 +184,7 @@ class PreviewView(QObject):
         self._committed_name = ""
         self._flow_controls = False
         self._controls_below = False
+        self._output_picture = False
         self.preview_box = self._build_preview_box()
         self.sequence_strip = SequenceStrip()
         self.sequence_strip.scrub_requested.connect(
@@ -180,6 +192,16 @@ class PreviewView(QObject):
         self.sequence_strip.hide()
         self.trim_band = self._build_trim_band()
         self.music_band = self._build_music_band()
+        # The output strip is the output's picture on the output's clock. When
+        # it is showing, the compact band need not show that picture again.
+        self.sequence_strip.installEventFilter(self)
+
+    def eventFilter(self, watched, event):  # noqa: N802 (Qt naming)
+        if watched is self.sequence_strip and event.type() in (
+                QEvent.Type.Show, QEvent.Type.Hide):
+            self.music_timeline.set_picture_elsewhere(
+                event.type() == QEvent.Type.Show)
+        return False
 
     def _build_preview_box(self) -> QWidget:
         """The video and its transport, permanently visible."""
@@ -269,6 +291,7 @@ class PreviewView(QObject):
         trim_row = QHBoxLayout()
         trim_row.setContentsMargins(0, 0, 0, 0)
         trim_row.setSpacing(TIGHT)
+        self._source_edits = []
         for text, requested, tip in (
             ("In", self.set_in_requested,
              "Start the export at the playhead  (I)"),
@@ -278,6 +301,7 @@ class PreviewView(QObject):
         ):
             button = QPushButton(text)
             button.setToolTip(tip)
+            self._source_edits.append((button, tip))
             # The keys go back to the picture afterwards. Qt leaves focus on a
             # clicked button, so on the base the next Space re-fired it: In,
             # then Space, moved the in point again — measured at 4.00 -> 8.50
@@ -311,6 +335,14 @@ class PreviewView(QObject):
         column.addWidget(self.trim_note)
 
         return side
+
+    def set_source_edits(self, applicable: bool) -> None:
+        """In, Out and Reset act on the recording in source focus. Beside an
+        output's picture that is not what is shown, so they are off and say
+        where they work."""
+        for button, tip in self._source_edits:
+            button.setEnabled(bool(applicable))
+            button.setToolTip(tip if applicable else SOURCE_EDITS_ELSEWHERE)
 
     def set_still_state(self, available: bool, running: bool = False,
                         cancelling: bool = False) -> None:
@@ -451,7 +483,22 @@ class PreviewView(QObject):
         already visible. What was not was what Enter and Escape do once a name
         is being typed — which was nothing, before this.
         """
-        self.focus_note.setText(NAMING_KEYS if editing else PICTURE_KEYS)
+        self._editing_name = editing
+        self.focus_note.setText(
+            NAMING_KEYS if editing
+            else OUTPUT_PICTURE_KEYS if self._output_picture else PICTURE_KEYS)
+
+    def set_output_picture(self, bound: bool) -> None:
+        """The picture is a selected output's, not the recording in focus.
+
+        The column beside it then speaks for that output, and the controls
+        that edit the focused recording's ranges say where they work instead
+        of acting on a recording that is not the one shown.
+        """
+        bound = bool(bound)
+        self._output_picture = bound
+        self.set_source_edits(not bound)
+        self._say_where_the_keys_are(getattr(self, "_editing_name", False))
 
     # -- naming a range --------------------------------------------------------
 
@@ -568,7 +615,17 @@ class PreviewView(QObject):
         two lines about silence, one of them stale, is how a person stops
         reading either.
         """
-        self.music_silence_note.setText(reason or SILENT_PREVIEW)
+        self.music_silence_note.setText(
+            reason or (LISTENING_PREVIEW if listening else QUIET_PREVIEW))
+        if bool(reason) != self._note_is_reason:
+            self._note_is_reason = bool(reason)
+            self._place_note()
+        if reason:
+            # What stops the music is never left scrolled out of the band,
+            # wherever the band was scrolled to for the numbers. After the
+            # layout has placed it: the note may just have moved.
+            QTimer.singleShot(0, lambda: self.music_body.ensureWidgetVisible(
+                self.music_silence_note, 0, 0))
         if self.listen_check.isChecked() != listening:
             blocked = self.listen_check.blockSignals(True)
             self.listen_check.setChecked(listening)
@@ -595,6 +652,34 @@ class PreviewView(QObject):
                            QSizePolicy.Policy.Fixed)
         side.layout().invalidate()
         side.updateGeometry()
+
+    def set_compact_controls(self, compact: bool) -> None:
+        """Classic's controls column when Music needs the height.
+
+        Only while the list has already folded for Music: the recording's
+        format and date step aside (the list and its tooltip still have
+        them), Play sits beside Grab still as it does in Flow, and the two
+        fixed gaps close. Every control stays, and so does every line that
+        says what is selected and where in it you are. Undone exactly.
+        """
+        compact = bool(compact)
+        if compact == getattr(self, "_compact_controls", False):
+            return
+        self._compact_controls = compact
+        for line in (self.clip_format, self.clip_date):
+            line.setVisible(not compact)
+        side_by_side = compact or self._flow_controls
+        self._side_actions.setDirection(
+            QBoxLayout.Direction.LeftToRight if side_by_side
+            else QBoxLayout.Direction.TopToBottom)
+        for gap, size in zip(self._side_gaps, (TIGHT, INNER)):
+            gap.changeSize(0, 0 if side_by_side else size,
+                           QSizePolicy.Policy.Minimum,
+                           QSizePolicy.Policy.Fixed)
+        side = self.sidebar
+        side.layout().invalidate()
+        side.updateGeometry()
+        self.preview_box.updateGeometry()
 
     def set_controls_below(self, below: bool) -> None:
         """Put the controls column under the picture, or back beside it.
@@ -638,7 +723,7 @@ class PreviewView(QObject):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.music_content = QWidget()
-        body = QVBoxLayout(self.music_content)
+        body = self._music_rows = QVBoxLayout(self.music_content)
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(INNER)
 
@@ -664,6 +749,8 @@ class PreviewView(QObject):
         self.music_silence_note = dim(QLabel(SILENT_PREVIEW))
         self.music_silence_note.setWordWrap(True)
         body.addWidget(self.music_silence_note)
+        self._note_is_reason = False
+        self._arranged_as = None
 
         # One editor for every way the music is shown. The lanes are its
         # visual presentation; the numbers below are another view of the
@@ -721,17 +808,55 @@ class PreviewView(QObject):
             # the font's and the style's.
             self.music_body.setMinimumHeight(max(
                 CLASSIC_MUSIC_MINIMUM, self.track_button.sizeHint().height()))
-            self.music_body.setMaximumHeight(CLASSIC_MUSIC_MAXIMUM)
+            self.restore_classic_reach()
         else:
             self.music_body.setMinimumHeight(MUSIC_BAND_MINIMUM)
             self.music_body.setMaximumHeight(16777215)
         self._music_band_margins()
         self._arrange_music()
 
+    def restore_classic_reach(self) -> None:
+        """Let Classic's band have its approved depth again, after the list
+        keeping a row held it down to its track row."""
+        self.music_body.setMaximumHeight(CLASSIC_MUSIC_MAXIMUM)
+
+    def _place_note(self) -> None:
+        """Classic's band is 120px: the track and listening rows and the
+        shallow lane with its handles fill it. The standing listening note
+        goes under the lane there; a refusal or a problem goes above it, so
+        what stops the music is never below the band's fold. Everywhere else
+        the note stays above the lanes."""
+        rows, note = self._music_rows, self.music_silence_note
+        below = (self.music_timeline.presentation is Presentation.CLASSIC
+                 and not self._note_is_reason)
+        rows.removeWidget(note)
+        at = rows.indexOf(self.music_timeline)
+        rows.insertWidget(at + 1 if below else at, note)
+
     def _arrange_music(self) -> None:
         # The numbers are behind More… in the compact presentation, and in
-        # every other one they are simply there.
-        self.music_panel.setVisible(self.music_timeline.shows_more)
+        # every other one they are simply there. Sound and If shorter are not
+        # numbers: compact keeps them in view beside More…, as approved, and
+        # they go back into their boxes everywhere else. Same widgets both
+        # ways, so there is only ever one of each value.
+        timeline, panel = self.music_timeline, self.music_panel
+        arrangement = (timeline.presentation, timeline.shows_more)
+        if arrangement != self._arranged_as:
+            # A different arrangement starts at its top: the track and Listen
+            # rows. Kept from the last one, the scroll left them above the
+            # band's fold (natively, after More… closed and after Flow to
+            # Classic). Only a real change does this, never a relayout.
+            self._arranged_as = arrangement
+            self.music_body.verticalScrollBar().setValue(0)
+        if timeline.presentation is Presentation.COMPACT:
+            row = timeline.more_row
+            for index, widget in enumerate(panel.take_primary()):
+                row.insertWidget(index, widget)
+                widget.show()
+        else:
+            panel.restore_primary()
+        panel.setVisible(timeline.shows_more)
+        self._place_note()
 
     def show_track_status(self, text: str) -> None:
         """What the acquisition is doing, in words a person can act on."""
