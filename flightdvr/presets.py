@@ -1331,12 +1331,22 @@ def build_commands(
         raise KeyError(f"no command builder for the {preset_key!r} preset")
 
     filters, mapped = picture("yuv420p", _scale_filter(clip, settings.social_height))
-    carries_audio = mapped if mapped is not None else (
-        settings.keep_audio and clip.has_audio
-    )
+    # A configured choice sounds the way it does on every other preset, at
+    # Social's 128k. The size budget then counts the track the finished file
+    # actually has: a join's own audio label, an ordinary output's resolved
+    # plan (Replace or Mix over a silent recording still has one, even at
+    # gain zero; No sound has none), and only with nothing configured the
+    # Keep checkbox and the recording, as before.
+    planned = configured_sound(["-c:a", "aac", "-b:a", "128k", "-ac", "2"])
+    if mapped is not None:
+        carries_audio = mapped
+    elif planned is not None:
+        carries_audio = planned != ["-an"]
+    else:
+        carries_audio = settings.keep_audio and clip.has_audio
     audio_kbps = 128 if carries_audio else 0
     fps_args = timing(settings.social_fps)
-    audio_args = sound("128k", mapped)
+    audio_args = planned if planned is not None else sound("128k", mapped)
 
     if settings.social_mode == "quality":
         if settings.hardware:

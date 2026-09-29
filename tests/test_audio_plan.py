@@ -20,8 +20,8 @@ import pytest
 
 from flightdvr.audio_plan import (
     AudioAsset, AudioMode, MusicChoice, OUTPUT_RATE, SampleSpan,
-    ShortTrackPolicy, resolve_audio_plan, resolve_monitor_audio_plan,
-    round_samples,
+    ShortTrackPolicy, configured_audio_export_supported, resolve_audio_plan,
+    resolve_monitor_audio_plan, round_samples,
 )
 
 
@@ -125,7 +125,7 @@ def test_plan_identity_changes_with_timing_or_content_but_is_stable_for_a_copy()
 
 
 @pytest.mark.parametrize("preset,joined,bundle", [
-    ("social", False, False), ("slowmo", False, False),
+    ("remux", False, False), ("slowmo", False, False),
     ("master", False, True), ("master", True, True),
 ])
 def test_unsupported_music_contexts_fail_instead_of_dropping_the_track(
@@ -194,11 +194,27 @@ def test_joined_master_reuses_the_same_finished_time_audio_calculation():
 
 
 def test_monitor_plan_does_not_create_a_nonmaster_or_legacy_audio_path():
-    with pytest.raises(ValueError, match="social"):
+    with pytest.raises(ValueError, match="remux"):
         resolve_monitor_audio_plan(
             music(), OUTPUT_RATE,
-            source_has_audio=True, preset_key="social")
+            source_has_audio=True, preset_key="remux")
     with pytest.raises(ValueError, match="legacy export path"):
         resolve_monitor_audio_plan(
             MusicChoice(), OUTPUT_RATE,
             source_has_audio=True, preset_key="master")
+
+
+@pytest.mark.parametrize("joined", [False, True])
+def test_social_carries_a_configured_choice_like_every_nominal_preset(joined):
+    """Stage B: Social's size budget counts the track, so Social is
+    supported alongside Master, Edit, Upload and Vertical. Bundles, Remux
+    and Slow stay refused."""
+    assert configured_audio_export_supported("social", joined=joined)
+    assert not configured_audio_export_supported("social", joined=joined,
+                                                 bundle=True)
+    plan = resolve_audio_plan(music(), OUTPUT_RATE, source_has_audio=False,
+                              preset_key="social", joined=joined)
+    assert plan.mode.value == "replace"
+    assert resolve_monitor_audio_plan(
+        music(), OUTPUT_RATE, source_has_audio=False,
+        preset_key="social").mode.value == "replace"

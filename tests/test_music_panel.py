@@ -279,7 +279,6 @@ def test_levels_stay_exact_fractions(panel):
 
 @pytest.mark.parametrize("context,fragment", [
     (dict(bundle=True), "delivery bundle"),
-    (dict(preset_key="social"), "Social"),
     (dict(preset_key="remux"), "Remux copies"),
     (dict(preset_key="slowmo"), "Slow motion has no sound"),
 ])
@@ -293,6 +292,21 @@ def test_an_unsupported_context_is_shown_and_locked(panel, context, fragment):
     assert fragment in panel.unsupported_label.text()
     assert not panel.mode_combo.isEnabled()
     assert not panel.music_level.isEnabled()
+
+
+@pytest.mark.parametrize("joined", [False, True])
+def test_social_is_editable_now_its_budget_counts_the_track(panel, joined):
+    """Stage B: Social is no longer refused, ordinary or joined."""
+    panel.load(MusicChoice(track=TRACK, mode=AudioMode.REPLACE,
+                           asset=an_asset()), target="Assembly",
+               preset_key="social", joined=joined, audition=True)
+    assert panel.unsupported_label.isHidden()
+    assert panel.mode_combo.isEnabled()
+    assert MusicPanel._refusal("social", joined, False) == ""
+    remux = MusicPanel._refusal("remux", False, False)
+    assert "budget" not in remux, "Social's old reason is gone"
+    assert "Social, Upload, Vertical carry it" in remux, (
+        "and Social is now named among the presets that carry it")
 
 
 def test_a_supported_context_is_editable_and_says_nothing(panel):
@@ -322,7 +336,7 @@ def test_a_master_assembly_is_editable_and_retains_its_choice(panel):
 def test_a_non_master_assembly_audition_stays_refused(panel):
     """Audition is not a blanket override for an unsupported preset."""
     panel.load(MusicChoice(mode=AudioMode.NO_SOUND), target="Assembly",
-               preset_key="social", joined=True, audition=True)
+               preset_key="remux", joined=True, audition=True)
 
     assert not panel.mode_combo.isEnabled()
     assert not panel.music_level.isEnabled()
@@ -355,7 +369,7 @@ def test_the_panel_refuses_the_same_contexts_the_resolver_does(panel):
     assert joined_plan.mode is AudioMode.REPLACE
     assert joined_plan.output.samples == OUTPUT_RATE
 
-    for context in (dict(bundle=True), dict(preset_key="social")):
+    for context in (dict(bundle=True), dict(preset_key="remux")):
         with pytest.raises(ValueError):
             resolve_audio_plan(choice, OUTPUT_RATE, source_has_audio=True,
                                preset_key=context.get("preset_key", "master"),

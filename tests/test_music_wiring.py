@@ -629,9 +629,10 @@ def test_an_unsupported_preset_refuses_instead_of_dropping_the_music(
     probe.deliver()
     app.processEvents()
 
-    # Social is refused until its size budget carries music (stage B); the
-    # panel is the one place that rule is written.
-    window.export_panel.preset_buttons["social"].setChecked(True)
+    # Remux copies the recording's streams, so it cannot carry music; the
+    # panel is the one place that rule is written. (Social used to be the
+    # example until stage B gave its size budget the track.)
+    window.export_panel.preset_buttons["remux"].setChecked(True)
     app.processEvents()
 
     said = warnings_from(monkeypatch)
@@ -640,7 +641,7 @@ def test_an_unsupported_preset_refuses_instead_of_dropping_the_music(
 
     assert window.jobs == [], "a refused action still queued something"
     assert said and "Nothing has been queued" in said[0]
-    assert "Social" in said[0]
+    assert "Remux" in said[0]
 
 
 def test_a_track_still_being_read_refuses_the_action_upfront(
@@ -1972,17 +1973,17 @@ def test_monitoring_output_b_uses_b_s_recording_without_loading_it(
 def test_monitoring_asks_the_output_s_own_preset(window, app, tmp_path,
                                                  monkeypatch):
     first, second = _two_recordings_with_music(
-        window, app, tmp_path, monkeypatch, presets=("edit", "social"))
+        window, app, tmp_path, monkeypatch, presets=("edit", "remux"))
     window.set_view_mode(Mode.FLOW)
     window._select_working_target(first)
     window._show_stage(Stage.OUTPUT)
     app.processEvents()
     assert window._monitor_refusal(first) == ""
     # Asked while A is shown, B still answers with its own preset.
-    assert "Social" in window._monitor_refusal(second)
+    assert "Remux" in window._monitor_refusal(second)
     window._select_working_target(second)
     app.processEvents()
-    assert "Social" in window._monitor_refusal(second)
+    assert "Remux" in window._monitor_refusal(second)
     # Refused, and kept.
     assert window._planned_music(second).mode is AudioMode.REPLACE
     window.set_view_mode(Mode.CLASSIC)
@@ -2013,11 +2014,17 @@ def test_a_classic_preset_change_updates_the_panel_and_monitor_at_once(
     panel = window.music_panel
     assert panel.supported and not panel.unsupported_label.text()
 
-    window.export_panel.preset_buttons["social"].setChecked(True)
+    window.export_panel.preset_buttons["remux"].setChecked(True)
     app.processEvents()
     assert not panel.supported
-    assert "Social" in panel.unsupported_label.text()
-    assert "Social" in window.live_preview.status.reason
+    assert "Remux" in panel.unsupported_label.text()
+    assert "Remux" in window.live_preview.status.reason
+
+    # Stage B: Social carries it now, and says nothing against it.
+    window.export_panel.preset_buttons["social"].setChecked(True)
+    app.processEvents()
+    assert panel.supported and not panel.unsupported_label.text()
+    assert not window.live_preview.status.reason
 
     window.export_panel.preset_buttons["upload"].setChecked(True)
     app.processEvents()
@@ -2266,10 +2273,10 @@ def test_a_classic_refusal_sits_above_the_lane(
     target, view = classic_band(window, monkeypatch, tmp_path, app)
     note = view.music_silence_note
     assert "Listen" in note.text()
-    window.export_panel.preset_buttons["social"].setChecked(True)
+    window.export_panel.preset_buttons["remux"].setChecked(True)
     for _ in range(20):
         app.processEvents()
-    assert "Social" in note.text()
+    assert "Remux" in note.text()
     assert in_band_view(view, note) == note.height(), (
         "the refusal is below the band's fold")
     # And it did not get there by scrolling the track and Listen rows away.
@@ -2279,7 +2286,7 @@ def test_a_classic_refusal_sits_above_the_lane(
     window.export_panel.preset_buttons["master"].setChecked(True)
     for _ in range(20):
         app.processEvents()
-    assert "Social" not in note.text()
+    assert "Remux" not in note.text()
     window.hide()
 
 

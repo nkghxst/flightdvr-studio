@@ -421,7 +421,6 @@ class MusicPanel(QWidget):
                     "member would need its own choice.")
         # Why, per preset, and what does carry it. The choice itself is kept.
         reasons = {
-            "social": "Social's file-size budget does not account for it yet",
             "remux": "Remux copies the recording's streams unchanged",
             "slowmo": "Slow motion has no sound",
         }
