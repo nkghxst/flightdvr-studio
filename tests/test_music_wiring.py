@@ -2336,3 +2336,61 @@ def test_a_new_arrangement_of_the_band_starts_at_its_track_and_listen_rows(
     view.set_music_presentation(Presentation.CLASSIC)
     assert body.verticalScrollBar().value() == 10
     window.hide()
+
+
+def test_a_same_label_on_a_different_output_never_takes_the_typing(
+        window, monkeypatch, tmp_path, app):
+    """Sol's finding on 8f32a35, reproduced as found: two recordings with the
+    same file name in different folders are two outputs with one label, and
+    the same stored choice. Typing left unfinished on the first must not land
+    on the second."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from flightdvr.output_plan import OutputTarget
+
+    first, _commits = typed_start(window, monkeypatch, tmp_path, app)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    other = window.clips[1]
+    other.path = elsewhere / window.clips[0].path.name
+    second = OutputTarget.clip_or_range(other.fingerprint, "")
+    assert second != first
+    window._store_music(second, window._planned_music(first))
+    box = window.music_panel.fade_in
+    label = window.music_panel.target_label.text()
+    type_into(box, app, "0.5")
+    focus(window, 1)
+    app.processEvents()
+    assert window._music_target == second
+    assert window.music_panel.target_label.text() == label, "same label"
+    QTest.keyClick(box, Qt.Key.Key_Return)
+    app.processEvents()
+    assert window._planned_music(second).fade_in_samples == 48_000
+    assert window._planned_music(first).fade_in_samples == 48_000
+    window.hide()
+
+
+def test_a_rename_of_the_same_output_keeps_the_typing(
+        window, monkeypatch, tmp_path, app):
+    """The other side: the label changes (the range is renamed), the output
+    does not, and the unfinished typing stays."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    window.clips[0].selects = [Select(1.0, 5.0, "one", sid="r-1")]
+    target, _commits = typed_start(window, monkeypatch, tmp_path, app)
+    assert target.items[0].sid == "r-1"
+    box = window.music_panel.fade_in
+    type_into(box, app, "0.2")
+    window.clips[0].selects[0].name = "renamed"
+    window._sync_music_panel()
+    app.processEvents()
+    assert window._music_target == target
+    assert "renamed" in window.music_panel.target_label.text()
+    assert box.lineEdit().text().startswith("0.2"), box.lineEdit().text()
+    QTest.keyClicks(box, "5")
+    QTest.keyClick(box, Qt.Key.Key_Return)
+    app.processEvents()
+    assert window._planned_music(target).fade_in_samples == 12_000
+    window.hide()

@@ -136,8 +136,10 @@ class MusicPanel(QWidget):
         self._passage: SampleSpan | None = None
         # Which output the boxes last showed, so a reload of the same one can
         # leave a number somebody is part-way through typing alone.
-        self._shown_target: str | None = None
-        self._previous_target: str | None = None
+        # The output itself (its stable identity, not its label: two outputs
+        # can share a label), for this load and the one before it.
+        self._shown_target = None
+        self._previous_target = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -321,7 +323,8 @@ class MusicPanel(QWidget):
 
     def load(self, choice: MusicChoice, *, target: str = "",
              preset_key: str = SUPPORTED_PRESET, joined: bool = False,
-             bundle: bool = False, audition: bool = False) -> None:
+             bundle: bool = False, audition: bool = False,
+             identity=None) -> None:
         """Show a choice. Emits nothing: the person has not chosen anything.
 
         The context arrives with the choice because whether music is offerable
@@ -331,7 +334,10 @@ class MusicPanel(QWidget):
             raise TypeError("load needs a MusicChoice")
         self._choice = choice
         self._asset = choice.asset
-        self._previous_target, self._shown_target = self._shown_target, target
+        # `identity` is the output being edited; the label is only what it is
+        # called. Without an identity the label is all there is to go on.
+        key = identity if identity is not None else target
+        self._previous_target, self._shown_target = self._shown_target, key
         self.set_context(target=target, preset_key=preset_key, joined=joined,
                          bundle=bundle, audition=audition)
         self._show_choice()

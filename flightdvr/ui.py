@@ -1987,7 +1987,8 @@ class MainWindow(QMainWindow):
             self._music_audition = audition
             self.music_panel.load(
                 choice, target=name, preset_key=preset_key,
-                joined=joined, bundle=bundle, audition=audition)
+                joined=joined, bundle=bundle, audition=audition,
+                identity=target)
             self.music_panel.set_asset(choice.asset)
             self._load_music_editor(target, choice, name)
             self._show_music_state(target)
@@ -2090,7 +2091,8 @@ class MainWindow(QMainWindow):
         name, preset_key, joined, bundle = self._music_context()
         self.music_panel.load(
             choice, target=name, preset_key=preset_key, joined=joined,
-            bundle=bundle, audition=self._music_audition)
+            bundle=bundle, audition=self._music_audition,
+            identity=self._music_target)
         self.music_panel.set_asset(choice.asset)
 
     def _rearm_after_structural(self) -> None:
