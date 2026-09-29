@@ -92,26 +92,93 @@ def file_holders(path: Path) -> list[str]:
         rm.RmEndSession(session)
 
 
-def leftover_report(path: Path, residual: str) -> str:
-    """For a failed assertion: the worker's own residual, who holds the file
-    now, and how long until it can be removed. Observed here, in the test,
-    after the fact; the worker itself never waits or retries."""
-    holders = file_holders(path)
-    released_after = None
-    started = time.monotonic()
-    while time.monotonic() - started < 10.0:
-        try:
-            with open(path, "rb+"):
-                pass
-            os.rename(path, path.with_suffix(path.suffix + ".probe"))
-            os.rename(path.with_suffix(path.suffix + ".probe"), path)
-            released_after = round(time.monotonic() - started, 3)
-            break
-        except OSError:
-            time.sleep(0.02)
-    return (f"{residual or '(no residual)'} | holders at failure: "
-            f"{holders or '(none named)'} | exclusive access after: "
-            f"{released_after if released_after is not None else '>10 s'}")
+def exclusive_open(path: Path) -> bool:
+    """Whether `path` can be opened with no sharing at all: no other handle
+    of any kind is open on it. A reopen or a rename is weaker, since both
+    succeed alongside handles that share. True off Windows."""
+    if os.name != "nt":
+        return True
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    handle = kernel.CreateFileW(str(path), 0x80000000, 0, None, 3, 0x80, None)
+    if handle in (None, wintypes.HANDLE(-1).value):
+        return False
+    kernel.CloseHandle(handle)
+    return True
+
+
+class UnlinkObserver:
+    """Watches the worker's own removal of `part`, from the test.
+
+    When the real unlink of the partial fails, the observer notes the moment,
+    asks the Restart Manager who holds the file right then, and times, from
+    that moment, how long until the file can be opened exclusively. It does
+    this on its own thread, so the worker gets its error at once and is not
+    delayed; the worker itself never waits or retries.
+    """
+
+    def __init__(self, monkeypatch, part: Path, refusal=None):
+        self.part = part
+        self.unlinked: list[Path] = []
+        self.holders_at_failure = None
+        self.holders_queried = None       # (started, finished) after the fail
+        self.release_after = None
+        self._thread = None
+        self._holder_thread = None
+        real_unlink = Path.unlink
+        observer = self
+
+        def watched(path_self, *args, **kwargs):
+            observer.unlinked.append(Path(path_self))
+            if refusal is not None and Path(path_self) == part:
+                raise refusal
+            try:
+                return real_unlink(path_self, *args, **kwargs)
+            except PermissionError:
+                # The moment of the failure, taken before anything else.
+                failed_at = time.monotonic()
+                if Path(path_self) == part and observer._thread is None:
+                    observer._start(failed_at)
+                raise
+
+        monkeypatch.setattr(Path, "unlink", watched)
+
+    def _start(self, failed_at: float) -> None:
+        # Two threads: the holder lookup is slow and must not delay the
+        # access timing, and it is a later observation, timed as such.
+        def access():
+            while time.monotonic() - failed_at < 10.0:
+                if exclusive_open(self.part):       # its handle is closed
+                    self.release_after = round(time.monotonic() - failed_at, 4)
+                    return
+                time.sleep(0.002)
+
+        def holders():
+            began = time.monotonic() - failed_at
+            self.holders_at_failure = file_holders(self.part)
+            self.holders_queried = (round(began, 4),
+                                    round(time.monotonic() - failed_at, 4))
+
+        self._thread = threading.Thread(target=access, daemon=True)
+        self._holder_thread = threading.Thread(target=holders, daemon=True)
+        self._thread.start()
+        self._holder_thread.start()
+
+    def report(self, residual: str) -> str:
+        for thread in (self._thread, self._holder_thread):
+            if thread is not None:
+                thread.join(timeout=12)
+        release = (f"<= {self.release_after} s after the failed unlink "
+                   "(first exclusive open; an observed upper bound)"
+                   if self.release_after is not None else "not within 10 s")
+        queried = (f"{self.holders_queried[0]}-{self.holders_queried[1]} s "
+                   "after it" if self.holders_queried else "not queried")
+        return (f"{residual or '(no residual)'} | exclusive access: {release}"
+                f" | holders, queried {queried}: "
+                f"{self.holders_at_failure or '(none named)'}")
 
 
 def _cancel_during_the_real_pcm_count(media, tmp_path, monkeypatch,  # noqa: F811
@@ -145,16 +212,8 @@ def _cancel_during_the_real_pcm_count(media, tmp_path, monkeypatch,  # noqa: F81
         return real_popen(command, *args, **kwargs)
 
     monkeypatch.setattr(audio_export.subprocess, "Popen", slow_decode)
-    unlinked = []
-    real_unlink = Path.unlink
-
-    def watched_unlink(self, *args, **kwargs):
-        unlinked.append(Path(self))
-        if unlink_refusal is not None and Path(self) == part:
-            raise unlink_refusal
-        return real_unlink(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "unlink", watched_unlink)
+    observer = UnlinkObserver(monkeypatch, part, refusal=unlink_refusal)
+    unlinked = observer.unlinked
     worker = ExportWorker(None, [first, second], tmp_path / "work")
     from flightdvr.media import find_tools
     worker.tools = find_tools()
@@ -173,7 +232,7 @@ def _cancel_during_the_real_pcm_count(media, tmp_path, monkeypatch,  # noqa: F81
         "worker": worker, "first": first, "second": second,
         "second_before": second_before, "out": out, "neighbour": neighbour,
         "before": before, "part": part, "decodes": decodes,
-        "seen_part": seen_part, "unlinked": unlinked,
+        "seen_part": seen_part, "unlinked": unlinked, "observer": observer,
     }
 
 
@@ -187,7 +246,7 @@ def test_a_cancel_during_the_real_pcm_count_removes_its_own_partial(
     assert first.status is JobStatus.CANCELLED
     # If this fails, the worker says why: that is the diagnostic P2a adds.
     if part.exists():
-        pytest.fail(leftover_report(part, got["worker"].residuals.get(0, "")))
+        pytest.fail(got["observer"].report(got["worker"].residuals.get(0, "")))
     assert first.message == "Cancelled"
     assert 0 not in got["worker"].residuals
     for path, digest in got["before"].items():

@@ -881,6 +881,8 @@ def test_cancel_during_the_real_pcm_count_keeps_the_destination(
 
     monkeypatch.setattr(audio_export.subprocess, "Popen", slow_decode)
     part = out.with_name("edit.flightdvr-part.mov")
+    from tests.test_media_correctness import UnlinkObserver
+    observer = UnlinkObserver(monkeypatch, part)
     result = []
     runner = threading.Thread(
         target=lambda: result.append(worker._run_job(0, job)), daemon=True)
@@ -901,8 +903,7 @@ def test_cancel_during_the_real_pcm_count_keeps_the_destination(
     assert out.read_bytes() == sentinel
     assert neighbour.read_bytes() == b"someone else's finished file"
     if part.exists():
-        from tests.test_media_correctness import leftover_report
-        pytest.fail(leftover_report(part, worker.residuals.get(0, "")))
+        pytest.fail(observer.report(worker.residuals.get(0, "")))
     assert queued.status is JobStatus.PENDING
     assert (queued.settings, queued.audio, queued.out_path) == (
         queued_before.settings, queued_before.audio, queued_before.out_path)
