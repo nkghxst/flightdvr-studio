@@ -188,6 +188,9 @@ class _SequenceLane:
     pending: tuple[float, bytes] | None = None
     ended: bool = False
     last_output: float | None = None
+    # Pictures per second this lane's decoder was started to emit, on the
+    # output clock: the interval its last picture covers.
+    cadence: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -328,7 +331,8 @@ def build_command(tools: Tools, clip: ClipInfo, start: float,
     filters = [
         f"scale={size.width}:{size.height}:force_original_aspect_ratio=decrease",
         f"pad={size.width}:{size.height}:(ow-iw)/2:(oh-ih)/2",
-        f"fps={max(1, fps)}",
+        # eof_action=pass: see `build_recipe_command`.
+        f"fps={max(1, fps)}:eof_action=pass",
     ]
 
     command = [str(tools.ffmpeg), "-hide_banner", "-nostdin", "-v", "error"]
@@ -377,7 +381,14 @@ def build_recipe_command(tools: Tools, clip: ClipInfo, start: float,
     if recipe.time_factor != 1:
         filters.append(f"setpts={recipe.time_factor}*PTS")
     filters += [
-        f"fps={float(recipe.cadence):g}",
+        # eof_action=pass also emits the last slot the final picture still
+        # covers. Measured (P2e): a source whose last picture starts at
+        # 3.967 s and runs to its occurrence's end at 4.000333 s gave slots
+        # up to 3.966667 only, so playback ended 0.33 ms more than one slot
+        # short of the boundary and was reported as a source that ended
+        # early. With it, the 4.000 slot shows that same picture; a source
+        # missing its last picture still stops a whole slot short.
+        f"fps={float(recipe.cadence):g}:eof_action=pass",
         f"scale={size.width}:{size.height}:"
         "force_original_aspect_ratio=decrease:flags=lanczos",
         f"pad={size.width}:{size.height}:(ow-iw)/2:(oh-ih)/2",
@@ -1297,6 +1308,8 @@ class PreviewPlayer(QObject):
             generation=generation,
             worker=worker,
             frames=frames,
+            cadence=(float(PREVIEW_FPS) if self._picture_recipe is None
+                     else float(self._picture_recipe.cadence)),
         )
         if request.role == "active":
             self._sequence_active = lane
@@ -1618,9 +1631,10 @@ class PreviewPlayer(QObject):
             # The final picture of a half-open cadence interval precedes the
             # occurrence boundary. Let the clock cross that last interval;
             # an earlier EOF still fails rather than skipping missing media.
+            # The cadence is the lane's own: a joined preview without a
+            # recipe decodes at PREVIEW_FPS, and used to be allowed nothing.
             boundary = factor * float(occurrence.output.end)
-            cadence = (self._picture_recipe.cadence
-                       if self._picture_recipe is not None else 0)
+            cadence = active.cadence
             complete_last_interval = (
                 active.last_output is not None and cadence > 0 and
                 boundary - active.last_output <= 1.0 / cadence + 1e-6
