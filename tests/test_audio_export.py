@@ -900,7 +900,9 @@ def test_cancel_during_the_real_pcm_count_keeps_the_destination(
     assert decodes[0].returncode != 0, "the decode ran to its end, unstopped"
     assert out.read_bytes() == sentinel
     assert neighbour.read_bytes() == b"someone else's finished file"
-    assert not part.exists()
+    if part.exists():
+        from tests.test_media_correctness import leftover_report
+        pytest.fail(leftover_report(part, worker.residuals.get(0, "")))
     assert queued.status is JobStatus.PENDING
     assert (queued.settings, queued.audio, queued.out_path) == (
         queued_before.settings, queued_before.audio, queued_before.out_path)

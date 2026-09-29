@@ -43,6 +43,77 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def file_holders(path: Path) -> list[str]:
+    """Which processes hold `path` open, by the Windows Restart Manager.
+
+    Diagnostic only, for a partial the worker could not remove: winerror 32
+    says another handle is open, not whose. Empty off Windows or when the
+    Restart Manager cannot say.
+    """
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    rm = ctypes.WinDLL("rstrtmgr")
+
+    class _UniqueProcess(ctypes.Structure):
+        _fields_ = [("dwProcessId", wintypes.DWORD),
+                    ("ProcessStartTime", wintypes.FILETIME)]
+
+    class _ProcessInfo(ctypes.Structure):
+        _fields_ = [("Process", _UniqueProcess),
+                    ("strAppName", ctypes.c_wchar * 256),
+                    ("strServiceShortName", ctypes.c_wchar * 64),
+                    ("ApplicationType", ctypes.c_int),
+                    ("AppStatus", wintypes.ULONG),
+                    ("TSSessionId", wintypes.DWORD),
+                    ("bRestartable", wintypes.BOOL)]
+
+    session = wintypes.DWORD()
+    key = ctypes.create_unicode_buffer(64)
+    if rm.RmStartSession(ctypes.byref(session), 0, key) != 0:
+        return ["(restart manager unavailable)"]
+    try:
+        files = (ctypes.c_wchar_p * 1)(str(path))
+        if rm.RmRegisterResources(session, 1, files, 0, None, 0, None) != 0:
+            return ["(could not register the file)"]
+        needed, count, reasons = wintypes.UINT(), wintypes.UINT(0), wintypes.DWORD()
+        rm.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), None,
+                     ctypes.byref(reasons))
+        infos = (_ProcessInfo * max(1, needed.value))()
+        count = wintypes.UINT(needed.value)
+        if rm.RmGetList(session, ctypes.byref(needed), ctypes.byref(count),
+                        infos, ctypes.byref(reasons)) != 0:
+            return ["(could not list holders)"]
+        return [f"{infos[i].strAppName} pid {infos[i].Process.dwProcessId}"
+                for i in range(count.value)]
+    finally:
+        rm.RmEndSession(session)
+
+
+def leftover_report(path: Path, residual: str) -> str:
+    """For a failed assertion: the worker's own residual, who holds the file
+    now, and how long until it can be removed. Observed here, in the test,
+    after the fact; the worker itself never waits or retries."""
+    holders = file_holders(path)
+    released_after = None
+    started = time.monotonic()
+    while time.monotonic() - started < 10.0:
+        try:
+            with open(path, "rb+"):
+                pass
+            os.rename(path, path.with_suffix(path.suffix + ".probe"))
+            os.rename(path.with_suffix(path.suffix + ".probe"), path)
+            released_after = round(time.monotonic() - started, 3)
+            break
+        except OSError:
+            time.sleep(0.02)
+    return (f"{residual or '(no residual)'} | holders at failure: "
+            f"{holders or '(none named)'} | exclusive access after: "
+            f"{released_after if released_after is not None else '>10 s'}")
+
+
 def _cancel_during_the_real_pcm_count(media, tmp_path, monkeypatch,  # noqa: F811
                                       unlink_refusal=None):
     """Two Edit jobs; the first is cancelled while the real PCM count is
@@ -115,7 +186,8 @@ def test_a_cancel_during_the_real_pcm_count_removes_its_own_partial(
     assert got["decodes"][0].returncode not in (None, 0), "decode not stopped"
     assert first.status is JobStatus.CANCELLED
     # If this fails, the worker says why: that is the diagnostic P2a adds.
-    assert not part.exists(), got["worker"].residuals.get(0, "(no residual)")
+    if part.exists():
+        pytest.fail(leftover_report(part, got["worker"].residuals.get(0, "")))
     assert first.message == "Cancelled"
     assert 0 not in got["worker"].residuals
     for path, digest in got["before"].items():
