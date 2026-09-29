@@ -239,18 +239,26 @@ def child_receipt(proc) -> dict:
 
 def classify_pids(pids: list[int], children: list[dict]) -> list[str]:
     """Each named PID as the observing test process, a known child (same PID
-    and creation time), or another process, with what Windows says of it."""
+    and creation time), another process, or unknown, with what Windows says
+    of it. A PID a known child had is "unknown" when either creation time is
+    missing: it may be that child or a later process given its number, and
+    neither is claimed. Only a differing creation time makes it another."""
     labelled = []
     for pid in pids:
         if pid == os.getpid():
             labelled.append(f"{pid} observer (this test process)")
             continue
         identity = process_identity(pid)
-        known = next((c for c in children if c["pid"] == pid
-                      and c.get("created_ns") is not None
-                      and c.get("created_ns") == identity.get("created_ns")),
-                     None)
-        kind = "known child" if known else "other process"
+        now = identity.get("created_ns")
+        same_pid = [c for c in children if c["pid"] == pid]
+        if not same_pid:
+            kind = "other process"
+        elif now is None or any(c.get("created_ns") is None for c in same_pid):
+            kind = "unknown (a known child's PID, identity not confirmed)"
+        elif any(c["created_ns"] == now for c in same_pid):
+            kind = "known child"
+        else:
+            kind = "other process (a known child's PID, created later)"
         labelled.append(f"{pid} {kind} {identity}")
     return labelled
 
@@ -308,14 +316,28 @@ class UnlinkObserver:
         monkeypatch.setattr(Path, "unlink", watched)
 
     def _first_look(self, failed_ns: int) -> None:
+        """Never raises: a diagnostic that fails is recorded as such, and the
+        failed unlink's own error is what the worker and the test see."""
         self.failed_ns = failed_ns
         began = time.time_ns()
-        self.pid_query = pids_using_file(self.part)
+        try:
+            self.pid_query = pids_using_file(self.part)
+        except Exception as exc:  # noqa: BLE001 - reported, never raised
+            self.pid_query = {"state": "error", "pids": [],
+                              "detail": f"{type(exc).__name__}: {exc}"}
         self.pid_query_ns = (began - failed_ns, time.time_ns() - failed_ns)
-        self.children_at_failure = [child_receipt(proc)
-                                    for proc in self._children()]
-        self.pid_labels = classify_pids(self.pid_query["pids"],
-                                        self.children_at_failure)
+        try:
+            self.children_at_failure = [child_receipt(proc)
+                                        for proc in self._children()]
+        except Exception as exc:  # noqa: BLE001
+            self.children_at_failure = []
+            self.pid_labels = [f"children not read: {type(exc).__name__}: {exc}"]
+            return
+        try:
+            self.pid_labels = classify_pids(self.pid_query["pids"],
+                                            self.children_at_failure)
+        except Exception as exc:  # noqa: BLE001
+            self.pid_labels = [f"not classified: {type(exc).__name__}: {exc}"]
 
     def _start(self, failed_at: float) -> None:
         # Two threads: the holder lookup is slow and must not delay the
@@ -623,6 +645,56 @@ def test_the_observer_looks_first_and_keeps_the_failure(tmp_path, monkeypatch):
     assert "file PIDs, queried" in report and "named" in report
     assert "association only, not proof" in report
     assert "secondary: exclusive access" in report
+
+
+def test_a_known_child_s_pid_without_a_confirmed_identity_is_unknown(
+        monkeypatch):
+    """Sol, I1: not "other process" when either creation time is missing."""
+    here = classify_pids.__globals__           # this module, as pytest loaded it
+    monkeypatch.setitem(here, "process_identity",
+                        lambda pid: {"identity": "not openable, error 5"})
+    [label] = classify_pids([4242], [{"pid": 4242, "created_ns": 1}])
+    assert "unknown" in label and "other process" not in label
+    monkeypatch.setitem(here, "process_identity",
+                        lambda pid: {"created_ns": 7, "image": "x.exe"})
+    [label] = classify_pids([4242], [{"pid": 4242}])
+    assert "unknown" in label
+    [label] = classify_pids([4242], [{"pid": 4242, "created_ns": 1}])
+    assert "other process" in label and "created later" in label
+    [label] = classify_pids([4242], [{"pid": 4242, "created_ns": 7}])
+    assert label.startswith("4242 known child")
+    [label] = classify_pids([4343], [{"pid": 4242, "created_ns": 7}])
+    assert label.startswith("4343 other process")
+
+
+def test_a_failing_diagnostic_never_hides_the_failed_unlink(tmp_path,
+                                                            monkeypatch):
+    """Sol, I2: the PID query raising must not replace the unlink's error."""
+    here = UnlinkObserver._first_look.__globals__
+    scratch = tmp_path / "edit.flightdvr-part.mov"
+    scratch.write_bytes(b"x")
+    original = PermissionError(13, "in use", str(scratch),
+                               *((32,) if os.name == "nt" else ()))
+
+    def refuse(self, *args, **kwargs):
+        raise original
+
+    def broken(*args, **kwargs):
+        raise OSError(22, "diagnostic broke")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    monkeypatch.setitem(here, "pids_using_file", broken)
+    monkeypatch.setitem(here, "child_receipt", broken)
+    observer = UnlinkObserver(monkeypatch, scratch, children=lambda: [object()])
+    with pytest.raises(PermissionError) as seen:
+        scratch.unlink()
+    assert seen.value is original
+    if os.name == "nt":
+        assert seen.value.winerror == 32
+    assert observer.pid_query["state"] == "error"
+    assert "diagnostic broke" in observer.pid_query["detail"]
+    assert "children not read" in observer.pid_labels[0]
+    assert "file PIDs, queried" in observer.first_look()
 
 
 def test_the_observer_does_nothing_when_the_unlink_succeeds(tmp_path,
