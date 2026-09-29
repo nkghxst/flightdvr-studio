@@ -692,15 +692,11 @@ def _probe_once(
             info.video_duration = picture if picture and picture > 0 else 0.0
             info.video_duration_origin = "stream" if info.video_duration else ""
             if timeline is not None:
-                # The raw clock the video's packets are stamped on, for
-                # `observe_picture_end`. None where ffprobe gave nothing.
-                begins = _finite(fmt.get("start_time"))
-                length = _finite(fmt.get("duration"))
+                # For `observe_picture_end`: the raw time the video's packets
+                # start at, and the file's length. None where ffprobe gave
+                # nothing.
                 timeline.update(
-                    format_start=begins,
-                    format_duration=length,
-                    format_end=(None if begins is None or length is None
-                                else begins + length),
+                    format_duration=_finite(fmt.get("duration")),
                     video_start=_finite(stream.get("start_time")),
                 )
         elif kind == "audio" and not info.audio_codec:
@@ -761,38 +757,38 @@ def probe(tools: Tools, path: Path, should_stop=None,
     return info
 
 
-# The picture's end is read from about this much of the end of the file. The
-# demuxer may seek earlier than asked, or not at all, so it is an
-# optimisation only: the bounds below are what limit the work, and they bound
-# both reads together.
-PICTURE_END_WINDOW_SECONDS = 10.0
+# A recording no longer than this is read whole, from its start, to find where
+# its picture ends; a longer one is not read at all (see observe_picture_end).
+# The time and output bounds below still limit the one read.
+PICTURE_END_WHOLE_READ_SECONDS = 10.0
 PICTURE_END_TIMEOUT_SECONDS = 20.0
-PICTURE_END_MAX_PACKETS = 20_000     # about 5.5 minutes of 60 fps packets
+PICTURE_END_MAX_PACKETS = 20_000
 PICTURE_END_MAX_LINE = 200
-PICTURE_END_SEEKING_READS = 4
 
 
 def observe_picture_end(tools: Tools, path: Path, timeline: dict,
                         should_stop=None, register=None) -> float:
     """Seconds from the first picture to the end of the last, or 0.0.
 
-    Read from the video stream's own packets near the end of the file: the
-    largest presentation time plus that packet's duration, on the clock the
-    stream's start time is on. Anything short of clean, complete evidence is
-    0.0, not an estimate: no start time or file length; a packet with no
-    time or no positive duration, the last one included; an end longer than
-    the file, or before the window read; any error ffprobe reports (a
+    Read from the video stream's own packets, for a recording whose stream
+    gives no picture length: the largest presentation time plus that
+    packet's duration, on the clock the stream's start time is on. Anything
+    short of clean, complete evidence is 0.0, not an estimate: no start time
+    or file length; a packet with no time or no positive duration, the last
+    one included; an end longer than the file; any error ffprobe reports (a
     truncated file exits 0 but says "File ended prematurely"); a failed exit;
     a timeout; too much output; a stop request.
 
-    A read that seeks is believed only when a second complete one agrees
-    exactly (up to four, inside the same deadline).
-    Measured with FFmpeg 7.1.5 (P2f): the same seeking read of one file
-    returned every packet in most runs and, with exit 0 and no error, none
-    (4 of 30 on a 5-minute file's last 10 s) or only the first two, which
-    would have looked like an end 4 s early. The reads that did not seek
-    agreed every time, so a file no longer than the window is read from its
-    start without one.
+    Only a recording no longer than PICTURE_END_WHOLE_READ_SECONDS is read,
+    whole and without a seek: those reads agreed every time they were
+    measured. A longer one stays unknown. Reading only its end means a seek,
+    and with FFmpeg 7.1.5 the same seeking read of one file returned, with
+    exit 0 and no error, every packet in most runs, none in some (4 of 30 on
+    a 5-minute file's last 10 s), and once only its first two -- an end that
+    looks complete and is not. Two reads agreeing does not prove either one
+    reached the end, and no exact test of that was found: the last packet of
+    any stream ended 1 ms short of a Matroska file's stated length, 0.107 s
+    past a transport stream's, and matched a third exactly (P2f).
 
     Measured (P2f): a Matroska file with no video-stream duration and a file
     duration of 4.230 has packets ending at 4.000, which a whole-clip join
@@ -801,39 +797,14 @@ def observe_picture_end(tools: Tools, path: Path, timeline: dict,
     Same child ownership as `_probe_once`: registered, stoppable, reaped here.
     """
     start = timeline.get("video_start")
-    begins, length = timeline.get("format_start"), timeline.get("format_duration")
-    end = timeline.get("format_end")
-    if start is None or end is None or length is None or end <= start:
+    length = timeline.get("format_duration")
+    if (start is None or length is None or length <= 0
+            or length > PICTURE_END_WHOLE_READ_SECONDS):
         return 0.0
-    first = start if begins is None else begins
-    window = end - PICTURE_END_WINDOW_SECONDS
-    deadline = time.monotonic() + PICTURE_END_TIMEOUT_SECONDS
-    if window <= first:
-        window = first
-        reads = [_read_packet_end(tools, path, None, deadline, should_stop,
-                                  register)]
-    else:
-        # Up to PICTURE_END_SEEKING_READS, inside the same deadline, until two
-        # complete reads agree exactly. One read never decides alone.
-        complete: list = []
-        agreed = None
-        for _ in range(PICTURE_END_SEEKING_READS):
-            if should_stop is not None and should_stop():
-                return 0.0
-            read = _read_packet_end(tools, path, window, deadline,
-                                    should_stop, register)
-            if read is not None:
-                if read in complete:
-                    agreed = read
-                    break
-                complete.append(read)
-        reads = [agreed]
-    if any(read is None for read in reads):
+    read = _read_packet_end(tools, path, should_stop, register)
+    if read is None:
         return 0.0
-    _count, last = reads[0]
-    if last < window:
-        return 0.0
-    picture = round(last - start, 6)
+    picture = round(read[1] - start, 6)
     # Not longer than the whole file: the bound `sequence_plan` also keeps.
     # Measured against the duration, not start + duration: a Matroska file
     # whose sound starts 23 ms early reports start -0.023 and a duration
@@ -843,19 +814,16 @@ def observe_picture_end(tools: Tools, path: Path, timeline: dict,
     return picture
 
 
-def _read_packet_end(tools: Tools, path: Path, window: float | None,
-                     deadline: float, should_stop=None,
+def _read_packet_end(tools: Tools, path: Path, should_stop=None,
                      register=None) -> tuple[int, float] | None:
-    """(packets, last packet end) from one owned ffprobe read of the video
-    packets, from `window` (None: from the start, without a seek) to the end
-    of the file; None unless that read was clean and complete."""
+    """(packets, last packet end) from one owned ffprobe read of all the
+    video packets, from the start of the file without a seek; None unless
+    that read was clean and complete within its bounds."""
     if should_stop is not None and should_stop():
         return None
-    args = [str(tools.ffprobe), "-v", "error"]
-    if window is not None:
-        args += ["-read_intervals", f"{window:.6f}%"]
-    args += ["-select_streams", "v:0", "-show_entries",
-             "packet=pts_time,duration_time", "-of", "csv=p=0", str(path)]
+    args = [str(tools.ffprobe), "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "packet=pts_time,duration_time", "-of", "csv=p=0",
+            str(path)]
     try:
         proc = subprocess.Popen(args, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, creationflags=NO_WINDOW)
@@ -869,7 +837,7 @@ def _read_packet_end(tools: Tools, path: Path, window: float | None,
 
     def read_packets():
         # Parsed as it arrives: only the running maximum is kept, so memory
-        # does not grow with however much the demuxer chose to read.
+        # does not grow with however much the demuxer reads.
         for raw in iter(lambda: proc.stdout.readline(PICTURE_END_MAX_LINE), b""):
             if seen["over"]:
                 continue            # drained, so the child is never blocked
@@ -900,6 +868,7 @@ def _read_packet_end(tools: Tools, path: Path, window: float | None,
         reader.start()
     finished = False
     try:
+        deadline = time.monotonic() + PICTURE_END_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             if should_stop is not None and should_stop():
                 break

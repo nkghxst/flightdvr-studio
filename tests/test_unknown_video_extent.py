@@ -88,9 +88,9 @@ def child(monkeypatch):
 
 
 TOOLS = media.Tools(Path("ffmpeg"), Path("ffprobe"))
-# The retained file's clock: format 0..4.230, picture from 0.
-_CLOCK = {"format_start": 0.0, "format_duration": 4.23, "format_end": 4.23,
-          "video_start": 0.0}
+# The retained file: 4.230 s long, its picture starting at 0.
+_CLOCK = {"format_duration": 4.23, "video_start": 0.0}
+_LONG = {"format_duration": 300.0, "video_start": 0.0}
 
 
 def _observe(clock=_CLOCK, **kwargs):
@@ -101,48 +101,36 @@ def test_the_last_packet_end_is_the_picture_s_end(child):
     child["launch"](_child("3.900000,0.033000\n3.933000,0.033000\n"
                            "3.967000,0.033000\n"))
     assert _observe() == pytest.approx(4.0)
-    # No longer than the window: one read from the start, without a seek
-    # (the reads that seek were not reliable, see below).
+    # One read of the whole recording, from its start, without a seek.
     assert len(child["calls"]) == 1
     assert "-read_intervals" not in child["args"]
     assert "packet=pts_time,duration_time" in child["args"]
 
 
-_LONG = {"format_start": 0.0, "format_duration": 300.0, "format_end": 300.0,
-         "video_start": 0.0}
-_TAIL = "299.950000,0.016667\n299.966667,0.016667\n299.983333,0.016667\n"
-
-
-def test_a_seeking_read_is_believed_only_when_a_second_agrees(child):
-    child["launch"](_child(_TAIL))
-    assert _observe(_LONG) == pytest.approx(300.0)
-    assert len(child["calls"]) == 2
-    args = child["calls"][0]
-    assert args[args.index("-read_intervals") + 1] == "290.000000%"
-
-
-def test_a_short_or_empty_seeking_read_never_decides(child):
-    """Measured with FFmpeg 7.1.5: the same seeking read sometimes returned
-    nothing, or only its first two packets, with exit 0 and no error."""
-    child["launch"](_child("290.000000,0.016667\n290.016667,0.016667\n"),
-                    _child(""), _child(_TAIL), _child(_TAIL))
-    assert _observe(_LONG) == pytest.approx(300.0)
-    assert len(child["calls"]) == 4
-
-
-def test_reads_that_never_agree_are_unknown(child):
-    child["launch"](_child("290.000000,0.016667\n"), _child(""),
-                    _child(_TAIL), _child("295.000000,0.016667\n"))
+def test_a_recording_longer_than_a_whole_read_is_unknown_without_a_read(child):
+    """Its end could only be read with a seek, and with FFmpeg 7.1.5 seeking
+    reads returned, with exit 0 and no error, sometimes nothing and once only
+    their first two packets: an end that looks complete and is not."""
+    child["launch"](_child("299.983333,0.016667\n"))
     assert _observe(_LONG) == 0.0
-    assert len(child["calls"]) == media.PICTURE_END_SEEKING_READS
-    assert all(proc.poll() is not None for proc in child["procs"])
+    assert child["calls"] == []
+
+
+def test_identical_partial_reads_are_still_unknown(monkeypatch):
+    """Sol's counterexample (P2f): two reads agreeing on the same early end,
+    2 packets ending at 290.033334 of a 300 s picture, were accepted by a
+    rule that believed agreement. Agreement is not completeness."""
+    reads = []
+    monkeypatch.setattr(media, "_read_packet_end",
+                        lambda *a, **k: reads.append(1) or (2, 290.033334))
+    assert _observe(_LONG) == 0.0
+    assert reads == [], "a seeking read is not attempted at all"
 
 
 def test_the_end_is_on_the_picture_s_clock_whatever_the_starts(child):
     """A picture 50 ms late, a file whose sound starts 23 ms early."""
     child["launch"](_child("4.017000,0.033000\n"))
-    late = {"format_start": -0.023, "format_duration": 4.2,
-            "format_end": 4.177, "video_start": 0.05}
+    late = {"format_duration": 4.2, "video_start": 0.05}
     assert _observe(late) == pytest.approx(4.0)
 
 
@@ -154,8 +142,8 @@ def test_packets_out_of_order_still_give_the_latest_end(child):
 
 @pytest.mark.parametrize("clock", [
     {**_CLOCK, "video_start": None},
-    {**_CLOCK, "format_end": None},
     {**_CLOCK, "format_duration": None},
+    {**_CLOCK, "format_duration": 0.0},
 ])
 def test_an_unknown_start_or_length_is_unknown(child, clock):
     child["launch"](_child("3.967000,0.033000\n"))
@@ -174,13 +162,6 @@ def test_an_unknown_start_or_length_is_unknown(child, clock):
 def test_incomplete_evidence_is_unknown_not_an_earlier_end(child, lines, why):
     child["launch"](_child(lines))
     assert _observe() == 0.0, why
-
-
-def test_a_seek_that_lands_before_the_window_is_bounded_not_trusted(child):
-    """The window starts 10 s before the end; packets that all end before it
-    mean the read did not reach the end, however often it says so."""
-    child["launch"](_child("10.000000,0.016667\n"))
-    assert _observe(_LONG) == 0.0
 
 
 @pytest.mark.parametrize("errors, code", [
@@ -260,6 +241,11 @@ def sources(tmp_path_factory):
     made["late.mkv"] = root / "late.mkv"
     run("-itsoffset", "0.05", "-i", pictures, "-i", sound, "-map", "0:v",
         "-map", "1:a", "-c:v", "copy", "-c:a", "pcm_s16le", made["late.mkv"])
+    made["long.mkv"] = root / "long.mkv"
+    run("-f", "lavfi", "-i", f"color=black:s={_W}x{_H}:r=30:d=12",
+        "-f", "lavfi", "-i", "sine=frequency=300:sample_rate=48000:duration=12.2",
+        "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast",
+        "-c:a", "pcm_s16le", made["long.mkv"])
     data = made["tail.mkv"].read_bytes()
     made["cut.mkv"] = root / "cut.mkv"
     made["cut.mkv"].write_bytes(data[: int(len(data) * 0.6)])
@@ -288,6 +274,19 @@ def test_matroska_without_a_picture_length_gets_one_from_its_packets(sources):
     late = probe(tools, made["late.mkv"])
     # Its DURATION tag says 4.050, an end time: the picture lasts 4.000.
     assert (late.video_duration, late.video_duration_origin) == (4.0, "packets")
+
+
+def test_a_long_recording_without_a_picture_length_stays_unknown(
+        sources, monkeypatch):
+    tools, made, _music = sources
+    calls = []
+    real = media.subprocess.Popen
+    monkeypatch.setattr(media.subprocess, "Popen",
+                        lambda args, **k: (calls.append(args), real(args, **k))[1])
+    found = probe(tools, made["long.mkv"])
+    assert found.duration > media.PICTURE_END_WHOLE_READ_SECONDS
+    assert found.video_duration == 0.0 and found.video_duration_origin == ""
+    assert len(calls) == 1, "no read of its packets was started"
 
 
 def test_a_truncated_recording_stays_unknown(sources):
