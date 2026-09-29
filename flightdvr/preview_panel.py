@@ -653,6 +653,34 @@ class PreviewView(QObject):
         side.layout().invalidate()
         side.updateGeometry()
 
+    def set_compact_controls(self, compact: bool) -> None:
+        """Classic's controls column when Music needs the height.
+
+        Only while the list has already folded for Music: the recording's
+        format and date step aside (the list and its tooltip still have
+        them), Play sits beside Grab still as it does in Flow, and the two
+        fixed gaps close. Every control stays, and so does every line that
+        says what is selected and where in it you are. Undone exactly.
+        """
+        compact = bool(compact)
+        if compact == getattr(self, "_compact_controls", False):
+            return
+        self._compact_controls = compact
+        for line in (self.clip_format, self.clip_date):
+            line.setVisible(not compact)
+        side_by_side = compact or self._flow_controls
+        self._side_actions.setDirection(
+            QBoxLayout.Direction.LeftToRight if side_by_side
+            else QBoxLayout.Direction.TopToBottom)
+        for gap, size in zip(self._side_gaps, (TIGHT, INNER)):
+            gap.changeSize(0, 0 if side_by_side else size,
+                           QSizePolicy.Policy.Minimum,
+                           QSizePolicy.Policy.Fixed)
+        side = self.sidebar
+        side.layout().invalidate()
+        side.updateGeometry()
+        self.preview_box.updateGeometry()
+
     def set_controls_below(self, below: bool) -> None:
         """Put the controls column under the picture, or back beside it.
 

@@ -456,6 +456,9 @@ class MainWindow(QMainWindow):
         # row again, and whether someone asked for the list back meanwhile.
         self._fold_need = 0
         self._fold_suppressed = False
+        # What folding for Music set aside, and the height that costs back.
+        self._music_hidden = None
+        self._music_disclosed = 0
         self._making_room = False
         self._room_pending = False
         self._viewport_home = None
@@ -1338,7 +1341,10 @@ class MainWindow(QMainWindow):
         if panel.folded:
             reclaim = (max(0, box.height() - box.content_floor())
                        + max(0, body.height() - body.minimumHeight()))
-            if not wanted or reclaim >= self._fold_need:
+            # Unfolding also gives back what folding set aside for Music (the
+            # list's filter rows, the picture's secondary lines). Counting it
+            # is what keeps unfold -> refold from going round.
+            if not wanted or reclaim >= self._fold_need + self._music_disclosed:
                 self._set_list_folded(False)
             return
         if (self._making_room or not wanted or not panel.table.isVisible()
@@ -1369,6 +1375,7 @@ class MainWindow(QMainWindow):
     def _set_list_folded(self, folded: bool) -> None:
         panel = self.browser_panel
         panel.show_folded(folded)
+        self._disclose_for_music(folded and self._view_mode is Mode.CLASSIC)
         if folded and self._view_mode is Mode.CLASSIC:
             # The band gave up its body to keep a list row; the row is folded
             # away now, so the band has that room back. It had stayed at its
@@ -1386,6 +1393,55 @@ class MainWindow(QMainWindow):
             if item is not None:
                 self.table.scrollToItem(item)
         self._relayout()
+
+    def _disclose_for_music(self, on: bool) -> None:
+        """What Classic sets aside while its list is folded for Music.
+
+        At 1120x760 the fold alone left the band at its track row: the list's
+        Show/Mark and Length rows stayed, and the picture sat at a floor its
+        secondary lines held up (the lane 0 of 40px in view, natively). While
+        folded, those rows step aside with the list — their filter state is
+        untouched, the folded summary still says what is selected, how far
+        through review and which range, and Show clips brings all of it back
+        — and the picture's column closes up. Undone exactly on unfold.
+        """
+        view = self.preview_view
+        if on == (self._music_hidden is not None):
+            return
+        if on:
+            box = view.preview_box
+            floor_before = box.content_floor()
+            hidden, rows = [], 0
+            for row in self.browser_panel._rows[1:]:
+                widgets = self._layout_widgets(row)
+                shown = [w for w in widgets if w.isVisible()]
+                if shown:
+                    rows += max(w.height() for w in shown) + INNER
+                for widget in shown:
+                    widget.hide()
+                    hidden.append(widget)
+            self._music_hidden = hidden
+            view.set_compact_controls(True)
+            self._music_disclosed = rows + max(
+                0, floor_before - box.content_floor())
+        else:
+            for widget in self._music_hidden:
+                widget.show()
+            self._music_hidden = None
+            self._music_disclosed = 0
+            view.set_compact_controls(False)
+
+    @staticmethod
+    def _layout_widgets(layout) -> list:
+        """Every widget a layout holds, through its nested layouts."""
+        found = []
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            if item.widget() is not None:
+                found.append(item.widget())
+            elif item.layout() is not None:
+                found.extend(MainWindow._layout_widgets(item.layout()))
+        return found
 
     def _on_unfold_requested(self) -> None:
         """"Show clips" on the folded summary: the list comes back, and stays
@@ -3291,6 +3347,7 @@ class MainWindow(QMainWindow):
         # A fold is Classic's; the list goes to Flow as a list.
         if self.browser_panel.folded:
             self.browser_panel.show_folded(False)
+            self._disclose_for_music(False)
             self.browser_panel.setMinimumHeight(MIN_LIST_HEIGHT)
         # The mode is recorded first. The sidebar only does its work while
         # Flow is the mode, so refreshing before this was refreshing into a
@@ -5598,6 +5655,7 @@ class MainWindow(QMainWindow):
         self._fold_suppressed = False
         if self.browser_panel.folded:
             self.browser_panel.show_folded(False)
+            self._disclose_for_music(False)
         self._layout_state = self._layout_state.with_browser(mode)
         self.browser_panel.show_mode(mode)
         action = self.browser_mode_actions.get(mode)
