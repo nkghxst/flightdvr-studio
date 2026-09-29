@@ -1060,3 +1060,54 @@ def test_the_trim_routes_work_again_once_the_scan_has_finished(
     window._add_select()
     assert len(clip.selects) == 2, "adding a range after the scan was refused"
     close(window)
+
+
+# -- one test's window never saves into another test's home ----------------------
+
+
+def _wait(app, seconds):
+    import time
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        app.processEvents()
+        time.sleep(0.02)
+
+
+def test_a_window_left_open_cannot_add_to_the_next_test_s_recent_list(
+        app, tmp_path, monkeypatch):
+    """The late writer, reproduced: a window left open with its save timer
+    armed, then the home moved as the next test's fixture moves it. Without
+    the teardown the next home lists the old folder as recent; with it, not.
+    """
+    from flightdvr.session import recent_sessions
+    from tests.conftest import stop_pending_session_writes
+
+    def leave_a_window_armed(name):
+        home = tmp_path / f"{name}-home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+        card = tmp_path / name / "card"
+        card.mkdir(parents=True)
+        window = open_window(app, card, [a_clip("hdz_001.ts")])
+        window.clips[0].trim_in, window.clips[0].trim_out = 1.0, 2.0
+        window._touch_session()
+        assert window._session_timer.isActive()
+        return window
+
+    def next_test_home(name):
+        home = tmp_path / f"{name}-next-home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+        _wait(app, 2.0)                      # past the 1.5 s save timer
+        return [r.label for r in recent_sessions()]
+
+    # Control: nothing between the two tests, and the old window writes in.
+    first = leave_a_window_armed("unguarded")
+    assert next_test_home("unguarded") == ["card"]
+    # With the teardown between them, the next home stays its own.
+    second = leave_a_window_armed("guarded")
+    assert stop_pending_session_writes() >= 1
+    assert next_test_home("guarded") == []
+    for window in (first, second):
+        window._session_timer.stop()
+        window.deleteLater()
