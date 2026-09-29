@@ -2272,6 +2272,9 @@ def test_a_classic_refusal_sits_above_the_lane(
     assert "Social" in note.text()
     assert in_band_view(view, note) == note.height(), (
         "the refusal is below the band's fold")
+    # And it did not get there by scrolling the track and Listen rows away.
+    for row in (view.track_button, view.listen_check):
+        assert in_band_view(view, row) == row.height(), row
     assert window._planned_music(target).mode is AudioMode.MIX, "choice kept"
     window.export_panel.preset_buttons["master"].setChecked(True)
     for _ in range(20):
