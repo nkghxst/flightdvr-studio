@@ -482,3 +482,62 @@ def test_preview_and_export_read_the_same_end(sources):
                             revision="p2f-bind", resolution=Resolution.success())
     assert plan.occurrences[0].source.end == Fraction("4")
     assert plan.total_samples == 8 * 48000
+
+
+# -- R1 (Sol, P2f review): a join with sound and no compiled sequence ----------
+
+
+def _pcm_frames(tools, path) -> int:
+    raw = subprocess.run([str(tools.ffmpeg), "-v", "error", "-i", str(path),
+                          "-map", "0:a:0", "-f", "s16le", "-ac", "2", "-"],
+                         check=True, capture_output=True).stdout
+    assert len(raw) % 4 == 0
+    return len(raw) // 4
+
+
+def test_a_legacy_join_without_a_sequence_ends_each_piece_at_its_picture(
+        sources, tmp_path):
+    """Measured by Sol: the known 4.000 end was accepted and then not used,
+    247 pictures and 406080 sample frames; with a sequence, 240 and 384000."""
+    tools, made, _music = sources
+    info = probe(tools, made["tail.mkv"])
+    assert (info.video_duration, info.video_duration_origin) == (4.0, "packets")
+    clips = [info, deepcopy(info)]
+    out = tmp_path / "legacy.mov"
+    job = _job(clips, None, keep=True, preset="edit", out=out, sequence=False)
+    assert job.sequence is None and not job.audio.configured
+    ok, message = _export(tools, job, tmp_path)
+    assert ok, message
+    got = _ids(tools, out)
+    assert got == list(range(120)) * 2
+    assert got[118:122] == [118, 119, 0, 1]
+    assert _pcm_frames(tools, out) == 384_000
+    # The submitted job keeps what it was given.
+    assert [c.trim_out for c in job.clips] == [0.0, 0.0]
+
+
+def test_only_a_piece_reaching_a_known_earlier_picture_end_is_cut():
+    from flightdvr.jobs import clips_cut_at_their_pictures
+
+    def recording(picture=4.0):
+        clip = ClipInfo(Path("r.mkv"), 1, datetime(2026, 9, 29), 4.23,
+                        _W, _H, 30.0, "h264", "pcm_s16le")
+        clip.video_duration = picture
+        return clip
+
+    whole, ranged, early = recording(), recording(), recording()
+    ranged.trim_in, ranged.trim_out = 1.0, 3.0
+    early.trim_in = 1.0                                   # open-ended
+    cut = clips_cut_at_their_pictures(
+        _job([whole, ranged, early], sequence=False))
+    assert [c.trim_out for c in cut] == [4.0, 3.0, 4.0]
+    assert [c.out_point for c in cut] == [4.0, 3.0, 4.0]
+    assert whole.trim_out == 0.0 and early.trim_out == 0.0, "copies only"
+    # Unchanged: with a sequence, without sound, or when the end is the file's.
+    assert clips_cut_at_their_pictures(
+        _job([whole, recording()]))[0].trim_out == 0.0
+    assert clips_cut_at_their_pictures(
+        _job([whole, recording()], keep=False, sequence=False))[0].trim_out == 0.0
+    same = recording(picture=4.23)
+    assert clips_cut_at_their_pictures(
+        _job([same, recording()], sequence=False))[0].trim_out == 0.0
