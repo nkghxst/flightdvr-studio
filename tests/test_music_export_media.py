@@ -744,19 +744,18 @@ def test_stage_a_ordinary_range_carries_each_mode_on_its_own_time(
         elif mode != "legacy":
             assert facts["audio"] == [(codec, OUTPUT_RATE, 2)], (mode, facts)
 
-    # The picture is the base route's picture, frame for frame: adding a
-    # music input and an explicit audio map changed nothing about it. The
-    # base itself has two pictures here. Keeping the recording's sound (and
-    # so Original) repeats the first frame, because this recording's sound
-    # starts 21 ms before its picture; without it the range is exact. Each
-    # mode is held to the base route that treats that sound the same way.
+    # One picture for every mode, frame for frame. History: at Stage A the
+    # base had two here. This recording's sound starts 21 ms before its
+    # picture (AAC priming), and the routes that kept that sound (legacy
+    # keep, Original, Mix) measured the range from the sound's start, so
+    # their event landed at frames 31-60, pinned then as measured base
+    # behaviour. P2b measures those seeks from the picture's first frame,
+    # the app's own source clock; every route is now the exact one.
     legacy = _stage_a_picture(tools, outputs["legacy"])
     legacy_silent = _stage_a_picture(tools, outputs["legacy_silent"])
     assert len(legacy) == len(legacy_silent) == STAGE_A_FRAMES
-    assert legacy != legacy_silent
-    for mode in ("original", "mix"):
-        assert _stage_a_picture(tools, outputs[mode]) == legacy, mode
-    for mode in ("no_sound", "replace"):
+    assert legacy == legacy_silent
+    for mode in ("original", "mix", "no_sound", "replace"):
         assert _stage_a_picture(tools, outputs[mode]) == legacy_silent, mode
 
     # ...and the exact route's picture is the range's own: the event second
@@ -773,7 +772,7 @@ def test_stage_a_ordinary_range_carries_each_mode_on_its_own_time(
             marked = [n for n, (label,) in enumerate(seen) if label == "yellow"]
         event[name] = (marked[0], marked[-1], len(marked))
     assert event["replace"] == (30, 59, 30)
-    assert event["legacy"] == (31, 60, 30)      # measured base behaviour
+    assert event["legacy"] == (30, 59, 30)      # was (31, 60, 30) before P2b
 
     decoded = {mode: _decode_mono(tools, outputs[mode])
                for mode in ("original", "replace", "mix")}

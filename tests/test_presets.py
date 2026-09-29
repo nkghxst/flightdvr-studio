@@ -1255,3 +1255,80 @@ def test_joined_stage_a_presets_put_music_after_every_source(preset):
     assert "[3:a:0]" in graph and "[1:a:0]atrim" not in graph
     at = command.index("-c:a")
     assert command[at + 1] == ("pcm_s16le" if preset == "edit" else "aac")
+
+
+# -- P2b: seeks measured from the picture's first frame ------------------------
+# The origin below is AAC priming's measured 21.333 ms. Only routes that use
+# the recording's own sound move; with origin zero every command is the base's.
+
+ORIGIN = 0.021333
+
+
+def _origin_case(mode, *, origin=ORIGIN, trim=(12.0, 18.0), keep=True):
+    clip = boxpro_clip(duration=20.0)
+    clip.video_start = origin
+    if trim:
+        clip.trim_in, clip.trim_out = trim
+    if mode is None:
+        plan = None
+    else:
+        if mode in (AudioMode.REPLACE, AudioMode.MIX):
+            asset = AudioAsset(Path("music.wav"), "a" * 64, 0, 48_000, 2,
+                               20 * 48_000)
+            choice = MusicChoice(asset=asset, mode=mode,
+                                 passage=SampleSpan(0, 20 * 48_000, 48_000))
+        else:
+            choice = MusicChoice(mode=mode)
+        length = round((trim[1] - trim[0]) if trim else 20.0) * OUTPUT_RATE
+        plan = resolve_audio_plan(choice, length, source_has_audio=True,
+                                  preset_key="master")
+    return build_commands(TOOLS, clip, "master",
+                          ExportSettings(keep_audio=keep),
+                          Path("out.mp4"), Path("work"), audio_plan=plan)[0]
+
+
+def _seeks(command):
+    return [command[i + 1] for i, token in enumerate(command) if token == "-ss"]
+
+
+@pytest.mark.parametrize("mode", [None, AudioMode.ORIGINAL, AudioMode.MIX])
+def test_a_route_using_the_recording_s_sound_seeks_from_its_picture(mode):
+    assert _seeks(_origin_case(mode)) == ["10.021", "12.021"]
+    whole = _origin_case(mode, trim=None)
+    assert _seeks(whole) == ["0.021"]
+    assert "-copyts" in whole and "-start_at_zero" in whole
+
+
+@pytest.mark.parametrize("mode, keep", [(None, False), (AudioMode.NO_SOUND, True),
+                                        (AudioMode.REPLACE, True)])
+def test_a_route_without_the_recording_s_sound_is_unchanged(mode, keep):
+    assert _origin_case(mode, keep=keep) == _origin_case(mode, keep=keep,
+                                                         origin=0.0)
+    assert _seeks(_origin_case(mode, keep=keep)) == ["10.000", "12.000"]
+    assert _seeks(_origin_case(mode, keep=keep, trim=None)) == []
+
+
+def test_original_and_mix_count_their_sound_from_the_same_origin():
+    # 6 s of output after the output seek the command states: 12.021 s on
+    # the file's clock. The sound counts from that stated value, to the
+    # sample, not from the unrounded origin.
+    original = _origin_case(AudioMode.ORIGINAL)
+    assert _seeks(original)[-1] == "12.021"
+    stated = round(12.021 * 48_000)
+    assert f"whole_len={6 * 48_000 + stated}" in " ".join(original)
+    mix = " ".join(_origin_case(AudioMode.MIX))
+    assert f"asetpts=PTS+{stated}/48000/TB" in mix
+
+
+def test_a_joined_export_with_the_recording_s_sound_trims_from_each_picture():
+    from flightdvr.presets import join_filtergraph
+    first, second = boxpro_clip(duration=20.0), boxpro_clip(duration=20.0)
+    first.video_start, second.video_start = ORIGIN, 0.05
+    keep, _v, _a = join_filtergraph([first, second], ExportSettings(),
+                                    "yuv420p")
+    assert "trim=start=0.021:" in keep and "atrim=start=0.021:" in keep
+    assert "trim=start=0.050:" in keep and "atrim=start=0.050:" in keep
+    silent, _v, _a = join_filtergraph([first, second],
+                                      ExportSettings(keep_audio=False),
+                                      "yuv420p")
+    assert "trim=start=0.000:" in silent and "0.021" not in silent

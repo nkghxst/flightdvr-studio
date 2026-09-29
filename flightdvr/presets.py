@@ -408,7 +408,7 @@ SEEK_LEAD_IN = 2.0
 
 def _input_args(
     sources: list[Path], concat_file: Path | None, clip: ClipInfo | None = None,
-    time_scale: float = 1.0,
+    time_scale: float = 1.0, origin: float = 0.0,
 ) -> list[str]:
     """Input side, hardened for the loose timestamps DVR transport streams have.
 
@@ -421,10 +421,20 @@ def _input_args(
     """
     args = ["-fflags", "+genpts", "-analyzeduration", "100M", "-probesize", "100M"]
 
-    seeking = concat_file is None and clip is not None and clip.trim_in > 0.01
+    # `origin` is where the picture's zero sits on the file's clock: the
+    # clip's video_start when the recording's own sound goes into the export,
+    # zero otherwise. With the sound mapped, -copyts -start_at_zero below
+    # count from the file's start (the sound, when it begins first); the app
+    # counts from the picture. Measured with every frame carrying its index:
+    # without this, a file whose sound led by 21-50 ms exported a trim that
+    # began 1-2 frames early, and a whole clip with 1-2 repeated first frames.
+    origin = max(0.0, origin)
+    seeking = (concat_file is None and clip is not None
+               and (clip.trim_in > 0.01 or origin > 0.0))
+    trim_in = clip.trim_in if clip is not None and clip.trim_in > 0.01 else 0.0
     if seeking:
         # Never seek past the start of the file.
-        start = max(0.0, clip.trim_in - SEEK_LEAD_IN)
+        start = max(0.0, trim_in - SEEK_LEAD_IN + origin)
         if start > 0.01:
             args += ["-ss", f"{start:.3f}"]
         # Without these, whether the timeline gets rebased by the first seek
@@ -451,7 +461,7 @@ def _input_args(
         # carried. Measured on a mid-GOP range with slowing on, an unscaled
         # 2.5 s here started the export 1.25 s early — every frame present,
         # correctly slowed, and a second and a quarter of the wrong footage.
-        args += ["-ss", f"{clip.trim_in * time_scale:.3f}"]
+        args += ["-ss", f"{(trim_in + origin) * time_scale:.3f}"]
     if concat_file is None and clip is not None and clip.is_trimmed:
         # `-t` is an output-side limit, measured in the timestamps the filters
         # produce rather than the ones the source carried. Every preset until
@@ -672,6 +682,12 @@ def join_filtergraph(
 
     for index, clip in enumerate(clips):
         _, start, duration = _clip_timing(clip)
+        if want_source_audio:
+            # The input's zero is the file's start; with the sound in the
+            # graph, both of this clip's trims start at its picture's first
+            # frame instead. Measured: a joined export of two clips whose
+            # sound led by 21-50 ms gained a repeated frame at the seam.
+            start += clip.video_start
 
         # A seek before -i already rebases timestamps to zero, so the trim is
         # measured from the start of what was decoded.
@@ -1043,11 +1059,30 @@ def build_commands(
                 + _input_args(sources, concat_file, clip))
         return [head + ["-c", "copy", "-movflags", "+faststart", str(out_path)]]
 
+    # Whether the recording's own sound goes into this export: then its seeks
+    # are measured from the picture's first frame, not the file's start (see
+    # `_input_args` and `ClipInfo.video_start`). Replace, No sound and Keep
+    # sound off never read it, and were already exact.
+    if audio_plan is None:
+        uses_source_audio = (settings.keep_audio and clip.has_audio
+                             and preset_key != "slowmo")
+    else:
+        uses_source_audio = (audio_plan.mode.value in ("original", "mix")
+                             and audio_plan.source_has_audio)
+    origin = clip.video_start if uses_source_audio and not joined else 0.0
+    # Where the output's first sample sits on the file's clock, for the
+    # sound arguments that count from the output seek. Exactly the seek the
+    # command states (three decimals), so the graph and the seek agree to
+    # the sample: measured, a sound graph shifted by the unrounded 0.021333 s
+    # against a stated 0.021 s seek began mid-block and gained an AAC frame.
+    seek_seconds = (float(f"{max(0.0, clip.trim_in) + origin:.3f}")
+                    if origin > 0.0 else max(0.0, clip.trim_in))
+
     if joined:
         head = [ff, "-hide_banner", "-nostdin", "-y"] + join_inputs(clips)
     else:
         head = ([ff, "-hide_banner", "-nostdin", "-y"]
-                + _input_args(sources, None, clip))
+                + _input_args(sources, None, clip, origin=origin))
     music_input_index = None
     if audio_plan is not None and audio_plan.mode.value in ("replace", "mix"):
         from .audio_export import music_input_args
@@ -1129,13 +1164,13 @@ def build_commands(
             return None
         if audio_plan.mode.value in ("replace", "mix"):
             from .audio_export import audio_filter_args
-            seek = round(max(0.0, clip.trim_in) * audio_plan.output.rate)
+            seek = round(seek_seconds * audio_plan.output.rate)
             return (audio_filter_args(audio_plan, source_seek_samples=seek)
                     + codec)
         if audio_plan.mode.value == "no_sound":
             return ["-an"]
         source_total = audio_plan.output.samples + round(
-            max(0.0, clip.trim_in) * audio_plan.output.rate)
+            seek_seconds * audio_plan.output.rate)
         return codec + [
             "-af", (
                 f"aresample={audio_plan.output.rate}:async=1:first_pts=0,"

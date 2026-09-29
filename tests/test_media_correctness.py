@@ -186,3 +186,102 @@ def test_a_failed_job_keeps_its_own_failure_and_adds_the_residual(
     assert str(part) in job.message
     monkeypatch.setattr(Path, "unlink", real_unlink)
     part.unlink(missing_ok=True)
+
+
+# -- P2b: the picture's origin ---------------------------------------------------
+
+from datetime import datetime  # noqa: E402
+
+import flightdvr.media as media_module  # noqa: E402
+from flightdvr.media import ClipInfo, video_origin  # noqa: E402
+
+
+@pytest.mark.parametrize("fmt, video, expected", [
+    ("1.400000", "1.421333", 0.021333),     # AAC priming: sound first
+    ("1.400000", "1.400000", 0.0),          # together
+    ("1.408700", "1.400000", 0.0),          # sound later: never negative
+    (None, "1.4", 0.0), ("1.4", None, 0.0),  # absent
+    ("N/A", "1.4", 0.0), ("1.4", "N/A", 0.0),
+    ("nan", "1.4", 0.0), ("1.4", "inf", 0.0), ("-inf", "1.4", 0.0),
+])
+def test_the_video_origin_is_defined_and_safe(fmt, video, expected):
+    assert video_origin(fmt, video) == pytest.approx(expected, abs=1e-9)
+
+
+def test_clipinfo_keeps_its_old_shape_and_copies_the_origin():
+    from copy import copy
+    positional = ClipInfo(Path("a.ts"), 1, datetime(2026, 9, 29), 2.0, 1280,
+                          720, 30.0, "h264", "aac", "yuv420p", "tv")
+    assert positional.video_start == 0.0
+    positional.video_start = 0.021333
+    assert copy(positional).video_start == 0.021333
+
+
+class _FakeProbe:
+    """A finished ffprobe with fixed JSON."""
+
+    def __init__(self, payload):
+        self._payload = payload
+        self.returncode = 0
+
+    def communicate(self, timeout=None):
+        return self._payload, ""
+
+    def poll(self):
+        return 0
+
+
+def _probed(monkeypatch, tmp_path, fmt_start, video_start, width=1280):
+    import json as _json
+    payloads = []
+
+    def fake(*args, **kwargs):
+        stream = {"codec_type": "video", "codec_name": "h264",
+                  "width": width, "height": 720, "avg_frame_rate": "30/1"}
+        if video_start is not None:
+            stream["start_time"] = video_start
+        fmt = {"duration": "20.0"}
+        if fmt_start is not None:
+            fmt["start_time"] = fmt_start
+        payloads.append(1)
+        return _FakeProbe(_json.dumps({"format": fmt, "streams": [
+            stream, {"codec_type": "audio", "codec_name": "aac",
+                     "start_time": "1.400000"}]}))
+
+    monkeypatch.setattr(media_module.subprocess, "Popen", fake)
+    path = tmp_path / "x.ts"
+    path.write_bytes(b"x")
+    return media_module.probe(media_module.Tools(Path("ffmpeg"), Path("ffprobe")), path), payloads
+
+
+def test_probe_records_the_origin_from_ffprobe(monkeypatch, tmp_path):
+    info, _ = _probed(monkeypatch, tmp_path, "1.400000", "1.421333")
+    assert info.video_start == pytest.approx(0.021333)
+    info, _ = _probed(monkeypatch, tmp_path, "N/A", "1.421333")
+    assert info.video_start == 0.0
+    info, _ = _probed(monkeypatch, tmp_path, "1.4", None)
+    assert info.video_start == 0.0
+
+
+def test_the_deep_retry_records_the_origin_the_same_way(monkeypatch, tmp_path):
+    """A first pass that could not read the picture's size is retried with a
+    deeper probe; the retry's answer carries the origin too."""
+    import json as _json
+    calls = []
+
+    def fake(args, *a, **k):
+        deep = "-analyzeduration" in args
+        calls.append(deep)
+        stream = {"codec_type": "video", "codec_name": "h264",
+                  "width": 1280 if deep else 0, "height": 720,
+                  "avg_frame_rate": "30/1", "start_time": "1.450000"}
+        return _FakeProbe(_json.dumps({
+            "format": {"duration": "20.0", "start_time": "1.400000"},
+            "streams": [stream]}))
+
+    monkeypatch.setattr(media_module.subprocess, "Popen", fake)
+    path = tmp_path / "y.ts"
+    path.write_bytes(b"y")
+    info = media_module.probe(media_module.Tools(Path("ffmpeg"), Path("ffprobe")), path)
+    assert calls == [False, True]
+    assert info.width == 1280 and info.video_start == pytest.approx(0.05)
