@@ -21,6 +21,7 @@ running two encodes at once makes both slower and the progress bars useless.
 
 from __future__ import annotations
 
+import math
 import subprocess
 import threading
 import time
@@ -273,6 +274,87 @@ def _parse_progress(line: str) -> tuple[str, str] | None:
     return key.strip(), value.strip()
 
 
+# Presets whose joins never carry sound (Slow motion) or never use the
+# compiled per-piece extent (Remux, a stream copy through the concat demuxer).
+_JOINS_WITHOUT_EXTENT_SOUND = ("slowmo", "remux")
+
+
+def unresolved_picture_ends(job: "Job", audio_plan=None) -> list[str]:
+    """Pieces of a joined export with sound that end where their recording
+    ends, on a recording whose picture's end is not known.
+
+    Such a piece is compiled to the file's whole duration, which also counts
+    sound after the last picture, and the join fills that sound with the last
+    picture repeated. Measured (P2f), a Matroska recording with no readable
+    picture end, joined whole with itself: 247 pictures for 240 with its own
+    sound, and with Replace every picture right but the music running 0.46 s
+    past them. No sound was exact, so it is not refused.
+
+    "Known" is the value, not its provenance: a picture length above zero and
+    no longer than the file (`sequence_plan._whole_clip_end`'s rule), however
+    it was set. A piece ends where the recording does when its compiled end,
+    or without a sequence its out point, reaches the file's duration: a whole
+    clip, and a range left open at its end.
+    """
+    if not _joined_with_sound(job, audio_plan):
+        return []
+    occurrences = (job.sequence.occurrences
+                   if job.sequence is not None
+                   and len(job.sequence.occurrences) == len(job.clips) else None)
+    found = []
+    for index, clip in enumerate(job.clips):
+        if _known_picture(clip):
+            continue
+        end = (float(occurrences[index].source.end) if occurrences is not None
+               else clip.out_point)
+        if end >= clip.duration - 0.01 and clip.path.name not in found:
+            found.append(clip.path.name)
+    return found
+
+
+def clips_cut_at_their_pictures(job: "Job", audio_plan=None) -> list:
+    """The clips a joined export with sound and no compiled sequence cuts.
+
+    A compiled sequence already ends a whole clip at its picture
+    (`sequence_plan._whole_clip_end`). Without one, the join cuts each piece
+    to its out point, which for a piece reaching its recording's end is the
+    file's duration: the known picture end was accepted and then not used.
+    Measured (Sol, P2f review): a legacy Keep sound join of a Matroska
+    recording whose picture ends at 4.000 of 4.230 gave 247 pictures and
+    406080 sample frames, where the same join with a sequence gave 240 and
+    384000. Such a piece is cut here, on a copy, at its picture's end.
+    Everything else is returned as it is.
+    """
+    if job.sequence is not None or not _joined_with_sound(job, audio_plan):
+        return list(job.clips)
+    cut = []
+    for clip in job.clips:
+        if (_known_picture(clip) and clip.video_duration < clip.duration
+                and clip.out_point >= clip.duration - 0.01):
+            clip = deepcopy(clip)
+            clip.trim_out = clip.video_duration
+        cut.append(clip)
+    return cut
+
+
+def _joined_with_sound(job: "Job", audio_plan=None) -> bool:
+    """A join whose output carries sound through the per-piece extent."""
+    if len(job.clips) < 2 or job.preset_key in _JOINS_WITHOUT_EXTENT_SOUND:
+        return False
+    if audio_plan is not None:
+        return audio_plan.mode.value in ("original", "mix", "replace")
+    return (not job.audio.configured and job.settings.keep_audio
+            and any(clip.has_audio for clip in job.clips))
+
+
+def _known_picture(clip) -> bool:
+    """`sequence_plan._whole_clip_end`'s rule: above zero and no longer than
+    the file, however it was set."""
+    picture = clip.video_duration
+    return (isinstance(picture, (int, float)) and not isinstance(picture, bool)
+            and math.isfinite(picture) and 0 < picture <= clip.duration)
+
+
 class ExportWorker(QThread):
     """Runs a list of jobs, reporting progress as it goes."""
 
@@ -423,6 +505,18 @@ class ExportWorker(QThread):
             except (OSError, ValueError) as exc:
                 return False, f"Cannot use the submitted audio: {exc}"
 
+        unknown = unresolved_picture_ends(job, audio_plan)
+        if unknown:
+            return False, (
+                "Cannot join " + ", ".join(unknown) + " with sound: where "
+                "its picture ends could not be read, and the sound would run "
+                "on past it. Export a range of it that ends before the end of "
+                "the recording, or choose No sound.")
+        clips = clips_cut_at_their_pictures(job, audio_plan)
+        duration = (job.total_duration if job.sequence is not None
+                    else output_runtime(job.preset_key, sum(
+                        c.trimmed_duration or c.duration for c in clips)))
+
         try:
             job.out_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -454,25 +548,24 @@ class ExportWorker(QThread):
         try:
             commands = build_commands(
                 self.tools,
-                job.clips[0],
+                clips[0],
                 job.preset_key,
                 job.settings,
                 temp_path,
                 self.work_dir,
-                sources=[c.path for c in job.clips],
+                sources=[c.path for c in clips],
                 concat_file=job.concat_file,
-                clips=job.clips,
+                clips=clips,
                 # The finished file is as long as every clip together. Sizing a
                 # joined export from clips[0] alone overshot the target by
                 # roughly the number of clips in it.
-                total_duration=job.total_duration,
+                total_duration=duration,
                 audio_plan=audio_plan,
                 sequence=job.sequence,
             )
         except Exception as exc:  # pragma: no cover - defensive
             return False, f"Could not build command: {exc}"
 
-        duration = job.total_duration
         offset = 0.0
         try:
             for pass_index, command in enumerate(commands):

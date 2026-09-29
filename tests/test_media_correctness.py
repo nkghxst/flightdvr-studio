@@ -110,24 +110,191 @@ def exclusive_open(path: Path) -> bool:
     return True
 
 
+_PIDS_BUFFER = 64 * 1024
+_FILE_PROCESS_IDS_USING_FILE_INFORMATION = 47
+_file_api = None
+
+
+def _windows_file_api():
+    """kernel32, ntdll and the status block type, loaded once, when the
+    observer is made rather than at the failure. Almost all of a query's
+    time is the query itself, which walks the system's handle table (open
+    0.2-0.3 ms, query 31-46 ms, close 0.1 ms, measured on the maker's
+    laptop), so what it reports is the file's users at some point in roughly
+    the first 50 ms after the failed unlink. A holder gone sooner (CI's went
+    within 0-15 ms) can be missed: "none" then says nothing."""
+    global _file_api
+    if _file_api is None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        ntdll = ctypes.WinDLL("ntdll")
+
+        class _IoStatus(ctypes.Structure):
+            _fields_ = [("Status", ctypes.c_long),
+                        ("Information", ctypes.c_size_t)]
+
+        _file_api = (kernel, ntdll, _IoStatus)
+    return _file_api
+
+
+def pids_using_file(path: Path, platform: str | None = None) -> dict:
+    """Which process IDs have `path` open right now, by the file system.
+
+    One of four states, kept distinct because only the first says anything:
+    "named" (with the PIDs), "none", "error" (with a detail) and
+    "unsupported" (off Windows). Asked through a handle opened for read
+    attributes only, sharing read, write and delete, so it blocks nobody,
+    and it is always closed. A named PID is a process with the file open at
+    that moment: not proof that its handle refused a delete, or that it
+    caused one.
+    """
+    if (platform or os.name) != "nt":
+        return {"state": "unsupported", "pids": []}
+    import ctypes
+    from ctypes import wintypes
+
+    kernel, ntdll, _IoStatus = _windows_file_api()
+    handle = kernel.CreateFileW(str(path), 0x80, 0x7, None, 3, 0x80, None)
+    if handle in (None, wintypes.HANDLE(-1).value):
+        return {"state": "error", "pids": [],
+                "detail": f"open failed, error {ctypes.get_last_error()}"}
+    try:
+        buffer = ctypes.create_string_buffer(_PIDS_BUFFER)
+        status = ntdll.NtQueryInformationFile(
+            wintypes.HANDLE(handle), ctypes.byref(_IoStatus()), buffer,
+            _PIDS_BUFFER, _FILE_PROCESS_IDS_USING_FILE_INFORMATION)
+        if status != 0:
+            return {"state": "error", "pids": [],
+                    "detail": f"query status {status & 0xFFFFFFFF:#x}"}
+        count = ctypes.c_ulong.from_buffer(buffer).value
+        width = ctypes.sizeof(ctypes.c_size_t)
+        if width + count * width > _PIDS_BUFFER:
+            return {"state": "error", "pids": [], "detail": f"{count} ids"}
+        pids = [ctypes.c_size_t.from_buffer(buffer, width + i * width).value
+                for i in range(count)]
+    finally:
+        kernel.CloseHandle(handle)
+    return {"state": "named" if pids else "none", "pids": pids}
+
+
+def process_identity(pid: int) -> dict:
+    """A PID's image name and kernel creation time (Unix ns), where Windows
+    will say: enough to tell a known child from a later process given the
+    same PID. The process handle is closed before returning."""
+    if os.name != "nt":
+        return {}
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    found = {}
+    handle = kernel.OpenProcess(0x1000, False, pid)   # query limited info
+    if not handle:
+        return {"identity": f"not openable, error {ctypes.get_last_error()}"}
+    try:
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if kernel.GetProcessTimes(wintypes.HANDLE(handle),
+                                  *[ctypes.byref(t) for t in times]):
+            found["created_ns"] = _filetime_ns(times[0])
+        name = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(len(name))
+        if kernel.QueryFullProcessImageNameW(wintypes.HANDLE(handle), 0,
+                                             name, ctypes.byref(size)):
+            found["image"] = os.path.basename(name.value)
+    finally:
+        kernel.CloseHandle(handle)
+    return found
+
+
+def _filetime_ns(filetime) -> int | None:
+    value = (filetime.dwHighDateTime << 32) | filetime.dwLowDateTime
+    return (value - 116444736000000000) * 100 if value else None
+
+
+def child_receipt(proc) -> dict:
+    """What the test knows of a child it started: PID, and the kernel's
+    creation and exit time read from its Popen handle (Unix ns), with the
+    exit code Python has reaped, if any."""
+    receipt = {"pid": proc.pid, "returncode": proc.returncode}
+    handle = getattr(proc, "_handle", None)
+    if os.name == "nt" and handle is not None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if kernel.GetProcessTimes(wintypes.HANDLE(int(handle)),
+                                  *[ctypes.byref(t) for t in times]):
+            receipt["created_ns"] = _filetime_ns(times[0])
+            receipt["exited_ns"] = _filetime_ns(times[1])
+    return receipt
+
+
+def classify_pids(pids: list[int], children: list[dict]) -> list[str]:
+    """Each named PID as the observing test process, a known child (same PID
+    and creation time), another process, or unknown, with what Windows says
+    of it. A PID a known child had is "unknown" when either creation time is
+    missing: it may be that child or a later process given its number, and
+    neither is claimed. Only a differing creation time makes it another."""
+    labelled = []
+    for pid in pids:
+        if pid == os.getpid():
+            labelled.append(f"{pid} observer (this test process)")
+            continue
+        identity = process_identity(pid)
+        now = identity.get("created_ns")
+        same_pid = [c for c in children if c["pid"] == pid]
+        if not same_pid:
+            kind = "other process"
+        elif now is None or any(c.get("created_ns") is None for c in same_pid):
+            kind = "unknown (a known child's PID, identity not confirmed)"
+        elif any(c["created_ns"] == now for c in same_pid):
+            kind = "known child"
+        else:
+            kind = "other process (a known child's PID, created later)"
+        labelled.append(f"{pid} {kind} {identity}")
+    return labelled
+
+
 class UnlinkObserver:
     """Watches the worker's own removal of `part`, from the test.
 
-    When the real unlink of the partial fails, the observer notes the moment,
-    asks the Restart Manager who holds the file right then, and times, from
-    that moment, how long until the file can be opened exclusively. It does
-    this on its own thread, so the worker gets its error at once and is not
-    delayed; the worker itself never waits or retries.
+    When the real unlink of the partial fails, the observer notes the moment
+    and first asks the file system which process IDs have the file open
+    (`pids_using_file`), on the worker's thread and before anything else,
+    since the holder has gone within 15 ms in CI. That query delays the
+    worker's error by its own duration, which is recorded. Each named PID is
+    classified against the children the test knows (`children`, receipts
+    with kernel creation times), then the known children's receipts are
+    taken. After that, on their own threads, the Restart Manager is asked
+    and the time to the first exclusive open is measured. The worker itself
+    never waits or retries. On success nothing here opens the file or writes
+    anything before the unlink.
     """
 
-    def __init__(self, monkeypatch, part: Path, refusal=None):
+    def __init__(self, monkeypatch, part: Path, refusal=None, children=None):
         self.part = part
         self.unlinked: list[Path] = []
         self.holders_at_failure = None
         self.holders_queried = None       # (started, finished) after the fail
         self.release_after = None
+        self.pid_query = None             # pids_using_file() at the failure
+        self.pid_query_ns = None          # (started, finished) after the fail
+        self.pid_labels: list[str] = []
+        self.children_at_failure: list[dict] = []
+        self.failed_ns = None
+        self._children = children or (lambda: [])
         self._thread = None
         self._holder_thread = None
+        if os.name == "nt":
+            _windows_file_api()         # loaded now, not at the failure
         real_unlink = Path.unlink
         observer = self
 
@@ -140,11 +307,37 @@ class UnlinkObserver:
             except PermissionError:
                 # The moment of the failure, taken before anything else.
                 failed_at = time.monotonic()
+                failed_ns = time.time_ns()
                 if Path(path_self) == part and observer._thread is None:
+                    observer._first_look(failed_ns)
                     observer._start(failed_at)
                 raise
 
         monkeypatch.setattr(Path, "unlink", watched)
+
+    def _first_look(self, failed_ns: int) -> None:
+        """Never raises: a diagnostic that fails is recorded as such, and the
+        failed unlink's own error is what the worker and the test see."""
+        self.failed_ns = failed_ns
+        began = time.time_ns()
+        try:
+            self.pid_query = pids_using_file(self.part)
+        except Exception as exc:  # noqa: BLE001 - reported, never raised
+            self.pid_query = {"state": "error", "pids": [],
+                              "detail": f"{type(exc).__name__}: {exc}"}
+        self.pid_query_ns = (began - failed_ns, time.time_ns() - failed_ns)
+        try:
+            self.children_at_failure = [child_receipt(proc)
+                                        for proc in self._children()]
+        except Exception as exc:  # noqa: BLE001
+            self.children_at_failure = []
+            self.pid_labels = [f"children not read: {type(exc).__name__}: {exc}"]
+            return
+        try:
+            self.pid_labels = classify_pids(self.pid_query["pids"],
+                                            self.children_at_failure)
+        except Exception as exc:  # noqa: BLE001
+            self.pid_labels = [f"not classified: {type(exc).__name__}: {exc}"]
 
     def _start(self, failed_at: float) -> None:
         # Two threads: the holder lookup is slow and must not delay the
@@ -176,9 +369,31 @@ class UnlinkObserver:
                    if self.release_after is not None else "not within 10 s")
         queried = (f"{self.holders_queried[0]}-{self.holders_queried[1]} s "
                    "after it" if self.holders_queried else "not queried")
-        return (f"{residual or '(no residual)'} | exclusive access: {release}"
-                f" | holders, queried {queried}: "
+        return (f"{residual or '(no residual)'}"
+                f" | {self.first_look()}"
+                f" | secondary: exclusive access: {release}"
+                f" | Restart Manager holders, queried {queried}: "
                 f"{self.holders_at_failure or '(none named)'}")
+
+    def first_look(self) -> str:
+        """The PID query at the failure, and the known children then. A named
+        PID is a process with the file open at that moment, not proof it
+        refused the delete; none and error say nothing either way."""
+        if self.pid_query is None:
+            return "file PIDs: not queried"
+        query = self.pid_query
+        when = (f"{self.pid_query_ns[0]}-{self.pid_query_ns[1]} ns after the "
+                "failed unlink")
+        state = query["state"] + (f" ({query['detail']})"
+                                  if query.get("detail") else "")
+        children = [
+            {"pid": c["pid"], "returncode": c["returncode"],
+             "exited_ns_before_failure": (self.failed_ns - c["exited_ns"]
+                                          if c.get("exited_ns") else None)}
+            for c in self.children_at_failure]
+        return (f"file PIDs, queried {when}: {state} {self.pid_labels}"
+                f" (association only, not proof of the refusal)"
+                f" | known children then: {children}")
 
 
 def _cancel_during_the_real_pcm_count(media, tmp_path, monkeypatch,  # noqa: F811
@@ -198,21 +413,26 @@ def _cancel_during_the_real_pcm_count(media, tmp_path, monkeypatch,  # noqa: F81
     part = out.with_name("edit.flightdvr-part.mov")
 
     real_popen = subprocess.Popen
-    decodes, seen_part = [], []
+    decodes, seen_part, known = [], [], []
 
     def slow_decode(command, *args, **kwargs):
-        # Only the count's decode is slowed: read at playback speed.
+        # Only the count's decode is slowed: read at playback speed. Every
+        # child the audio check starts is kept, for the observer's receipts.
         if "s16le" in command and "-map" in command:
             seen_part.append(part.exists() and part.stat().st_size)
             command = list(command)
             command.insert(command.index("-i"), "-re")
             proc = real_popen(command, *args, **kwargs)
             decodes.append(proc)
+            known.append(proc)
             return proc
-        return real_popen(command, *args, **kwargs)
+        proc = real_popen(command, *args, **kwargs)
+        known.append(proc)
+        return proc
 
     monkeypatch.setattr(audio_export.subprocess, "Popen", slow_decode)
-    observer = UnlinkObserver(monkeypatch, part, refusal=unlink_refusal)
+    observer = UnlinkObserver(monkeypatch, part, refusal=unlink_refusal,
+                              children=lambda: list(known))
     unlinked = observer.unlinked
     worker = ExportWorker(None, [first, second], tmp_path / "work")
     from flightdvr.media import find_tools
@@ -317,6 +537,175 @@ def test_a_failed_job_keeps_its_own_failure_and_adds_the_residual(
     assert str(part) in job.message
     monkeypatch.setattr(Path, "unlink", real_unlink)
     part.unlink(missing_ok=True)
+
+
+# -- the observer's first look: controls for its file PID query ------------------
+
+_windows_only = pytest.mark.skipif(os.name != "nt", reason="a Windows query")
+
+
+def _holding_child(path: Path, share_delete: bool):
+    """A real child holding `path` open for reading: without delete sharing
+    (Python's own open), or with read, write and delete all shared."""
+    import sys
+    if share_delete:
+        body = ("import ctypes, sys, time\n"
+                "k = ctypes.WinDLL('kernel32')\n"
+                "k.CreateFileW.restype = ctypes.c_void_p\n"
+                "h = k.CreateFileW(sys.argv[1], 0x80000000, 7, None, 3, 0x80, None)\n"
+                "print('ready' if h not in (None, 2**64 - 1) else 'failed', flush=True)\n"
+                "time.sleep(30)\n")
+    else:
+        body = ("import sys, time\n"
+                "f = open(sys.argv[1], 'rb')\n"
+                "print('ready', flush=True)\n"
+                "time.sleep(30)\n")
+    proc = subprocess.Popen([sys.executable, "-c", body, str(path)],
+                            stdout=subprocess.PIPE, text=True)
+    assert proc.stdout.readline().strip() == "ready"
+    return proc
+
+
+def _release(proc) -> None:
+    proc.kill()
+    proc.wait(timeout=10)
+    proc.stdout.close()
+
+
+@_windows_only
+def test_a_delete_refusing_holder_is_named_and_the_unlink_fails(tmp_path):
+    scratch = tmp_path / "held.bin"
+    scratch.write_bytes(b"x" * 1024)
+    child = _holding_child(scratch, share_delete=False)
+    try:
+        found = pids_using_file(scratch)
+        assert found == {"state": "named", "pids": [child.pid]}
+        labels = classify_pids(found["pids"], [child_receipt(child)])
+        assert labels[0].startswith(f"{child.pid} known child")
+        with pytest.raises(PermissionError) as refused:
+            scratch.unlink()
+        assert refused.value.winerror == 32
+    finally:
+        _release(child)
+    assert pids_using_file(scratch)["state"] == "none"
+
+
+@_windows_only
+def test_a_holder_that_allows_delete_is_named_too_and_the_unlink_succeeds(
+        tmp_path):
+    """So a named PID cannot be read as the one that refused a delete."""
+    scratch = tmp_path / "shared.bin"
+    scratch.write_bytes(b"x" * 1024)
+    child = _holding_child(scratch, share_delete=True)
+    try:
+        found = pids_using_file(scratch)
+        assert found == {"state": "named", "pids": [child.pid]}
+        scratch.unlink()
+    finally:
+        _release(child)
+    assert not scratch.exists()
+
+
+def test_no_holder_a_failed_query_and_no_support_are_different_answers(
+        tmp_path):
+    scratch = tmp_path / "idle.bin"
+    scratch.write_bytes(b"x")
+    assert pids_using_file(scratch, platform="posix") == {
+        "state": "unsupported", "pids": []}
+    if os.name != "nt":
+        return
+    assert pids_using_file(scratch) == {"state": "none", "pids": []}
+    missing = pids_using_file(tmp_path / "missing.bin")
+    assert missing["state"] == "error" and missing["pids"] == []
+    assert "open failed" in missing["detail"]
+    # The query's own handle is closed: nothing is left holding the file.
+    assert exclusive_open(scratch)
+
+
+@_windows_only
+def test_the_observer_looks_first_and_keeps_the_failure(tmp_path, monkeypatch):
+    scratch = tmp_path / "edit.flightdvr-part.mov"
+    scratch.write_bytes(b"x" * 1024)
+    child = _holding_child(scratch, share_delete=False)
+    observer = UnlinkObserver(monkeypatch, scratch,
+                              children=lambda: [child])
+    try:
+        with pytest.raises(PermissionError) as refused:
+            scratch.unlink()
+        assert refused.value.winerror == 32, "the original failure, unchanged"
+        assert observer.pid_query == {"state": "named", "pids": [child.pid]}
+        assert observer.pid_query_ns[0] >= 0
+        assert observer.pid_query_ns[1] >= observer.pid_query_ns[0]
+        assert observer.pid_labels[0].startswith(f"{child.pid} known child")
+        assert observer.children_at_failure[0]["pid"] == child.pid
+    finally:
+        _release(child)
+    report = observer.report("its unfinished file could not be removed")
+    assert report.startswith("its unfinished file could not be removed | ")
+    assert "file PIDs, queried" in report and "named" in report
+    assert "association only, not proof" in report
+    assert "secondary: exclusive access" in report
+
+
+def test_a_known_child_s_pid_without_a_confirmed_identity_is_unknown(
+        monkeypatch):
+    """Sol, I1: not "other process" when either creation time is missing."""
+    here = classify_pids.__globals__           # this module, as pytest loaded it
+    monkeypatch.setitem(here, "process_identity",
+                        lambda pid: {"identity": "not openable, error 5"})
+    [label] = classify_pids([4242], [{"pid": 4242, "created_ns": 1}])
+    assert "unknown" in label and "other process" not in label
+    monkeypatch.setitem(here, "process_identity",
+                        lambda pid: {"created_ns": 7, "image": "x.exe"})
+    [label] = classify_pids([4242], [{"pid": 4242}])
+    assert "unknown" in label
+    [label] = classify_pids([4242], [{"pid": 4242, "created_ns": 1}])
+    assert "other process" in label and "created later" in label
+    [label] = classify_pids([4242], [{"pid": 4242, "created_ns": 7}])
+    assert label.startswith("4242 known child")
+    [label] = classify_pids([4343], [{"pid": 4242, "created_ns": 7}])
+    assert label.startswith("4343 other process")
+
+
+def test_a_failing_diagnostic_never_hides_the_failed_unlink(tmp_path,
+                                                            monkeypatch):
+    """Sol, I2: the PID query raising must not replace the unlink's error."""
+    here = UnlinkObserver._first_look.__globals__
+    scratch = tmp_path / "edit.flightdvr-part.mov"
+    scratch.write_bytes(b"x")
+    original = PermissionError(13, "in use", str(scratch),
+                               *((32,) if os.name == "nt" else ()))
+
+    def refuse(self, *args, **kwargs):
+        raise original
+
+    def broken(*args, **kwargs):
+        raise OSError(22, "diagnostic broke")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    monkeypatch.setitem(here, "pids_using_file", broken)
+    monkeypatch.setitem(here, "child_receipt", broken)
+    observer = UnlinkObserver(monkeypatch, scratch, children=lambda: [object()])
+    with pytest.raises(PermissionError) as seen:
+        scratch.unlink()
+    assert seen.value is original
+    if os.name == "nt":
+        assert seen.value.winerror == 32
+    assert observer.pid_query["state"] == "error"
+    assert "diagnostic broke" in observer.pid_query["detail"]
+    assert "children not read" in observer.pid_labels[0]
+    assert "file PIDs, queried" in observer.first_look()
+
+
+def test_the_observer_does_nothing_when_the_unlink_succeeds(tmp_path,
+                                                            monkeypatch):
+    scratch = tmp_path / "edit.flightdvr-part.mov"
+    scratch.write_bytes(b"x")
+    observer = UnlinkObserver(monkeypatch, scratch)
+    scratch.unlink()
+    assert not scratch.exists()
+    assert observer.pid_query is None and observer._thread is None
+    assert observer.first_look() == "file PIDs: not queried"
 
 
 # -- P2b: the picture's origin ---------------------------------------------------
