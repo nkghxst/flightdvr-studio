@@ -698,3 +698,49 @@ def test_a_whole_clip_join_shows_each_picture_once(whole_clip_sources,
     if "audio" in streams:
         assert float(streams["audio"]["duration"]) == pytest.approx(
             float(streams["video"]["duration"]), abs=0.002)
+
+
+def _burst_onsets(tools_, path) -> list[float]:
+    import array
+    raw = subprocess.run(
+        [str(tools_.ffmpeg), "-v", "error", "-i", str(path), "-map", "0:a:0",
+         "-ac", "1", "-ar", "48000", "-af", "highpass=f=1500", "-f", "f32le",
+         "-"], check=True, capture_output=True).stdout
+    samples = array.array("f")
+    samples.frombytes(raw)
+    found, index, quiet, window = [], 0, True, 96
+    while index < len(samples) - window:
+        energy = sum(v * v for v in samples[index:index + window]) / window
+        if energy > 0.02 and quiet:
+            found.append(index / 48000)
+            quiet, index = False, index + 12000
+            continue
+        if energy < 0.002:
+            quiet = True
+        index += window // 2
+    return found
+
+
+def test_a_whole_clip_join_keeps_each_occurrence_s_own_sound_offset(
+        whole_clip_sources, tmp_path):
+    """P2d: sound that starts after the picture kept its delay in a single
+    export but lost it in a join, where each clip's sound was moved to start
+    at zero (measured, +20.0 ms for a source's +28.7 ms)."""
+    tools_, found = whole_clip_sources
+    source = found["sound_late"]
+    starts = {kind: float(s["start_time"])
+              for kind, s in _streams(tools_, source).items()}
+    [onset] = _burst_onsets(tools_, source)
+    offset = starts["audio"] + onset - (starts["video"] + _BURST / 30)
+    assert offset > 0.02, ("the sound starts after the picture", offset)
+
+    out = _whole_join(tools_, [source, source], "original", tmp_path, "late")
+    streams = _streams(tools_, out)
+    audio_start = float(streams["audio"]["start_time"])
+    video_start = float(streams["video"]["start_time"])
+    frames = _SECONDS * 30
+    shown = [video_start + (k * frames + _BURST) / 30 for k in (0, 1)]
+    heard = [audio_start + t for t in _burst_onsets(tools_, out)]
+    assert len(heard) == 2
+    for sound, picture in zip(heard, shown):
+        assert sound - picture == pytest.approx(offset, abs=0.002)
