@@ -285,3 +285,93 @@ def test_the_deep_retry_records_the_origin_the_same_way(monkeypatch, tmp_path):
     info = media_module.probe(media_module.Tools(Path("ffmpeg"), Path("ffprobe")), path)
     assert calls == [False, True]
     assert info.width == 1280 and info.video_start == pytest.approx(0.05)
+
+
+# -- P2c: a trimmed join's second range, in every route ---------------------------
+#
+# Sol's literal oracle from the PR #152 review: 360 generated frames, each
+# carrying its index as ten binary bars; ranges [2, 5) and [6, 8) at 30 fps
+# must export frames 60..149 then 180..239, exactly. A transport stream with
+# AAC (whose priming starts the file 21 ms before its picture, at 1.4 s) made
+# No sound and Replace begin the second range at frame 138: the seeked input
+# was rebased differently when its sound was not used.
+
+_BITS, _W, _H = 10, 320, 180
+
+
+def _ordinal_ids(tools, path: Path) -> list[int]:
+    raw = subprocess.run(
+        [str(tools.ffmpeg), "-v", "error", "-i", str(path), "-map", "0:v:0",
+         "-pix_fmt", "gray", "-f", "rawvideo", "-"],
+        check=True, capture_output=True).stdout
+    size, bar = _W * _H, _W // _BITS
+    row = (_H // 2) * _W
+    return [sum(1 << bit for bit in range(_BITS)
+                if raw[base + row + bit * bar + bar // 2] > 128)
+            for base in range(0, len(raw), size)]
+
+
+@pytest.fixture(scope="module")
+def ordinal_ts(tmp_path_factory):
+    from flightdvr.audio_export import file_sha256
+    from flightdvr.audio_plan import AudioAsset
+    from flightdvr.media import find_tools
+
+    tools_ = find_tools()
+    root = tmp_path_factory.mktemp("ordinals")
+    video, audio = root / "ordinals.mkv", root / "audio.wav"
+    geq = ("geq=lum='if(bitand(floor(N/pow(2,floor(X/32))),1),235,16)'"
+           ":cb=128:cr=128")
+    subprocess.run([str(tools_.ffmpeg), "-v", "error", "-y", "-f", "lavfi",
+                    "-i", f"color=black:s={_W}x{_H}:r=30:d=12", "-vf", geq,
+                    "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0",
+                    "-g", "30", str(video)], check=True)
+    subprocess.run([str(tools_.ffmpeg), "-v", "error", "-y", "-f", "lavfi",
+                    "-i", "sine=frequency=600:sample_rate=48000:duration=12",
+                    "-ac", "2", str(audio)], check=True)
+    source = root / "aac-priming.ts"
+    subprocess.run([str(tools_.ffmpeg), "-v", "error", "-y", "-i", str(video),
+                    "-i", str(audio), "-map", "0:v", "-map", "1:a", "-c:v",
+                    "copy", "-c:a", "aac", str(source)], check=True)
+    assert _ordinal_ids(tools_, source) == list(range(360)), "fixture"
+    asset = AudioAsset(audio.resolve(), file_sha256(audio), 0, 48000, 2,
+                       12 * 48000)
+    return tools_, source, asset
+
+
+@pytest.mark.parametrize("mode", ["no_sound", "replace", "original"])
+def test_a_trimmed_join_exports_each_range_s_own_frames(ordinal_ts, tmp_path,
+                                                         mode):
+    from flightdvr.audio_plan import MusicChoice, SampleSpan
+    from flightdvr.media import probe
+    from flightdvr.output_plan import working_outputs
+    from flightdvr.presets import PASSTHROUGH
+    from flightdvr.sequence_plan import Resolution, compile_sequence
+
+    tools_, source, asset = ordinal_ts
+    info = probe(tools_, source)
+    assert info.video_start > 0, "the file starts before its picture"
+    clips = []
+    for start, end in ((2.0, 5.0), (6.0, 8.0)):
+        clip = deepcopy(info)
+        clip.trim_in, clip.trim_out = start, end
+        clips.append(clip)
+    output = working_outputs(clips, joined=True)[0]
+    sequence = compile_sequence(output, revision="p2c",
+                                resolution=Resolution.success())
+    if mode == "replace":
+        choice = MusicChoice(mode=AudioMode.REPLACE, asset=asset,
+                             passage=SampleSpan(0, 12 * 48000, 48000),
+                             fade_in_samples=0, fade_out_samples=0)
+    else:
+        choice = MusicChoice(mode=AudioMode(mode))
+    out = tmp_path / f"join-{mode}.mp4"
+    job = Job(clips, "master",
+              ExportSettings(master_speed="ultrafast", colour=PASSTHROUGH),
+              out, audio=choice, target=output.target, sequence=sequence)
+    ok, message = ExportWorker(tools_, [job], tmp_path / "work")._run_job(0, job)
+    assert ok, message
+    ids = _ordinal_ids(tools_, out)
+    expected = list(range(60, 150)) + list(range(180, 240))
+    assert ids[87:94] == [147, 148, 149, 180, 181, 182, 183], ids[87:94]
+    assert ids == expected

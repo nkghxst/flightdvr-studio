@@ -611,8 +611,20 @@ def _clip_timing(clip: ClipInfo) -> tuple[float, float, float]:
 
 
 def join_inputs(clips: list[ClipInfo]) -> list[str]:
-    """Input arguments for a join: one -i per clip, each with its own seek."""
-    args: list[str] = []
+    """Input arguments for a join: one -i per clip, each with its own seek.
+
+    Every input keeps its file's own timestamps, counted from the file's
+    start (-copyts -start_at_zero), so each clip's trims in
+    `join_filtergraph` are stated on one known clock. Left to ffmpeg, a
+    seeked input was rebased by the seek alone when only its picture was
+    used, but by the seek and the file's start time when its sound was used
+    too: measured, first frame after "-ss 4" at 1.421333 s against 0.021333
+    s on the same file. Trims written as seconds after the seek then chose
+    pictures 1.4 s early on a transport stream starting at 1.4 s: a trimmed
+    join's second range began at frame 138 where 180 was asked for, in
+    every route that did not read the recording's sound.
+    """
+    args: list[str] = ["-copyts", "-start_at_zero"]
     for clip in clips:
         seek, _, _ = _clip_timing(clip)
         args += ["-fflags", "+genpts", "-analyzeduration", "100M",
@@ -681,23 +693,22 @@ def join_filtergraph(
     labels: list[str] = []
 
     for index, clip in enumerate(clips):
-        _, start, duration = _clip_timing(clip)
+        _, _lead_in, duration = _clip_timing(clip)
+        # Stated on the file's own clock (`join_inputs` keeps it), not as
+        # seconds after the input seek. That clock counts from the file's
+        # start when the recording's sound is in the graph, and from its
+        # picture when it is not (the single-clip route measures the same,
+        # see `_input_args`); so with the sound in, both trims start at the
+        # picture's first frame, video_start later.
+        start = max(0.0, clip.trim_in) if clip.trim_in > 0.01 else 0.0
         if want_source_audio:
-            # The input's zero is the file's start; with the sound in the
-            # graph, both of this clip's trims start at its picture's first
-            # frame instead. Measured: a joined export of two clips whose
-            # sound led by 21-50 ms gained a repeated frame at the seam.
             start += clip.video_start
 
-        # A seek before -i already rebases timestamps to zero, so the trim is
-        # measured from the start of what was decoded.
-        #
-        # Known imprecision: a joined segment can come out one frame short,
-        # measured at 359 frames where 360 were expected across two three-
-        # second cuts. The seam itself is correct — the frames on either side
-        # of it match a standalone export at 44.7 dB — so this is a sixtieth of
-        # a second lost at each join, against the corrupt frames the concat
-        # demuxer produced at every trimmed seam.
+        # The comment this replaces said a joined segment could come out one
+        # frame short and called the seam itself correct. Measured with every
+        # frame carrying its index (P2c), the seam was not correct in every
+        # route: see `join_inputs`. With the clock stated, each range is its
+        # exact frames, first to last, in every route.
         video = [f"trim=start={start:.3f}:duration={duration:.3f}",
                  "setpts=PTS-STARTPTS"]
         if vertical:

@@ -718,8 +718,13 @@ def test_each_clip_in_a_join_is_trimmed_accurately():
         clips=clips,
     )[0]
     assert "42.000" in command, "no fast seek to a lead-in before the in point"
+    # P2c: every input keeps its file's clock, and the trim is stated on it
+    # (44 s), not as seconds after the seek (2 s), which ffmpeg rebased
+    # differently depending on whether the input's sound was used.
+    assert command[command.index("-copyts") + 1] == "-start_at_zero"
+    assert command.index("-copyts") < command.index("-i")
     graph = command[command.index("-filter_complex") + 1]
-    assert "trim=start=2.000:duration=60.000" in graph
+    assert "trim=start=44.000:duration=60.000" in graph
 
 
 def _joined_audio_case(mode: AudioMode):
