@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -345,6 +346,17 @@ class ClipInfo:
     # back from there would make the model depend on its persistence layer.
     review: str = ""
 
+    # Seconds from the file's start to its picture's first frame: ffprobe's
+    # video-stream start_time minus the format start_time (the earliest of
+    # all its streams). Zero when the picture starts first or with the file,
+    # and whenever either value is absent, "N/A" or not a finite number —
+    # never negative. The app's source clock starts at the picture (the
+    # preview decodes without sound, so its zero is the first frame); a file
+    # whose sound starts earlier has its own zero this far before that, which
+    # is what an export that keeps the recording's sound has to measure from.
+    # Measured: AAC's encoder priming alone gives 0.021333 s.
+    video_start: float = 0.0
+
     # -- trimming --------------------------------------------------------------
 
     # trim_in and trim_out are the select currently being edited, and mean
@@ -542,6 +554,23 @@ def _to_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _finite(value) -> float | None:
+    """A number ffprobe gave, or None for absent, "N/A", NaN or infinity."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def video_origin(format_start, video_start) -> float:
+    """`ClipInfo.video_start` from ffprobe's two start times; see there."""
+    begins, picture = _finite(format_start), _finite(video_start)
+    if begins is None or picture is None:
+        return 0.0
+    return max(0.0, round(picture - begins, 6))
+
+
 def _fps_from(rate: str | None) -> float:
     if not rate or rate in ("0/0", "0"):
         return 0.0
@@ -640,6 +669,8 @@ def _probe_once(
             )
             if not info.duration:
                 info.duration = _to_float(stream.get("duration"))
+            info.video_start = video_origin(fmt.get("start_time"),
+                                            stream.get("start_time"))
         elif kind == "audio" and not info.audio_codec:
             info.audio_codec = stream.get("codec_name", "")
 

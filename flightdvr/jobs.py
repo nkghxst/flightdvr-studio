@@ -293,6 +293,10 @@ class ExportWorker(QThread):
         self.work_dir = work_dir
         self._cancel = False
         self._process: subprocess.Popen | None = None
+        # What each job was doing, for a diagnostic, and any of its own
+        # unfinished files it could not remove afterwards (by job index).
+        self._phase = ""
+        self.residuals: dict[int, str] = {}
 
     def cancel(self) -> None:
         """Called from the UI thread, so it asks and does not wait.
@@ -333,9 +337,12 @@ class ExportWorker(QThread):
             ok, message = self._run_job(index, job)
             job.elapsed = time.monotonic() - started
 
+            residual = self.residuals.get(index, "")
             if self._cancel and not ok:
                 job.status = JobStatus.CANCELLED
-                message = "Cancelled"
+                # Still Cancelled; but an unfinished file of its own left
+                # behind is said, not folded into the plain word.
+                message = f"Cancelled — {residual}" if residual else "Cancelled"
             elif ok:
                 job.status = JobStatus.DONE
                 job.progress = 1.0
@@ -343,6 +350,8 @@ class ExportWorker(QThread):
             else:
                 job.status = JobStatus.FAILED
                 failed += 1
+                if residual:
+                    message = f"{message} — {residual}"
 
             job.message = message
             self.job_finished.emit(index, ok, message)
@@ -468,15 +477,18 @@ class ExportWorker(QThread):
         try:
             for pass_index, command in enumerate(commands):
                 weight = PASS_WEIGHTS[pass_index] if len(commands) > 1 else 1.0
+                self._phase = "encoding"
                 ok, message = self._run_one(index, command, duration, offset, weight)
                 if not ok:
                     return False, message
                 offset += weight
 
+            self._phase = "checking the picture"
             ok, message = self._validate(temp_path)
             if not ok:
                 return False, message
             if audio_plan is not None:
+                self._phase = "checking the sound"
                 from .audio_export import validate_expected_audio
                 try:
                     ok, message = validate_expected_audio(
@@ -495,6 +507,7 @@ class ExportWorker(QThread):
             if self._cancel:
                 return False, "Cancelled"
 
+            self._phase = "publishing"
             size = temp_path.stat().st_size
             try:
                 temp_path.replace(out_path)
@@ -504,8 +517,35 @@ class ExportWorker(QThread):
         finally:
             self._cleanup_pass_logs(temp_path)
             # A temporary file still here means the job failed or was
-            # cancelled. Whatever the user already had is untouched.
-            self._remove(temp_path)
+            # cancelled. Whatever the user already had is untouched. Every
+            # child that read or wrote it has been settled by now (the encode
+            # in _run_one, both validators in their own cleanup), so this is
+            # the job's own file with no handle of its own left on it.
+            residual = self._remove_owned(temp_path)
+            if residual:
+                self.residuals[index] = (
+                    f"{residual} (the job was {self._phase or 'starting'})")
+            self._phase = ""
+
+    @staticmethod
+    def _remove_owned(path: Path) -> str:
+        """Remove this job's own unfinished file, or say exactly why not.
+
+        Never retried blind: nothing here owns a handle on it any more, so a
+        failure is something outside the job (another program holding the
+        file, or permissions). It is reported with the path to remove by
+        hand, not swallowed — a cancelled job that silently leaves a partial
+        behind was the failure seen once on Windows CI.
+        """
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            winerror = getattr(exc, "winerror", None)
+            detail = (f"{type(exc).__name__}, errno {exc.errno}"
+                      + (f", winerror {winerror}" if winerror else ""))
+            return (f"its unfinished file could not be removed ({detail}): "
+                    f"{path}")
+        return ""
 
     @staticmethod
     def _remove(path: Path) -> None:
