@@ -21,6 +21,7 @@ running two encodes at once makes both slower and the progress bars useless.
 
 from __future__ import annotations
 
+import math
 import subprocess
 import threading
 import time
@@ -273,6 +274,53 @@ def _parse_progress(line: str) -> tuple[str, str] | None:
     return key.strip(), value.strip()
 
 
+# Presets whose joins never carry sound (Slow motion) or never use the
+# compiled per-piece extent (Remux, a stream copy through the concat demuxer).
+_JOINS_WITHOUT_EXTENT_SOUND = ("slowmo", "remux")
+
+
+def unresolved_picture_ends(job: "Job", audio_plan=None) -> list[str]:
+    """Pieces of a joined export with sound that end where their recording
+    ends, on a recording whose picture's end is not known.
+
+    Such a piece is compiled to the file's whole duration, which also counts
+    sound after the last picture, and the join fills that sound with the last
+    picture repeated. Measured (P2f), a Matroska recording with no readable
+    picture end, joined whole with itself: 247 pictures for 240 with its own
+    sound, and with Replace every picture right but the music running 0.46 s
+    past them. No sound was exact, so it is not refused.
+
+    "Known" is the value, not its provenance: a picture length above zero and
+    no longer than the file (`sequence_plan._whole_clip_end`'s rule), however
+    it was set. A piece ends where the recording does when its compiled end,
+    or without a sequence its out point, reaches the file's duration: a whole
+    clip, and a range left open at its end.
+    """
+    if len(job.clips) < 2 or job.preset_key in _JOINS_WITHOUT_EXTENT_SOUND:
+        return []
+    if audio_plan is not None:
+        with_sound = audio_plan.mode.value in ("original", "mix", "replace")
+    else:
+        with_sound = (not job.audio.configured and job.settings.keep_audio
+                      and any(clip.has_audio for clip in job.clips))
+    if not with_sound:
+        return []
+    occurrences = (job.sequence.occurrences
+                   if job.sequence is not None
+                   and len(job.sequence.occurrences) == len(job.clips) else None)
+    found = []
+    for index, clip in enumerate(job.clips):
+        picture = clip.video_duration
+        if (isinstance(picture, (int, float)) and math.isfinite(picture)
+                and 0 < picture <= clip.duration):
+            continue
+        end = (float(occurrences[index].source.end) if occurrences is not None
+               else clip.out_point)
+        if end >= clip.duration - 0.01 and clip.path.name not in found:
+            found.append(clip.path.name)
+    return found
+
+
 class ExportWorker(QThread):
     """Runs a list of jobs, reporting progress as it goes."""
 
@@ -422,6 +470,14 @@ class ExportWorker(QThread):
                 verify_music_asset(audio_plan)
             except (OSError, ValueError) as exc:
                 return False, f"Cannot use the submitted audio: {exc}"
+
+        unknown = unresolved_picture_ends(job, audio_plan)
+        if unknown:
+            return False, (
+                "Cannot join " + ", ".join(unknown) + " with sound: where "
+                "its picture ends could not be read, and the sound would run "
+                "on past it. Export a range of it that ends before the end of "
+                "the recording, or choose No sound.")
 
         try:
             job.out_path.parent.mkdir(parents=True, exist_ok=True)
