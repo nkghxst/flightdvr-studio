@@ -611,7 +611,17 @@ def _clip_timing(clip: ClipInfo) -> tuple[float, float, float]:
 
 
 def join_inputs(clips: list[ClipInfo]) -> list[str]:
-    """Input arguments for a join: one -i per clip, each with its own seek."""
+    """Input arguments for a join: one -i per clip, each with its own seek.
+
+    FFmpeg 7.1 rebases a seeked input by the seek alone when only its picture
+    is used, but by the seek and the file's start time when its sound is used
+    too: measured, first frame after "-ss 4" at 1.421333 s against 0.021333
+    s on the same file (FFmpeg 4.4.1 gave 0.021333 either way). `join_filtergraph` therefore has every clip that has
+    sound use it, heard or not, so one rebasing holds in every route. (A
+    global -copyts gave one clock as well, but FFmpeg 4.4.2 then retimed the
+    joined output's last pictures and repeated one: measured, 151 frames for
+    150.)
+    """
     args: list[str] = []
     for clip in clips:
         seek, _, _ = _clip_timing(clip)
@@ -682,22 +692,15 @@ def join_filtergraph(
 
     for index, clip in enumerate(clips):
         _, start, duration = _clip_timing(clip)
-        if want_source_audio:
-            # The input's zero is the file's start; with the sound in the
-            # graph, both of this clip's trims start at its picture's first
-            # frame instead. Measured: a joined export of two clips whose
-            # sound led by 21-50 ms gained a repeated frame at the seam.
-            start += clip.video_start
-
-        # A seek before -i already rebases timestamps to zero, so the trim is
-        # measured from the start of what was decoded.
-        #
-        # Known imprecision: a joined segment can come out one frame short,
-        # measured at 359 frames where 360 were expected across two three-
-        # second cuts. The seam itself is correct — the frames on either side
-        # of it match a standalone export at 44.7 dB — so this is a sixtieth of
-        # a second lost at each join, against the corrupt frames the concat
-        # demuxer produced at every trimmed seam.
+        # Seconds after the input seek, on the rebasing a clip gets when its
+        # sound is used (see `join_inputs`): the file's start is zero, so the
+        # picture starts video_start later, and both trims start there. Every
+        # clip with sound uses it (below, discarded when not heard), so this
+        # holds in every route. It had held only where the sound was heard:
+        # measured with every frame carrying its index (P2c), No sound and
+        # Replace began a trimmed join's second range at frame 138 for 180.
+        # The comment this replaces called the seam itself correct.
+        start += clip.video_start
         video = [f"trim=start={start:.3f}:duration={duration:.3f}",
                  "setpts=PTS-STARTPTS"]
         if vertical:
@@ -725,10 +728,19 @@ def join_filtergraph(
                 f"fps={fps:g}",
                 f"format={pix_fmt}",
             ]
+        # The range's own length again, after the rate is set. With a clip's
+        # sound used and discarded, FFmpeg 4.4.1's fps filter repeated a
+        # seeked clip's last picture until its input ended: measured, 163
+        # frames for 150 in a two-range join. This cap only removes pictures
+        # past the range; FFmpeg 7.1 gave none to remove.
+        video.append(f"trim=duration={duration:.3f}")
         chains.append(f"[{index}:v]{','.join(video)}[v{index}]")
         labels.append(f"[v{index}]")
 
         if not want_source_audio:
+            if clip.has_audio:
+                # Used and discarded: see `join_inputs` for why it is used.
+                chains.append(f"[{index}:a]anullsink")
             continue
         if clip.has_audio:
             audio = [f"atrim=start={start:.3f}:duration={duration:.3f}",

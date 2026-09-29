@@ -125,6 +125,38 @@ def isolated_settings(settings_backend):
         store.sync()
 
 
+def stop_pending_session_writes() -> int:
+    """Cancel every live window's pending session save. Returns how many.
+
+    A window a test leaves open can still have its 1.5 s save timer armed.
+    Fired later, during another test, the save lands in that window's own old
+    session file but `remember()` resolves the home when it runs: the next
+    test's patched home got a Recent entry for a folder it never marked
+    (test_session_window, Linux CI, twice). Stopped, not flushed: by
+    teardown the home patch is already undone, and a flush would write into
+    the real one.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return 0
+    stopped = 0
+    for widget in app.topLevelWidgets():
+        timer = getattr(widget, "_session_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+            stopped += 1
+    return stopped
+
+
+@pytest.fixture(autouse=True)
+def no_session_writes_after_the_test():
+    """No window from this test may save into another test's home."""
+    yield
+    stop_pending_session_writes()
+
+
 @dataclass(frozen=True)
 class Clip:
     """A synthetic recording, described well enough to reason about."""
