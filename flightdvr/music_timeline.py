@@ -688,6 +688,14 @@ class MusicTimeline(QWidget):
         layout.addWidget(self.picture)
         self.music_caption = dim(QLabel("Music — as the finished output carries it"))
         layout.addWidget(self.music_caption)
+        # One line each. `dim` wraps and grows a label, which suits a note;
+        # a caption measured natively at 32 and 48px for one line of text,
+        # and at the compact size that was the waveform's room.
+        for caption in (self.output_caption, self.picture_caption,
+                        self.music_caption):
+            caption.setWordWrap(False)
+            caption.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                  QSizePolicy.Policy.Fixed)
         self.music = OutputMusicLane(editor)
         layout.addWidget(self.music)
         self.legend = dim(QLabel(
@@ -696,7 +704,7 @@ class MusicTimeline(QWidget):
         self.legend.setWordWrap(True)
         layout.addWidget(self.legend)
 
-        more_row = QHBoxLayout()
+        more_row = self.more_row = QHBoxLayout()
         more_row.setSpacing(INNER)
         self.more_button = QPushButton("More…")
         self.more_button.setCheckable(True)
@@ -717,6 +725,7 @@ class MusicTimeline(QWidget):
 
         self._presentation = Presentation.FULL
         self._more = False
+        self._picture_elsewhere = False
         self.set_presentation(Presentation.FULL)
 
     @property
@@ -726,6 +735,15 @@ class MusicTimeline(QWidget):
     def set_presentation(self, presentation: Presentation) -> None:
         self._presentation = Presentation(presentation)
         self._arrange()
+
+    def set_picture_elsewhere(self, elsewhere: bool) -> None:
+        """Whether the output's picture is already shown, on this same clock,
+        just above the band. At the compact size the band then does not show
+        it a second time: that room is the waveform's."""
+        elsewhere = bool(elsewhere)
+        if elsewhere != self._picture_elsewhere:
+            self._picture_elsewhere = elsewhere
+            self._arrange()
 
     def _show_more(self, on: bool) -> None:
         self._more = on
@@ -739,8 +757,9 @@ class MusicTimeline(QWidget):
         submitted = mode is Presentation.SUBMITTED
         # A job's picture is its finished file, which is not shown here; the
         # music is what this presentation is for.
+        twice = compact and self._picture_elsewhere
         for widget in (self.picture_caption, self.picture):
-            widget.setVisible(not classic and not submitted)
+            widget.setVisible(not classic and not submitted and not twice)
         self.output_caption.setVisible(not classic)
         for widget in (self.more_button, self.more_note):
             widget.setVisible(compact)

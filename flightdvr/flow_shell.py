@@ -163,6 +163,7 @@ class FlowShell(QWidget):
     stage_chosen = Signal(str)        # a Stage value
     back_requested = Signal()
     next_requested = Signal()
+    selected_activated = Signal()     # the one output being edited
     primary_activated = Signal()      # Commit to render
     secondary_activated = Signal()    # Cancel / Cancel this render
 
@@ -282,6 +283,12 @@ class FlowShell(QWidget):
         # as the wrong number is worse than no count.
         actions = QVBoxLayout()
         actions.setSpacing(TIGHT)
+        # The one output open on this page, apart from the batch below it.
+        # Only a page that edits one output offers it.
+        self.selected_button = QPushButton("Queue this output")
+        self.selected_button.clicked.connect(self.selected_activated.emit)
+        self.selected_button.hide()
+        actions.addWidget(self.selected_button)
         self.primary_button = QPushButton("Commit to render")
         self.primary_button.clicked.connect(self.primary_activated.emit)
         self.secondary_button = QPushButton("Cancel")
@@ -330,12 +337,21 @@ class FlowShell(QWidget):
         self.next_button.setEnabled(bool(forward))
 
     def set_actions(self, *, primary: str, primary_enabled: bool,
-                    secondary: str, secondary_enabled: bool = True) -> None:
-        """Name and enable the two fixed actions for the page showing now.
+                    secondary: str, secondary_enabled: bool = True,
+                    selected: str = "", selected_enabled: bool = False,
+                    selected_tip: str = "") -> None:
+        """Name and enable the fixed actions for the page showing now.
 
         Queue turns the primary off and renames the secondary: from there the
         thing you can do is stop the render in front of you, not start another.
+        `selected` names the one-output action, and no name means the page has
+        none.
         """
+        self.selected_button.setVisible(bool(selected))
+        if selected:
+            self.selected_button.setText(selected)
+            self.selected_button.setEnabled(bool(selected_enabled))
+            self.selected_button.setToolTip(selected_tip)
         self.primary_button.setText(primary)
         self.primary_button.setEnabled(bool(primary_enabled))
         self.secondary_button.setText(secondary)

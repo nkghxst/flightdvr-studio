@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QBoxLayout, QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpacerItem,
@@ -180,6 +180,16 @@ class PreviewView(QObject):
         self.sequence_strip.hide()
         self.trim_band = self._build_trim_band()
         self.music_band = self._build_music_band()
+        # The output strip is the output's picture on the output's clock. When
+        # it is showing, the compact band need not show that picture again.
+        self.sequence_strip.installEventFilter(self)
+
+    def eventFilter(self, watched, event):  # noqa: N802 (Qt naming)
+        if watched is self.sequence_strip and event.type() in (
+                QEvent.Type.Show, QEvent.Type.Hide):
+            self.music_timeline.set_picture_elsewhere(
+                event.type() == QEvent.Type.Show)
+        return False
 
     def _build_preview_box(self) -> QWidget:
         """The video and its transport, permanently visible."""
@@ -730,8 +740,19 @@ class PreviewView(QObject):
 
     def _arrange_music(self) -> None:
         # The numbers are behind More… in the compact presentation, and in
-        # every other one they are simply there.
-        self.music_panel.setVisible(self.music_timeline.shows_more)
+        # every other one they are simply there. Sound and If shorter are not
+        # numbers: compact keeps them in view beside More…, as approved, and
+        # they go back into their boxes everywhere else. Same widgets both
+        # ways, so there is only ever one of each value.
+        timeline, panel = self.music_timeline, self.music_panel
+        if timeline.presentation is Presentation.COMPACT:
+            row = timeline.more_row
+            for index, widget in enumerate(panel.take_primary()):
+                row.insertWidget(index, widget)
+                widget.show()
+        else:
+            panel.restore_primary()
+        panel.setVisible(timeline.shows_more)
 
     def show_track_status(self, text: str) -> None:
         """What the acquisition is doing, in words a person can act on."""

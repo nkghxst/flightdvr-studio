@@ -3121,6 +3121,7 @@ class MainWindow(QMainWindow):
         shell.back_requested.connect(lambda: self._step_stage(-1))
         shell.next_requested.connect(lambda: self._step_stage(1))
         shell.primary_activated.connect(self._commit_all_planned)
+        shell.selected_activated.connect(self._commit_selected)
         shell.secondary_activated.connect(self._cancel)
         layout.addWidget(shell, 1)
 
@@ -3552,10 +3553,24 @@ class MainWindow(QMainWindow):
                 primary_enabled=False,
                 secondary="Cancel this render", secondary_enabled=running)
             return
+        selected = self._sidebar_target
+        chosen = selected is not None and selected in self._active_targets()
+        # Music edits one output, so it offers that one on its own, beside
+        # (never instead of) the batch. Output has its own button in its panel.
         self.flow_shell.set_actions(
             primary=f"Queue all planned ({planned})",
             primary_enabled=planned > 0,
-            secondary="Cancel render", secondary_enabled=running)
+            secondary="Cancel render", secondary_enabled=running,
+            selected="Queue this output" if stage is Stage.MUSIC else "",
+            selected_enabled=chosen,
+            selected_tip=(f"Queue {self._target_label(selected)} only"
+                          if chosen else "Choose an output first"))
+
+    def _target_label(self, target) -> str:
+        """A planned output's own name, as its card shows it."""
+        return next((output.label for output in self._working_outputs()
+                     if output.target == target), "this output")
+
     def _step_stage(self, direction: int) -> None:
         back, forward = flow_neighbours(self._flow_stage, self._offered_stages)
         self._show_stage(forward if direction > 0 else back)
@@ -4298,6 +4313,8 @@ class MainWindow(QMainWindow):
         self._focus_piece(target.items[0].fingerprint, target.items[0].sid)
         if self._output_picture_active():
             self._refresh_output_picture()
+        if self._view_mode is Mode.FLOW and self._flow_stage is not None:
+            self._show_page_actions(self._flow_stage)
 
     def _focus_piece(self, fingerprint: str, sid: str) -> None:
         """Focus a target's source identity without crossing picture clocks.

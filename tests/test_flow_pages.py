@@ -3323,7 +3323,22 @@ def test_a_short_music_page_folds_and_more_unfolds_without_choosing(window, app)
     assert needed > room, "the fixture never made the page short"
     assert timeline.presentation is Presentation.COMPACT
     assert timeline.song.isHidden() and window.music_panel.isHidden()
-    assert not timeline.music.isHidden() and not timeline.picture.isHidden()
+    assert not timeline.music.isHidden()
+    # P1: compact shows the output picture once. The output strip above the
+    # band is that picture on the same clock, so the band's own copy steps
+    # aside while the strip shows, and comes back when it does not.
+    strip = window.preview_view.sequence_strip
+    assert strip.isVisible()
+    assert timeline.picture.isHidden()
+    # Sound and If shorter stay in view beside More…; the numbers go behind it.
+    panel = window.music_panel
+    assert panel.mode_combo.isVisible() and panel.short_track_combo.isVisible()
+    assert not panel.fade_in.isVisible()
+    strip.hide()
+    settled(app)
+    assert not timeline.picture.isHidden()
+    strip.show()
+    settled(app)
     timeline.more_button.setChecked(True)
     settled(app)
     assert not timeline.song.isHidden() and not window.music_panel.isHidden()
@@ -3852,3 +3867,49 @@ def test_w5_native_output_choice_restores_trim_focus(window, app, tmp_path):
     settled(app)
     assert not [thread for thread in window.findChildren(QThread)
                 if thread.isRunning()]
+
+
+# -- P1: Music queues the one output it edits, apart from the batch -------------
+
+def test_music_queues_the_selected_output_only_and_the_batch_stays_apart(
+        window, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    first, second = planned_pair(window, app)
+    window.show()
+    settled(app)
+    window._select_working_target(second)
+    window._show_stage(Stage.MUSIC)
+    settled(app)
+    shell = window.flow_shell
+    button = shell.selected_button
+    assert button.isVisible() and button.isEnabled()
+    assert button.text() == "Queue this output"
+    assert shell.primary_button.text() == "Queue all planned (2)"
+    assert button is not shell.primary_button
+    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    settled(app)
+    assert [job.clips[0].fingerprint for job in window.jobs] == [
+        second.items[0].fingerprint]
+    # The batch is its own press. B, already queued, stays one job; the
+    # batch adds what is not yet queued and says so.
+    QTest.mouseClick(shell.primary_button, Qt.MouseButton.LeftButton)
+    settled(app)
+    assert [job.clips[0].fingerprint for job in window.jobs] == [
+        second.items[0].fingerprint, first.items[0].fingerprint]
+    assert "1 already in the queue" in window.statusBar().currentMessage()
+    window.set_view_mode(Mode.CLASSIC)
+
+
+def test_the_one_output_action_is_music_s_alone(window, app):
+    """Output has its own button in its panel; the others edit no one
+    output, so none of them grows a second one."""
+    planned_pair(window, app)
+    window.show()
+    settled(app)
+    for stage in (Stage.BROWSE, Stage.TRIM, Stage.OUTPUT, Stage.QUEUE):
+        window._show_stage(stage)
+        settled(app)
+        assert not window.flow_shell.selected_button.isVisible(), stage
+    window.set_view_mode(Mode.CLASSIC)

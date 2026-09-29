@@ -173,6 +173,45 @@ class MusicPanel(QWidget):
 
     # -- construction ---------------------------------------------------------
 
+    def _primary_row(self, caption: str, combo: QComboBox) -> QWidget:
+        """A label and its combo as one piece, so the compact band can show
+        the same control beside More… rather than a copy of it."""
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(TIGHT)
+        layout.addWidget(QLabel(caption))
+        layout.addWidget(combo)
+        layout.addStretch(1)
+        return row
+
+    def take_primary(self) -> list[QWidget]:
+        """Sound and If shorter, out of their boxes, for the caller to place.
+
+        The compact band keeps these beside More… while the numbers go behind
+        it, as approved. They are the same widgets: one value, never two.
+        `restore_primary` puts them back exactly where they were.
+        """
+        if getattr(self, "_primary_homes", None) is None:
+            homes = []
+            for row in (self.sound_row, self.short_track_row):
+                form = row.parentWidget().layout()
+                index = form.getWidgetPosition(row)[0]
+                homes.append((row, form, index))
+            self._primary_homes = homes
+            for row, form, _index in homes:
+                form.removeWidget(row)
+        return [row for row, _form, _index in self._primary_homes]
+
+    def restore_primary(self) -> None:
+        homes = getattr(self, "_primary_homes", None)
+        if homes is None:
+            return
+        self._primary_homes = None
+        for row, form, index in homes:
+            form.insertRow(index, row)
+            row.show()
+
     def _build_sound_box(self) -> QWidget:
         box = QGroupBox("Sound")
         form = QFormLayout(box)
@@ -182,7 +221,8 @@ class MusicPanel(QWidget):
         for mode, label, _ in MODE_LABELS:
             self.mode_combo.addItem(label, mode)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-        form.addRow("Sound:", self.mode_combo)
+        self.sound_row = self._primary_row("Sound:", self.mode_combo)
+        form.addRow(self.sound_row)
 
         self.mode_help = dim(QLabel(""))
         self.mode_help.setWordWrap(True)
@@ -222,7 +262,9 @@ class MusicPanel(QWidget):
         for policy, label in SHORT_TRACK_LABELS:
             self.short_track_combo.addItem(label, policy)
         self.short_track_combo.currentIndexChanged.connect(self._on_edited)
-        form.addRow("If shorter:", self.short_track_combo)
+        self.short_track_row = self._primary_row("If shorter:",
+                                                 self.short_track_combo)
+        form.addRow(self.short_track_row)
 
         self.passage_note = dim(QLabel(
             "The passage needs the track's own sample clock, so it can only be "
