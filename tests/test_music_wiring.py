@@ -2314,3 +2314,25 @@ def test_a_refusal_brings_itself_into_the_band_s_view(
     assert in_band_view(view, note) == note.height()
     window.export_panel.preset_buttons["master"].setChecked(True)
     window.hide()
+
+
+def test_a_new_arrangement_of_the_band_starts_at_its_track_and_listen_rows(
+        window, monkeypatch, tmp_path, app):
+    from flightdvr.music_timeline import Presentation
+
+    target, view = classic_band(window, monkeypatch, tmp_path, app)
+    body = view.music_body
+    body.verticalScrollBar().setValue(body.verticalScrollBar().maximum())
+    app.processEvents()
+    assert in_band_view(view, view.listen_check) < view.listen_check.height()
+    view.set_music_presentation(Presentation.FULL)
+    view.set_music_presentation(Presentation.CLASSIC)
+    for _ in range(10):
+        app.processEvents()
+    for row in (view.track_button, view.listen_check):
+        assert in_band_view(view, row) == row.height(), row
+    # A relayout of the same arrangement leaves a person's scroll alone.
+    body.verticalScrollBar().setValue(10)
+    view.set_music_presentation(Presentation.CLASSIC)
+    assert body.verticalScrollBar().value() == 10
+    window.hide()

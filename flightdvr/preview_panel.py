@@ -722,6 +722,7 @@ class PreviewView(QObject):
         self.music_silence_note.setWordWrap(True)
         body.addWidget(self.music_silence_note)
         self._note_is_reason = False
+        self._arranged_as = None
 
         # One editor for every way the music is shown. The lanes are its
         # visual presentation; the numbers below are another view of the
@@ -811,6 +812,14 @@ class PreviewView(QObject):
         # they go back into their boxes everywhere else. Same widgets both
         # ways, so there is only ever one of each value.
         timeline, panel = self.music_timeline, self.music_panel
+        arrangement = (timeline.presentation, timeline.shows_more)
+        if arrangement != self._arranged_as:
+            # A different arrangement starts at its top: the track and Listen
+            # rows. Kept from the last one, the scroll left them above the
+            # band's fold (natively, after More… closed and after Flow to
+            # Classic). Only a real change does this, never a relayout.
+            self._arranged_as = arrangement
+            self.music_body.verticalScrollBar().setValue(0)
         if timeline.presentation is Presentation.COMPACT:
             row = timeline.more_row
             for index, widget in enumerate(panel.take_primary()):

@@ -771,6 +771,10 @@ class MusicTimeline(QWidget):
         for widget in (self.picture_caption, self.picture):
             widget.setVisible(not classic and not submitted and not twice)
         self.output_caption.setVisible(not classic)
+        # Classic's shallow band spends its 120px on the rows above and the
+        # lane itself: with this caption the lane showed 36 of its 40px at
+        # 1440x913 (natively). The legend under the lane says what it is.
+        self.music_caption.setVisible(not classic)
         for widget in (self.more_button, self.more_note):
             widget.setVisible(compact)
         self.more_note.setVisible(folded)
