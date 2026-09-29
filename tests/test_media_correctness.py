@@ -445,5 +445,53 @@ def test_a_trimmed_join_exports_each_range_s_own_frames(ordinal_ts, tmp_path,
     assert ok, message
     ids = _ordinal_ids(tools_, out)
     expected = list(range(60, 150)) + list(range(180, 240))
-    assert ids[87:94] == [147, 148, 149, 180, 181, 182, 183], ids[87:94]
-    assert ids == expected
+    if ids != expected:
+        pytest.fail(_join_report(tools_, source, info, clips, choice,
+                                 sequence, out, ids, expected))
+
+
+def _join_report(tools_, source, info, clips, choice, sequence, out, ids,
+                 expected) -> str:
+    """Everything needed to diagnose a mismatch where it happened: the oldest
+    FFmpeg on Linux, where a desktop run did not reproduce it."""
+    import json as _json
+
+    from flightdvr.audio_plan import resolve_audio_plan
+    from flightdvr.presets import PASSTHROUGH, build_commands
+
+    def probe_json(path, entries):
+        return _json.loads(subprocess.run(
+            [str(tools_.ffprobe), "-v", "error", "-show_entries", entries,
+             "-of", "json", str(path)],
+            check=True, capture_output=True, text=True).stdout)
+
+    plan = resolve_audio_plan(choice, sequence.total_samples,
+                              source_has_audio=info.has_audio,
+                              preset_key="master", joined=True)
+    command = build_commands(
+        tools_, clips[0], "master",
+        ExportSettings(master_speed="ultrafast", colour=PASSTHROUGH),
+        Path("out.mp4"), Path("work"), clips=clips, audio_plan=plan,
+        sequence=sequence, total_duration=5.0)[0]
+    frames = probe_json(out, "frame=best_effort_timestamp_time")
+    times = [f.get("best_effort_timestamp_time")
+             for f in frames.get("frames", [])]
+    version = subprocess.run([str(tools_.ffmpeg), "-version"],
+                             capture_output=True,
+                             text=True).stdout.splitlines()[0]
+    mismatch = next((k for k, (a, b) in enumerate(zip(ids, expected))
+                     if a != b), None)
+    lines = [
+        f"ids differ: got {len(ids)} want {len(expected)}; first mismatch "
+        f"{mismatch}; last ids {ids[-4:]}; last frame times {times[-4:]}",
+        "source: " + _json.dumps(probe_json(
+            source, "format=start_time,duration:"
+                    "stream=codec_type,start_time,duration")),
+        f"video_start {info.video_start}",
+        "output: " + _json.dumps(probe_json(
+            out, "format=duration:stream=codec_type,start_time,duration,"
+                 "nb_frames")),
+        version,
+        "command: " + " ".join(command[1:]),
+    ]
+    return "\n".join(lines)
