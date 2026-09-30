@@ -1086,6 +1086,46 @@ def test_bundle_second_member_failure_removes_only_owned_staging(
 # -- through real ffmpeg --------------------------------------------------------
 
 
+@pytest.mark.parametrize("target_kind", ["missing", "other", "assembly"])
+def test_worker_refuses_a_configured_bundle_without_its_exact_target(
+        tmp_path, qt_app, target_kind):
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from flightdvr.jobs import ExportWorker, Job
+    from flightdvr.output_plan import OutputTarget, target_for_piece
+    from flightdvr.presets import ExportSettings
+    clip = _clip(tmp_path, "submitted.ts", [(0, 4, "")])
+    target = target_for_piece(clip)
+    if target_kind == "missing":
+        target = None
+    elif target_kind == "other":
+        target = OutputTarget.clip_or_range("different-source")
+    else:
+        target = OutputTarget.assembly(target.items)
+    out = tmp_path / "must-not-exist.mov"
+    job = Job([clip], "edit", ExportSettings(), out,
+              audio=MusicChoice(mode=AudioMode.ORIGINAL), target=target, frozen=True)
+    worker = ExportWorker(None, [job], tmp_path / "worker")
+    ok, message = worker._run_job(0, job)
+    assert not ok and "captured source target" in message
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("key", ["remux", "slowmo"])
+def test_worker_still_refuses_configured_incompatible_bundle_members(tmp_path, qt_app, key):
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from flightdvr.jobs import ExportWorker, Job
+    from flightdvr.output_plan import target_for_piece
+    from flightdvr.presets import ExportSettings
+    clip = _clip(tmp_path, "submitted.ts", [(0, 4, "")])
+    out = tmp_path / "must-not-exist.mp4"
+    job = Job([clip], key, ExportSettings(), out,
+              audio=MusicChoice(mode=AudioMode.NO_SOUND),
+              target=target_for_piece(clip), frozen=True)
+    ok, message = ExportWorker(None, [job], tmp_path / "worker")._run_job(0, job)
+    assert not ok and "not supported" in message
+    assert not out.exists()
+
+
 @pytest.mark.integration
 def test_a_two_member_bundle_really_writes_two_playable_files(tools, clip, tmp_path):
     """The plan has to survive contact with the encoder.

@@ -118,7 +118,7 @@ class Member:
         if len(choices) != 1:
             return "Each output keeps its own sound choice"
         choice = next(iter(choices))
-        mode = choice.mode.value
+        mode = choice.mode.value.replace("_", " ").capitalize()
         track = f" · {choice.track.name}" if choice.track is not None else ""
         codec = ("PCM s16le · MOV" if self.key == "edit"
                  else "AAC 128k" if self.key == "social" else "AAC 192k")
