@@ -80,6 +80,66 @@ def _context(tmp_path, **overrides):
 # -- planning, without a window -------------------------------------------------
 
 
+def test_bundle_planning_captures_material_settings_and_inherited_sound(tmp_path):
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from flightdvr.bundle import Piece, plan_bundle
+    from flightdvr.output_plan import OutputTarget
+    from flightdvr.presets import ExportSettings
+
+    clip = _clip(tmp_path, "selected-b.ts", [(12, 18, "passage")])
+    target = OutputTarget.clip_or_range(clip.fingerprint, clip.selects[0].sid)
+    choice = MusicChoice(mode=AudioMode.ORIGINAL)
+    settings = ExportSettings()
+    settings.social_size_mb = 8
+    pieces = [Piece(clip.for_export()[0], audio=choice, output_target=target)]
+    members = plan_bundle(["edit", "social", "vertical"], pieces,
+                          **_context(tmp_path, settings=settings))
+    assert len(members) == 3
+    assert all(member.usable and len(member.jobs) == 1 for member in members)
+    clip.selects[0].start = 1
+    settings.social_size_mb = 99
+    for member in members:
+        planned = member.jobs[0]
+        assert planned.audio == choice
+        assert planned.output_target == target
+        assert planned.clips[0].trim_start == 12
+        assert member.settings.social_size_mb == 8
+    labels = {member.key: member.sound_label for member in members}
+    assert "PCM s16le · MOV" in labels["edit"]
+    assert "AAC 128k" in labels["social"]
+    assert "AAC 192k" in labels["vertical"]
+
+
+@pytest.mark.parametrize("key", ["remux", "slowmo"])
+def test_configured_bundle_member_is_explicitly_incompatible(tmp_path, key):
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from flightdvr.bundle import Piece, plan_bundle
+
+    clip = _clip(tmp_path, "selected.ts")
+    member, = plan_bundle([key], [Piece(
+        clip, audio=MusicChoice(mode=AudioMode.NO_SOUND))], **_context(tmp_path))
+    assert not member.usable
+    assert member.jobs == []
+    assert "Deselect" in member.problem
+    assert "configured sound" in member.problem
+
+
+def test_legacy_bundle_pieces_do_not_inherit_a_focused_choice(tmp_path):
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from flightdvr.bundle import Piece, plan_bundle
+
+    a = _clip(tmp_path, "a.ts")
+    b = _clip(tmp_path, "b.ts")
+    members = plan_bundle(["master"], [
+        Piece(a, audio=MusicChoice(mode=AudioMode.ORIGINAL)),
+        Piece(b, audio=MusicChoice(mode=AudioMode.NO_SOUND)),
+    ], **_context(tmp_path))
+    assert len(members) == 1 and len(members[0].jobs) == 2
+    assert [job.audio.mode for job in members[0].jobs] == [
+        AudioMode.ORIGINAL, AudioMode.NO_SOUND]
+    assert members[0].sound_label == "Each output keeps its own sound choice"
+
+
 def test_a_source_too_narrow_to_crop_disables_vertical_rather_than_queueing_it(tmp_path):
     """A member the app already knows would fail must not reach the queue.
 
