@@ -1089,10 +1089,6 @@ class MainWindow(QMainWindow):
         return self.preview_view.play_button
 
     @property
-    def trim_note(self) -> QLabel:
-        return self.preview_view.trim_note
-
-    @property
     def trim_band(self) -> QWidget:
         return self.preview_view.trim_band
 
@@ -1969,7 +1965,6 @@ class MainWindow(QMainWindow):
         if not self._ready:
             return
         # What an edit would have refreshed, minus recording it as a choice.
-        self.trim_note.setVisible(preset == "remux")
         self._refresh_vertical_overlay()
         self._refresh_export_markers()
         self._update_estimate()
@@ -6916,7 +6911,6 @@ class MainWindow(QMainWindow):
         if not self._ready:
             return
         key = key or self._preset_key()
-        self.trim_note.setVisible(key == "remux")
         self._refresh_vertical_overlay()
         self._refresh_export_markers()
         self._update_estimate()

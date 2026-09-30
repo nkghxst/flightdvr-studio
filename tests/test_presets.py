@@ -1367,3 +1367,147 @@ def test_a_joined_export_with_the_recording_s_sound_trims_from_each_picture():
     # the same rebasing and the same trims (see `join_inputs`).
     assert "trim=start=0.021:" in silent and "trim=start=0.050:" in silent
     assert "atrim" not in silent and "[1:a]anullsink" in silent
+
+
+# -- Stage B: Social carries a configured choice; its size budget counts it ----
+#
+# Expected video bitrates are worked out here from the documented rule, not by
+# calling target_video_bitrate: floor(MB * 1024**2 * 8 / 1000 / runtime * 0.97)
+# minus 128 when the finished file has a track, floor 300. For 2 MB:
+#   6 s  -> 2796.2027 kbit/s total -> 2712 without a track, 2584 with one
+#   8 s  -> 2097.1520 kbit/s total -> 2034 without a track, 1906 with one
+# and 1 MB over 60 s -> 139.81 total -> 135 or 7, both floored to 300.
+
+SOCIAL_2MB = ExportSettings(social_mode="size", social_size_mb=2)
+
+
+def _video_kbps(command: list[str]) -> str:
+    return command[command.index("-b:v") + 1]
+
+
+@pytest.mark.parametrize("mode,kbps", [
+    (AudioMode.ORIGINAL, "2584k"), (AudioMode.REPLACE, "2584k"),
+    (AudioMode.MIX, "2584k"), (AudioMode.NO_SOUND, "2712k"),
+])
+def test_social_size_budget_follows_the_resolved_track(mode, kbps):
+    pass1, pass2 = _ordinary_audio_case(mode, "social", SOCIAL_2MB)
+    assert _video_kbps(pass1) == _video_kbps(pass2) == kbps
+    # Both passes see the same inputs, maps and sound; pass 1 is not muted.
+    def body(command):
+        at = command.index("-pass")
+        return command[:at] + command[at + 2:-3]
+    assert body(pass1) == body(pass2)
+    assert pass1[-3:] == ["-f", "null", "-"]
+    if mode is AudioMode.NO_SOUND:
+        assert "-an" in pass1 and "-an" in pass2
+    else:
+        assert "-an" not in pass1
+        assert pass2[pass2.index("-c:a"):pass2.index("-c:a") + 4] == [
+            "-c:a", "aac", "-b:a", "128k"]
+
+
+@pytest.mark.parametrize("mode", [AudioMode.REPLACE, AudioMode.MIX])
+def test_social_music_over_a_silent_recording_with_keep_off_still_costs_its_track(
+        mode):
+    settings = ExportSettings(social_mode="size", social_size_mb=2,
+                              keep_audio=False)
+    pass1, pass2 = _ordinary_audio_case(mode, "social", settings,
+                                        source_has_audio=False)
+    assert _video_kbps(pass2) == "2584k"
+    inputs = [pass2[i + 1] for i, t in enumerate(pass2) if t == "-i"]
+    assert inputs[-1] == "music.wav", "music is input 1 for an ordinary output"
+
+
+def test_social_music_at_zero_gain_is_still_a_track():
+    clip = boxpro_clip(duration=20.0)
+    clip.trim_in, clip.trim_out = 12.0, 18.0
+    asset = AudioAsset(Path("music.wav"), "a" * 64, 0, 44_100, 2, 20 * 44_100)
+    plan = resolve_audio_plan(
+        MusicChoice(asset=asset, mode=AudioMode.REPLACE,
+                    passage=SampleSpan(4 * 44_100, 10 * 44_100, 44_100),
+                    music_level=Fraction(0)),
+        6 * OUTPUT_RATE, source_has_audio=True, preset_key="social")
+    pass1, pass2 = build_commands(TOOLS, clip, "social", SOCIAL_2MB,
+                                  Path("out.mp4"), Path("work"),
+                                  audio_plan=plan)
+    assert _video_kbps(pass2) == "2584k"
+
+
+def test_unconfigured_social_is_what_it_was():
+    """The legacy route: the Keep checkbox and the recording decide."""
+    clip = boxpro_clip(duration=20.0)
+    clip.trim_in, clip.trim_out = 12.0, 18.0
+    keep = build_commands(TOOLS, clip, "social", SOCIAL_2MB,
+                          Path("out.mp4"), Path("work"))
+    off = build_commands(TOOLS, clip, "social",
+                         ExportSettings(social_mode="size", social_size_mb=2,
+                                        keep_audio=False),
+                         Path("out.mp4"), Path("work"))
+    assert _video_kbps(keep[1]) == "2584k" and _video_kbps(off[1]) == "2712k"
+    assert "-an" in off[1] and "-an" not in keep[1]
+
+
+def _social_joined_case(mode: AudioMode, settings: ExportSettings):
+    first = boxpro_clip(path=Path("a.ts"), duration=3.0)
+    middle = boxpro_clip(path=Path("b.ts"), duration=2.0, audio_codec="")
+    third = boxpro_clip(path=Path("a.ts"), duration=3.0)
+    spans = (SampleSpan(0, 144_000, OUTPUT_RATE),
+             SampleSpan(144_000, 240_000, OUTPUT_RATE),
+             SampleSpan(240_000, 384_000, OUTPUT_RATE))
+    sequence = SimpleNamespace(
+        occurrences=tuple(SimpleNamespace(sample_span=s) for s in spans),
+        total_samples=384_000)
+    if mode in (AudioMode.REPLACE, AudioMode.MIX):
+        asset = AudioAsset(Path("music.wav"), "a" * 64, 0, 44_100, 2,
+                           8 * 44_100)
+        choice = MusicChoice(asset=asset, mode=mode,
+                             passage=SampleSpan(44_100, 3 * 44_100, 44_100))
+    else:
+        choice = MusicChoice(mode=mode)
+    plan = resolve_audio_plan(choice, 384_000, source_has_audio=True,
+                              preset_key="social", joined=True)
+    return build_commands(TOOLS, first, "social", settings, Path("out.mp4"),
+                          Path("work"), clips=[first, middle, third],
+                          audio_plan=plan, sequence=sequence,
+                          total_duration=8.0)
+
+
+@pytest.mark.parametrize("mode,kbps", [
+    (AudioMode.MIX, "1906k"), (AudioMode.REPLACE, "1906k"),
+    (AudioMode.NO_SOUND, "2034k"),
+])
+def test_social_assembly_budget_uses_the_whole_runtime_and_its_own_graph(
+        mode, kbps):
+    pass1, pass2 = _social_joined_case(mode, SOCIAL_2MB)
+    assert _video_kbps(pass1) == _video_kbps(pass2) == kbps
+    graph = pass2[pass2.index("-filter_complex") + 1]
+    assert pass2.count("-filter_complex") == 1, "no second sound graph"
+    if mode is AudioMode.NO_SOUND:
+        assert pass2.count("-map") == 1
+    else:
+        assert "[3:a:0]" in graph, "music is input 3 after A, B, A"
+        assert pass2.count("-map") == 2
+        assert pass2[pass2.index("-c:a"):pass2.index("-c:a") + 4] == [
+            "-c:a", "aac", "-b:a", "128k"]
+    assert graph == pass1[pass1.index("-filter_complex") + 1]
+
+
+def test_social_budget_floor_and_quality_and_hardware_policies_hold():
+    clip = boxpro_clip(duration=60.0)
+    floor = build_commands(TOOLS, clip, "social",
+                           ExportSettings(social_mode="size", social_size_mb=1),
+                           Path("out.mp4"), Path("work"))
+    assert _video_kbps(floor[1]) == "300k"
+    quality = _ordinary_audio_case(
+        AudioMode.MIX, "social",
+        ExportSettings(social_mode="quality", social_crf=23))
+    assert len(quality) == 1 and "-b:v" not in quality[0]
+    assert quality[0][quality[0].index("-crf") + 1] == "23"
+    hardware = _ordinary_audio_case(
+        AudioMode.MIX, "social",
+        ExportSettings(social_mode="size", social_size_mb=2,
+                       use_gpu=True, hw_encoder="h264_nvenc"))
+    assert len(hardware) == 1, "hardware stays one bitrate-targeted pass"
+    assert "2584k" in hardware[0] and "-pass" not in hardware[0]
+    assert hardware[0][hardware[0].index("-c:a"):hardware[0].index("-c:a") + 4] \
+        == ["-c:a", "aac", "-b:a", "128k"]

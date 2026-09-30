@@ -183,6 +183,7 @@ def _export(tools, fixture: JoinedFixture, tmp_path: Path, name: str,
         target, audio=choice, target=fixture.target,
         sequence=fixture.sequence,
     )
+    (tmp_path / "work").mkdir(exist_ok=True)     # as the app's work_dir()
     worker = ExportWorker(tools, [job], tmp_path / "work")
     ok, message = worker._run_job(0, job)
     assert ok, message
@@ -317,6 +318,7 @@ def test_published_master_modes_follow_literal_a_b_a_finished_time(
 # is PCM in MOV and so is held to the exact 384000 samples.
 STAGE_A_ASSEMBLY = {
     "edit": ("pcm_s16le", (WIDTH, HEIGHT)),
+    "social": ("aac", (WIDTH, HEIGHT)),     # its default size mode: two passes
     "upload": ("aac", (1920, 1080)),
     "vertical": ("aac", (720, 1280)),
 }
@@ -445,26 +447,36 @@ def _assert_literal_a_b_a(tools, fixture, outputs, preset: str = "master"):
         measurement, sort_keys=True))
 
 
+@pytest.mark.parametrize("preset", ["master", "social"])
 def test_cancelling_a_live_joined_graph_preserves_the_previous_file(
-        tools, joined_fixture, tmp_path, monkeypatch):
+        tools, joined_fixture, tmp_path, monkeypatch, preset):
+    """Social: size mode, two CPU passes. Pass 1 writes no file, so the
+    live partial waited for below is pass 2's, and the cancel lands there."""
     fixture = joined_fixture
     target = tmp_path / "cancelled.mp4"
     sentinel = b"previous completed output"
     target.write_bytes(sentinel)
     before = hashlib.sha256(target.read_bytes()).hexdigest()
+    settings = (ExportSettings(master_speed="ultrafast", colour=PASSTHROUGH)
+                if preset == "master" else
+                ExportSettings(social_mode="size", social_size_mb=2,
+                               colour=PASSTHROUGH))
     job = Job(
-        fixture.pieces, "master",
-        ExportSettings(master_speed="ultrafast", colour=PASSTHROUGH),
+        fixture.pieces, preset, settings,
         target, audio=_choice(fixture, AudioMode.MIX),
         target=fixture.target, sequence=fixture.sequence,
     )
+    (tmp_path / "work").mkdir(exist_ok=True)     # as the app's work_dir()
     worker = ExportWorker(tools, [job], tmp_path / "work")
     real_build = jobs_module.build_commands
+
+    built = []
 
     def throttled(*args, **kwargs):
         commands = real_build(*args, **kwargs)
         for command in commands:
             command.insert(command.index("-i"), "-re")
+        built.append(len(commands))
         return commands
 
     monkeypatch.setattr(jobs_module, "build_commands", throttled)
@@ -483,6 +495,10 @@ def test_cancelling_a_live_joined_graph_preserves_the_previous_file(
         pytest.fail("the joined graph never reached a live partial output")
 
     observed = part.stat().st_size
+    assert built == [1 if preset == "master" else 2]
+    if preset == "social":
+        assert "-pass" in worker._process.args and worker._process.args[
+            worker._process.args.index("-pass") + 1] == "2", "cancel in pass 2"
     worker.cancel()
     runner.join(timeout=10)
     assert not runner.is_alive(), "cancelled joined FFmpeg did not settle"
@@ -498,7 +514,7 @@ def test_cancelling_a_live_joined_graph_preserves_the_previous_file(
     }, sort_keys=True))
 
 
-@pytest.mark.parametrize("preset", ["master", "edit"])
+@pytest.mark.parametrize("preset", ["master", "edit", "social"])
 def test_hardcoded_music_input_one_is_caught_before_publication(
         tools, joined_fixture, tmp_path, monkeypatch, preset):
     """Input 1 is silent B, not music; the old assumption must be observable."""
@@ -520,6 +536,7 @@ def test_hardcoded_music_input_one_is_caught_before_publication(
         target, audio=_choice(fixture, AudioMode.REPLACE),
         target=fixture.target, sequence=fixture.sequence,
     )
+    (tmp_path / "work").mkdir(exist_ok=True)     # as the app's work_dir()
     ok, message = ExportWorker(
         tools, [job], tmp_path / "work")._run_job(0, job)
     assert not ok, "hard-coded input 1 unexpectedly published a file"

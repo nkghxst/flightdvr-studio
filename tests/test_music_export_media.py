@@ -520,7 +520,7 @@ STAGE_A_SAMPLES = 288_000                 # 6 s at 48 kHz
 STAGE_A_FRAMES = 180                      # 6 s at 30 fps
 STAGE_A_EVENT_FRAMES = range(30, 60)      # output [1, 2)
 STAGE_A_SIZES = {
-    "master": (1280, 720), "edit": (1280, 720),
+    "master": (1280, 720), "edit": (1280, 720), "social": (1280, 720),
     "upload": (1920, 1080), "vertical": (720, 1280),
 }
 STAGE_A_WINDOW = 4_800                    # 0.1 s: whole cycles of every tone
@@ -604,6 +604,10 @@ def _stage_a_choice(asset, mode: str):
 def _stage_a_settings(**changes):
     from flightdvr.presets import PASSTHROUGH, ExportSettings
 
+    # Social in quality mode here: one CRF encode per mode, so every mode's
+    # picture is the same frame for frame. Its size mode, where the budget
+    # differs with the track, is tested on its own below.
+    changes.setdefault("social_mode", "quality")
     return ExportSettings(
         master_speed="ultrafast", upload_speed="ultrafast",
         vertical_speed="ultrafast", edit_codec="prores_lt",
@@ -622,6 +626,9 @@ def _stage_a_export(tools, clip, preset: str, choice, root: Path, name: str,
     out = root / f"{preset}-{name}{suffix}"
     job = Job([ranged], preset, settings or _stage_a_settings(), out,
               audio=choice)
+    # As the app's own work_dir() does: Social's two passes keep their
+    # statistics there.
+    (root / "work").mkdir(exist_ok=True)
     worker = ExportWorker(tools, [job], root / "work")
     ok, message = worker._run_job(0, job)
     assert ok, f"{preset}/{name}: {message}"
@@ -720,7 +727,8 @@ def _stage_a_events_hold(samples: array, mode: str) -> bool:
     return True
 
 
-@pytest.mark.parametrize("preset", ["master", "edit", "upload", "vertical"])
+@pytest.mark.parametrize("preset",
+                         ["master", "edit", "social", "upload", "vertical"])
 def test_stage_a_ordinary_range_carries_each_mode_on_its_own_time(
         tools, stage_a_media, tmp_path, preset):
     clip, asset = stage_a_media
@@ -849,7 +857,7 @@ def test_stage_a_music_on_the_wrong_origin_is_caught(
     assert not list(tmp_path.glob("*.flightdvr-part*"))
 
 
-@pytest.mark.parametrize("preset", ["master", "edit"])
+@pytest.mark.parametrize("preset", ["master", "edit", "social"])
 def test_stage_a_silent_recording_modes(tools, tmp_path, stage_a_media,
                                         preset):
     """Replace and Mix need no sound of the recording's own, even with
@@ -887,3 +895,102 @@ def test_stage_a_silent_recording_modes(tools, tmp_path, stage_a_media,
         assert music == pytest.approx(level * 14_000 / 32_768, rel=0.15)
         assert _stage_a_magnitude(samples, 1.5, 1000) < music / 4
         assert _stage_a_magnitude(samples, 0.5, 1000) >= 0.015
+
+
+# -- Stage B: Social in size mode, and a cancel while its sound is checked ----
+
+
+def _audio_stream_bitrate(tools, path: Path) -> int:
+    """The AAC stream's own bit rate from its packets, not the container's."""
+    found = json.loads(_run([
+        str(tools.ffprobe), "-v", "error", "-select_streams", "a:0",
+        "-show_entries", "packet=size:stream=duration", "-of", "json",
+        str(path)]).stdout)
+    total = sum(int(p["size"]) for p in found["packets"]) * 8
+    return round(total / float(found["streams"][0]["duration"]))
+
+
+@pytest.mark.parametrize("mode", ["mix", "no_sound"])
+def test_social_size_mode_lands_under_its_target_with_its_track(
+        tools, stage_a_media, tmp_path, mode):
+    clip, asset = stage_a_media
+    target_bytes = 2 * 1024 * 1024
+    out = _stage_a_export(
+        tools, clip, "social", _stage_a_choice(asset, mode), tmp_path, mode,
+        settings=_stage_a_settings(social_mode="size", social_size_mb=2))
+    size = out.stat().st_size
+    facts = _stage_a_facts(tools, out)
+    assert size <= target_bytes, (size, target_bytes)
+    assert [v[1:] for v in facts["video"]] == [(1280, 720, STAGE_A_FRAMES)]
+    measured = None
+    if mode == "no_sound":
+        assert facts["audio"] == []
+    else:
+        assert facts["audio"] == [("aac", OUTPUT_RATE, 2)]
+        assert _stage_a_events_hold(_decode_mono(tools, out), mode)
+        measured = _audio_stream_bitrate(tools, out)
+        # What the budget needs is that the track does not spend more than
+        # the 128k it was given. The rate asked for is asserted on the
+        # command (test_presets); what FFmpeg's AAC encoder delivers depends
+        # on the build: measured from the packets of this 6 s track, 128500
+        # bit/s on 7.1.5 and 93191 on 4.4.1 (it undershoots on simple
+        # tones). 5% over is room for packet framing on a short file; Stage
+        # A's 192k would not fit under it.
+        assert measured <= 1.05 * 128_000, measured
+    print("SOCIAL_SIZE_MEASUREMENT " + json.dumps({
+        "mode": mode, "bytes": size, "target_bytes": target_bytes,
+        "audio_stream_bps": measured, "sha256_16": _file_sha256(out)[:16],
+    }, sort_keys=True))
+
+
+def test_social_cancel_while_its_sound_is_checked_keeps_the_destination(
+        tools, stage_a_media, tmp_path, monkeypatch):
+    """The AAC check's probe is replaced by an owned child that waits, so the
+    cancel lands while the worker is checking the sound. The previous file
+    is untouched and the job's own partial is not left behind."""
+    import sys
+    import threading
+    from copy import copy
+
+    import flightdvr.audio_export as audio_export
+    from flightdvr.jobs import ExportWorker, Job
+
+    clip, asset = stage_a_media
+    out = tmp_path / "social.mp4"
+    out.write_bytes(b"previous completed output")
+    before = _file_sha256(out)
+    real_popen = audio_export.subprocess.Popen
+    waiting = []
+
+    def slow_probe(command, *args, **kwargs):
+        if "-select_streams" in command and "a" in command:
+            child = real_popen([sys.executable, "-c",
+                                "import time; time.sleep(30)"], *args, **kwargs)
+            waiting.append(child)
+            return child
+        return real_popen(command, *args, **kwargs)
+
+    monkeypatch.setattr(audio_export.subprocess, "Popen", slow_probe)
+    ranged = copy(clip)
+    ranged.trim_in, ranged.trim_out = STAGE_A_RANGE
+    job = Job([ranged], "social", _stage_a_settings(), out,
+              audio=_stage_a_choice(asset, "mix"))
+    (tmp_path / "work").mkdir(exist_ok=True)
+    worker = ExportWorker(tools, [job], tmp_path / "work")
+    result = []
+    runner = threading.Thread(
+        target=lambda: result.append(worker._run_job(0, job)), daemon=True)
+    runner.start()
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline and not waiting:
+        time.sleep(0.02)
+    assert waiting, "the sound check never started"
+    assert worker._phase == "checking the sound"
+    worker.cancel()
+    runner.join(timeout=15)
+    assert not runner.is_alive(), "the cancel was not seen during the check"
+    assert result and result[0] == (False, "Cancelled")
+    assert waiting[0].poll() is not None, "the waiting child was not stopped"
+    assert _file_sha256(out) == before
+    part = out.with_name("social.flightdvr-part.mp4")
+    assert not part.exists(), worker.residuals.get(0, "(no residual)")

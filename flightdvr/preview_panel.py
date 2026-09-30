@@ -327,13 +327,6 @@ class PreviewView(QObject):
         )
         column.addWidget(keys)
 
-        self.trim_note = dim(QLabel(
-            "Remux cuts at keyframes, so a trimmed rewrap can be a second out. "
-            "The re-encoding presets are exact."
-        ))
-        self.trim_note.hide()
-        column.addWidget(self.trim_note)
-
         return side
 
     def set_source_edits(self, applicable: bool) -> None:
@@ -631,6 +624,16 @@ class PreviewView(QObject):
             self.listen_check.setChecked(listening)
             self.listen_check.blockSignals(blocked)
 
+    def _keep_reason_in_view(self, *_range) -> None:
+        """Bring a refusal back into view when the band is resized after it
+        was shown there. Measured natively at Classic 1120x760: Remux was
+        revealed in the band's 54px, then a later relayout of the window
+        (Remux's longer explanations taking height above the band) squeezed
+        the band to 28px and left it 0 of 16px visible.
+        A standing note, and a person's own scrolling, are left alone."""
+        if self._note_is_reason:
+            self.music_body.ensureWidgetVisible(self.music_silence_note, 0, 0)
+
     def set_flow_controls(self, flow: bool) -> None:
         """Arrange the controls beside the picture for Flow, or for Classic.
 
@@ -781,6 +784,10 @@ class PreviewView(QObject):
         self.music_body.setMinimumHeight(MUSIC_BAND_MINIMUM)
         self.music_body.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # The range changes when the band's viewport or its contents are
+        # resized, never when a person scrolls.
+        self.music_body.verticalScrollBar().rangeChanged.connect(
+            self._keep_reason_in_view)
         layout.addWidget(self.music_body)
         self.music_body.setVisible(False)
         band.toggled.connect(self.music_band_changing)

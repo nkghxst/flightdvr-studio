@@ -629,9 +629,10 @@ def test_an_unsupported_preset_refuses_instead_of_dropping_the_music(
     probe.deliver()
     app.processEvents()
 
-    # Social is refused until its size budget carries music (stage B); the
-    # panel is the one place that rule is written.
-    window.export_panel.preset_buttons["social"].setChecked(True)
+    # Remux copies the recording's streams, so it cannot carry music; the
+    # panel is the one place that rule is written. (Social used to be the
+    # example until stage B gave its size budget the track.)
+    window.export_panel.preset_buttons["remux"].setChecked(True)
     app.processEvents()
 
     said = warnings_from(monkeypatch)
@@ -640,7 +641,7 @@ def test_an_unsupported_preset_refuses_instead_of_dropping_the_music(
 
     assert window.jobs == [], "a refused action still queued something"
     assert said and "Nothing has been queued" in said[0]
-    assert "Social" in said[0]
+    assert "Remux" in said[0]
 
 
 def test_a_track_still_being_read_refuses_the_action_upfront(
@@ -1972,17 +1973,17 @@ def test_monitoring_output_b_uses_b_s_recording_without_loading_it(
 def test_monitoring_asks_the_output_s_own_preset(window, app, tmp_path,
                                                  monkeypatch):
     first, second = _two_recordings_with_music(
-        window, app, tmp_path, monkeypatch, presets=("edit", "social"))
+        window, app, tmp_path, monkeypatch, presets=("edit", "remux"))
     window.set_view_mode(Mode.FLOW)
     window._select_working_target(first)
     window._show_stage(Stage.OUTPUT)
     app.processEvents()
     assert window._monitor_refusal(first) == ""
     # Asked while A is shown, B still answers with its own preset.
-    assert "Social" in window._monitor_refusal(second)
+    assert "Remux" in window._monitor_refusal(second)
     window._select_working_target(second)
     app.processEvents()
-    assert "Social" in window._monitor_refusal(second)
+    assert "Remux" in window._monitor_refusal(second)
     # Refused, and kept.
     assert window._planned_music(second).mode is AudioMode.REPLACE
     window.set_view_mode(Mode.CLASSIC)
@@ -2013,11 +2014,17 @@ def test_a_classic_preset_change_updates_the_panel_and_monitor_at_once(
     panel = window.music_panel
     assert panel.supported and not panel.unsupported_label.text()
 
-    window.export_panel.preset_buttons["social"].setChecked(True)
+    window.export_panel.preset_buttons["remux"].setChecked(True)
     app.processEvents()
     assert not panel.supported
-    assert "Social" in panel.unsupported_label.text()
-    assert "Social" in window.live_preview.status.reason
+    assert "Remux" in panel.unsupported_label.text()
+    assert "Remux" in window.live_preview.status.reason
+
+    # Stage B: Social carries it now, and says nothing against it.
+    window.export_panel.preset_buttons["social"].setChecked(True)
+    app.processEvents()
+    assert panel.supported and not panel.unsupported_label.text()
+    assert not window.live_preview.status.reason
 
     window.export_panel.preset_buttons["upload"].setChecked(True)
     app.processEvents()
@@ -2266,10 +2273,10 @@ def test_a_classic_refusal_sits_above_the_lane(
     target, view = classic_band(window, monkeypatch, tmp_path, app)
     note = view.music_silence_note
     assert "Listen" in note.text()
-    window.export_panel.preset_buttons["social"].setChecked(True)
+    window.export_panel.preset_buttons["remux"].setChecked(True)
     for _ in range(20):
         app.processEvents()
-    assert "Social" in note.text()
+    assert "Remux" in note.text()
     assert in_band_view(view, note) == note.height(), (
         "the refusal is below the band's fold")
     # And it did not get there by scrolling the track and Listen rows away.
@@ -2279,7 +2286,7 @@ def test_a_classic_refusal_sits_above_the_lane(
     window.export_panel.preset_buttons["master"].setChecked(True)
     for _ in range(20):
         app.processEvents()
-    assert "Social" not in note.text()
+    assert "Remux" not in note.text()
     window.hide()
 
 
@@ -2312,6 +2319,72 @@ def test_a_refusal_brings_itself_into_the_band_s_view(
         app.processEvents()
     assert "Remux" in note.text()
     assert in_band_view(view, note) == note.height()
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    window.hide()
+
+
+def squeeze_band(view, app, height: int) -> None:
+    """Hold the band's body to `height`, as the rest of the window does when
+    something beside the picture grows."""
+    view.music_body.setMaximumHeight(height)
+    for _ in range(20):
+        app.processEvents()
+    assert view.music_body.viewport().height() == height
+
+
+def test_a_refusal_stays_in_view_when_the_band_is_squeezed_afterwards(
+        window, monkeypatch, tmp_path, app):
+    """N1, measured natively at Classic 1120x760: Remux was revealed at the
+    foot of the band's 54px, then Remux's longer explanation beside the
+    picture squeezed the band to 28px and left the refusal 0 of 16px in
+    view. Reproduced here in that order: reveal first, squeeze after."""
+    _target, view = classic_band(window, monkeypatch, tmp_path, app)
+    note, bar = view.music_silence_note, view.music_body.verticalScrollBar()
+    squeeze_band(view, app, 54)
+    window.export_panel.preset_buttons["remux"].setChecked(True)
+    for _ in range(20):
+        app.processEvents()
+    assert "Remux" in note.text()
+    assert in_band_view(view, note) == note.height(), "not revealed at first"
+    assert bar.value() > 0, "fixture: the reveal had to scroll"
+    squeeze_band(view, app, 28)
+    assert in_band_view(view, note) == note.height(), (
+        "the refusal was left below the squeezed band's fold")
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    window.hide()
+
+
+def test_squeezing_the_band_leaves_the_standing_note_and_scroll_alone(
+        window, monkeypatch, tmp_path, app):
+    _target, view = classic_band(window, monkeypatch, tmp_path, app)
+    note, bar = view.music_silence_note, view.music_body.verticalScrollBar()
+    squeeze_band(view, app, 54)
+    assert "Listen" in note.text()
+    bar.setValue(10)
+    app.processEvents()
+    squeeze_band(view, app, 28)
+    assert bar.value() == 10, "a standing note moved the band on a resize"
+    window.hide()
+
+
+def test_a_person_can_scroll_away_from_a_shown_refusal(
+        window, monkeypatch, tmp_path, app):
+    """Only a resize brings the refusal back; scrolling to the numbers
+    below it is the person's to do and stays done."""
+    from PySide6.QtWidgets import QAbstractSlider
+
+    _target, view = classic_band(window, monkeypatch, tmp_path, app)
+    note, bar = view.music_silence_note, view.music_body.verticalScrollBar()
+    squeeze_band(view, app, 54)
+    window.export_panel.preset_buttons["remux"].setChecked(True)
+    for _ in range(20):
+        app.processEvents()
+    assert in_band_view(view, note) == note.height()
+    bar.triggerAction(QAbstractSlider.SliderAction.SliderToMaximum)
+    for _ in range(20):
+        app.processEvents()
+    assert bar.value() == bar.maximum()
+    assert in_band_view(view, note) == 0, "the person's scroll was undone"
     window.export_panel.preset_buttons["master"].setChecked(True)
     window.hide()
 

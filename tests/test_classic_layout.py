@@ -22,11 +22,12 @@ the result is readable, which is what the screenshots in the PR are for.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QThread, Signal
 
 from flightdvr.widgets import MIN_LIST_HEIGHT
 
@@ -951,7 +952,8 @@ def test_the_list_panel_does_not_answer_height_for_width(qt_app):
         assert_no_threads_left(window)
 
 
-def test_the_window_minimum_counts_the_picture_at_its_floor(qt_app):
+def test_the_window_minimum_counts_the_picture_at_its_floor(qt_app,
+                                                           isolated_controls):
     """A narrower-and-shorter move is not held to the old picture's height."""
     window = many_clips_window(qt_app, BrowserMode.NORMAL, (1460, 1000))
     try:
@@ -1172,7 +1174,8 @@ def test_folding_for_music_sets_the_filter_rows_and_secondary_lines_aside(
         assert_no_threads_left(window)
 
 
-def test_closing_music_or_leaving_classic_brings_the_rows_back(qt_app):
+def test_closing_music_or_leaving_classic_brings_the_rows_back(
+        qt_app, isolated_controls):
     from flightdvr.flow_layout import Mode
     window = many_clips_window(qt_app, BrowserMode.NORMAL, (1120, 760))
     panel, view = window.browser_panel, window.preview_view
@@ -1237,3 +1240,729 @@ def test_unfolding_counts_what_the_fold_set_aside(qt_app):
         view.music_band.setChecked(False)
         window.close()
         assert_no_threads_left(window)
+
+
+# -- The Remux caveat beside the picture gets the height its text needs --------
+
+# The windows below are isolated as the music-wiring ones are, before they
+# exist: settings (conftest), a disposable home for the sessions and the
+# thumbnail and strip caches, a disposable card and output folder, no encoder
+# probe or release check (no_background_work), no scan thread, no strip decode
+# and no thumbnail requests. A window built by hand outside these wrote to the
+# real settings and caches; offscreen is a platform, not a guard.
+
+
+class _NoStrip(QThread):
+    """A FilmstripLoader that decodes nothing (as in test_music_wiring)."""
+
+    ready = Signal(object)
+    activity_ready = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, *args, **kwargs):
+        parent = args[3] if len(args) > 3 else kwargs.get("parent")
+        super().__init__(parent)
+
+    def start(self, *_args) -> None:
+        self.finished.emit()
+
+    def isRunning(self) -> bool:  # noqa: N802 (Qt naming)
+        return False
+
+    def stop(self) -> None:
+        pass
+
+    def wait(self, *_args) -> bool:
+        return True
+
+
+class _NoScan(QObject):
+    """A ScanWorker that starts no thread (as in test_music_wiring)."""
+
+    counted = Signal(int, int)
+    found = Signal(int, object)
+    done = Signal(int, int)
+
+    def __init__(self, tools, folder, recursive, generation, parent=None):
+        super().__init__(parent)
+
+    def start(self) -> None:
+        pass
+
+    def isRunning(self) -> bool:  # noqa: N802 (Qt naming)
+        return False
+
+    def stop(self) -> None:
+        pass
+
+    def wait(self, *_args) -> bool:
+        return True
+
+
+@pytest.fixture
+def isolated_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    return home
+
+
+@pytest.fixture
+def isolated_controls(qt_app, isolated_home, monkeypatch):
+    """The isolation for controls that build their own window through
+    `many_clips_window`, which adds clips straight after construction: so
+    everything, thumbnails included, is in place before the window exists.
+    Settings (conftest), home (isolated_home), no encoder probe or release
+    check (no_background_work), no scan thread, no strip decode, and no
+    thumbnail request, patched on the class because there is no window yet
+    to patch it on.
+
+    It also owns the windows those controls build. The helper constructs the
+    window and then goes on to size, show and fill it before the test's own
+    try/finally begins, so a failure in between left a window nobody closed.
+    Each window is registered the moment its constructor returns, and one the
+    test did not close is closed here, and checked for threads, while every
+    guard above is still in place: this runs before monkeypatch undoes them.
+    """
+    from flightdvr.ui import MainWindow
+
+    monkeypatch.setattr("flightdvr.ui.ScanWorker", _NoScan)
+    monkeypatch.setattr("flightdvr.ui.FilmstripLoader", _NoStrip)
+    monkeypatch.setattr("flightdvr.thumbs.ThumbnailLoader.request",
+                        lambda self, *_a, **_k: None)
+    built = []
+    construct = MainWindow.__init__
+
+    def registered(self, *args, **kwargs):
+        construct(self, *args, **kwargs)
+        built.append(self)
+
+    monkeypatch.setattr(MainWindow, "__init__", registered)
+    try:
+        yield isolated_home
+    finally:
+        # Every window is attempted, whatever an earlier one does; the first
+        # failure is raised once they all have been.
+        failures = []
+        for window in built:
+            try:
+                if not window._closing:
+                    window.close()
+            except Exception as exc:
+                failures.append(exc)
+        qt_app.processEvents()
+        for window in built:
+            try:
+                assert_no_threads_left(window)
+            except AssertionError as exc:
+                failures.append(exc)
+        if failures:
+            raise failures[0]
+
+
+@pytest.fixture
+def isolated_window(qt_app, tmp_path, isolated_home, monkeypatch):
+    """A window whose every write lands under `tmp_path`, closed however the
+    test ends, with the guards still in place until it has."""
+    from dataclasses import replace
+
+    from flightdvr.media import find_tools
+    from flightdvr.ui import MainWindow
+
+    monkeypatch.setattr("flightdvr.ui.ScanWorker", _NoScan)
+    monkeypatch.setattr("flightdvr.ui.FilmstripLoader", _NoStrip)
+    card = tmp_path / "card"
+    card.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+
+    made = MainWindow(find_tools())
+    try:
+        monkeypatch.setattr(made.thumbs, "request", lambda *_: None)
+        monkeypatch.setattr(made.player, "load", lambda *a, **k: None)
+        made.source_combo.insertItem(0, str(card), str(card))
+        made.source_combo.setCurrentIndex(0)
+        made.export_panel.out_edit.setCurrentText(str(out))
+        made.resize(1240, 900)
+        made.show()
+        qt_app.processEvents()
+        for index, name in enumerate(("hdz_001.ts", "hdz_002.ts", "hdz_003.ts")):
+            made._add_clip(made._scan_generation,
+                           replace(a_clip(name, 100.0 + index), path=card / name))
+        qt_app.processEvents()
+        yield made
+    finally:
+        made.close()
+        qt_app.processEvents()
+        assert_no_threads_left(made)
+
+
+
+# -- When the layout work a transition queued has finished ---------------------
+#
+# The caveat has to be readable once the preset change's layout work is done,
+# not at whatever moment a helper happens to return. `settle()` returns when
+# the preview's height repeats, or when its passes run out, and says nothing
+# about the window: measured natively, the caveat was cut at that point and
+# whole at the next recorded one, the window having grown in between.
+#
+# What "done" means here is read off the source, not timed. Everything this
+# window defers, it defers through `QTimer.singleShot(ms, callable)`, and only
+# two modules do it: `flightdvr.ui` (the relayout's five zero-delay calls, the
+# minimum held on every layout request, the picture's fit retried at 40 ms, the
+# list fold at 60, the Music room at 120, the list-place restore at 20) and
+# `flightdvr.preview_panel` (the note that says what stops the music, kept
+# in view). There are no queued
+# connections, posted events, animations or basic timers in the package. One
+# timer object also matters: the selection timer reloads the clip a quarter
+# of a second after a row change.
+#
+# So the tests below count those deferred calls, by standing a counting
+# subclass in for `QTimer` in those two modules (nothing in the product is
+# changed, and a call made in any other form is not queued at all and refuses
+# completion),
+# and the work is finished when all of this holds at once: no counted call is
+# still to run, including any a call queued in its turn; the selection timer
+# is not pending; and Qt's event loop has just reported that it had nothing
+# left to handle. Neither a number of passes nor two equal sizes nor a wait
+# is taken for completion. The watchdog only ever fails.
+#
+# Two things it must never do. A call that raised has run, but it has not done
+# its work: its failure is kept for good, and an empty queue after it attests
+# nothing. And a call still waiting when a test ends, however it ends, must not
+# outlive it: the observer is closed before the window and its guards are let
+# go, and a closed observer runs nothing it was handed and queues nothing new.
+# What it abandoned is recorded as abandoned, never as finished.
+
+
+class LayoutNotComplete(AssertionError):
+    """The queued layout work did not finish; nothing may be asserted of it."""
+
+
+class LayoutWork:
+    """Counts the window's deferred layout calls, from before it is built,
+    and owns them until it is closed."""
+
+    def __init__(self) -> None:
+        from PySide6.QtCore import QTimer
+
+        self.outstanding: dict[int, str] = {}
+        self.scheduled = 0
+        self.untracked: list[str] = []
+        self.failed: list[tuple[str, BaseException]] = []
+        self.abandoned: list[str] = []
+        self.refused: list[str] = []
+        self.closed = False
+        self._calls: dict[int, object] = {}
+        work = self
+
+        class Counted(QTimer):
+            """QTimer, with singleShot(ms, callable) counted and owned."""
+
+            @staticmethod
+            def singleShot(*args):  # noqa: N802 (Qt naming)
+                if work.closed:
+                    work.refused.append(repr(args))
+                    return
+                if len(args) != 2 or not callable(args[1]):
+                    # Not a form this can own, so it is not queued at all.
+                    work.untracked.append(repr(args))
+                    return
+                delay, callback = args
+                token = work.scheduled
+                work.scheduled += 1
+                name = (f"#{token} "
+                        f"{getattr(callback, '__qualname__', type(callback).__name__)}"
+                        f" @{delay}ms")
+                work.outstanding[token] = name
+                work._calls[token] = callback
+                try:
+                    # Qt is handed the token, not the callback: closing the
+                    # observer leaves it nothing to call.
+                    QTimer.singleShot(delay, lambda: work.dispatch(token))
+                except Exception as error:
+                    del work._calls[token], work.outstanding[token]
+                    work.failed.append((f"{name} (could not be queued)", error))
+                    raise
+
+        self.timer = Counted
+
+    def dispatch(self, token: int) -> None:
+        """What Qt calls when a counted call comes due."""
+        callback = self._calls.pop(token, None)
+        if callback is None:
+            return  # abandoned when the observer closed, and recorded there
+        # No longer waiting before it runs, so that whatever it queues in its
+        # turn is counted as waiting after it.
+        name = self.outstanding.pop(token)
+        try:
+            callback()
+        except Exception as error:
+            # Kept here and not left to however Qt reports an error raised
+            # under its event loop: see held().
+            self.failed.append((name, error))
+
+    def close(self) -> None:
+        """Let go of every call still waiting. None of them runs after this,
+        and nothing more is queued."""
+        if self.closed:
+            return
+        self.closed = True
+        self.abandoned = [self.outstanding[token] for token in sorted(self._calls)]
+        self._calls.clear()
+
+    def held(self) -> list[str]:
+        """Why this work can never be shown to have finished. Nothing here is
+        ever cleared."""
+        return ([f"failed: {name}: {error!r}" for name, error in self.failed]
+                + [f"abandoned, never run: {name}" for name in self.abandoned]
+                + [f"made in a form that is not counted, and not queued: {call}"
+                   for call in self.untracked])
+
+    def verdict(self) -> None:
+        held = self.held()
+        if held:
+            raise LayoutNotComplete(
+                f"layout work failed or was abandoned: {held}"
+            ) from (self.failed[0][1] if self.failed else None)
+
+
+@pytest.fixture
+def layout_work(monkeypatch):
+    from flightdvr import ui
+
+    work = LayoutWork()
+    monkeypatch.setattr("flightdvr.ui.QTimer", work.timer)
+    monkeypatch.setattr("flightdvr.preview_panel.QTimer", work.timer)
+
+    # The selection timer is waited for too, and it calls this from Qt.
+    load = ui.MainWindow._load_selected_clip
+
+    def load_recording_failure(window, *args, **kwargs):
+        try:
+            return load(window, *args, **kwargs)
+        except Exception as error:
+            work.failed.append(("the selected clip's load", error))
+            raise
+
+    monkeypatch.setattr(ui.MainWindow, "_load_selected_clip",
+                        load_recording_failure)
+    yield work
+    # Before monkeypatch gives the real home and settings back.
+    work.close()
+
+
+@pytest.fixture
+def spare_work():
+    """An observer of its own for the cases below, which break it on purpose:
+    closed however the test ends, and before the window is."""
+    work = LayoutWork()
+    yield work
+    work.close()
+
+
+@pytest.fixture
+def tracked_window(layout_work, isolated_window):
+    """The isolated window, built after the counting was in place. Its
+    deferred calls are let go of before it is closed, and a test that left
+    any failed or unrun does not pass."""
+    try:
+        # Showing a window queues at least the held minimum; none counted
+        # would mean the window was built before its calls could be seen.
+        assert layout_work.scheduled > 0, (
+            "the window's deferred calls are not counted")
+        yield isolated_window
+    finally:
+        layout_work.close()
+    layout_work.verdict()
+
+
+def complete_layout(qt_app, window, work, watchdog_ms: int = 5000) -> int:
+    """Run the event loop until the queued layout work has finished.
+
+    Returns the passes it took. Raises `LayoutNotComplete`, with what was
+    still waiting, if the watchdog runs out first, and at once, every time,
+    for work that has failed, been abandoned or been closed: it never returns
+    because time has passed, nor because a queue is empty after a failure.
+    """
+    from PySide6.QtCore import QEventLoop
+
+    loop = QEventLoop()
+    deadline = time.monotonic() + watchdog_ms / 1000
+    passes = handled_passes = 0
+    waiting: list[str] = []
+
+    def refuse(why: str):
+        raise LayoutNotComplete(
+            f"{why}: held={work.held()}, closed={work.closed}, "
+            f"waiting={waiting}, passes={passes} of which {handled_passes} "
+            f"handled events, window={window.size()}, "
+            f"minimum={window.minimumHeight()}"
+        ) from (work.failed[0][1] if work.failed else None)
+
+    while True:
+        if work.closed or work.held():
+            refuse("this layout work can not be shown to have finished")
+        try:
+            handled = loop.processEvents(QEventLoop.ProcessEventsFlag.AllEvents)
+        except Exception as error:
+            work.failed.append(("raised out of the event loop", error))
+            continue
+        passes += 1
+        handled_passes += bool(handled)
+        waiting = list(work.outstanding.values())
+        if window._select_timer.isActive():
+            waiting.append("the selection timer (reloads the clip)")
+        if not handled and not waiting and not work.held():
+            return passes
+        if time.monotonic() > deadline:
+            refuse(f"layout work still queued after {watchdog_ms} ms")
+
+
+def test_queued_layout_work_is_never_taken_for_finished(tracked_window,
+                                                       layout_work,
+                                                       spare_work, qt_app):
+    """Work that keeps queueing itself is refused, by name, and accepted only
+    once it has actually stopped."""
+    window = tracked_window
+    complete_layout(qt_app, window, layout_work)
+    stopped = []
+
+    def queues_itself_again():
+        if not stopped:
+            spare_work.timer.singleShot(0, queues_itself_again)
+
+    try:
+        spare_work.timer.singleShot(0, queues_itself_again)
+        with pytest.raises(LayoutNotComplete) as refused:
+            complete_layout(qt_app, window, spare_work, watchdog_ms=250)
+        assert "queues_itself_again" in str(refused.value)
+
+        stopped.append(True)
+        complete_layout(qt_app, window, spare_work)
+        assert spare_work.outstanding == {}
+    finally:
+        stopped.append(True)
+
+
+def test_a_layout_call_that_fails_is_never_taken_for_finished(tracked_window,
+                                                             layout_work,
+                                                             spare_work,
+                                                             qt_app):
+    """A call that raised has left the queue without doing its work. The
+    queue being empty afterwards shows nothing, then or later."""
+    window = tracked_window
+    complete_layout(qt_app, window, layout_work)
+
+    def fails_part_way():
+        raise RuntimeError("the layout call failed")
+
+    spare_work.timer.singleShot(0, fails_part_way)
+    with pytest.raises(LayoutNotComplete) as refused:
+        complete_layout(qt_app, window, spare_work)
+    assert "fails_part_way" in str(refused.value)
+    assert isinstance(refused.value.__cause__, RuntimeError)
+
+    # Nothing is waiting and the event loop is idle: still not finished.
+    assert spare_work.outstanding == {}
+    qt_app.processEvents()
+    with pytest.raises(LayoutNotComplete) as again:
+        complete_layout(qt_app, window, spare_work)
+    assert "fails_part_way" in str(again.value)
+    with pytest.raises(LayoutNotComplete):
+        spare_work.verdict()
+
+
+def test_layout_work_let_go_of_never_runs_and_is_not_finished(tracked_window,
+                                                             layout_work,
+                                                             qt_app):
+    """Calls still waiting when a test gives up, one delayed and one that
+    queues itself again, are recorded as abandoned, run nothing when Qt
+    brings them due, queue nothing more, and are never reported finished."""
+    window = tracked_window
+    complete_layout(qt_app, window, layout_work)
+    own = LayoutWork()
+    ran = []
+
+    def comes_due_late():
+        ran.append("late")
+
+    def queues_itself_again():
+        ran.append("again")
+        own.timer.singleShot(0, queues_itself_again)
+
+    try:
+        own.timer.singleShot(200, comes_due_late)
+        own.timer.singleShot(200, queues_itself_again)
+        with pytest.raises(LayoutNotComplete):
+            complete_layout(qt_app, window, own, watchdog_ms=20)
+    finally:
+        own.close()
+    assert ran == [], "the fixture: a call came due before the watchdog"
+    assert len(own.abandoned) == 2
+    assert "comes_due_late" in own.abandoned[0]
+    assert "queues_itself_again" in own.abandoned[1]
+
+    # What Qt does when each comes due, after the close.
+    own.dispatch(0)
+    own.dispatch(1)
+    assert ran == [] and own.scheduled == 2
+
+    own.timer.singleShot(0, comes_due_late)
+    assert own.scheduled == 2 and len(own.refused) == 1
+    with pytest.raises(LayoutNotComplete):
+        complete_layout(qt_app, window, own)
+    with pytest.raises(LayoutNotComplete):
+        own.verdict()
+
+
+REMUX_KEYFRAME_WARNING = ("Remux cuts at keyframes, so a trimmed rewrap can be "
+                          "a second out. The re-encoding presets are exact.")
+
+
+def test_the_remux_caveat_is_sized_by_its_height_for_width(isolated_window):
+    """dim() sets a fresh size policy, which drops word wrap's
+    height-for-width; the caveat's text is never set again to restore it."""
+    note = isolated_window.export_panel.remux_keyframe_note
+    assert note.wordWrap()
+    assert note.sizePolicy().hasHeightForWidth()
+
+
+def whole_and_inside(label, side, box) -> list[str]:
+    """What is wrong with how `label` is shown, if anything."""
+    from PySide6.QtCore import QPoint, QRect
+
+    problems = []
+    needed = label.heightForWidth(label.width())
+    if label.height() < needed:
+        problems.append(f"{label.height()}px given, {needed} needed at "
+                        f"{label.width()}px")
+    if not side.rect().contains(QRect(label.mapTo(side, QPoint(0, 0)),
+                                      label.size())):
+        problems.append("outside the side column")
+    if not box.contentsRect().contains(QRect(label.mapTo(box, QPoint(0, 0)),
+                                             label.size())):
+        problems.append("outside the preview box")
+    shown = sum(r.width() * r.height() for r in label.visibleRegion())
+    if shown != label.width() * label.height():
+        problems.append(f"{shown} of {label.width() * label.height()} px² shown")
+    return problems
+
+
+def shown_whole(label) -> list[str]:
+    """What is wrong with how `label` is shown, if anything, wherever it is:
+    its own full height for its width, and every pixel of it on screen."""
+    problems = []
+    needed = label.heightForWidth(label.width())
+    if label.height() < needed:
+        problems.append(f"{label.height()}px given, {needed} needed at "
+                        f"{label.width()}px")
+    shown = sum(r.width() * r.height() for r in label.visibleRegion())
+    if shown != label.width() * label.height():
+        problems.append(f"{shown} of {label.width() * label.height()} px² shown")
+    return problems
+
+
+def shown_within_its_viewport(label) -> list[str]:
+    """Offscreen only (see its one use): what is wrong with how `label` is
+    shown, bounded by the viewport of the scroll area it is in. Its own full
+    height for its width, as everywhere; and what is shown of it must be
+    exactly its rectangle cut to that viewport, nothing more and no holes,
+    not empty, and with every row of it (the cut may only be at the sides).
+    This is visibility within the viewport, not the whole text rendered."""
+    from PySide6.QtCore import QPoint, QRect
+    from PySide6.QtGui import QRegion
+    from PySide6.QtWidgets import QScrollArea
+
+    problems = []
+    needed = label.heightForWidth(label.width())
+    if label.height() < needed:
+        problems.append(f"{label.height()}px given, {needed} needed at "
+                        f"{label.width()}px")
+    area = label.parentWidget()
+    while area is not None and not isinstance(area, QScrollArea):
+        area = area.parentWidget()
+    if area is None:
+        return problems + ["not inside a scroll area"]
+    viewport = area.viewport()
+    # All in the label's own coordinates.
+    own = QRect(QPoint(0, 0), label.size())
+    port = QRect(label.mapFrom(viewport, QPoint(0, 0)), viewport.size())
+    expected = own.intersected(port)
+    if expected.isEmpty():
+        problems.append("none of it inside the viewport")
+    elif label.visibleRegion() != QRegion(expected):
+        shown = [[r.x(), r.y(), r.width(), r.height()]
+                 for r in label.visibleRegion()]
+        problems.append(f"shown {shown} is not its rectangle within the viewport "
+                        f"{[expected.x(), expected.y(), expected.width(), expected.height()]}")
+    if expected.top() != 0 or expected.height() != label.height():
+        problems.append(f"rows outside the viewport: {expected.y()}+"
+                        f"{expected.height()} of {label.height()}")
+    return problems
+
+
+def where_shown(label) -> list:
+    """The label and each ancestor up to its window, in window coordinates:
+    its rectangle, its minimum size hint, and the rectangles of it that are
+    visible. Evidence for a failure message; nothing asserts on it."""
+    from PySide6.QtCore import QPoint
+
+    window = label.window()
+    rows, widget = [], label
+    while widget is not None:
+        at = (widget.mapTo(window, QPoint(0, 0)) if widget is not window
+              else QPoint(0, 0))
+        hint = widget.minimumSizeHint()
+        rows.append((type(widget).__name__,
+                     [at.x(), at.y(), widget.width(), widget.height()],
+                     [hint.width(), hint.height()],
+                     [[r.x() + at.x(), r.y() + at.y(), r.width(), r.height()]
+                      for r in widget.visibleRegion()]))
+        if widget is window:
+            break
+        widget = widget.parentWidget()
+    return rows
+
+
+@pytest.mark.parametrize("size", [(1120, 760), (1440, 913)])
+def test_the_remux_caveat_is_shown_whole_with_the_remux_options(
+        tracked_window, layout_work, qt_app, size):
+    """Beside the picture the caveat's four lines raised the picture's floor,
+    and natively at 1120x760 the window grew to 812 to show them. With the
+    Remux options it is shown whole, with all its words, and choosing Remux
+    asks nothing more of the window. The note beside the picture stays whole."""
+    window = tracked_window
+    view = window.preview_view
+    window.resize(*size)
+    window.browser_panel.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    window.export_panel.preset_buttons["social"].click()
+    complete_layout(qt_app, window, layout_work)
+    side, box = view.sidebar, view.preview_box
+    keys, caveat = view.focus_note, window.export_panel.remux_keyframe_note
+    before = (window.minimumHeight(), window.size())
+    assert not caveat.isVisible()
+
+    window.export_panel.preset_buttons["remux"].click()
+    # What the earlier checkpoint saw, kept for the record and not asserted:
+    # `settle()` returning is not a claim that anything has stopped moving.
+    settle(qt_app, window.preview_box)
+    when_settle_returned = shown_whole(caveat)
+    complete_layout(qt_app, window, layout_work)
+    assert caveat.isVisible()
+    assert caveat.text() == REMUX_KEYFRAME_WARNING
+    # On Qt's offscreen platform only, the export column's scroll content can
+    # be wider than its viewport, and it does not scroll sideways: measured
+    # (R-OFFSCREEN-1) at the offscreen window's minimum width, the whole
+    # column was cut on the right, the warning with it, while natively it is
+    # shown whole. So offscreen its visibility is held to the viewport, every
+    # row and nothing missing inside it; everywhere else, and in the native
+    # checks, it must be shown whole. This is not whole-text acceptance.
+    from PySide6.QtWidgets import QApplication
+
+    if QApplication.platformName() == "offscreen":
+        problems = shown_within_its_viewport(caveat)
+    else:
+        problems = shown_whole(caveat)
+    # One string, so that pytest prints all of it rather than a shortened repr.
+    assert problems == [], repr((
+        window.size(), QApplication.platformName(),
+        {"when settle() returned": when_settle_returned,
+         "where shown": where_shown(caveat)}))
+    assert whole_and_inside(keys, side, box) == [], window.size()
+    assert (window.minimumHeight(), window.size()) == before
+
+    # Control: away from Remux the caveat goes, and the note stays whole.
+    window.export_panel.preset_buttons["social"].click()
+    complete_layout(qt_app, window, layout_work)
+    assert not caveat.isVisible()
+    assert whole_and_inside(keys, side, box) == []
+
+
+# -- After Remux, Classic's column still holds the picture ---------------------
+
+
+def remux_at(window, qt_app, work, size):
+    """Classic at `size`, a clip loaded, Remux chosen: its keyframe warning
+    shown with its options, and the layout work each step queued finished."""
+    window.resize(*size)
+    window.browser_panel.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    complete_layout(qt_app, window, work)
+    window.export_panel.preset_buttons["remux"].click()
+    complete_layout(qt_app, window, work)
+
+
+def column_holds_the_picture(window) -> bool:
+    column = window._left_column
+    box = window.preview_view.preview_box
+    return column.height() >= box.geometry().bottom() + 1
+
+
+@pytest.mark.parametrize("size", [(1120, 760), (1440, 913)])
+def test_a_picture_at_its_floor_is_given_the_room_it_needs(tracked_window,
+                                                         layout_work,
+                                                         qt_app, size):
+    """With Remux chosen the picture cannot be shorter than the controls
+    beside it. The column must still hold the whole picture, and the window's
+    contents must have their minimum."""
+    window = tracked_window
+    remux_at(window, qt_app, layout_work, size)
+    assert column_holds_the_picture(window), (
+        window._left_column.height(),
+        window.preview_view.preview_box.geometry().bottom() + 1)
+    central = window.centralWidget()
+    assert central.height() >= central.minimumSizeHint().height()
+
+
+def test_layout_requests_do_not_ratchet_the_window_up(tracked_window,
+                                                     layout_work, qt_app):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+
+    window = tracked_window
+    remux_at(window, qt_app, layout_work, (1120, 760))
+    before = (window.minimumHeight(), window.size())
+    for _ in range(5):
+        QApplication.postEvent(window, QEvent(QEvent.Type.LayoutRequest))
+        complete_layout(qt_app, window, layout_work)
+    assert (window.minimumHeight(), window.size()) == before
+
+
+def test_remux_and_back_ask_nothing_more_of_the_window(
+        tracked_window, layout_work, qt_app):
+    """Social, then Remux, then Social again: the same preset, the same list,
+    the same clip. Beside the picture Remux's caveat raised the minimum,
+    natively from 760 to 812, and the window grew to show it. With the Remux
+    options it asks nothing: the minimum and the size stay what Social had,
+    and going back leaves exactly the state the baseline was taken in."""
+    window = tracked_window
+    presets = window.export_panel.preset_buttons
+    note = window.export_panel.remux_keyframe_note
+
+    def state():
+        return (window.export_panel.preset_key(), window._layout_state.browser,
+                window.browser_panel.table.currentRow(),
+                note.isVisible(), window.width())
+
+    window.resize(1120, 760)
+    window.browser_panel.table.setCurrentCell(0, 0)
+    window._load_selected_clip()
+    presets["social"].click()
+    complete_layout(qt_app, window, layout_work)
+    baseline_state, baseline = state(), window.minimumHeight()
+    size = window.size()
+    assert baseline_state[0] == "social" and not note.isVisible()
+
+    presets["remux"].click()
+    complete_layout(qt_app, window, layout_work)
+    assert note.isVisible()
+    assert (window.minimumHeight(), window.size()) == (baseline, size)
+    assert column_holds_the_picture(window)
+
+    presets["social"].click()
+    complete_layout(qt_app, window, layout_work)
+    assert state() == baseline_state, "not the state the baseline was taken in"
+    assert (window.minimumHeight(), window.size()) == (baseline, size)
+    assert column_holds_the_picture(window)

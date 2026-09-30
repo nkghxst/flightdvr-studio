@@ -299,9 +299,11 @@ def _resolve_configured_audio(
 # The presets a configured music/audio choice is exported and monitored for.
 # All are nominal-1x outputs: their picture may be recropped, rescaled or
 # re-encoded, but output time is source time, so one finished-time sound plan
-# serves them all. Social waits for its size budget (stage B), bundles for
-# per-member submission (stage C); Remux copies streams and Slow has no sound.
-CONFIGURED_AUDIO_PRESETS = frozenset({"master", "edit", "upload", "vertical"})
+# serves them all. Social's size budget counts the track the plan actually
+# gives it (stage B). Bundles wait for per-member submission (stage C); Remux
+# copies streams and Slow has no sound.
+CONFIGURED_AUDIO_PRESETS = frozenset(
+    {"master", "edit", "social", "upload", "vertical"})
 
 
 def resolve_monitor_audio_plan(
