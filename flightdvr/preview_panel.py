@@ -327,13 +327,6 @@ class PreviewView(QObject):
         )
         column.addWidget(keys)
 
-        self.trim_note = dim(QLabel(
-            "Remux cuts at keyframes, so a trimmed rewrap can be a second out. "
-            "The re-encoding presets are exact."
-        ))
-        self.trim_note.hide()
-        column.addWidget(self.trim_note)
-
         return side
 
     def set_source_edits(self, applicable: bool) -> None:

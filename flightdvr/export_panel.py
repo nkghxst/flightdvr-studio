@@ -616,6 +616,21 @@ class ExportPanel(QWidget):
             "Because the video stays HEVC, the free DaVinci Resolve still will "
             "not read it. Use Edit for anything going on a timeline."
         )))
+        # Beside the picture this took four lines of the 190px column, and at
+        # 1120x760 that raised the picture's floor by 52px and the window's
+        # minimum from 760 to 812. Here it has the options' width, and it is
+        # shown and hidden with them.
+        self.remux_keyframe_note = dim(QLabel(
+            "Remux cuts at keyframes, so a trimmed rewrap can be a second out. "
+            "The re-encoding presets are exact."
+        ))
+        # dim() sets a fresh size policy, which drops the height-for-width that
+        # word wrap gives a label, and this text is never set again to bring it
+        # back; without it a layout can size it by its hint and cut a line.
+        policy = self.remux_keyframe_note.sizePolicy()
+        policy.setHeightForWidth(True)
+        self.remux_keyframe_note.setSizePolicy(policy)
+        layout.addWidget(self.remux_keyframe_note)
         layout.addStretch(1)
         return box
 
