@@ -230,6 +230,8 @@ def probes(monkeypatch):
     monkeypatch.setattr("flightdvr.ui.MusicAssetProbe", _FakeProbe,
                         raising=False)
     monkeypatch.setattr("flightdvr.ui.ScanWorker", _NoScan)
+    monkeypatch.setattr("flightdvr.thumbs.ThumbnailLoader.request",
+                        lambda *a, **k: None)
     # Hermetic: these windows start no encoder probe and ask no release API.
     # Both are real work with real threads, neither has any bearing on music
     # wiring, and a probe still running at interpreter exit takes the process
@@ -861,16 +863,9 @@ def test_the_band_starts_collapsed_and_gives_the_picture_its_height_back(
     assert window.music_band.sizeHint().height() > collapsed
 
 
-def test_a_delivery_bundle_refuses_instead_of_dropping_the_music(
+def test_a_delivery_bundle_refuses_a_missing_submitted_track(
         window, monkeypatch, tmp_path, app):
-    """The route the first version missed (#116 review).
-
-    A bundle member is frozen at the name it was agreed under, and
-    `resolve_audio_plan` refuses music for one. Without a check on this path
-    the choice was dropped on the way in and the bundle queued Master with an
-    unconfigured choice, silently — the exact substitution every other route
-    was written to prevent.
-    """
+    """A validated choice cannot authorise a now-missing file (#116/C)."""
     focus(window, 0)
     probe = choose_track(window, monkeypatch, tmp_path / "song.mp3")
     probe.deliver()
@@ -886,11 +881,18 @@ def test_a_delivery_bundle_refuses_instead_of_dropping_the_music(
                         lambda self: QDialog.DialogCode.Rejected)
     tick(window, 0)
     window._add_bundle()
+    from PySide6.QtTest import QTest
+    import time
+    deadline = time.monotonic() + 3
+    while window._bundle_check is not None and time.monotonic() < deadline:
+        QTest.qWait(5)
+        app.processEvents()
+    assert window._bundle_check is None, "the bounded file check never completed"
 
     assert window.jobs == [], "a bundle queued despite music it cannot export"
     assert said, "the bundle dropped the music without saying anything"
     assert "Nothing has been queued" in said[0]
-    assert "bundle" in said[0]
+    assert "song.mp3" in said[0], "the missing-track path was not reached"
 
 
 def test_a_bundle_with_no_music_is_untouched_by_the_new_check(

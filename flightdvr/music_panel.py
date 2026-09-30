@@ -416,9 +416,6 @@ class MusicPanel(QWidget):
         if configured_audio_export_supported(
                 preset_key, joined=joined, bundle=bundle):
             return ""
-        if bundle:
-            return ("Music is not exported for a delivery bundle yet. Each "
-                    "member would need its own choice.")
         # Why, per preset, and what does carry it. The choice itself is kept.
         reasons = {
             "remux": "Remux copies the recording's streams unchanged",

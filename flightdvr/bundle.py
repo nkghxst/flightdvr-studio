@@ -73,6 +73,7 @@ class Piece:
         # A modal confirmation must describe the captured range, not a later
         # edit through the browser's mutable ClipInfo.
         object.__setattr__(self, "clip", deepcopy(self.clip))
+        object.__setattr__(self, "sequence", deepcopy(self.sequence))
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,8 @@ class Member:
         track = f" · {choice.track.name}" if choice.track is not None else ""
         codec = ("PCM s16le · MOV" if self.key == "edit"
                  else "AAC 128k" if self.key == "social" else "AAC 192k")
+        if choice.mode.value == "no_sound":
+            codec += " (no audio stream for No sound)"
         return f"Inherited sound: {mode}{track} · {codec}"
 
     @property
@@ -165,8 +168,15 @@ def plan_member(key: str, pieces: list[Piece], *, joined: bool,
 
     clips = [p.clip for p in pieces]
 
+    if joined and any((p.audio, p.output_target, p.sequence) !=
+                      (pieces[0].audio, pieces[0].output_target,
+                       pieces[0].sequence) for p in pieces[1:]):
+        member.problem = "the Assembly does not have one captured sound binding"
+        return member
+
     if (any(piece.audio.configured for piece in pieces)
-            and not configured_audio_export_supported(key)):
+            and not configured_audio_export_supported(key, joined=joined,
+                                                       bundle=True)):
         member.problem = (
             f"{member.label} cannot carry the configured sound choice. "
             "Deselect this member to deliver the compatible presets.")

@@ -55,7 +55,8 @@ def _describe(member: Member) -> tuple[str, str]:
         shown.append(f"and {len(names) - NAMES_SHOWN} more")
     total = (f"{len(names)} files  ·  " if len(names) > 1 else "")
     total += f"{human_size(member.size)}  ·  {human_duration(member.runtime)}"
-    return "\n".join(shown + [total]), "\n".join(names)
+    sound = [member.sound_label] if member.sound_label else []
+    return "\n".join(shown + sound + [total]), "\n".join(names + sound)
 
 
 class BundleDialog(QDialog):
@@ -111,11 +112,10 @@ class BundleDialog(QDialog):
         line.setContentsMargins(0, 0, 0, 0)
 
         box = QCheckBox(member.label)
-        box.setEnabled(member.usable)
-        # Only a member that can actually be produced starts ticked, so
-        # restoring a remembered selection onto material that cannot take it
-        # offers what is possible instead of an unqueueable dialog.
-        box.setChecked(member.usable and member.key in chosen)
+        # A remembered incompatible selection needs the person's explicit
+        # deselection. Never silently reduce the bundle they asked to deliver.
+        box.setEnabled(member.usable or member.key in chosen)
+        box.setChecked(member.key in chosen)
         box.toggled.connect(lambda *_: self._refresh())
         box.setMinimumWidth(120)
         self._boxes[member.key] = box
@@ -138,7 +138,7 @@ class BundleDialog(QDialog):
     def chosen(self) -> list[str]:
         """The ticked presets, in the order the panel offers them."""
         return [m.key for m in self._members
-                if m.usable and self._boxes[m.key].isChecked()]
+                if self._boxes[m.key].isChecked()]
 
     def selected_members(self) -> list[Member]:
         picked = set(self.chosen())
@@ -153,10 +153,18 @@ class BundleDialog(QDialog):
         which pair caused it.
         """
         members = self.selected_members()
+        invalid = [member for member in members if not member.usable]
+        for member in self._members:
+            self._boxes[member.key].setEnabled(
+                member.usable or self._boxes[member.key].isChecked())
         clashes = collisions(members, self._already)
 
         if not members:
             self.summary.setText("Nothing chosen yet.")
+        elif invalid:
+            self.summary.setText(
+                "Deselect the incompatible members before adding:\n• "
+                + "\n• ".join(f"{m.label}: {m.problem}" for m in invalid))
         elif clashes:
             self.summary.setText(
                 "Nothing can be added yet:\n• " + "\n• ".join(clashes)
@@ -171,4 +179,4 @@ class BundleDialog(QDialog):
                 f"{human_size(size)}  ·  {human_duration(runtime)} of finished "
                 f"video")
 
-        self.add_button.setEnabled(bool(members) and not clashes)
+        self.add_button.setEnabled(bool(members) and not invalid and not clashes)
