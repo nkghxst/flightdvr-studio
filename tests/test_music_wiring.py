@@ -2323,6 +2323,72 @@ def test_a_refusal_brings_itself_into_the_band_s_view(
     window.hide()
 
 
+def squeeze_band(view, app, height: int) -> None:
+    """Hold the band's body to `height`, as the rest of the window does when
+    something beside the picture grows."""
+    view.music_body.setMaximumHeight(height)
+    for _ in range(20):
+        app.processEvents()
+    assert view.music_body.viewport().height() == height
+
+
+def test_a_refusal_stays_in_view_when_the_band_is_squeezed_afterwards(
+        window, monkeypatch, tmp_path, app):
+    """N1, measured natively at Classic 1120x760: Remux was revealed at the
+    foot of the band's 54px, then Remux's longer explanation beside the
+    picture squeezed the band to 28px and left the refusal 0 of 16px in
+    view. Reproduced here in that order: reveal first, squeeze after."""
+    _target, view = classic_band(window, monkeypatch, tmp_path, app)
+    note, bar = view.music_silence_note, view.music_body.verticalScrollBar()
+    squeeze_band(view, app, 54)
+    window.export_panel.preset_buttons["remux"].setChecked(True)
+    for _ in range(20):
+        app.processEvents()
+    assert "Remux" in note.text()
+    assert in_band_view(view, note) == note.height(), "not revealed at first"
+    assert bar.value() > 0, "fixture: the reveal had to scroll"
+    squeeze_band(view, app, 28)
+    assert in_band_view(view, note) == note.height(), (
+        "the refusal was left below the squeezed band's fold")
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    window.hide()
+
+
+def test_squeezing_the_band_leaves_the_standing_note_and_scroll_alone(
+        window, monkeypatch, tmp_path, app):
+    _target, view = classic_band(window, monkeypatch, tmp_path, app)
+    note, bar = view.music_silence_note, view.music_body.verticalScrollBar()
+    squeeze_band(view, app, 54)
+    assert "Listen" in note.text()
+    bar.setValue(10)
+    app.processEvents()
+    squeeze_band(view, app, 28)
+    assert bar.value() == 10, "a standing note moved the band on a resize"
+    window.hide()
+
+
+def test_a_person_can_scroll_away_from_a_shown_refusal(
+        window, monkeypatch, tmp_path, app):
+    """Only a resize brings the refusal back; scrolling to the numbers
+    below it is the person's to do and stays done."""
+    from PySide6.QtWidgets import QAbstractSlider
+
+    _target, view = classic_band(window, monkeypatch, tmp_path, app)
+    note, bar = view.music_silence_note, view.music_body.verticalScrollBar()
+    squeeze_band(view, app, 54)
+    window.export_panel.preset_buttons["remux"].setChecked(True)
+    for _ in range(20):
+        app.processEvents()
+    assert in_band_view(view, note) == note.height()
+    bar.triggerAction(QAbstractSlider.SliderAction.SliderToMaximum)
+    for _ in range(20):
+        app.processEvents()
+    assert bar.value() == bar.maximum()
+    assert in_band_view(view, note) == 0, "the person's scroll was undone"
+    window.export_panel.preset_buttons["master"].setChecked(True)
+    window.hide()
+
+
 def test_a_new_arrangement_of_the_band_starts_at_its_track_and_listen_rows(
         window, monkeypatch, tmp_path, app):
     from flightdvr.music_timeline import Presentation
