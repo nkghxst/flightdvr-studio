@@ -21,7 +21,11 @@ appimage-check the built AppImage itself, on a machine where no system ffmpeg
                the packaged process with that pair and pass. Both are repeated
                with a conflicting ffmpeg/ffprobe pair first on PATH, which must
                be neither selected nor ever run. It also records which of the
-               pair's declared libraries the bundle itself carries.
+               pair's declared libraries the bundle itself carries. Each
+               --check-export runs contained (contained_run): every process it
+               leaves behind is found, proven to be its own, stopped and
+               reaped within a fixed deadline, and anything left, or anything
+               that cannot be proven either way, fails the check.
 
 Each writes <OUT>/<command>.json plus raw logs, prints a summary, and exits 1
 if any requirement fails. Hardware encoders are recorded as telemetry only.
@@ -33,9 +37,13 @@ import hashlib
 import json
 import os
 import re
+import select
 import shutil
+import signal
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -266,6 +274,286 @@ def export_check(folder: Path, out: Path) -> int:
     return ev.finish()
 
 
+# -- containing one --check-export invocation (Linux CI only) ------------------------
+#
+# The diagnostic's own worker handling cannot promise that an ffmpeg it
+# started has gone (it exits 3 when it cannot confirm that). So the helper
+# contains the invocation from outside:
+#
+# - the invocation runs in a new session with a fresh token in its environment,
+#   which everything it starts inherits;
+# - the helper is a child subreaper for the duration, so a descendant whose
+#   parent exits is re-parented to the helper rather than lost to init;
+# - afterwards, every process in that session or newly re-parented to the
+#   helper (and their descendants) is opened as a pidfd *first*, then read from
+#   /proc while the handle is held and confirmed still running. Only a process
+#   carrying this invocation's token is owned. Owned processes are signalled
+#   through their pidfd only (never a numeric PID or a process group), and
+#   reaped by handle only (never waitpid(-1)). Anything relevant that cannot be
+#   proven -- no token, unreadable, exited before it could be read, or a
+#   different start time once the handle is held -- is ambiguous: recorded,
+#   never signalled or reaped, and a failure;
+# - all of that shares one deadline. Output goes to a file, not a pipe, so no
+#   wait for end-of-file can outlast it.
+
+TOKEN_NAME = "FLIGHTDVR_CONTAINMENT_TOKEN"
+INVOCATION_SECONDS = 900
+CLEANUP_SECONDS = 30
+TERM_GRACE_SECONDS = 10
+_PR_SET_CHILD_SUBREAPER = 36
+_PR_GET_CHILD_SUBREAPER = 37
+_UNREADABLE = "<unreadable>"
+
+
+def _subreaper(enable: bool | None = None) -> bool:
+    """Read, or set, this process's child-subreaper flag (Linux prctl)."""
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    if enable is None:
+        value = ctypes.c_int(0)
+        if libc.prctl(_PR_GET_CHILD_SUBREAPER, ctypes.byref(value), 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "PR_GET_CHILD_SUBREAPER failed")
+        return bool(value.value)
+    if libc.prctl(_PR_SET_CHILD_SUBREAPER, int(enable), 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER failed")
+    return enable
+
+
+def _stat(pid: int) -> dict | None:
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    head, _, rest = raw.rpartition(")")
+    fields = rest.split()                # fields[0] is stat field 3 (state)
+    return {"pid": pid, "comm": head.partition("(")[2], "state": fields[0],
+            "ppid": int(fields[1]), "session": int(fields[3]), "start": int(fields[19])}
+
+
+def _all_stats() -> dict[int, dict]:
+    found = {}
+    for entry in os.scandir("/proc"):
+        if entry.name.isdigit():
+            stat = _stat(int(entry.name))
+            if stat is not None:
+                found[stat["pid"]] = stat
+    return found
+
+
+def _token_of(pid: int):
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return _UNREADABLE
+    prefix = TOKEN_NAME.encode() + b"="
+    for item in raw.split(b"\0"):
+        if item.startswith(prefix):
+            return item[len(prefix):].decode(errors="replace")
+    return None
+
+
+def _proc_identity(pid: int) -> dict | None:
+    """What /proc says about `pid`. Only meaningful while a pidfd is held."""
+    stat = _stat(pid)
+    if stat is None:
+        return None
+    stat["token"] = _token_of(pid)
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+        stat["cmdline"] = cmdline.replace(b"\0", b" ").decode(errors="replace").strip()[:200]
+    except OSError:
+        stat["cmdline"] = _UNREADABLE
+    return stat
+
+
+def _exited(fd: int, seconds: float = 0.0) -> bool:
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    return bool(poller.poll(max(0, int(seconds * 1000))))
+
+
+def contained_run(argv: list[str], env: dict, log_path: Path, *,
+                  invocation_seconds: float = INVOCATION_SECONDS,
+                  cleanup_seconds: float = CLEANUP_SECONDS,
+                  term_grace: float = TERM_GRACE_SECONDS,
+                  _signal=None, _read=None) -> dict:
+    """Run `argv` contained, as described above, and return the record."""
+    send = _signal or signal.pidfd_send_signal
+    read = _read or _proc_identity
+    me = os.getpid()
+    token = uuid.uuid4().hex
+    record: dict = {"argv": [str(a) for a in argv], "log": str(log_path),
+                    "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
+                    "exit": None, "timed_out": False, "owned": {}, "ambiguous": [],
+                    "remaining": [], "deadline_hit": False}
+    previous = _subreaper()
+    _subreaper(True)
+    before = {pid: stat["start"] for pid, stat in _all_stats().items() if stat["ppid"] == me}
+    record["helper_children_before"] = sorted(before)
+    handles: dict[int, int] = {}         # owned pid -> its pidfd, until reaped
+    started = time.monotonic()
+    proc = None
+    try:
+        try:
+            with open(log_path, "wb") as log:
+                proc = subprocess.Popen(argv, env=dict(env, **{TOKEN_NAME: token}),
+                                        stdin=subprocess.DEVNULL, stdout=log,
+                                        stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as exc:
+            record["error"] = f"could not start: {type(exc).__name__}: {exc}"
+            return record
+        record["session"] = session = proc.pid
+        try:
+            record["exit"] = proc.wait(timeout=invocation_seconds)
+        except subprocess.TimeoutExpired:
+            record["timed_out"] = True
+        record["invocation_seconds"] = round(time.monotonic() - started, 3)
+
+        deadline = time.monotonic() + cleanup_seconds
+        seen: set[int] = set()
+
+        def ambiguous(pid: int, reason: str, scanned: dict, identity=None) -> None:
+            record["ambiguous"].append({"pid": pid, "reason": reason, "scan": scanned,
+                                        "identity": identity})
+
+        def classify(pid: int, scanned: dict) -> None:
+            try:
+                fd = os.pidfd_open(pid)
+            except ProcessLookupError:
+                ambiguous(pid, "exited before it could be opened", scanned)
+                return
+            identity = read(pid)
+            if identity is None or _exited(fd):
+                os.close(fd)
+                ambiguous(pid, "exited before it could be identified", scanned, identity)
+                return
+            if identity["start"] != scanned["start"]:
+                os.close(fd)
+                ambiguous(pid, "identity changed between the scan and the handle",
+                          scanned, identity)
+                return
+            if identity["token"] != token:
+                os.close(fd)
+                why = {None: "no token", _UNREADABLE: "token unreadable"}.get(
+                    identity["token"], "a different token")
+                ambiguous(pid, why, scanned, identity)
+                return
+            handles[pid] = fd
+            identity = {k: v for k, v in identity.items() if k != "token"}
+            record["owned"][str(pid)] = dict(identity, signals=[], reaped=None)
+
+        def reap(pid: int) -> None:
+            fd = handles[pid]
+            entry = record["owned"][str(pid)]
+            if proc is not None and pid == proc.pid:
+                try:
+                    proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    return                   # the deadline decides
+                entry["reaped"] = "by the helper (its direct child)"
+            else:
+                try:
+                    if os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG) is None:
+                        return               # not yet collectable; next pass
+                    entry["reaped"] = "by the helper, through its pidfd"
+                except ChildProcessError:
+                    # Still the child of an owned process: once that one is
+                    # gone it is re-parented here, so try again next pass.
+                    stat = _stat(pid)
+                    if stat is not None and stat["ppid"] in handles:
+                        return
+                    entry["reaped"] = "not the helper's child; left to its parent"
+            os.close(fd)
+            del handles[pid]
+
+        while time.monotonic() < deadline:
+            stats = _all_stats()
+            relevant = {pid for pid, s in stats.items()
+                        if pid != me and pid not in seen
+                        and (s["session"] == session
+                             or (s["ppid"] == me and before.get(pid) != s["start"])
+                             or s["ppid"] in handles)}
+            for pid in sorted(relevant):
+                seen.add(pid)
+                classify(pid, stats[pid])
+            for pid, fd in list(handles.items()):
+                entry = record["owned"][str(pid)]
+                if _exited(fd):
+                    reap(pid)
+                    continue
+                try:
+                    if not entry["signals"]:
+                        entry["term_at"] = time.monotonic()
+                        entry["signals"].append(["SIGTERM", round(time.monotonic() - started, 3)])
+                        send(fd, signal.SIGTERM)
+                    elif (len(entry["signals"]) == 1
+                          and time.monotonic() - entry["term_at"] >= term_grace):
+                        entry["signals"].append(["SIGKILL", round(time.monotonic() - started, 3)])
+                        send(fd, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass                         # exited meanwhile; reaped next pass
+            if not relevant and not handles:
+                break
+            if handles:
+                poller = select.poll()
+                for fd in handles.values():
+                    poller.register(fd, select.POLLIN)
+                poller.poll(int(max(0.0, min(0.2, deadline - time.monotonic())) * 1000))
+            else:
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        else:
+            record["deadline_hit"] = True
+        if handles:
+            record["deadline_hit"] = True
+        record["remaining"] = sorted(handles)
+        record["cleanup_seconds"] = round(time.monotonic() - started
+                                          - record["invocation_seconds"], 3)
+    finally:
+        for fd in handles.values():
+            os.close(fd)
+        for entry in record["owned"].values():
+            entry.pop("term_at", None)
+        _subreaper(previous)
+    return record
+
+
+def run_check_export(ev: "Evidence", appimage: Path, label: str, run_env: dict,
+                     pin: dict, **containment) -> None:
+    """The app's own probe and exports, inside the packaged process, contained."""
+    parent = ev.out / label
+    parent.mkdir(parents=True, exist_ok=False)
+    run = contained_run([str(appimage), "--check-export", str(parent)], run_env,
+                        ev.out / f"{label}.log", **containment)
+    receipts = sorted(parent.glob("flightdvr-check-export-*/receipt.json"))
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8")) if len(receipts) == 1 else {}
+    ev.record[label] = {"exit": run["exit"], "containment": run,
+                        "receipts": [str(r) for r in receipts], "receipt": receipt}
+    ev.require(f"{label}: --check-export exits 0 in time",
+               run["exit"] == 0 and not run["timed_out"],
+               f"exit {run['exit']}, timed out {run['timed_out']}")
+    ev.require(f"{label}: one receipt, reporting PASS",
+               len(receipts) == 1 and receipt.get("result") == "PASS",
+               f"{len(receipts)} receipts; failures {receipt.get('failures')}")
+    ev.require(f"{label}: ran frozen", receipt.get("app", {}).get("frozen") is True)
+    for tool in ("ffmpeg", "ffprobe"):
+        used = receipt.get("tools", {}).get(tool, {})
+        ev.require(f"{label}: {tool} used was the bundled, pinned copy",
+                   used.get("bundled") is True
+                   and used.get("path", "").endswith(f"/usr/bin/_internal/ffmpeg/{tool}")
+                   and used.get("sha256") == pin["binaries"][tool],
+                   json.dumps(used))
+    for name in ("master", "edit", "remux"):
+        done = receipt.get("exports", {}).get(name, {})
+        ev.require(f"{label}: {name} export done and inspected",
+                   done.get("status") == "Done" and "probe" in done, json.dumps(done)[:300])
+    ev.require(f"{label}: no process of its own outlived it", not run["owned"],
+               json.dumps(run["owned"])[:400])
+    ev.require(f"{label}: no process of uncertain ownership", not run["ambiguous"],
+               json.dumps(run["ambiguous"])[:400])
+    ev.require(f"{label}: nothing of its own remains", not run["remaining"], str(run["remaining"]))
+    ev.require(f"{label}: cleanup finished within {CLEANUP_SECONDS} s", not run["deadline_hit"])
+
+
 def _absent_system_tools() -> dict[str, list[str]]:
     """Every place the app would look for ffmpeg outside its bundle."""
     sys.path.insert(0, str(ROOT))
@@ -346,36 +634,8 @@ def appimage_check(appimage: Path, out: Path) -> int:
                    report.get("ffmpeg_origin", "no origin"))
         return report
 
-    def check_export(label: str, run_env: dict) -> None:
-        """The app's own probe and exports, inside the packaged process."""
-        parent = out / label
-        parent.mkdir(parents=True, exist_ok=False)
-        result = ev.run(label, [str(appimage), "--check-export", str(parent)],
-                        env=run_env, timeout=900)
-        receipts = sorted(parent.glob("flightdvr-check-export-*/receipt.json"))
-        receipt = json.loads(receipts[0].read_text(encoding="utf-8")) if len(receipts) == 1 else {}
-        ev.record[label] = {"exit": result.returncode, "receipts": [str(r) for r in receipts],
-                            "receipt": receipt}
-        ev.require(f"{label}: --check-export exits 0", result.returncode == 0,
-                   f"exit {result.returncode}: {result.stdout[-400:]}")
-        ev.require(f"{label}: one receipt, reporting PASS",
-                   len(receipts) == 1 and receipt.get("result") == "PASS",
-                   f"{len(receipts)} receipts; failures {receipt.get('failures')}")
-        ev.require(f"{label}: ran frozen", receipt.get("app", {}).get("frozen") is True)
-        for tool in ("ffmpeg", "ffprobe"):
-            used = receipt.get("tools", {}).get(tool, {})
-            ev.require(f"{label}: {tool} used was the bundled, pinned copy",
-                       used.get("bundled") is True
-                       and used.get("path", "").endswith(f"/usr/bin/_internal/ffmpeg/{tool}")
-                       and used.get("sha256") == pin["binaries"][tool],
-                       json.dumps(used))
-        for name in ("master", "edit", "remux"):
-            done = receipt.get("exports", {}).get(name, {})
-            ev.require(f"{label}: {name} export done and inspected",
-                       done.get("status") == "Done" and "probe" in done, json.dumps(done)[:300])
-
     check("check-isolated", env)
-    check_export("check-export-isolated", env)
+    run_check_export(ev, appimage, "check-export-isolated", env, pin)
 
     # A conflicting pair first on PATH, which would win if bundled-first broke.
     # Each one leaves a marker if it is ever run, and that fails the check.
@@ -393,7 +653,7 @@ def appimage_check(appimage: Path, out: Path) -> int:
     report = check("check-conflicting-path", conflicting)
     ev.require("check-conflicting-path: decoy not selected",
                all(str(decoy) not in report.get(t, "") for t in ("ffmpeg", "ffprobe")))
-    check_export("check-export-conflicting-path", conflicting)
+    run_check_export(ev, appimage, "check-export-conflicting-path", conflicting, pin)
     ev.record["decoy_was_run"] = marker.exists()
     ev.require("conflicting PATH: decoy never run", not marker.exists(),
                "the conflicting PATH ffmpeg/ffprobe was executed")

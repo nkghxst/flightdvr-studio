@@ -19,8 +19,10 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -425,19 +427,25 @@ def _fake_appimage(tmp_path, monkeypatch, pin, run_decoy: bool):
         if argv[1] == "--check":
             return check_bundle.subprocess.CompletedProcess(
                 argv, 0, f"ffmpeg  {inside}/ffmpeg  (bundled)\nffprobe {inside}/ffprobe\n", "")
-        if argv[1] == "--check-export":
-            child = Path(argv[2]) / "flightdvr-check-export-test"
-            child.mkdir()
-            receipt = {"result": "PASS", "failures": [], "app": {"frozen": True},
-                       "tools": {t: {"bundled": True, "path": f"{inside}/{t}",
-                                     "sha256": pin["binaries"][t]} for t in ("ffmpeg", "ffprobe")},
-                       "exports": {n: {"status": "Done", "probe": {}}
-                                   for n in ("master", "edit", "remux")}}
-            (child / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
-            return check_bundle.subprocess.CompletedProcess(argv, 0, "check-export PASS\n", "")
         raise AssertionError(f"unexpected command {argv}")
 
+    def contained(argv, env, log_path, **_kwargs):
+        first = Path(env.get("PATH", "").split(os.pathsep)[0])
+        if run_decoy and first.name == "decoy":
+            (first.parent / "decoy-was-run").write_text("decoy\n")
+        child = Path(argv[2]) / "flightdvr-check-export-test"
+        child.mkdir()
+        receipt = {"result": "PASS", "failures": [], "app": {"frozen": True},
+                   "tools": {t: {"bundled": True, "path": f"{inside}/{t}",
+                                 "sha256": pin["binaries"][t]} for t in ("ffmpeg", "ffprobe")},
+                   "exports": {n: {"status": "Done", "probe": {}}
+                               for n in ("master", "edit", "remux")}}
+        (child / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+        return {"exit": 0, "timed_out": False, "owned": {}, "ambiguous": [],
+                "remaining": [], "deadline_hit": False}
+
     monkeypatch.setattr(check_bundle.subprocess, "run", run)
+    monkeypatch.setattr(check_bundle, "contained_run", contained)
     monkeypatch.setattr(check_bundle, "load_pin", lambda path=None: pin)
     monkeypatch.setattr(check_bundle, "_machine", lambda ev: None)
     monkeypatch.setattr(check_bundle, "_absent_system_tools", lambda: {})
@@ -462,3 +470,213 @@ def test_appimage_check_fails_if_the_conflicting_pair_is_ever_run(tmp_path, monk
         assert record["failures"] == ["conflicting PATH: decoy never run"]
     else:
         assert code == 0 and record["result"] == "PASS" and record["failures"] == []
+
+
+# -- containment of one --check-export invocation (Linux only) --------------------------------
+#
+# A /bin/sh stand-in takes the AppImage's place and starts only `sleep`, so
+# nothing real is run. Every pid the stand-in starts is written to a pidfile,
+# so the test knows it independently of the helper. Test teardown cleans up
+# only what these tests started, through pidfds validated against the
+# recorded start time, or through the test's own Popen handles.
+
+linux_only = pytest.mark.skipif(not sys.platform.startswith("linux"),
+                                reason="containment uses pidfd, /proc and a subreaper")
+
+
+def _stand_in(tmp_path, body: str) -> list[str]:
+    script = tmp_path / "stand-in.sh"
+    script.write_text("#!/bin/sh\n" + body + "\n")
+    return ["/bin/sh", str(script)]
+
+
+def _pids(pidfile: Path) -> list[int]:
+    return [int(x) for x in pidfile.read_text().split()] if pidfile.exists() else []
+
+
+def _start(pid: int) -> int | None:
+    stat = check_bundle._stat(pid)
+    return None if stat is None or stat["state"] == "Z" else stat["start"]
+
+
+def _still_running(pid: int, start: int) -> bool:
+    return _start(pid) == start
+
+
+def _clean_up(pid: int, start: int) -> None:
+    """Teardown for a process this test started: by validated pidfd only."""
+    import signal as signals
+    try:
+        fd = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return
+    try:
+        if _start(pid) != start:
+            return                         # not the process this test started
+        signals.pidfd_send_signal(fd, signals.SIGKILL)
+        check_bundle._exited(fd, 5)
+        try:
+            os.waitid(os.P_PIDFD, fd, os.WEXITED)
+        except ChildProcessError:
+            pass
+    finally:
+        os.close(fd)
+
+
+def _run(tmp_path, body, **kwargs):
+    pidfile = tmp_path / "pids"
+    env = dict(os.environ, PIDFILE=str(pidfile))
+    began = time.monotonic()
+    record = check_bundle.contained_run(_stand_in(tmp_path, body), env, tmp_path / "log",
+                                        **kwargs)
+    return record, _pids(pidfile), time.monotonic() - began
+
+
+@linux_only
+def test_containment_clean_run(tmp_path):
+    record, _, _ = _run(tmp_path, "exit 0")
+    assert record["exit"] == 0 and not record["timed_out"]
+    assert record["owned"] == {} and record["ambiguous"] == [] and record["remaining"] == []
+    assert not record["deadline_hit"]
+
+
+@linux_only
+def test_containment_unstopped_exit_3_kills_and_reaps_its_descendant(tmp_path):
+    record, (pid,), _ = _run(tmp_path, 'sleep 300 &\necho $! >> "$PIDFILE"\nexit 3')
+    assert record["exit"] == 3
+    entry = record["owned"][str(pid)]
+    assert entry["signals"][0][0] == "SIGTERM"
+    assert entry["reaped"] == "by the helper, through its pidfd"
+    assert record["remaining"] == [] and record["ambiguous"] == []
+    assert not _still_running(pid, entry["start"])
+
+
+@linux_only
+def test_containment_follows_its_token_out_of_the_session(tmp_path):
+    record, (pid,), _ = _run(tmp_path,
+                             'setsid sleep 300 &\necho $! >> "$PIDFILE"\nsleep 1\nexit 1')
+    entry = record["owned"][str(pid)]
+    assert entry["session"] != record["session"]          # it really left
+    assert entry["reaped"] == "by the helper, through its pidfd"
+    assert record["remaining"] == [] and not _still_running(pid, entry["start"])
+
+
+@linux_only
+def test_containment_a_cleared_token_escape_is_ambiguous_and_untouched(tmp_path):
+    record, (pid,), _ = _run(tmp_path,
+                             'env -i setsid sleep 300 &\necho $! >> "$PIDFILE"\nsleep 1\nexit 1')
+    start = _start(pid)
+    try:
+        assert str(pid) not in record["owned"]
+        [found] = [a for a in record["ambiguous"] if a["pid"] == pid]
+        assert found["reason"] == "no token"
+        assert _still_running(pid, found["scan"]["start"])     # never signalled
+    finally:
+        _clean_up(pid, start)
+
+
+@linux_only
+def test_containment_timeout_stops_everything_within_the_deadline(tmp_path):
+    record, (pid,), elapsed = _run(
+        tmp_path, 'sleep 300 &\necho $! >> "$PIDFILE"\nsleep 60',
+        invocation_seconds=2, cleanup_seconds=30, term_grace=2)
+    assert record["timed_out"] and record["exit"] is None
+    assert str(record["session"]) in record["owned"]        # the stand-in itself
+    assert str(pid) in record["owned"]
+    assert record["remaining"] == [] and not record["deadline_hit"]
+    assert elapsed < 2 + 30
+    for entry in record["owned"].values():
+        assert not _still_running(entry["pid"], entry["start"])
+
+
+@linux_only
+def test_containment_without_a_receipt_still_cleans_up_and_fails(tmp_path, monkeypatch):
+    appimage = tmp_path / "FlightDVR_Studio-stand-in.AppImage"
+    appimage.write_text('#!/bin/sh\nsleep 300 &\necho $! >> "$PIDFILE"\nexit 3\n')
+    appimage.chmod(0o755)
+    pidfile = tmp_path / "pids"
+    monkeypatch.setenv("PIDFILE", str(pidfile))
+    ev = check_bundle.Evidence(tmp_path / "out", "receipt-oracle")
+    check_bundle.run_check_export(ev, appimage, "check-export", dict(os.environ),
+                                  _dir_pin(tmp_path))
+    (pid,) = _pids(pidfile)
+    run = ev.record["check-export"]["containment"]
+    assert "check-export: one receipt, reporting PASS" in ev.record["failures"]
+    assert "check-export: --check-export exits 0 in time" in ev.record["failures"]
+    assert "check-export: no process of its own outlived it" in ev.record["failures"]
+    assert run["owned"][str(pid)]["reaped"] == "by the helper, through its pidfd"
+    assert run["remaining"] == []
+    assert "check-export: nothing of its own remains" not in ev.record["failures"]
+
+
+@linux_only
+def test_containment_never_touches_a_process_started_before_it(tmp_path):
+    unrelated = subprocess.Popen(["sleep", "300"])
+    try:
+        record, _, _ = _run(tmp_path, "exit 0")
+        assert unrelated.pid in record["helper_children_before"]
+        assert unrelated.poll() is None                     # neither signalled nor reaped
+        assert str(unrelated.pid) not in record["owned"]
+        assert all(a["pid"] != unrelated.pid for a in record["ambiguous"])
+    finally:
+        unrelated.kill()
+        unrelated.wait()
+
+
+@linux_only
+def test_containment_never_touches_a_helper_child_started_during_it(tmp_path):
+    import threading
+    started: list = []
+    timer = threading.Timer(0.5, lambda: started.append(subprocess.Popen(["sleep", "300"])))
+    timer.start()
+    try:
+        record, _, _ = _run(tmp_path, "sleep 2\nexit 0")
+        timer.join()
+        (unrelated,) = started
+        [found] = [a for a in record["ambiguous"] if a["pid"] == unrelated.pid]
+        assert found["reason"] == "no token"                # ambiguous: the run fails
+        assert unrelated.poll() is None                     # never signalled, never reaped
+        assert str(unrelated.pid) not in record["owned"]
+    finally:
+        timer.join()
+        for proc in started:
+            proc.kill()
+            proc.wait()
+
+
+@linux_only
+def test_containment_owned_survivors_fail_at_the_deadline(tmp_path):
+    sent = []
+    record, (pid,), elapsed = _run(
+        tmp_path, 'sleep 300 &\necho $! >> "$PIDFILE"\nexit 3',
+        cleanup_seconds=2, term_grace=0.5, _signal=lambda fd, sig: sent.append(sig))
+    try:
+        assert record["deadline_hit"] and record["remaining"] == [pid]
+        assert len(sent) == 2                               # TERM, then KILL, both no-ops
+        assert elapsed < 2 + 2
+    finally:
+        _clean_up(pid, record["owned"][str(pid)]["start"])
+
+
+@linux_only
+def test_containment_never_signals_a_process_whose_identity_changed(tmp_path):
+    sent = []
+    pidfile = tmp_path / "pids"
+
+    def read(pid):
+        identity = check_bundle._proc_identity(pid)
+        if identity is not None and pid in _pids(pidfile):
+            identity["start"] += 1                      # as if the pid were reused
+        return identity
+
+    record, (pid,), _ = _run(tmp_path, 'sleep 300 &\necho $! >> "$PIDFILE"\nexit 3',
+                             _signal=lambda fd, sig: sent.append(sig), _read=read)
+    start = _start(pid)
+    try:
+        assert sent == []
+        [found] = [a for a in record["ambiguous"] if a["pid"] == pid]
+        assert found["reason"] == "identity changed between the scan and the handle"
+        assert str(pid) not in record["owned"]
+        assert _still_running(pid, found["scan"]["start"])
+    finally:
+        _clean_up(pid, start)
