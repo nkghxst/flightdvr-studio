@@ -297,3 +297,34 @@ def test_launch_dispatches_before_any_window_exists(monkeypatch, tmp_path):
     assert ui.launch(["--check-export", str(tmp_path)]) == 7
     assert ui.launch(["--check-export"]) == 7
     assert calls == [str(tmp_path), None]
+
+
+def _unwritable(*_args, **_kwargs):
+    raise OSError(28, "No space left on device")
+
+
+def test_a_receipt_that_cannot_be_written_still_holds_a_running_worker_and_leaves(
+        stand_in, monkeypatch):
+    _use_worker(monkeypatch, waits=[False, False])
+    monkeypatch.setattr(package_check, "_write_receipt", _unwritable)
+    reported = []
+
+    def exit_(code):
+        reported.append(list(package_check._UNSTOPPED))
+        raise _Exited(code)
+
+    with pytest.raises(_Exited) as left:
+        package_check.check_export(str(stand_in), export_seconds=0.001, _exit=exit_)
+    assert left.value.code == package_check.UNSTOPPED_EXIT
+    assert reported == [[_StandInWorker.made[0]]]      # held when the process leaves
+    assert not list(stand_in.glob("flightdvr-check-export-*/receipt.json"))
+
+
+def test_a_receipt_that_cannot_be_written_fails_the_check(stand_in, monkeypatch):
+    _use_worker(monkeypatch, waits=[True])
+    monkeypatch.setattr(package_check, "_write_receipt", _unwritable)
+    report, code = package_check.check_export(str(stand_in), _exit=_never_export)
+    assert code == 1
+    assert report.startswith("check-export FAIL\nreceipt NOT WRITTEN in ")
+    assert "the receipt could not be written: OSError" in report
+    assert package_check._UNSTOPPED == []

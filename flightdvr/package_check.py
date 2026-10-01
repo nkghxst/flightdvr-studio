@@ -114,9 +114,11 @@ def check_export(argument: str | None, export_seconds: float = EXPORT_SECONDS,
     The export worker belongs to this function from the moment it starts:
     whatever happens inside, timeout or exception, it is settled here before
     the receipt is written. A worker that cannot be confirmed stopped is
-    recorded as such, kept referenced, and the process exits with
-    UNSTOPPED_EXIT straight after the receipt and report are out, rather than
-    returning into code that would release a running thread.
+    recorded as such and kept referenced before anything else is attempted,
+    and the process exits with UNSTOPPED_EXIT once the receipt and report have
+    been tried, rather than returning into code that would release a running
+    thread. A receipt that cannot be written makes the result FAIL; it is
+    reported, never raised.
     """
     if not argument:
         return "--check-export needs a folder to write into.", 2
@@ -145,19 +147,28 @@ def check_export(argument: str | None, export_seconds: float = EXPORT_SECONDS,
         except Exception:                # noqa: BLE001 — recorded, never raised
             fail("could not settle the export worker:\n" + traceback.format_exc())
             stopped = False
+        if not stopped:
+            # Held before anything else can fail, so no later error, the
+            # receipt write included, can unwind past a running worker.
+            _UNSTOPPED.append(owned["worker"])
         if not receipt["failures"]:
             receipt["result"] = "PASS"
         receipt["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        path = _write_receipt(child, receipt)
+        try:
+            where = str(_write_receipt(child, receipt))
+        except Exception as exc:         # noqa: BLE001 — reported, never raised
+            # A check whose receipt is not on disk has not passed.
+            receipt["result"] = "FAIL"
+            fail(f"the receipt could not be written: {type(exc).__name__}: {exc}")
+            where = f"NOT WRITTEN in {child}"
 
-    lines = [f"check-export {receipt['result']}", f"receipt {path}"]
+    lines = [f"check-export {receipt['result']}", f"receipt {where}"]
     lines += [f"  {line}" for message in receipt["failures"] for line in message.splitlines()]
     report = "\n".join(lines)
     if not stopped:
-        _UNSTOPPED.append(owned["worker"])
         try:
             print(report, flush=True)
-        except (AttributeError, OSError, ValueError):
+        except Exception:                # noqa: BLE001 — leaving regardless
             pass
         _exit(UNSTOPPED_EXIT)
     return report, 0 if receipt["result"] == "PASS" else 1
