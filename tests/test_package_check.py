@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -94,7 +95,17 @@ def test_a_system_ffmpeg_fails_closed_before_anything_runs(tmp_path, monkeypatch
 
 @pytest.fixture
 def as_bundled(tools, monkeypatch):
-    """The ffmpeg on PATH, treated as the bundled copy a packaged build has."""
+    """The ffmpeg on PATH, treated as the bundled copy a packaged build has.
+
+    The check's Master export is the Rec.709 conversion, which needs zscale.
+    The pinned Linux and Windows builds have it (CI records that for Linux);
+    Homebrew's ffmpeg does not, so there is nothing to prove with it here.
+    """
+    filters = subprocess.run([str(tools.ffmpeg), "-hide_banner", "-filters"],
+                             capture_output=True, text=True, timeout=20)
+    assert filters.returncode == 0, filters.stderr
+    if not any(line.split()[1:2] == ["zscale"] for line in filters.stdout.splitlines()):
+        pytest.skip("the check's Rec.709 export needs this ffmpeg's zscale filter")
     monkeypatch.setattr(media, "find_tools", lambda: tools)
     monkeypatch.setattr(media, "is_bundled", lambda _path: True)
     return tools
