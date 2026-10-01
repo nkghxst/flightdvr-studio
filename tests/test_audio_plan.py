@@ -126,7 +126,7 @@ def test_plan_identity_changes_with_timing_or_content_but_is_stable_for_a_copy()
 
 @pytest.mark.parametrize("preset,joined,bundle", [
     ("remux", False, False), ("slowmo", False, False),
-    ("master", False, True), ("master", True, True),
+    ("remux", False, True), ("slowmo", True, True),
 ])
 def test_unsupported_music_contexts_fail_instead_of_dropping_the_track(
         preset, joined, bundle):
@@ -207,11 +207,11 @@ def test_monitor_plan_does_not_create_a_nonmaster_or_legacy_audio_path():
 @pytest.mark.parametrize("joined", [False, True])
 def test_social_carries_a_configured_choice_like_every_nominal_preset(joined):
     """Stage B: Social's size budget counts the track, so Social is
-    supported alongside Master, Edit, Upload and Vertical. Bundles, Remux
-    and Slow stay refused."""
+    supported alongside Master, Edit, Upload and Vertical, including frozen
+    compatible bundle members. Remux and Slow stay refused."""
     assert configured_audio_export_supported("social", joined=joined)
-    assert not configured_audio_export_supported("social", joined=joined,
-                                                 bundle=True)
+    assert configured_audio_export_supported("social", joined=joined,
+                                             bundle=True)
     plan = resolve_audio_plan(music(), OUTPUT_RATE, source_has_audio=False,
                               preset_key="social", joined=joined)
     assert plan.mode.value == "replace"

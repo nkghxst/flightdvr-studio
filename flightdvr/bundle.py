@@ -33,9 +33,12 @@ good and are not deleted to simulate a rollback.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from copy import deepcopy
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from .audio_plan import MusicChoice, configured_audio_export_supported
+from .output_plan import OutputTarget
 from .format import (
     BadTemplate, UnknownTemplateField, check_stem, check_template,
     expand_template, export_fields, output_key,
@@ -62,6 +65,15 @@ class Piece:
     clip: ClipInfo
     index: int = 0
     total: int = 1
+    audio: MusicChoice = MusicChoice()
+    output_target: OutputTarget | None = None
+    sequence: object | None = None
+
+    def __post_init__(self) -> None:
+        # A modal confirmation must describe the captured range, not a later
+        # edit through the browser's mutable ClipInfo.
+        object.__setattr__(self, "clip", deepcopy(self.clip))
+        object.__setattr__(self, "sequence", deepcopy(self.sequence))
 
 
 @dataclass(frozen=True)
@@ -71,6 +83,13 @@ class PlannedJob:
     clips: list[ClipInfo]
     stem: str
     target: Path
+    audio: MusicChoice = MusicChoice()
+    output_target: OutputTarget | None = None
+    sequence: object | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "clips", deepcopy(self.clips))
+        object.__setattr__(self, "sequence", deepcopy(self.sequence))
 
 
 @dataclass
@@ -88,6 +107,24 @@ class Member:
     problem: str = ""
     size: int = 0
     runtime: float = 0.0
+    settings: ExportSettings | None = None
+
+    @property
+    def sound_label(self) -> str:
+        """The inherited decision and this member's existing audio codec."""
+        choices = {job.audio for job in self.jobs}
+        if not choices or not any(choice.configured for choice in choices):
+            return ""
+        if len(choices) != 1:
+            return "Each output keeps its own sound choice"
+        choice = next(iter(choices))
+        mode = choice.mode.value.replace("_", " ").capitalize()
+        track = f" · {choice.track.name}" if choice.track is not None else ""
+        codec = ("PCM s16le · MOV" if self.key == "edit"
+                 else "AAC 128k" if self.key == "social" else "AAC 192k")
+        if choice.mode.value == "no_sound":
+            codec += " (no audio stream for No sound)"
+        return f"Inherited sound: {mode}{track} · {codec}"
 
     @property
     def label(self) -> str:
@@ -124,12 +161,26 @@ def plan_member(key: str, pieces: list[Piece], *, joined: bool,
     reason: a pilot choosing Vertical should hear about a narrow source now,
     not after the queue has reached the front of it.
     """
-    member = Member(key)
+    member = Member(key, settings=frozen_settings(settings))
     if not pieces:
         member.problem = "there is nothing to export"
         return member
 
     clips = [p.clip for p in pieces]
+
+    if joined and any((p.audio, p.output_target, p.sequence) !=
+                      (pieces[0].audio, pieces[0].output_target,
+                       pieces[0].sequence) for p in pieces[1:]):
+        member.problem = "the Assembly does not have one captured sound binding"
+        return member
+
+    if (any(piece.audio.configured for piece in pieces)
+            and not configured_audio_export_supported(key, joined=joined,
+                                                       bundle=True)):
+        member.problem = (
+            f"{member.label} cannot carry the configured sound choice. "
+            "Deselect this member to deliver the compatible presets.")
+        return member
 
     if key == "vertical":
         problems = vertical_problems(_recordings(pieces))
@@ -163,7 +214,9 @@ def plan_member(key: str, pieces: list[Piece], *, joined: bool,
             check_stem(stem)
             member.jobs = [PlannedJob(
                 list(clips), stem,
-                templated_output_path(out_dir, stem, key, subfolders))]
+                templated_output_path(out_dir, stem, key, subfolders),
+                pieces[0].audio, pieces[0].output_target,
+                pieces[0].sequence)]
         else:
             planned: list[PlannedJob] = []
             for piece in pieces:
@@ -174,7 +227,8 @@ def plan_member(key: str, pieces: list[Piece], *, joined: bool,
                 check_stem(stem)
                 planned.append(PlannedJob(
                     [piece.clip], stem,
-                    templated_output_path(out_dir, stem, key, subfolders)))
+                    templated_output_path(out_dir, stem, key, subfolders),
+                    piece.audio, piece.output_target, piece.sequence))
             member.jobs = planned
     except (UnknownTemplateField, BadTemplate) as exc:
         member.problem = str(exc)
@@ -264,4 +318,4 @@ def frozen_settings(settings: ExportSettings) -> ExportSettings:
     an export is a promise about the settings that were on screen when it was
     confirmed.
     """
-    return replace(settings)
+    return deepcopy(settings)

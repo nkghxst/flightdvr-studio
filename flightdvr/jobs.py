@@ -40,7 +40,7 @@ from .media import (
 from .audio_plan import MusicChoice, OUTPUT_RATE, resolve_audio_plan, round_samples
 from .format import DEFAULT_TEMPLATE
 from .output_naming import NamingInputs, ResolvedOutput, resolve_output
-from .output_plan import OutputTarget
+from .output_plan import OutputTarget, target_for_piece
 from .presets import (
     PRESETS, ExportSettings, build_commands, join_problems, output_runtime,
     slow_problems, vertical_problems,
@@ -490,6 +490,11 @@ class ExportWorker(QThread):
                             "disagree")
                     output_samples = job.sequence.total_samples
                 else:
+                    if job.frozen and (job.target is None
+                                       or job.target.is_assembly
+                                       or target_for_piece(job.clips[0]) != job.target):
+                        raise ValueError(
+                            "configured bundle member needs its captured source target")
                     output_samples = round_samples(
                         job.total_duration * OUTPUT_RATE)
                 audio_plan = resolve_audio_plan(

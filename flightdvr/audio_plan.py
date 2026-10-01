@@ -334,11 +334,13 @@ def configured_audio_export_supported(
 ) -> bool:
     """Whether one configured choice can be rendered by this output route.
 
-    Ordinary and joined outputs alike, on the nominal-1x presets above. Keep
+    Ordinary, joined and frozen bundle members alike, on nominal-1x presets.
+    A bundle inherits one captured choice; it is not a different sound recipe.
+    Keep
     this decision shared with the panel, the monitor and the worker so the
     controls and the export authority cannot drift into a silent drop.
     """
-    return preset_key in CONFIGURED_AUDIO_PRESETS and not bundle
+    return preset_key in CONFIGURED_AUDIO_PRESETS
 
 
 def resolve_audio_plan(

@@ -35,7 +35,7 @@ from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import (
-    QEvent, QPoint, QRect, QRectF, QSettings, Qt, QThread, QTimer, Signal,
+    QEvent, QPoint, QRect, QRectF, QSettings, Qt, QThread, QTimer, Signal, Slot,
 )
 from PySide6.QtGui import (
     QAction, QActionGroup, QColor, QIcon, QImage, QKeySequence, QPainter,
@@ -319,6 +319,37 @@ def submitted_lines(job) -> list[str]:
     lines.append(f"Status: {status}")
     return lines
 
+class _BundleTrackCheck(QThread):
+    """Only hash already-validated assets; never decode or hash on the UI."""
+
+    result = Signal(int, str)
+
+    def __init__(self, assets, generation: int, parent=None):
+        super().__init__(parent)
+        self.assets = tuple(assets)
+        self.generation = generation
+
+    def stop(self) -> None:
+        self.requestInterruption()
+
+    def run(self) -> None:
+        problem = ""
+        try:
+            for asset in self.assets:
+                digest = hashlib.sha256()
+                with asset.track.open("rb") as source:
+                    while chunk := source.read(1024 * 1024):
+                        if self.isInterruptionRequested():
+                            return
+                        digest.update(chunk)
+                if digest.hexdigest() != asset.sha256:
+                    raise ValueError(f"{asset.track.name}: the music file changed")
+        except (OSError, ValueError) as exc:
+            problem = str(exc)
+        if not self.isInterruptionRequested():
+            self.result.emit(self.generation, problem)
+
+
 class MainWindow(QMainWindow):
     # A closing window cannot parent a QThread that is still reaping a probe
     # child. These parentless references live exactly until `finished`.
@@ -394,6 +425,9 @@ class MainWindow(QMainWindow):
         # success must reach the target it was started for and no other.
         self._music_generation = 0
         self._music_probe: MusicAssetProbe | None = None
+        self._bundle_check: _BundleTrackCheck | None = None
+        self._bundle_request = None
+        self._bundle_generation = 0
         self._music_probe_target: OutputTarget | None = None
         self._music_probe_track: Path | None = None
         # What each target's acquisition is doing. A target is never left
@@ -1714,6 +1748,7 @@ class MainWindow(QMainWindow):
             editor.cancel_gesture()
         self._stop_music_probe()
         self._stop_pending_checks()
+        self._stop_bundle_check()
         self._session_generation += 1
         self._pending_music.clear()
         self._music_reading.clear()
@@ -5110,6 +5145,7 @@ class MainWindow(QMainWindow):
         self._stop_music_probe()
         self._stop_envelope_probe()
         self._stop_pending_checks()
+        self._stop_bundle_check()
         # First, because it is the one holding a decoder open on the card.
         self.player.shutdown()
         self._flight_scan_ready = False
@@ -7495,170 +7531,242 @@ class MainWindow(QMainWindow):
     # -- delivery bundles -----------------------------------------------------
 
     def _bundle_material(self) -> tuple[list[Piece], bool, str]:
-        """The material a bundle would deliver, or why there is none.
+        """Capture Flow's selected output, or Classic's per-target legacy batch."""
+        selected = self._sidebar_target if self._view_mode is Mode.FLOW else None
+        if self._view_mode is Mode.FLOW:
+            output = next((one for one in self._working_outputs()
+                           if one.target == selected), None)
+            if output is None:
+                return [], False, "Choose one current working output first."
+            joined = output.joined
+        else:
+            joined = self.export_panel.join_enabled()
 
-        Deliberately the same decision `_add_to_queue` makes, rather than a
-        second way of choosing what gets exported: the assembly is the job when
-        there is one, and the ticked ranges are the job when there is not. A
-        bundle that picked its material differently would quietly produce files
-        that do not match the ones the ordinary button makes from the same
-        screen — and the whole promise of the confirmation is that what it
-        lists is what arrives.
-
-        The index and total travel with each piece because `export_fields`
-        needs them per recording. Flattening first and numbering afterwards
-        would number every range on the card in one sequence, which is not what
-        the single-preset path writes.
-        """
-        if self.export_panel.join_enabled():
-            pieces, gaps = self._assembly_export_pieces()
+        if joined:
+            clips, gaps = self._assembly_export_pieces()
             if gaps:
-                listed = "\n".join(f"• {a}" for a in gaps)
                 return [], True, (
                     "The assembly refers to material that is not here:\n\n"
-                    f"{listed}\n\n"
-                    "Remove those rows, or rescan the card if the footage "
-                    "should still be there.")
-            if len(pieces) < 2:
+                    + "\n".join(f"• {gap}" for gap in gaps)
+                    + "\n\nRemove those rows, or rescan the card.")
+            if len(clips) < 2:
                 return [], True, (
-                    "An assembly needs at least two ranges to be worth "
-                    "joining. Use Add to queue for a single range.")
-            return [Piece(piece) for piece in pieces], True, ""
+                    "An assembly needs at least two ranges. "
+                    "Use Add to queue for a single range.")
+            try:
+                target, audio, sequence = self._assembly_audio_snapshot(clips)
+            except ValueError as problem:
+                return [], True, str(problem)
+            if selected is not None and target != selected:
+                return [], True, "The selected Assembly changed."
+            return [Piece(clip, audio=audio, output_target=target,
+                          sequence=sequence) for clip in clips], True, ""
 
-        clips = self.selected_clips()
-        if not clips:
-            return [], False, "Tick at least one clip first."
         grouped: list[Piece] = []
-        for clip in clips:
+        for clip in self.selected_clips():
             parts = clip.for_export()
-            for index, piece in enumerate(parts):
-                grouped.append(Piece(piece, index, len(parts)))
+            for index, part in enumerate(parts):
+                target = self._music_target_for(part)
+                if selected is not None and target != selected:
+                    continue
+                grouped.append(Piece(
+                    part, index, len(parts), self._music_for(part), target))
+        if not grouped:
+            return [], False, ("Choose one current working output first."
+                               if self._view_mode is Mode.FLOW
+                               else "Tick at least one clip first.")
         return grouped, False, ""
 
-    def _add_bundle(self) -> None:
-        """Show what several presets would write, then queue the chosen ones.
-
-        Every job is planned, named and sized before the first one is appended,
-        and the queue is mutated in one pass afterwards. Appending as each
-        member is confirmed would leave a half-added bundle behind the first
-        refusal, which is the failure the confirmation exists to prevent.
-        """
+    def _capture_bundle_action(self) -> dict:
+        """Values compared again, never silently rebuilt after confirmation."""
         pieces, joined, problem = self._bundle_material()
         if problem:
-            QMessageBox.warning(self, "Nothing to deliver", problem)
-            return
-
-        # Before the confirmation, never mind the queue. A bundle member is
-        # frozen at the name it was agreed under, and music is not exported
-        # for one — so a configured choice has to refuse here rather than be
-        # dropped on the way past.
-        refusal = self._music_refusal(pieces, joined=joined, bundle=True)
+            raise ValueError(problem)
+        # Per-member capability is shown in the dialog, not inferred from the
+        # focused radio button. Here check only acquisition/binding validity.
+        refusal = self._music_refusal(
+            pieces, joined=joined, bundle=True, preset_for=lambda _piece: "master")
         if refusal:
+            raise ValueError(refusal)
+        text = self.export_panel.output_text().strip()
+        if not text:
+            raise ValueError("Choose where the exports should go.")
+        return dict(
+            pieces=tuple(pieces), joined=joined,
+            settings=frozen_settings(self.current_settings()),
+            out_dir=Path(text), template=self.export_panel.template(),
+            subfolders=self.export_panel.subfolders_enabled(),
+            stamp=self.flight_date(), session_name=self.session.title if self.session else "",
+            session_generation=self._session_generation, mode=self._view_mode,
+            selected=self._sidebar_target if self._view_mode is Mode.FLOW else None,
+            sequence_revision=self._sequence_revision)
+
+    def _bundle_action_current(self, action: dict, generation: int) -> bool:
+        if self._closing or generation != self._bundle_generation:
+            return False
+        try:
+            return action == self._capture_bundle_action()
+        except (ValueError, OSError):
+            return False
+
+    def _bundle_already(self) -> set[str]:
+        return {output_key(job.out_path) for job in self.jobs
+                if job.status in (JobStatus.PENDING, JobStatus.RUNNING)}
+
+    def _stop_bundle_check(self) -> None:
+        self._bundle_generation += 1
+        check, self._bundle_check = self._bundle_check, None
+        self._bundle_request = None
+        if check is not None:
+            if check.isRunning():
+                self._retain_probe_thread(check)
+            check.stop()
+
+    def _bundle_preflight(self, action: dict, generation: int, ready) -> None:
+        """Both before and after the modal; callback authority is action-bound."""
+        if not self._bundle_action_current(action, generation):
+            if not self._closing:
+                QMessageBox.warning(
+                    self, "This bundle changed",
+                    "Nothing has been queued. Reopen the bundle for the current output.")
+            return
+        assets = tuple(dict.fromkeys(piece.audio.asset for piece in action["pieces"]
+                                     if piece.audio.asset is not None))
+        if not assets:
+            ready()
+            return
+        check = _BundleTrackCheck(assets, generation, self)
+        self._bundle_check = check
+        self._bundle_request = (check, action, generation, ready)
+        # A QObject slot has this window's thread affinity. Never let a plain
+        # Python worker callback run a modal dialog or mutate the queue.
+        check.result.connect(self._bundle_checked)
+        check.start()
+        self.statusBar().showMessage("Checking the bundle's captured music file…")
+
+    @Slot(int, str)
+    def _bundle_checked(self, received: int, problem: str) -> None:
+        request = self._bundle_request
+        if request is None:
+            return
+        check, action, generation, ready = request
+        if (self._bundle_check is not check or self.sender() is not check
+                or received != generation or received != self._bundle_generation
+                or self._closing):
+            return
+        self._bundle_check = None
+        self._bundle_request = None
+        if check.isRunning():
+            self._retain_probe_thread(check)
+        if problem:
+            QMessageBox.warning(self, "This bundle cannot use its music",
+                                "Nothing has been queued.\n\n" + problem)
+        elif not self._bundle_action_current(action, generation):
             QMessageBox.warning(
-                self, "That music cannot be exported yet",
-                "Nothing has been queued.\n\n" + refusal,
-            )
+                self, "This bundle changed",
+                "Nothing has been queued. Reopen the bundle for the current output.")
+        else:
+            ready()
+
+    def _add_bundle(self) -> None:
+        """Freeze before confirmation; stage everything before one queue append."""
+        self._stop_bundle_check()
+        generation = self._bundle_generation
+        try:
+            action = self._capture_bundle_action()
+        except (ValueError, OSError) as problem:
+            QMessageBox.warning(self, "Nothing to deliver",
+                                "Nothing has been queued.\n\n" + str(problem))
             return
-
-        out_dir = Path(self.export_panel.output_text().strip())
-        if not str(out_dir).strip():
-            QMessageBox.warning(self, "No output folder",
-                                "Choose where the exports should go.")
-            return
-
-        settings = self.current_settings()
-        subfolders = self.export_panel.subfolders_enabled()
-        already = {
-            output_key(j.out_path) for j in self.jobs
-            if j.status in (JobStatus.PENDING, JobStatus.RUNNING)
-        }
-
         members = plan_bundle(
-            PRESET_ORDER, pieces,
-            joined=joined,
-            out_dir=out_dir,
-            template=self.export_panel.template(),
-            subfolders=subfolders,
-            stamp=self.flight_date(),
-            session_name=self.session.title if self.session else "",
-            settings=settings,
-        )
+            PRESET_ORDER, list(action["pieces"]), joined=action["joined"],
+            out_dir=action["out_dir"], template=action["template"],
+            subfolders=action["subfolders"], stamp=action["stamp"],
+            session_name=action["session_name"], settings=action["settings"])
+        self._bundle_preflight(
+            action, generation,
+            lambda: self._confirm_bundle(action, members, generation))
 
-        dialog = BundleDialog(members, already, self.export_panel.bundle(), self)
+    def _confirm_bundle(self, action: dict, members, generation: int) -> None:
+        dialog = BundleDialog(members, self._bundle_already(),
+                              self.export_panel.bundle(), self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         chosen = dialog.selected_members()
         if not chosen:
             return
+        if (any(not member.usable or not any(member is m for m in members)
+                for member in chosen)
+                or len({member.key for member in chosen}) != len(chosen)):
+            QMessageBox.warning(self, "This bundle cannot be queued",
+                                "Nothing has been queued. Deselect incompatible members.")
+            return
+        self._bundle_preflight(
+            action, generation,
+            lambda: self._commit_bundle(action, chosen, generation))
 
-        # Asked again against the queue as it is at this moment. The dialog is
-        # modal to this window, but a job can finish while it is open, and the
-        # check that matters is the one immediately before the mutation.
-        clashes = bundle_collisions(chosen, already)
+    def _commit_bundle(self, action: dict, chosen, generation: int) -> None:
+        if not self._bundle_action_current(action, generation):
+            return
+        clashes = bundle_collisions(chosen, self._bundle_already())
         if clashes:
-            listed = "\n".join(f"• {c}" for c in clashes)
-            QMessageBox.warning(
-                self, "This bundle cannot be queued",
-                f"Nothing has been queued:\n\n{listed}")
+            QMessageBox.warning(self, "This bundle cannot be queued",
+                                "Nothing has been queued:\n\n"
+                                + "\n".join(f"• {clash}" for clash in clashes))
             return
 
-        # Staged entirely outside the queue first. Sol's finding: building the
-        # concat lists inside the loop that appends meant a second member whose
-        # list could not be written left the first one already in `self.jobs` —
-        # neither the one action that was promised nor a refusal, and the queue
-        # not even redrawn to show what had happened. Nothing reaches the window
-        # until every selected member is ready.
         staged: list[Job] = []
-        written: list[Path] = []
+        owned_root = None
+        staging_parent = None
         try:
+            if action["joined"]:
+                staging_parent = work_dir().resolve()
+                owned_root = Path(tempfile.mkdtemp(
+                    prefix="bundle-", dir=staging_parent)).resolve()
+                if owned_root.parent != staging_parent:
+                    raise OSError("bundle staging escaped its owned parent")
             for member in chosen:
-                # One snapshot per member, so changing the panel afterwards
-                # cannot reach a job that was confirmed under what it showed.
-                # A bundle crosses presets, so each member is captured
-                # separately. Jobs no longer share a settings object in any
-                # path: `Job.__post_init__` deep-copies what it is given (#83),
-                # which is what protects the nested values music will add —
-                # `frozen_settings` is a shallow `replace()` and would not.
-                captured = frozen_settings(settings)
                 for planned in member.jobs:
                     concat = None
-                    if joined:
+                    if action["joined"]:
                         concat = write_concat_file(
-                            planned.clips, work_dir(),
-                            f"{planned.stem}_{_clip_set_id(planned.clips)}")
-                        written.append(concat)
+                            planned.clips, owned_root, planned.stem)
+                        if not concat.resolve().is_relative_to(owned_root):
+                            raise OSError("concat descriptor escaped bundle staging")
                     staged.append(Job(
-                        list(planned.clips), member.key, captured,
-                        planned.target, concat_file=concat, out_dir=out_dir,
-                        stem=planned.stem, subfolders=subfolders, frozen=True))
-        except OSError as exc:
-            # The lists already written belong to an action that is not
-            # happening, so they are taken back where they can be. A failure to
-            # remove one is not worth a second message: the work directory is
-            # temporary, and the queue is what had to be left alone.
-            for path in written:
+                        list(planned.clips), member.key,
+                        frozen_settings(member.settings),
+                        planned.target, concat_file=concat,
+                        audio=planned.audio, target=planned.output_target,
+                        sequence=planned.sequence, out_dir=action["out_dir"],
+                        stem=planned.stem, subfolders=action["subfolders"], frozen=True))
+            if not self._bundle_action_current(action, generation):
+                raise ValueError("the captured bundle action changed during preparation")
+            clashes = bundle_collisions(chosen, self._bundle_already())
+            if clashes:
+                raise ValueError("; ".join(clashes))
+        except Exception as problem:
+            cleanup = ""
+            # The unique mkdtemp child is the whole cleanup authority. Never
+            # unlink shared deterministic concat names or caller-supplied paths.
+            if (owned_root is not None and staging_parent is not None
+                    and owned_root.parent == staging_parent
+                    and owned_root.name.startswith("bundle-")):
                 try:
-                    path.unlink()
-                except OSError:
-                    pass
-            QMessageBox.warning(
-                self, "This bundle could not be prepared",
-                f"Nothing has been queued.\n\n{exc}")
+                    shutil.rmtree(owned_root)
+                except OSError as error:
+                    cleanup = f"\nOwned staging retained because cleanup failed: {error}"
+            QMessageBox.warning(self, "This bundle could not be prepared",
+                                "Nothing has been queued.\n\n" + str(problem) + cleanup)
             return
 
-        before = len(self.jobs)
         self.jobs.extend(staged)
-
-        # Remembered beside the single preset rather than instead of it, so the
-        # radio button the card was being worked with is still there next time.
-        self.export_panel.set_bundle([m.key for m in chosen])
+        self.export_panel.set_bundle([member.key for member in chosen])
         self._touch_session()
-
         self._rebuild_queue()
-        added = len(self.jobs) - before
-        names = ", ".join(m.label for m in chosen)
+        names = ", ".join(member.label for member in chosen)
         self.statusBar().showMessage(
-            f"{added} queued as a bundle: {names}", 6000)
+            f"{len(staged)} queued as a bundle: {names}", 6000)
 
     def _assembly_rows(self):
         """The assembly resolved against every clip on the card.

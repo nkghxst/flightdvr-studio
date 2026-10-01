@@ -278,10 +278,10 @@ def test_levels_stay_exact_fractions(panel):
 
 
 @pytest.mark.parametrize("context,fragment", [
-    (dict(bundle=True), "delivery bundle"),
+    (dict(preset_key="remux", bundle=True), "Remux copies"),
     (dict(preset_key="remux"), "Remux copies"),
     (dict(preset_key="slowmo"), "Slow motion has no sound"),
-])
+], ids=["bundle-remux", "ordinary-remux", "ordinary-slow"])
 def test_an_unsupported_context_is_shown_and_locked(panel, context, fragment):
     """The same refusals the resolver makes, said before the commit rather
     than at it."""
@@ -345,16 +345,14 @@ def test_a_non_master_assembly_audition_stays_refused(panel):
     assert "Preview only" not in panel.unsupported_label.text()
 
 
-def test_a_bundle_audition_stays_refused(panel):
-    """A preview flag cannot unlock a delivery bundle's export controls."""
+def test_a_compatible_bundle_member_inherits_editable_sound(panel):
+    """A bundle uses the same captured nominal-preset sound contract."""
     panel.load(MusicChoice(mode=AudioMode.NO_SOUND), target="Bundle",
                joined=True, bundle=True, audition=True)
 
-    assert not panel.mode_combo.isEnabled()
+    assert panel.mode_combo.isEnabled()
     assert not panel.music_level.isEnabled()
-    assert not panel.unsupported_label.isHidden()
-    assert "delivery bundle" in panel.unsupported_label.text()
-    assert "Preview only" not in panel.unsupported_label.text()
+    assert panel.unsupported_label.isHidden()
 
 
 def test_the_panel_refuses_the_same_contexts_the_resolver_does(panel):
@@ -369,7 +367,7 @@ def test_the_panel_refuses_the_same_contexts_the_resolver_does(panel):
     assert joined_plan.mode is AudioMode.REPLACE
     assert joined_plan.output.samples == OUTPUT_RATE
 
-    for context in (dict(bundle=True), dict(preset_key="remux")):
+    for context in (dict(preset_key="remux", bundle=True), dict(preset_key="remux")):
         with pytest.raises(ValueError):
             resolve_audio_plan(choice, OUTPUT_RATE, source_has_audio=True,
                                preset_key=context.get("preset_key", "master"),

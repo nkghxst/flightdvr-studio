@@ -80,6 +80,66 @@ def _context(tmp_path, **overrides):
 # -- planning, without a window -------------------------------------------------
 
 
+def test_bundle_planning_captures_material_settings_and_inherited_sound(tmp_path):
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from flightdvr.bundle import Piece, plan_bundle
+    from flightdvr.output_plan import OutputTarget
+    from flightdvr.presets import ExportSettings
+
+    clip = _clip(tmp_path, "selected-b.ts", [(12, 18, "passage")])
+    target = OutputTarget.clip_or_range(clip.fingerprint, clip.selects[0].sid)
+    choice = MusicChoice(mode=AudioMode.ORIGINAL)
+    settings = ExportSettings()
+    settings.social_size_mb = 8
+    pieces = [Piece(clip.for_export()[0], audio=choice, output_target=target)]
+    members = plan_bundle(["edit", "social", "vertical"], pieces,
+                          **_context(tmp_path, settings=settings))
+    assert len(members) == 3
+    assert all(member.usable and len(member.jobs) == 1 for member in members)
+    clip.selects[0].start = 1
+    settings.social_size_mb = 99
+    for member in members:
+        planned = member.jobs[0]
+        assert planned.audio == choice
+        assert planned.output_target == target
+        assert planned.clips[0].trim_in == 12
+        assert member.settings.social_size_mb == 8
+    labels = {member.key: member.sound_label for member in members}
+    assert "PCM s16le · MOV" in labels["edit"]
+    assert "AAC 128k" in labels["social"]
+    assert "AAC 192k" in labels["vertical"]
+
+
+@pytest.mark.parametrize("key", ["remux", "slowmo"])
+def test_configured_bundle_member_is_explicitly_incompatible(tmp_path, key):
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from flightdvr.bundle import Piece, plan_bundle
+
+    clip = _clip(tmp_path, "selected.ts")
+    member, = plan_bundle([key], [Piece(
+        clip, audio=MusicChoice(mode=AudioMode.NO_SOUND))], **_context(tmp_path))
+    assert not member.usable
+    assert member.jobs == []
+    assert "Deselect" in member.problem
+    assert "configured sound" in member.problem
+
+
+def test_legacy_bundle_pieces_do_not_inherit_a_focused_choice(tmp_path):
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from flightdvr.bundle import Piece, plan_bundle
+
+    a = _clip(tmp_path, "a.ts")
+    b = _clip(tmp_path, "b.ts")
+    members = plan_bundle(["master"], [
+        Piece(a, audio=MusicChoice(mode=AudioMode.ORIGINAL)),
+        Piece(b, audio=MusicChoice(mode=AudioMode.NO_SOUND)),
+    ], **_context(tmp_path))
+    assert len(members) == 1 and len(members[0].jobs) == 2
+    assert [job.audio.mode for job in members[0].jobs] == [
+        AudioMode.ORIGINAL, AudioMode.NO_SOUND]
+    assert members[0].sound_label == "Each output keeps its own sound choice"
+
+
 def test_a_source_too_narrow_to_crop_disables_vertical_rather_than_queueing_it(tmp_path):
     """A member the app already knows would fail must not reach the queue.
 
@@ -282,11 +342,16 @@ def test_a_refused_member_cannot_be_ticked_and_says_why(qt_app, tmp_path):
 
     dialog = BundleDialog(members, set(), ["master", "vertical"], None)
     try:
-        assert not dialog._boxes["vertical"].isEnabled()
-        assert not dialog._boxes["vertical"].isChecked(), (
-            "a remembered selection ticked a member that cannot be delivered")
+        assert dialog._boxes["vertical"].isEnabled()
+        assert dialog._boxes["vertical"].isChecked()
+        assert not dialog.add_button.isEnabled()
+        assert "Deselect" in dialog.summary.text()
         assert dialog._boxes["master"].isChecked()
+        assert "vertical" in dialog.chosen()
+        dialog._boxes["vertical"].setChecked(False)
+        assert not dialog._boxes["vertical"].isEnabled()
         assert "vertical" not in dialog.chosen()
+        assert dialog.add_button.isEnabled()
     finally:
         dialog.deleteLater()
 
@@ -331,8 +396,26 @@ def test_every_row_is_tab_reachable_and_answers_space(qt_app, tmp_path):
 # -- through the window ---------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def window(qt_app):
+@pytest.fixture
+def window(qt_app, tmp_path, monkeypatch):
+    # Disposable through close, before MainWindow's original constructor.
+    # These inert stand-ins are shared with the already guarded wiring tests.
+    from test_music_wiring import _NoProbe, _NoScan, _NoStrip
+    from PySide6.QtCore import QSettings
+    import flightdvr.ui as ui
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(ui, "HardwareProbe", _NoProbe)
+    monkeypatch.setattr(ui, "ScanWorker", _NoScan)
+    monkeypatch.setattr(ui, "FilmstripLoader", _NoStrip)
+    monkeypatch.setattr("flightdvr.updates.should_check", lambda *a, **k: False)
+    monkeypatch.setattr("flightdvr.thumbs.ThumbnailLoader.request",
+                        lambda *a, **k: None)
+
+    def disposable_settings(*_args, **_kwargs):
+        return QSettings(str(tmp_path / "bundle.ini"), QSettings.Format.IniFormat)
+
+    monkeypatch.setattr(ui, "QSettings", disposable_settings)
     from flightdvr.media import ToolsMissing, find_tools
     from flightdvr.ui import MainWindow
 
@@ -343,6 +426,10 @@ def window(qt_app):
     made = MainWindow(tools)
     yield made
     made.close()
+    qt_app.processEvents()
+    from PySide6.QtCore import QThread
+    assert not [t for t in made.findChildren(QThread) if t.isRunning()]
+    assert not type(made)._retired_probe_threads
 
 
 @pytest.fixture
@@ -638,7 +725,7 @@ def test_a_concat_list_that_cannot_be_written_leaves_the_queue_untouched(
         prepared.append(stem)
         if len(prepared) > 1:
             raise OSError("synthetic second concat preparation failure")
-        written = tmp_path / f"{stem}.txt"
+        written = work / f"{stem}.txt"
         written.write_text("first member", encoding="utf-8")
         return written
 
@@ -666,7 +753,377 @@ def test_a_concat_list_that_cannot_be_written_leaves_the_queue_untouched(
         "the concat list of the abandoned action was left behind")
 
 
+# -- selected-output / captured-action regressions ------------------------------
+
+
+def _flow_bundle(window, bench, *, choice=None):
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from flightdvr.flow_layout import Mode
+    from flightdvr.output_plan import OutputTarget
+    from flightdvr.presets import ExportSettings
+    targets = [OutputTarget.clip_or_range(c.fingerprint, c.real_selects[0].sid)
+               for c in bench]
+    window.output_plan.set_choices(targets[0], "master", ExportSettings(),
+                                   MusicChoice(mode=AudioMode.NO_SOUND))
+    window.output_plan.set_choices(targets[1], "master", ExportSettings(),
+                                   choice or MusicChoice(mode=AudioMode.ORIGINAL))
+    window._view_mode = Mode.FLOW
+    window._sidebar_target = targets[1]
+    window._trim_clip = bench[0]  # Source A deliberately differs from output B.
+    window.export_panel.template_edit.setText("{clip}_{preset}")
+    return targets
+
+
+def _settle_bundle(window, qt_app):
+    from PySide6.QtTest import QTest
+    import time
+    deadline = time.monotonic() + 3
+    while (window._bundle_check is not None
+           or type(window)._retired_probe_threads) and time.monotonic() < deadline:
+        qt_app.processEvents()
+        QTest.qWait(5)
+    assert window._bundle_check is None, "bundle file check did not settle"
+    assert not type(window)._retired_probe_threads, "bundle hash worker survived"
+
+
+def _bundle_track(tmp_path):
+    import hashlib
+    from flightdvr.audio_plan import AudioAsset, AudioMode, MusicChoice, SampleSpan
+    track = tmp_path / "bundle-song.wav"
+    track.write_bytes(b"owned synthetic asset identity; not media acceptance")
+    asset = AudioAsset(track, hashlib.sha256(track.read_bytes()).hexdigest(),
+                       0, 48000, 2, 48000 * 10)
+    return MusicChoice(mode=AudioMode.REPLACE, asset=asset,
+                       passage=SampleSpan(48000, 48000 * 7, 48000))
+
+
+def test_flow_bundle_uses_selected_b_not_source_a_or_batch(
+        window, bench, monkeypatch):
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from flightdvr.presets import ExportSettings
+    targets = _flow_bundle(window, bench)
+    settings = ExportSettings(social_size_mb=8)
+    monkeypatch.setattr(window, "current_settings", lambda: settings)
+    _accept(monkeypatch, ["edit", "social", "vertical"])
+    window._add_bundle()
+    assert len(window.jobs) == 3
+    assert [job.out_path.name for job in window.jobs] == [
+        "hdz_048_edit.mov", "hdz_048_social.mp4", "hdz_048_vertical.mp4"]
+    assert all(job.target == targets[1] and job.frozen for job in window.jobs)
+    assert all(job.audio.mode is AudioMode.ORIGINAL for job in window.jobs)
+    assert all([c.path for c in job.clips] == [bench[1].path] for job in window.jobs)
+    settings.social_size_mb = 99
+    bench[1].selects[0].start = 2
+    window.output_plan.set_choices(targets[1], "master", settings,
+                                   MusicChoice(mode=AudioMode.NO_SOUND))
+    assert all(job.settings.social_size_mb == 8 for job in window.jobs)
+    assert all(job.clips[0].trim_in == 0 for job in window.jobs)
+    assert all(job.audio.mode is AudioMode.ORIGINAL for job in window.jobs)
+    assert window.output_plan.get(targets[0]).music.mode is AudioMode.NO_SOUND
+
+
+def test_classic_bundle_keeps_each_targets_own_sound(window, bench, monkeypatch):
+    from flightdvr.audio_plan import AudioMode
+    from flightdvr.flow_layout import Mode
+    targets = _flow_bundle(window, bench)
+    window._view_mode = Mode.CLASSIC
+    _accept(monkeypatch, ["edit"])
+    window._add_bundle()
+    assert len(window.jobs) == 2
+    assert [(job.target, job.audio.mode) for job in window.jobs] == [
+        (targets[0], AudioMode.NO_SOUND), (targets[1], AudioMode.ORIGINAL)]
+
+
+def _assembly_bundle(window, bench, monkeypatch, tmp_path):
+    from flightdvr.assembly import Item, resolve
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from flightdvr.flow_layout import Mode
+    from flightdvr.output_plan import working_outputs
+    from flightdvr.presets import ExportSettings
+    from flightdvr.sequence_plan import Resolution, compile_sequence
+    a, b = [Item(c.fingerprint, c.real_selects[0].sid) for c in bench]
+    window.export_panel.assembly_panel.show_rows(resolve([a, b, a], bench))
+    clips, gaps = window._assembly_export_pieces()
+    assert not gaps and [c.path for c in clips] == [bench[0].path, bench[1].path,
+                                                  bench[0].path]
+    output = working_outputs(clips, joined=True)[0]
+    sequence = compile_sequence(output, resolution=Resolution.success(), revision="bundles-c-aba")
+    window._view_mode = Mode.FLOW
+    window._sidebar_target = window._assembly_music_target = output.target
+    window._sequence_target, window._sequence_plan = output.target, sequence
+    window.output_plan.set_choices(output.target, "master", ExportSettings(),
+                                   MusicChoice(mode=AudioMode.ORIGINAL))
+    window.export_panel.template_edit.setText("{clip}_{preset}")
+    # Assembly membership, not browser ticks, is the authority.
+    monkeypatch.setattr(type(window), "selected_clips", lambda self: [])
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    monkeypatch.setattr("flightdvr.ui.work_dir", lambda: staging)
+    return output.target, sequence, staging
+
+
+def test_flow_bundle_preserves_unticked_repeated_assembly_order(
+        window, bench, monkeypatch, tmp_path):
+    target, sequence, staging = _assembly_bundle(window, bench, monkeypatch, tmp_path)
+    _accept(monkeypatch, ["edit", "social", "vertical"])
+    window._add_bundle()
+    assert len(window.jobs) == 3
+    assert [job.out_path.name for job in window.jobs] == [
+        "hdz_047_joined_edit.mov", "hdz_047_joined_social.mp4", "hdz_047_joined_vertical.mp4"]
+    assert all(job.target == target and job.sequence == sequence for job in window.jobs)
+    assert all([c.path for c in job.clips] == [bench[0].path, bench[1].path,
+                                              bench[0].path] for job in window.jobs)
+    assert len({job.concat_file for job in window.jobs}) == 3
+    assert all(job.concat_file.is_relative_to(staging) for job in window.jobs)
+
+
+@pytest.mark.parametrize("change", ["target", "range", "choice", "settings", "revision"])
+def test_bundle_rejects_action_changes_during_confirmation(
+        window, bench, monkeypatch, change):
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from PySide6.QtWidgets import QDialog
+    import flightdvr.ui as ui
+    targets = _flow_bundle(window, bench)
+    before_bundle = window.export_panel.bundle()
+    warnings, touches = [], []
+    monkeypatch.setattr(ui.QMessageBox, "warning", lambda *args: warnings.append(args[2]))
+    monkeypatch.setattr(window, "_touch_session", lambda: touches.append(1))
+
+    def confirm(dialog):
+        dialog._boxes["edit"].setChecked(True)
+        if change == "target":
+            window._sidebar_target = targets[0]
+        elif change == "range":
+            bench[1].selects[0].start = 1
+        elif change == "choice":
+            old = window.output_plan.get(targets[1])
+            window.output_plan.set_choices(targets[1], old.preset_key, old.settings,
+                                           MusicChoice(mode=AudioMode.NO_SOUND))
+        elif change == "settings":
+            window.export_panel.template_edit.setText("changed_{clip}_{preset}")
+        else:
+            window._sequence_revision += 1
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ui.BundleDialog, "exec", confirm)
+    window._add_bundle()
+    assert window.jobs == [] and touches == []
+    assert window.export_panel.bundle() == before_bundle
+    assert warnings and "Reopen" in warnings[0], "stale-action refusal was not reached"
+
+
+def test_bundle_rechecks_queue_added_during_confirmation(window, bench, monkeypatch):
+    from flightdvr.jobs import Job
+    from flightdvr.presets import ExportSettings
+    from PySide6.QtWidgets import QDialog
+    import flightdvr.ui as ui
+    _flow_bundle(window, bench)
+    warnings = []
+    sentinel = []
+
+    def confirm(dialog):
+        dialog._boxes["edit"].setChecked(True)
+        planned = next(m for m in dialog._members if m.key == "edit").jobs[0]
+        sentinel.append(Job([bench[0]], "edit", ExportSettings(), planned.target))
+        window.jobs.append(sentinel[0])
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ui.BundleDialog, "exec", confirm)
+    monkeypatch.setattr(ui.QMessageBox, "warning", lambda *a: warnings.append(a[2]))
+    window._add_bundle()
+    assert window.jobs == sentinel
+    assert warnings and "already in the queue" in warnings[0]
+
+
+@pytest.mark.parametrize("fault", ["missing", "changed", "changed_in_modal"])
+def test_bundle_validates_track_before_and_after_confirmation(
+        window, bench, monkeypatch, tmp_path, qt_app, fault):
+    from PySide6.QtWidgets import QDialog
+    import flightdvr.ui as ui
+    choice = _bundle_track(tmp_path)
+    _flow_bundle(window, bench, choice=choice)
+    warnings, opened, touches = [], [], []
+    monkeypatch.setattr(ui.QMessageBox, "warning", lambda *a: warnings.append(a[2]))
+    monkeypatch.setattr(window, "_touch_session", lambda: touches.append(1))
+
+    def confirm(dialog):
+        opened.append(1)
+        dialog._boxes["edit"].setChecked(True)
+        if fault == "changed_in_modal":
+            choice.track.write_bytes(b"changed during confirmation")
+        return QDialog.DialogCode.Accepted
+
+    if fault == "missing":
+        choice.track.unlink()
+    elif fault == "changed":
+        choice.track.write_bytes(b"different current bytes")
+    monkeypatch.setattr(ui.BundleDialog, "exec", confirm)
+    window._add_bundle()
+    _settle_bundle(window, qt_app)
+    assert window.jobs == [] and touches == [] and window.export_panel.bundle() == []
+    assert len(opened) == (1 if fault == "changed_in_modal" else 0)
+    assert warnings and "bundle-song.wav" in warnings[0]
+
+
+def test_bundle_hash_results_cannot_authorise_a_changed_action(
+        window, bench, monkeypatch, tmp_path, qt_app):
+    import flightdvr.ui as ui
+    from PySide6.QtWidgets import QDialog, QApplication
+    from PySide6.QtCore import QThread
+    choice = _bundle_track(tmp_path)
+    targets = _flow_bundle(window, bench, choice=choice)
+    opened, warnings = [], []
+    monkeypatch.setattr(ui.QMessageBox, "warning", lambda *a: warnings.append(a[2]))
+    monkeypatch.setattr(ui.BundleDialog, "exec",
+                        lambda d: (opened.append(1), QDialog.DialogCode.Rejected)[1])
+    window._add_bundle()
+    assert window._bundle_check is not None
+    window._sidebar_target = targets[0]  # Before processing queued completion.
+    _settle_bundle(window, qt_app)
+    assert window.jobs == [] and opened == []
+    assert warnings and "Reopen" in warnings[0]
+    assert QThread.currentThread() == QApplication.instance().thread()
+
+
+@pytest.mark.parametrize("mode", ["replace", "mix"])
+def test_bundle_carries_validated_track_through_both_hash_checks(
+        window, bench, monkeypatch, tmp_path, qt_app, mode):
+    from dataclasses import replace
+    from flightdvr.audio_plan import AudioMode
+    from PySide6.QtCore import QThread
+    from PySide6.QtWidgets import QDialog
+    import flightdvr.ui as ui
+    choice = replace(_bundle_track(tmp_path), mode=AudioMode(mode))
+    targets = _flow_bundle(window, bench, choice=choice)
+    checked, opened, warnings = [], [], []
+    original = ui._BundleTrackCheck.run
+
+    def run_hash(worker):
+        checked.append(QThread.currentThread() != qt_app.thread())
+        return original(worker)
+
+    def confirm(dialog):
+        # This is the modal itself, not a caller-thread assertion afterwards.
+        assert QThread.currentThread() == qt_app.thread()
+        opened.append(1)
+        for key in ("edit", "social", "vertical"):
+            dialog._boxes[key].setChecked(True)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ui._BundleTrackCheck, "run", run_hash)
+    monkeypatch.setattr(ui.BundleDialog, "exec", confirm)
+    monkeypatch.setattr(ui.QMessageBox, "warning", lambda *a: warnings.append(a[2]))
+    window._add_bundle()
+    _settle_bundle(window, qt_app)
+    assert checked == [True, True] and opened == [1] and warnings == []
+    assert len(window.jobs) == 3
+    assert all(job.target == targets[1] and job.audio == choice for job in window.jobs)
+
+
+@pytest.mark.parametrize("key", ["remux", "slowmo", "vertical"])
+def test_selected_incompatible_bundle_member_needs_explicit_deselection(
+        window, bench, monkeypatch, key):
+    from PySide6.QtWidgets import QDialog
+    import flightdvr.ui as ui
+    _flow_bundle(window, bench)
+    if key == "vertical":
+        bench[1].width = 320
+    remembered = ["edit", key]
+    window.export_panel.set_bundle(remembered)
+    opened, touches = [], []
+
+    def cancel(dialog):
+        opened.append(1)
+        assert dialog._boxes[key].isChecked() and dialog._boxes[key].isEnabled()
+        assert not dialog.add_button.isEnabled()
+        assert "Deselect" in dialog.summary.text()
+        dialog._boxes[key].setChecked(False)
+        assert not dialog._boxes[key].isEnabled()
+        assert dialog.add_button.isEnabled()
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(ui.BundleDialog, "exec", cancel)
+    monkeypatch.setattr(window, "_touch_session", lambda: touches.append(1))
+    window._add_bundle()
+    window._add_bundle()  # Cancellation did not overwrite the remembered choice.
+    assert len(opened) == 2
+    assert window.jobs == [] and touches == []
+    assert window.export_panel.bundle() == remembered
+
+
+def test_bundle_second_member_failure_removes_only_owned_staging(
+        window, bench, monkeypatch, tmp_path):
+    import flightdvr.ui as ui
+    from flightdvr.jobs import Job
+    from flightdvr.presets import ExportSettings
+    _target, _sequence, staging = _assembly_bundle(window, bench, monkeypatch, tmp_path)
+    shared = staging / "unrelated-queued-concat.txt"
+    shared.write_text("preserve these queued descriptors", encoding="utf-8")
+    sentinel = Job([bench[0]], "master", ExportSettings(), tmp_path / "sentinel.mp4",
+                   concat_file=shared)
+    window.jobs.append(sentinel)
+    prepared, warnings, touches = [], [], []
+    original = ui.write_concat_file
+
+    def fail_second(clips, directory, stem):
+        prepared.append(directory)
+        if len(prepared) == 2:
+            raise OSError("named second-member staging failure")
+        return original(clips, directory, stem)
+
+    monkeypatch.setattr(ui, "write_concat_file", fail_second)
+    monkeypatch.setattr(ui.QMessageBox, "warning", lambda *a: warnings.append(a[2]))
+    monkeypatch.setattr(window, "_touch_session", lambda: touches.append(1))
+    _accept(monkeypatch, ["edit", "social", "vertical"])
+    window._add_bundle()
+    assert len(prepared) == 2, "the second member was not reached"
+    assert window.jobs == [sentinel] and touches == []
+    assert shared.read_text() == "preserve these queued descriptors"
+    assert list(staging.iterdir()) == [shared]
+    assert warnings and "named second-member staging failure" in warnings[0]
+
+
 # -- through real ffmpeg --------------------------------------------------------
+
+
+@pytest.mark.parametrize("target_kind", ["missing", "other", "assembly"])
+def test_worker_refuses_a_configured_bundle_without_its_exact_target(
+        tmp_path, qt_app, target_kind):
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from flightdvr.jobs import ExportWorker, Job
+    from flightdvr.output_plan import OutputTarget, target_for_piece
+    from flightdvr.presets import ExportSettings
+    clip = _clip(tmp_path, "submitted.ts", [(0, 4, "")])
+    target = target_for_piece(clip)
+    if target_kind == "missing":
+        target = None
+    elif target_kind == "other":
+        target = OutputTarget.clip_or_range("different-source")
+    else:
+        target = OutputTarget.assembly(target.items)
+    out = tmp_path / "must-not-exist.mov"
+    job = Job([clip], "edit", ExportSettings(), out,
+              audio=MusicChoice(mode=AudioMode.ORIGINAL), target=target, frozen=True)
+    worker = ExportWorker(None, [job], tmp_path / "worker")
+    ok, message = worker._run_job(0, job)
+    assert not ok and "captured source target" in message
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("key", ["remux", "slowmo"])
+def test_worker_still_refuses_configured_incompatible_bundle_members(tmp_path, qt_app, key):
+    from flightdvr.audio_plan import AudioMode, MusicChoice
+    from flightdvr.jobs import ExportWorker, Job
+    from flightdvr.output_plan import target_for_piece
+    from flightdvr.presets import ExportSettings
+    clip = _clip(tmp_path, "submitted.ts", [(0, 4, "")])
+    out = tmp_path / "must-not-exist.mp4"
+    job = Job([clip], key, ExportSettings(), out,
+              audio=MusicChoice(mode=AudioMode.NO_SOUND),
+              target=target_for_piece(clip), frozen=True)
+    ok, message = ExportWorker(None, [job], tmp_path / "worker")._run_job(0, job)
+    assert not ok and "not supported" in message
+    assert not out.exists()
 
 
 @pytest.mark.integration
