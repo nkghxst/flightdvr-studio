@@ -42,8 +42,19 @@ import traceback
 from copy import deepcopy
 from pathlib import Path
 
-# The longest the exports below may run together before they are cancelled.
+# The longest the exports below may run together before they are cancelled,
+# and how long a cancelled worker then has to confirm it has stopped.
 EXPORT_SECONDS = 600
+STOP_SECONDS = 60
+
+# Exit code when the export worker could not be confirmed stopped. The receipt
+# is already on disk by then; the process leaves without tearing the thread
+# down, because destroying a QThread that is still running aborts Python.
+UNSTOPPED_EXIT = 3
+
+# Workers that never confirmed they stopped. Holding them here means nothing
+# releases a running QThread before the process ends.
+_UNSTOPPED: list = []
 SOURCE_SECONDS = 3.0
 
 # What each representative export must contain, read back with the app's own
@@ -96,8 +107,17 @@ def _clip_facts(info) -> dict:
             "color_range": info.color_range, "error": info.error}
 
 
-def check_export(argument: str | None, export_seconds: float = EXPORT_SECONDS) -> tuple[str, int]:
-    """Run the diagnostic and return (report, exit code)."""
+def check_export(argument: str | None, export_seconds: float = EXPORT_SECONDS,
+                 _exit=os._exit) -> tuple[str, int]:
+    """Run the diagnostic and return (report, exit code).
+
+    The export worker belongs to this function from the moment it starts:
+    whatever happens inside, timeout or exception, it is settled here before
+    the receipt is written. A worker that cannot be confirmed stopped is
+    recorded as such, kept referenced, and the process exits with
+    UNSTOPPED_EXIT straight after the receipt and report are out, rather than
+    returning into code that would release a running thread.
+    """
     if not argument:
         return "--check-export needs a folder to write into.", 2
     parent = Path(argument)
@@ -114,11 +134,17 @@ def check_export(argument: str | None, export_seconds: float = EXPORT_SECONDS) -
     def fail(message: str) -> None:
         receipt["failures"].append(message)
 
+    owned: dict = {"worker": None}
     try:
-        _run(child, receipt, fail, export_seconds)
+        _run(child, receipt, fail, export_seconds, owned)
     except Exception:                    # noqa: BLE001 — recorded, never raised
         fail("unexpected error:\n" + traceback.format_exc())
     finally:
+        try:
+            stopped = _settle(owned["worker"], receipt, fail)
+        except Exception:                # noqa: BLE001 — recorded, never raised
+            fail("could not settle the export worker:\n" + traceback.format_exc())
+            stopped = False
         if not receipt["failures"]:
             receipt["result"] = "PASS"
         receipt["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -126,10 +152,41 @@ def check_export(argument: str | None, export_seconds: float = EXPORT_SECONDS) -
 
     lines = [f"check-export {receipt['result']}", f"receipt {path}"]
     lines += [f"  {line}" for message in receipt["failures"] for line in message.splitlines()]
-    return "\n".join(lines), 0 if receipt["result"] == "PASS" else 1
+    report = "\n".join(lines)
+    if not stopped:
+        _UNSTOPPED.append(owned["worker"])
+        try:
+            print(report, flush=True)
+        except (AttributeError, OSError, ValueError):
+            pass
+        _exit(UNSTOPPED_EXIT)
+    return report, 0 if receipt["result"] == "PASS" else 1
 
 
-def _run(child: Path, receipt: dict, fail, export_seconds: float) -> None:
+def _settle(worker, receipt: dict, fail) -> bool:
+    """Make sure a started worker has stopped. False if that cannot be confirmed.
+
+    Uses only the worker's own cancel(), as the window does: no thread or
+    process is forced. Bounded by STOP_SECONDS.
+    """
+    if worker is None:
+        return True
+    record = receipt.setdefault("worker", {})
+    record["started"] = True
+    if worker.isRunning():
+        worker.cancel()
+        record["cancel_requested"] = True
+        record["stopped"] = bool(worker.wait(STOP_SECONDS * 1000))
+    else:
+        record["stopped"] = True
+    if not record["stopped"]:
+        fail(f"the export worker could not be confirmed stopped within {STOP_SECONDS} s "
+             "of cancelling; its ffmpeg may still be running and its files were not "
+             "cleaned up")
+    return record["stopped"]
+
+
+def _run(child: Path, receipt: dict, fail, export_seconds: float, owned: dict) -> None:
     from PySide6.QtCore import QCoreApplication
 
     from . import __version__
@@ -215,16 +272,16 @@ def _run(child: Path, receipt: dict, fail, export_seconds: float) -> None:
                      out_path=output_path(exports, "generated", "remux", False)),
     }
     worker = ExportWorker(tools, list(jobs.values()), work)
+    owned["worker"] = worker            # check_export settles it on every exit
     started = time.monotonic()
     worker.start()
     in_time = worker.wait(int(export_seconds * 1000))
-    if not in_time:
-        # The worker's own cancellation, exactly as the window uses it.
-        worker.cancel()
-        stopped = worker.wait(60_000)
-        fail(f"exports did not finish within {export_seconds:g} s"
-             + ("" if stopped else "; the worker did not stop within 60 s after cancel"))
     receipt["export_seconds"] = round(time.monotonic() - started, 3)
+    if not in_time:
+        # Cancelled, and confirmed stopped or not, by check_export's _settle
+        # before the receipt is written.
+        fail(f"exports did not finish within {export_seconds:g} s")
+        return
 
     receipt["exports"] = {}
     for name, job in jobs.items():

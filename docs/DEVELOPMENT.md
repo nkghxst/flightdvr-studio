@@ -417,7 +417,8 @@ and which copies of `libgcc_s.so.1` and `libmvec.so.1` ffmpeg actually loads
 when the packaged app starts it.
 
 **The AppImage is built on the oldest supported LTS on purpose.** An AppImage
-carries no glibc; one built on Ubuntu 24.04 will not start on 22.04. If the
+carries no `libc.so.6` or loader of its own; one built on Ubuntu 24.04 will not
+start on 22.04. If the
 `ubuntu-22.04` runner label is ever retired, `ubuntu-latest` works but raises
 the floor and will break users on older distributions.
 

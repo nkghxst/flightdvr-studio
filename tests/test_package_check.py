@@ -136,8 +136,142 @@ def test_an_export_that_overruns_its_limit_fails(tmp_path, as_bundled):
     report, code = package_check.check_export(str(tmp_path), export_seconds=0.001)
     receipt = _receipt(tmp_path)
     assert code == 1 and receipt["result"] == "FAIL"
-    assert any("did not finish within" in f for f in receipt["failures"])
-    assert not any("did not stop" in f for f in receipt["failures"])
+    assert receipt["failures"][0] == "exports did not finish within 0.001 s"
+    assert receipt["worker"] == {"started": True, "cancel_requested": True, "stopped": True}
+    assert not any("confirmed stopped" in f for f in receipt["failures"])
+
+
+# -- a worker that will not stop, or an error once it has started --------------------------------
+#
+# A stand-in worker at the ExportWorker boundary: no thread, process or ffmpeg
+# exists, so nothing here exercises (or touches) real cancellation. What is
+# under test is the diagnostic's own ownership: the worker is settled before
+# the receipt is written, a worker that cannot be confirmed stopped is kept
+# referenced, and the process is left by the hard-exit path only after the
+# receipt is on disk.
+
+class _Exited(Exception):
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+class _StandInWorker:
+    made: list = []
+
+    def __init__(self, tools, jobs, work, *, waits=(), raise_on_first_wait=False):
+        self.waits_requested: list[int] = []
+        self.answers = list(waits)
+        self.raise_on_first_wait = raise_on_first_wait
+        self.cancelled = False
+        self.running = False
+        _StandInWorker.made.append(self)
+
+    def start(self):
+        self.running = True
+
+    def wait(self, ms):
+        self.waits_requested.append(ms)
+        if self.raise_on_first_wait and len(self.waits_requested) == 1:
+            raise RuntimeError("injected failure after the worker started")
+        stopped = self.answers.pop(0)
+        self.running = not stopped
+        return stopped
+
+    def cancel(self):
+        self.cancelled = True
+
+    def isRunning(self):
+        return self.running
+
+
+@pytest.fixture
+def stand_in(tmp_path, monkeypatch):
+    """Everything before the worker answered without ffmpeg."""
+    from datetime import datetime
+    from flightdvr.media import ClipInfo
+
+    tools_dir = tmp_path / "bundle"
+    tools_dir.mkdir()
+    for name in ("ffmpeg", "ffprobe"):
+        (tools_dir / name).write_bytes(b"stand-in")
+    monkeypatch.setattr(media, "find_tools",
+                        lambda: Tools(tools_dir / "ffmpeg", tools_dir / "ffprobe"))
+    monkeypatch.setattr(media, "is_bundled", lambda _path: True)
+
+    def run_hidden(args, timeout=60):
+        if "-version" not in args:
+            Path(args[-1]).write_bytes(b"generated")
+        return subprocess.CompletedProcess(args, 0, "ffmpeg version stand-in\n", "")
+
+    def probe(_tools, path, *a, **k):
+        return ClipInfo(path=path, size=1, modified=datetime(2026, 10, 1), duration=3.0,
+                        width=640, height=360, fps=60.0, video_codec="hevc",
+                        audio_codec="aac", pix_fmt="yuvj420p", color_range="pc")
+
+    monkeypatch.setattr(media, "run_hidden", run_hidden)
+    monkeypatch.setattr(media, "probe", probe)
+    monkeypatch.setattr(package_check, "_UNSTOPPED", [])
+    _StandInWorker.made = []
+    out = tmp_path / "out"
+    out.mkdir()
+    return out
+
+
+def _use_worker(monkeypatch, **behaviour):
+    monkeypatch.setattr(jobs, "ExportWorker",
+                        lambda tools, js, work: _StandInWorker(tools, js, work, **behaviour))
+
+
+def _exit_after_receipt(out):
+    def exit_(code):
+        # The receipt must already be on disk when the process is left.
+        receipt = _receipt(out)
+        assert receipt["result"] == "FAIL"
+        raise _Exited(code)
+    return exit_
+
+
+def test_a_worker_that_will_not_stop_is_kept_and_the_process_left_after_the_receipt(
+        stand_in, monkeypatch):
+    _use_worker(monkeypatch, waits=[False, False])
+    with pytest.raises(_Exited) as left:
+        package_check.check_export(str(stand_in), export_seconds=0.001,
+                                   _exit=_exit_after_receipt(stand_in))
+    assert left.value.code == package_check.UNSTOPPED_EXIT
+    worker = _StandInWorker.made[0]
+    assert worker.waits_requested == [1, package_check.STOP_SECONDS * 1000]
+    assert worker.cancelled
+    assert package_check._UNSTOPPED == [worker]       # never released while running
+    receipt = _receipt(stand_in)
+    assert receipt["worker"] == {"started": True, "cancel_requested": True, "stopped": False}
+    assert receipt["failures"][0] == "exports did not finish within 0.001 s"
+    assert "could not be confirmed stopped" in receipt["failures"][1]
+
+
+def test_an_error_after_start_still_settles_the_worker_before_the_receipt(
+        stand_in, monkeypatch):
+    _use_worker(monkeypatch, waits=[True], raise_on_first_wait=True)
+    report, code = package_check.check_export(str(stand_in), _exit=_never_export)
+    worker = _StandInWorker.made[0]
+    assert code == 1 and worker.cancelled and not worker.running
+    receipt = _receipt(stand_in)
+    assert receipt["worker"] == {"started": True, "cancel_requested": True, "stopped": True}
+    assert "injected failure after the worker started" in receipt["failures"][0]
+    assert package_check._UNSTOPPED == []
+
+
+def test_an_error_after_start_with_a_worker_that_will_not_stop_fails_closed(
+        stand_in, monkeypatch):
+    _use_worker(monkeypatch, waits=[False], raise_on_first_wait=True)
+    with pytest.raises(_Exited) as left:
+        package_check.check_export(str(stand_in), _exit=_exit_after_receipt(stand_in))
+    assert left.value.code == package_check.UNSTOPPED_EXIT
+    assert package_check._UNSTOPPED == [_StandInWorker.made[0]]
+    receipt = _receipt(stand_in)
+    assert receipt["worker"]["stopped"] is False
+    assert "injected failure" in receipt["failures"][0]
+    assert "could not be confirmed stopped" in receipt["failures"][1]
 
 
 @pytest.mark.integration
