@@ -49,6 +49,46 @@ NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 # How long to let a child shut down politely before killing it.
 TERMINATE_SECONDS = 5
 
+
+def child_env(executable: str | os.PathLike[str]) -> dict[str, str]:
+    """The environment for one child process, chosen by what it runs.
+
+    A frozen Linux build (the AppImage) puts its bundled Qt and Python
+    libraries first on LD_LIBRARY_PATH so the app itself can start, and
+    PyInstaller's bootloader saves whatever was there before as
+    LD_LIBRARY_PATH_ORIG, only when there was something. A *system* ffmpeg or
+    ffprobe that inherits the bundle's path loads the bundle's older
+    libstdc++/libz first and dies on a symbol mismatch before it reads a frame,
+    which a scan reports as "No readable video files found here" over a card
+    that is fine (#131, reported and diagnosed by Rory Lambert). So a program
+    from outside the bundle gets the saved value back, or no LD_LIBRARY_PATH
+    at all when there was none to save.
+
+    A program shipped inside the bundle keeps the bundle's path, because it
+    was collected with those libraries and needs them; which one is running is
+    decided from the executable itself, the same way `is_bundled` decides it.
+    Nothing else is touched: a source run is not frozen; on macOS the
+    bootloader rewrites library references instead of setting a loader path
+    and saves no _ORIG, so a DYLD_LIBRARY_PATH there is the person's own; and
+    Windows finds DLLs another way. The live environment is never modified:
+    every caller gets its own copy.
+    """
+    env = os.environ.copy()
+    if not getattr(sys, "frozen", False) or not sys.platform.startswith("linux"):
+        return env
+    program = Path(executable)
+    if not program.is_absolute():
+        found = shutil.which(str(executable), path=env.get("PATH"))
+        program = Path(found) if found else None
+    if program is not None and is_bundled(program):
+        return env
+    original = env.pop("LD_LIBRARY_PATH_ORIG", None)
+    if original is not None:
+        env["LD_LIBRARY_PATH"] = original
+    else:
+        env.pop("LD_LIBRARY_PATH", None)
+    return env
+
 # Checked after PATH. On Windows these are where people unpack the gyan.dev
 # builds; on Linux a package manager puts ffmpeg on PATH already, so those are
 # only for a manually installed or Flatpak-exported copy. The Homebrew prefixes
@@ -268,6 +308,7 @@ def run_hidden(args: list[str], timeout: float | None = 60) -> subprocess.Comple
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=child_env(args[0]),
         creationflags=NO_WINDOW,
     )
 
@@ -617,7 +658,7 @@ def _probe_once(
     try:
         proc = subprocess.Popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, creationflags=NO_WINDOW,
+            text=True, env=child_env(args[0]), creationflags=NO_WINDOW,
         )
     except OSError as exc:
         info.error = str(exc)
@@ -826,7 +867,8 @@ def _read_packet_end(tools: Tools, path: Path, should_stop=None,
             str(path)]
     try:
         proc = subprocess.Popen(args, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, creationflags=NO_WINDOW)
+                                stderr=subprocess.PIPE, env=child_env(args[0]),
+                                creationflags=NO_WINDOW)
     except OSError:
         return None
     if register is not None:
@@ -945,7 +987,7 @@ def _encoder_runs(tools: Tools, name: str, register=None,
     try:
         proc = subprocess.Popen(
             args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=NO_WINDOW,
+            env=child_env(args[0]), creationflags=NO_WINDOW,
         )
     except OSError:
         return False

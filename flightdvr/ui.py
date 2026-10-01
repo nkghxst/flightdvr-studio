@@ -69,7 +69,7 @@ from .format import (
 )
 from .help_content import naming_help_html, release_links
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
-from .media import ClipInfo, Select, Tools, available_encoders
+from .media import ClipInfo, Select, Tools, available_encoders, child_env
 from .audio_plan import (
     OUTPUT_RATE, AudioMode, MusicChoice, SampleSpan, ShortTrackPolicy,
     resolve_monitor_audio_plan, round_samples,
@@ -6915,11 +6915,12 @@ class MainWindow(QMainWindow):
         player = find_player()
         try:
             if player is not None:
-                subprocess.Popen([str(player), str(path)])
+                subprocess.Popen([str(player), str(path)], env=child_env(player))
             elif os.name == "nt":
                 os.startfile(str(path))  # type: ignore[attr-defined]
             else:
-                subprocess.Popen([DESKTOP_OPEN, str(path)])
+                subprocess.Popen([DESKTOP_OPEN, str(path)],
+                                 env=child_env(DESKTOP_OPEN))
         except OSError as exc:
             QMessageBox.warning(
                 self, "Could not open the clip",
