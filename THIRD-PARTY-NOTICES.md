@@ -5,13 +5,14 @@ The full text is in [LICENSE](LICENSE).
 
 ## FFmpeg
 
-**Only the Windows installer bundles FFmpeg.** The Linux AppImage and the macOS
-app use the copy your package manager installed and redistribute no FFmpeg
-binary, so the offer below applies to the Windows download alone.
+**The Windows installer and the Linux AppImage bundle FFmpeg.** The macOS app
+uses the copy Homebrew installed and redistributes no FFmpeg binary.
 
-Where it is bundled, `ffmpeg.exe` and `ffprobe.exe` are separate programs:
-FlightDVR Studio runs them as child processes and contains no FFmpeg code
-itself.
+Where it is bundled, `ffmpeg` and `ffprobe` (`ffmpeg.exe` and `ffprobe.exe` on
+Windows) are separate programs: FlightDVR Studio runs them as child processes
+and contains no FFmpeg code itself.
+
+### Windows installer
 
 | | |
 |---|---|
@@ -29,7 +30,7 @@ pinned by SHA-256 in `packaging/ffmpeg-build.json`; the Windows build script
 refuses to package anything that does not match, so this attribution cannot
 drift away from what is shipped.
 
-### Corresponding source
+#### Corresponding source
 
 Section 6 of the GPL v3 requires the complete corresponding source: FFmpeg
 itself, every library statically linked into it, and the scripts used to
@@ -48,6 +49,47 @@ received rather than whatever is current.
 If you would rather receive the source on physical media, contact the author and
 it will be provided at no more than the cost of distribution. This offer is valid
 for three years from the date you received this software.
+
+### Linux AppImage
+
+The AppImage bundles the Linux build of the same FFmpeg commit, from the same
+BtbN release as the Windows installer.
+
+| | |
+|---|---|
+| Version | `n7.1.5-12-g1fdbca85aa`, BtbN variant `linux64-gpl-7.1` |
+| Build | BtbN/FFmpeg-Builds release `autobuild-2026-07-31-14-10`, build-system commit `a99e8230eae00d1cee38f23076a7a1f55cd984e2` |
+| Archive | `ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-gpl-7.1.tar.xz`, 119,007,364 bytes, SHA-256 `c1e6caf48923dd8e6bc5e54d51ba70c321175b8162ae9c414c392990e72f0e79` |
+| `ffmpeg` | 139,397,096 bytes, SHA-256 `be59d8a5989ce0593343c0a8e3c36dd02ce523ecdc4b9ebc04437b2aa9ad2fe6` |
+| `ffprobe` | 139,261,288 bytes, SHA-256 `716620defe0abbfead89c7c3895cbdebc7a530dd4646f9967c5234abc7cccbad` |
+| Licence | **GNU General Public License v3 or later** |
+
+It is configured with `--enable-gpl --enable-version3` and is **not** an
+`--enable-nonfree` build. The exact configuration is in
+`ffmpeg-configuration-linux.txt` alongside this file; the build refuses to
+package a binary whose own version output does not match it. The pin is
+`packaging/ffmpeg-build-linux.json`, and the build refuses any archive or
+program whose size or SHA-256 differs from it.
+
+Its declared dynamic dependencies come from the system it runs on, and the
+AppImage does not carry them: the GNU C library (`libc.so.6`, `libm.so.6`,
+`libdl.so.2`, `librt.so.1`, `libpthread.so.0`, `libmvec.so.1` and the loader
+`ld-linux-x86-64.so.2`, symbol versions up to `GLIBC_2.28`) and
+`libgcc_s.so.1`, the GCC runtime library. Hardware encoding, where it works,
+uses the graphics drivers already installed on that system.
+
+#### Corresponding source
+
+The GitHub release is not marked immutable, so the commits below, not the
+release name, are the fixed references:
+
+| Part | Where |
+|---|---|
+| FFmpeg, at the exact commit | https://github.com/FFmpeg/FFmpeg/tree/1fdbca85aaea513c9cc6c14d347f76543346d3da |
+| The complete build system | https://github.com/BtbN/FFmpeg-Builds/tree/a99e8230eae00d1cee38f23076a7a1f55cd984e2 |
+| Every dependency, with the version and source of each | https://github.com/BtbN/FFmpeg-Builds/tree/a99e8230eae00d1cee38f23076a7a1f55cd984e2/scripts.d |
+
+This project does not yet keep its own copy of that source for the Linux build.
 
 ## Qt / PySide6
 

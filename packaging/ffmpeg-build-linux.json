@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "The exact FFmpeg build the Linux AppImage bundles: the same FFmpeg commit",
+    "and BtbN release as the Windows pin in ffmpeg-build.json, linux64 gpl 7.1",
+    "variant. fetch-ffmpeg.sh and verify_ffmpeg_linux.py refuse anything whose",
+    "size or SHA-256 differ, and build-appimage.sh and the spec check the pair",
+    "again before bundling, so THIRD-PARTY-NOTICES.md cannot drift from the binary.",
+    "",
+    "The GitHub release is not immutable (the API reports immutable: false), so",
+    "the archive hash is the byte identity and the build-system commit is pinned",
+    "separately rather than trusted through the tag name."
+  ],
+  "version": "n7.1.5-12-g1fdbca85aa",
+  "ffmpeg_git_commit": "1fdbca85aa",
+  "ffmpeg_git_commit_full": "1fdbca85aaea513c9cc6c14d347f76543346d3da",
+  "release_tag": "autobuild-2026-07-31-14-10",
+  "build_system_commit": "a99e8230eae00d1cee38f23076a7a1f55cd984e2",
+  "variant": "linux64-gpl-7.1",
+  "archive": "ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-gpl-7.1.tar.xz",
+  "archive_root": "ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-gpl-7.1",
+  "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-gpl-7.1.tar.xz",
+  "archive_size": 119007364,
+  "archive_sha256": "c1e6caf48923dd8e6bc5e54d51ba70c321175b8162ae9c414c392990e72f0e79",
+  "binaries": {
+    "ffmpeg": "be59d8a5989ce0593343c0a8e3c36dd02ce523ecdc4b9ebc04437b2aa9ad2fe6",
+    "ffprobe": "716620defe0abbfead89c7c3895cbdebc7a530dd4646f9967c5234abc7cccbad"
+  },
+  "binary_sizes": {
+    "ffmpeg": 139397096,
+    "ffprobe": 139261288
+  },
+  "licence_member": "LICENSE.txt",
+  "licence_size": 35147,
+  "licence_sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+  "licence": "GPL-3.0-or-later",
+  "corresponding_source": {
+    "ffmpeg": "https://github.com/FFmpeg/FFmpeg/tree/1fdbca85aaea513c9cc6c14d347f76543346d3da",
+    "build_system": "https://github.com/BtbN/FFmpeg-Builds/tree/a99e8230eae00d1cee38f23076a7a1f55cd984e2",
+    "dependency_sources": "https://github.com/BtbN/FFmpeg-Builds/tree/a99e8230eae00d1cee38f23076a7a1f55cd984e2/scripts.d"
+  }
+}

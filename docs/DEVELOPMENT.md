@@ -252,19 +252,21 @@ works. `_encoder_runs()` performs a real three-frame encode. Hardcoding
 `h264_amf` because it worked on the development machine would have failed on
 the laptop, which is how this was found.
 
-**ffmpeg options are not stable, and the app does not bundle one on Linux or
-macOS.** `-fps_mode` replaced `-vsync` in ffmpeg 5.1. Ubuntu 22.04 ships 4.4,
-the AppImage is built for 22.04 on purpose, and every re-encoding export plus
-the filmstrip extraction used `-fps_mode` — so on that distribution every
-export failed with `Unrecognized option 'fps_mode'` and the trim panel stayed
-empty. `frame_rate_mode()` in `media.py` probes for it once, the same way the
-hardware encoders are probed, and falls back to `-vsync`.
+**ffmpeg options are not stable, and a source checkout or the macOS app uses
+whatever ffmpeg the system has.** `-fps_mode` replaced `-vsync` in ffmpeg 5.1.
+Ubuntu 22.04 ships 4.4, the AppImage was built for 22.04 on purpose and then
+carried no ffmpeg, and every re-encoding export plus the filmstrip extraction
+used `-fps_mode` — so on that distribution every export failed with
+`Unrecognized option 'fps_mode'` and the trim panel stayed empty.
+`frame_rate_mode()` in `media.py` probes for it once, the same way the hardware
+encoders are probed, and falls back to `-vsync`.
 
-The general rule: the Windows build knows exactly which ffmpeg it has because
-the binary is pinned, and the other two know nothing at all. Anything added to
-a command that is newer than the oldest supported distribution's ffmpeg has to
-be probed. The integration suite runs on `ubuntu-22.04` during the AppImage
-build precisely so this class of problem shows up.
+The general rule: the Windows installer and the AppImage know exactly which
+ffmpeg they have because the binary is pinned, and a source run or the macOS
+app knows nothing at all. Anything added to a command that is newer than the
+oldest supported distribution's ffmpeg has to be probed. The integration suite
+runs on `ubuntu-22.04`'s own ffmpeg during the AppImage build precisely so this
+class of problem shows up, and again on the pinned Linux pair.
 
 **The goggles have no clock battery.** The Box Pro's own log reports
 `rtc_init has NOT detected a battery`, so the clock restarts from the same
@@ -368,10 +370,42 @@ All three share `packaging/flightdvr_studio.spec`, which branches on
 `sys.platform` for the icon format, the macOS `BUNDLE` step, and whether ffmpeg
 is bundled.
 
-**ffmpeg is bundled on Windows only.** Windows users have no package manager to
-supply one, and the app has to work on a machine that never had it. Linux and
-macOS both do, so bundling there would mean redistributing a second GPL binary
-and carrying a second corresponding-source offer for no user benefit.
+**ffmpeg is bundled on Windows and Linux.** Windows users have no package
+manager to supply one. On Linux the distributions' ffmpeg ranges from 4.4 on
+Ubuntu 22.04 to Fedora's restricted `ffmpeg-free`, so the AppImage carries the
+pinned BtbN Linux build of the same FFmpeg commit the Windows installer uses,
+and every export runs against one known ffmpeg. macOS uses Homebrew's.
+
+**The bundled Linux ffmpeg is pinned the same way, and checked at every step.**
+`packaging/ffmpeg-build-linux.json` records the archive URL, its size and
+SHA-256, both programs' sizes and SHA-256, and the build-system commit (the
+GitHub release is not immutable, so the commit and the hashes are the fixed
+references, not the release name). `packaging/fetch-ffmpeg.sh` downloads that
+archive once, under a temporary name, and `packaging/verify_ffmpeg_linux.py`
+checks its size and hash before opening it, refuses absolute or climbing
+paths, links and duplicate candidates, reads out only `ffmpeg`, `ffprobe` and
+the licence, checks both programs, and only then publishes the folder.
+`build-appimage.sh` checks the folder it is given, checks that
+`packaging/ffmpeg-configuration-linux.txt` matches the binary's own version
+output, checks the pair again inside the PyInstaller output, and accepts only
+`--check` exit 0 with the bundled copy resolved; the spec refuses to build on
+Linux without the pinned pair. Run it with `FFMPEG_DIR` set to the folder
+`fetch-ffmpeg.sh` prints, or unset to fetch into `build/ffmpeg-linux`.
+
+CI then proves the artifact rather than the source: on `ubuntu-22.04` and
+`ubuntu-latest`, `packaging/check_linux_bundle.py` runs the built AppImage's
+`--check` with no system ffmpeg anywhere the app looks, and again with a
+decoy pair first on `PATH`; both must resolve the bundled pair, whose bytes
+are checked in the extracted AppImage. It also records the pair's version,
+configuration, encoders and filters, cross-checks its ELF dependencies with
+`readelf` and `objdump` and resolves them with `ldd`, and exports generated
+media through every codec family the presets use. Evidence is uploaded as
+`linux-bundle-evidence-*`.
+
+What that does not cover: a person starting the AppImage in a normal desktop
+session, hardware encoders on real GPUs, and the app's own probe-and-export
+path running inside the packaged build (`--check` resolves the tools but does
+not run them).
 
 **The AppImage is built on the oldest supported LTS on purpose.** An AppImage
 carries no glibc; one built on Ubuntu 24.04 will not start on 22.04. If the
@@ -800,7 +834,7 @@ release attached to them yet.
 
 ## Deliberately not done
 
-- **Bundling ffmpeg on Linux or macOS.** Reasoning above.
+- **Bundling ffmpeg on macOS.** Reasoning above.
 - **Converting colour tags by default.** Reasoning above.
 - **Parallel exports.** ffmpeg already saturates every core; running two at
   once makes both slower and the progress display meaningless.
