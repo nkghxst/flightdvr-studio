@@ -393,19 +393,27 @@ Linux without the pinned pair. Run it with `FFMPEG_DIR` set to the folder
 `fetch-ffmpeg.sh` prints, or unset to fetch into `build/ffmpeg-linux`.
 
 CI then proves the artifact rather than the source: on `ubuntu-22.04` and
-`ubuntu-latest`, `packaging/check_linux_bundle.py` runs the built AppImage's
-`--check` with no system ffmpeg anywhere the app looks, and again with a
-decoy pair first on `PATH`; both must resolve the bundled pair, whose bytes
-are checked in the extracted AppImage. It also records the pair's version,
-configuration, encoders and filters, cross-checks its ELF dependencies with
-`readelf` and `objdump` and resolves them with `ldd`, and exports generated
-media through every codec family the presets use. Evidence is uploaded as
-`linux-bundle-evidence-*`.
+`ubuntu-latest`, `packaging/check_linux_bundle.py` runs the built AppImage with
+no system ffmpeg anywhere the app looks, and again with a decoy pair first on
+`PATH` that fails the check if it is ever run. Each time, `--check` must
+resolve the bundled pair, whose bytes are checked in the extracted AppImage,
+and `--check-export <folder>` must pass. That mode
+(`flightdvr/package_check.py`) runs inside the packaged process with no window
+and no settings: it generates a short HEVC recording in a new folder of its
+own, reads it with the app's `probe`, exports a trimmed Master with the Rec.709
+conversion, an Edit and a Remux through the real `ExportWorker` under a time
+limit, reads the results back with `probe`, and writes `receipt.json` with the
+tools, their origin and hashes, and every measured property. It refuses to run
+on an ffmpeg that is not the bundled one. The helper also records the pair's
+version, configuration, encoders and filters, cross-checks its ELF
+dependencies with `readelf` and `objdump` and resolves them with `ldd` on the
+runner, records which of those libraries the bundle carries itself
+(`libgcc_s.so.1`, collected by PyInstaller), and exports generated media
+through the pair directly. Evidence is uploaded as `linux-bundle-evidence-*`.
 
 What that does not cover: a person starting the AppImage in a normal desktop
-session, hardware encoders on real GPUs, and the app's own probe-and-export
-path running inside the packaged build (`--check` resolves the tools but does
-not run them).
+session, real recordings, devices, listening, hardware encoders on real GPUs,
+and which `libgcc_s.so.1` ffmpeg actually loads when the packaged app starts it.
 
 **The AppImage is built on the oldest supported LTS on purpose.** An AppImage
 carries no glibc; one built on Ubuntu 24.04 will not start on 22.04. If the

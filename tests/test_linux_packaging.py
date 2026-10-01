@@ -384,3 +384,81 @@ def test_ci_gates_the_linux_bundle_without_softening_failures():
     assert "packaging/fetch-ffmpeg.sh" in workflow
     assert workflow.count("check_linux_bundle.py appimage-check") == 2
     assert "Remove the system ffmpeg" in workflow
+
+
+def test_a_release_waits_for_the_current_linux_check():
+    workflow = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
+    assert "needs: [appimage, appimage-current-linux, macos, windows-installer]" in workflow
+
+
+# -- the CI helper's own verdict on the actual AppImage ---------------------------------------
+
+_cspec = importlib.util.spec_from_file_location("check_linux_bundle",
+                                                PACKAGING / "check_linux_bundle.py")
+check_bundle = importlib.util.module_from_spec(_cspec)
+_cspec.loader.exec_module(check_bundle)
+
+
+def _fake_appimage(tmp_path, monkeypatch, pin, run_decoy: bool):
+    """Stand in for the AppImage at the subprocess boundary.
+
+    Everything else in appimage_check runs for real: the decoy scripts are
+    written and found on PATH, and the receipts and marker are read from disk.
+    `run_decoy` makes the packaged app run whatever is first on PATH, which is
+    exactly the failure the decoy exists to catch.
+    """
+    inside = "/tmp/appimage_extracted_test/usr/bin/_internal/ffmpeg"
+
+    def run(argv, **kwargs):
+        env = kwargs.get("env") or {}
+        first = Path(env.get("PATH", "").split(os.pathsep)[0])
+        if argv[1] == "--appimage-extract":
+            pair = Path(kwargs["cwd"]) / "squashfs-root/usr/bin/_internal/ffmpeg"
+            pair.mkdir(parents=True)
+            for name, data in (("ffmpeg", FFMPEG), ("ffprobe", FFPROBE)):
+                (pair / name).write_bytes(data)
+                (pair / name).chmod(0o755)
+            (pair.parent / "libgcc_s.so.1").write_bytes(b"gcc runtime")
+            return check_bundle.subprocess.CompletedProcess(argv, 0, "", "")
+        if run_decoy and first.name == "decoy":
+            (first.parent / "decoy-was-run").write_text("decoy\n")
+        if argv[1] == "--check":
+            return check_bundle.subprocess.CompletedProcess(
+                argv, 0, f"ffmpeg  {inside}/ffmpeg  (bundled)\nffprobe {inside}/ffprobe\n", "")
+        if argv[1] == "--check-export":
+            child = Path(argv[2]) / "flightdvr-check-export-test"
+            child.mkdir()
+            receipt = {"result": "PASS", "failures": [], "app": {"frozen": True},
+                       "tools": {t: {"bundled": True, "path": f"{inside}/{t}",
+                                     "sha256": pin["binaries"][t]} for t in ("ffmpeg", "ffprobe")},
+                       "exports": {n: {"status": "Done", "probe": {}}
+                                   for n in ("master", "edit", "remux")}}
+            (child / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+            return check_bundle.subprocess.CompletedProcess(argv, 0, "check-export PASS\n", "")
+        raise AssertionError(f"unexpected command {argv}")
+
+    monkeypatch.setattr(check_bundle.subprocess, "run", run)
+    monkeypatch.setattr(check_bundle, "load_pin", lambda path=None: pin)
+    monkeypatch.setattr(check_bundle, "_machine", lambda ev: None)
+    monkeypatch.setattr(check_bundle, "_absent_system_tools", lambda: {})
+    appimage = tmp_path / "FlightDVR_Studio-test.AppImage"
+    appimage.write_bytes(b"never executed")
+    return appimage
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the decoy is a POSIX script found on PATH by name")
+@pytest.mark.parametrize("run_decoy", [False, True], ids=["decoy-idle", "decoy-run"])
+def test_appimage_check_fails_if_the_conflicting_pair_is_ever_run(tmp_path, monkeypatch,
+                                                                   run_decoy):
+    pin = _dir_pin(tmp_path)
+    appimage = _fake_appimage(tmp_path, monkeypatch, pin, run_decoy)
+    out = tmp_path / "evidence"
+    code = check_bundle.appimage_check(appimage, out)
+    record = json.loads((out / "appimage-check.json").read_text(encoding="utf-8"))
+    assert record["decoy_was_run"] is run_decoy
+    assert record["bundle_carries_declared_dependencies"]["libgcc_s.so.1"]["size"] == 11
+    if run_decoy:
+        assert code == 1 and record["result"] == "FAIL"
+        assert record["failures"] == ["conflicting PATH: decoy never run"]
+    else:
+        assert code == 0 and record["result"] == "PASS" and record["failures"] == []

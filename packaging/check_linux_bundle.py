@@ -16,8 +16,12 @@ export-check   generated media encoded through every codec and filter family
                pinned ffprobe.
 appimage-check the built AppImage itself, on a machine where no system ffmpeg
                can be found: its --check must exit 0 and resolve both programs
-               inside the bundle, whose bytes must match the pin, and must still
-               do so with a conflicting ffmpeg/ffprobe pair first on PATH.
+               inside the bundle, whose bytes must match the pin, and its
+               --check-export must run the app's own probe and exports inside
+               the packaged process with that pair and pass. Both are repeated
+               with a conflicting ffmpeg/ffprobe pair first on PATH, which must
+               be neither selected nor ever run. It also records which of the
+               pair's declared libraries the bundle itself carries.
 
 Each writes <OUT>/<command>.json plus raw logs, prints a summary, and exits 1
 if any requirement fails. Hardware encoders are recorded as telemetry only.
@@ -311,6 +315,16 @@ def appimage_check(appimage: Path, out: Path) -> int:
     except PinError as exc:
         ev.require("bundled pair inside the AppImage matches the pin", False, f"{exc.reason}: {exc}")
 
+    # Which of the pair's declared dependencies the bundle itself carries.
+    # PyInstaller collects some for Python and Qt (libgcc_s.so.1 among them),
+    # and a child started by the frozen app may load those rather than the
+    # host's. Recorded, not judged: which copy ffmpeg actually loads at run
+    # time is not measured here.
+    internal = inner.parent
+    ev.record["bundle_carries_declared_dependencies"] = {
+        name: {"size": (internal / name).stat().st_size, "sha256": sha256_file(internal / name)}
+        for name in sorted(EXPECTED_NEEDED) if (internal / name).is_file()}
+
     home = out / "home"
     for sub in ("config", "data", "cache", "tmp"):
         (home / sub).mkdir(parents=True, exist_ok=True)
@@ -332,9 +346,39 @@ def appimage_check(appimage: Path, out: Path) -> int:
                    report.get("ffmpeg_origin", "no origin"))
         return report
 
+    def check_export(label: str, run_env: dict) -> None:
+        """The app's own probe and exports, inside the packaged process."""
+        parent = out / label
+        parent.mkdir(parents=True, exist_ok=False)
+        result = ev.run(label, [str(appimage), "--check-export", str(parent)],
+                        env=run_env, timeout=900)
+        receipts = sorted(parent.glob("flightdvr-check-export-*/receipt.json"))
+        receipt = json.loads(receipts[0].read_text(encoding="utf-8")) if len(receipts) == 1 else {}
+        ev.record[label] = {"exit": result.returncode, "receipts": [str(r) for r in receipts],
+                            "receipt": receipt}
+        ev.require(f"{label}: --check-export exits 0", result.returncode == 0,
+                   f"exit {result.returncode}: {result.stdout[-400:]}")
+        ev.require(f"{label}: one receipt, reporting PASS",
+                   len(receipts) == 1 and receipt.get("result") == "PASS",
+                   f"{len(receipts)} receipts; failures {receipt.get('failures')}")
+        ev.require(f"{label}: ran frozen", receipt.get("app", {}).get("frozen") is True)
+        for tool in ("ffmpeg", "ffprobe"):
+            used = receipt.get("tools", {}).get(tool, {})
+            ev.require(f"{label}: {tool} used was the bundled, pinned copy",
+                       used.get("bundled") is True
+                       and used.get("path", "").endswith(f"/usr/bin/_internal/ffmpeg/{tool}")
+                       and used.get("sha256") == pin["binaries"][tool],
+                       json.dumps(used))
+        for name in ("master", "edit", "remux"):
+            done = receipt.get("exports", {}).get(name, {})
+            ev.require(f"{label}: {name} export done and inspected",
+                       done.get("status") == "Done" and "probe" in done, json.dumps(done)[:300])
+
     check("check-isolated", env)
+    check_export("check-export-isolated", env)
 
     # A conflicting pair first on PATH, which would win if bundled-first broke.
+    # Each one leaves a marker if it is ever run, and that fails the check.
     decoy = out / "decoy"
     decoy.mkdir(exist_ok=True)
     marker = out / "decoy-was-run"
@@ -349,7 +393,10 @@ def appimage_check(appimage: Path, out: Path) -> int:
     report = check("check-conflicting-path", conflicting)
     ev.require("check-conflicting-path: decoy not selected",
                all(str(decoy) not in report.get(t, "") for t in ("ffmpeg", "ffprobe")))
+    check_export("check-export-conflicting-path", conflicting)
     ev.record["decoy_was_run"] = marker.exists()
+    ev.require("conflicting PATH: decoy never run", not marker.exists(),
+               "the conflicting PATH ffmpeg/ffprobe was executed")
     return ev.finish()
 
 

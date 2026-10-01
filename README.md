@@ -62,8 +62,10 @@ Like the Windows build, it carries **its own ffmpeg and ffprobe**: the pinned
 build named in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), so every
 export uses the same ffmpeg whatever your distribution ships. Nothing needs
 installing first, and an ffmpeg you have installed yourself is left alone; the
-app always prefers the copy inside the AppImage. The bundled ffmpeg needs only
-the system's C library and `libgcc_s.so.1`, the GCC runtime library.
+app always prefers the copy inside the AppImage. The bundled ffmpeg needs the
+system's C library. It also needs `libgcc_s.so.1`, the GCC runtime library; the
+AppImage carries a copy, and whether ffmpeg uses that copy or the system's has
+not been measured.
 Run the app with `--check` to see exactly which ffmpeg it is using.
 
 Playback happens in the window and needs nothing else. Install VLC or mpv as
