@@ -12,6 +12,8 @@ import json
 import tempfile
 
 import pytest
+
+from flightdvr.assembly_panel import ITEM_ROLE
 from pathlib import Path as _Path
 
 _TMP = [_Path(tempfile.mkdtemp())]
@@ -302,3 +304,115 @@ def test_export_piece_does_not_share_the_select_with_the_clip(tmp_path):
     clip.selects[0].start = 99.0
     assert piece.selects[0].start == 1.0, "the queued piece followed a later edit"
     assert piece.selects[0].sid == clip.selects[0].sid
+
+
+# --- #77: drag to reorder ----------------------------------------------------
+
+def _panel_with(rows_spec, qt_app):
+    """A panel holding present rows, and a missing one where asked."""
+    from flightdvr.assembly import Item, resolve
+    from flightdvr.assembly_panel import AssemblyPanel
+
+    here = _clip(_TMP[0], "hdz_047.ts",
+                 [(0.0, 5.0, "one"), (6.0, 9.0, "two"), (10.0, 14.0, "three")])
+    stored = []
+    for spec in rows_spec:
+        if spec == "gap":
+            stored.append(Item("fp-gone", "a-range-that-went"))
+        else:
+            stored.append(Item(here.fingerprint, here.selects[spec].sid))
+    panel = AssemblyPanel()
+    panel.show_rows(resolve(stored, [here], names={"fp-gone": "hdz_099.ts"}))
+    return panel, stored
+
+
+def _through_qt_mime(panel, rows):
+    """Encode rows the way a drag does, and decode them into an empty list.
+
+    This is the step that carries the risk and the only one worth simulating.
+    Hand-rolling a whole move would test the arithmetic in this helper rather
+    than anything in the application — `dropMimeData` on a list overwrites
+    rather than inserts, which is exactly the sort of detail a fake gets
+    wrong. Whether Qt accepts the drop event needs a live drag source and is
+    checked natively instead.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QListWidget
+
+    model = panel.list.model()
+    mime = model.mimeData([model.index(r, 0) for r in rows])
+
+    landing = QListWidget()
+    landing.model().dropMimeData(mime, Qt.DropAction.CopyAction, 0, 0,
+                                 landing.rootIndex())
+    return [landing.item(r).data(ITEM_ROLE) for r in range(landing.count())]
+
+
+def test_a_dragged_row_keeps_the_exact_item_it_pointed_at(qt_app):
+    """The whole risk of this feature.
+
+    A drag round-trips each row through Qt's mime encoding. If the stored
+    reference does not survive, the row still reads `hdz_047.ts · one` while
+    pointing at nothing, and nobody finds out until the export.
+    """
+    panel, stored = _panel_with([0, 1, 2], qt_app)
+
+    carried = _through_qt_mime(panel, [2])
+
+    assert carried == [stored[2]], carried
+    assert carried[0].sid == stored[2].sid
+    assert carried[0].fingerprint == stored[2].fingerprint
+
+
+def test_a_multi_row_drag_carries_every_reference_in_order(qt_app):
+    panel, stored = _panel_with([0, 1, 2], qt_app)
+
+    carried = _through_qt_mime(panel, [1, 2])
+
+    assert carried == [stored[1], stored[2]], carried
+    assert len({i.sid for i in carried}) == 2, "a row was duplicated"
+
+
+def test_a_completed_drop_reports_the_order_once(qt_app):
+    """The wiring we own: one finished drop, one order_changed.
+
+    Qt moves list rows by inserting and then removing, so `rowsMoved` never
+    fires and `rowsInserted`/`rowsRemoved` would report one drag twice — with
+    a half-finished order visible in between.
+    """
+    panel, _ = _panel_with([0, 1, 2], qt_app)
+    changes = []
+    panel.order_changed.connect(lambda: changes.append(panel.items()))
+
+    panel.list.dropped.emit()
+
+    assert len(changes) == 1, f"order_changed fired {len(changes)} times"
+    assert len(changes[0]) == 3
+
+
+def test_a_missing_row_cannot_be_dragged_or_carried(qt_app):
+    """Clearing ItemIsEnabled leaves ItemIsDragEnabled set, so a gap could be
+    picked up and moved away from the position that is the only remaining
+    evidence of where it belonged."""
+    from PySide6.QtCore import Qt
+
+    panel, stored = _panel_with([0, "gap", 1], qt_app)
+    gap = panel.list.item(1)
+
+    assert not (gap.flags() & Qt.ItemFlag.ItemIsDragEnabled)
+    assert not (gap.flags() & Qt.ItemFlag.ItemIsEnabled)
+    # And it still holds the reference it always did, in its stored place.
+    assert panel.items()[1] == stored[1]
+
+
+def test_the_list_offers_internal_move_without_losing_the_keyboard(qt_app):
+    from PySide6.QtWidgets import QAbstractItemView
+
+    panel, stored = _panel_with([0, 1, 2], qt_app)
+
+    assert panel.list.dragDropMode() == QAbstractItemView.DragDropMode.InternalMove
+    # The accessible route still works exactly as it did.
+    panel.list.item(2).setSelected(True)
+    panel._move(-1)
+    assert [i.sid for i in panel.items()] == [
+        stored[0].sid, stored[2].sid, stored[1].sid]
