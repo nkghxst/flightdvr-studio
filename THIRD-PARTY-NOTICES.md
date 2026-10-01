@@ -74,11 +74,13 @@ program whose size or SHA-256 differs from it.
 Its declared dynamic dependencies are the GNU C library (`libc.so.6`,
 `libm.so.6`, `libdl.so.2`, `librt.so.1`, `libpthread.so.0`, `libmvec.so.1` and
 the loader `ld-linux-x86-64.so.2`, symbol versions up to `GLIBC_2.28`) and
-`libgcc_s.so.1`, the GCC runtime library. The AppImage carries no C library;
-that always comes from the system it runs on. It does carry a copy of
-`libgcc_s.so.1`, which PyInstaller collects for Python and Qt from the system
-the AppImage is built on, so either that copy or the system's may be the one
-ffmpeg loads when the app starts it; which one has not been measured.
+`libgcc_s.so.1`, the GCC runtime library. The AppImage does not carry the C
+library itself (`libc.so.6`) or its loader; those always come from the system
+it runs on. It does carry copies of two of the others, `libgcc_s.so.1` and
+glibc's vector maths library `libmvec.so.1`, which PyInstaller collects for
+Python and Qt from the system the AppImage is built on. Either those copies or
+the system's may be the ones ffmpeg loads when the app starts it; which has not
+been measured.
 Hardware encoding, where it works, uses the graphics drivers already installed
 on the system.
 

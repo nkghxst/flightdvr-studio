@@ -408,12 +408,13 @@ on an ffmpeg that is not the bundled one. The helper also records the pair's
 version, configuration, encoders and filters, cross-checks its ELF
 dependencies with `readelf` and `objdump` and resolves them with `ldd` on the
 runner, records which of those libraries the bundle carries itself
-(`libgcc_s.so.1`, collected by PyInstaller), and exports generated media
-through the pair directly. Evidence is uploaded as `linux-bundle-evidence-*`.
+(`libgcc_s.so.1` and `libmvec.so.1`, collected by PyInstaller), and exports
+generated media through the pair directly. Evidence is uploaded as `linux-bundle-evidence-*`.
 
 What that does not cover: a person starting the AppImage in a normal desktop
 session, real recordings, devices, listening, hardware encoders on real GPUs,
-and which `libgcc_s.so.1` ffmpeg actually loads when the packaged app starts it.
+and which copies of `libgcc_s.so.1` and `libmvec.so.1` ffmpeg actually loads
+when the packaged app starts it.
 
 **The AppImage is built on the oldest supported LTS on purpose.** An AppImage
 carries no glibc; one built on Ubuntu 24.04 will not start on 22.04. If the
