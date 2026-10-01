@@ -193,12 +193,13 @@ def test_each_caller_gets_a_copy_and_the_live_environment_is_untouched(
     monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/opt/system/lib")
     monkeypatch.setenv("FLIGHTDVR_MARKER", "keep")
     before = dict(os.environ)
+    exe = _system_ffmpeg(tmp_path)
 
-    env = child_env(_system_ffmpeg(tmp_path))
+    env = child_env(exe)
     env["FLIGHTDVR_MARKER"] = "changed"
 
     assert dict(os.environ) == before
-    assert child_env(_system_ffmpeg(tmp_path)) is not env
+    assert child_env(exe) is not env
 
 
 # -- Every launch carries it ---------------------------------------------------
