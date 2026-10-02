@@ -293,8 +293,12 @@ def export_check(folder: Path, out: Path) -> int:
 #   proven -- no token, unreadable, exited before it could be read, or a
 #   different start time once the handle is held -- is ambiguous: recorded,
 #   never signalled or reaped, and a failure;
-# - all of that shares one deadline. Output goes to a file, not a pipe, so no
-#   wait for end-of-file can outlast it.
+# - all of that shares one deadline, checked between every phase; running past
+#   it is a failure however the work ended. Output goes to a file, not a pipe,
+#   so no wait for end-of-file can outlast it;
+# - an error anywhere (scanning, opening, reading, signalling, reaping, the
+#   subreaper flag) is recorded and fails the check, never raised, and what is
+#   already proven owned keeps being settled within the same deadline.
 
 TOKEN_NAME = "FLIGHTDVR_CONTAINMENT_TOKEN"
 INVOCATION_SECONDS = 900
@@ -376,144 +380,209 @@ def contained_run(argv: list[str], env: dict, log_path: Path, *,
                   invocation_seconds: float = INVOCATION_SECONDS,
                   cleanup_seconds: float = CLEANUP_SECONDS,
                   term_grace: float = TERM_GRACE_SECONDS,
-                  _signal=None, _read=None) -> dict:
-    """Run `argv` contained, as described above, and return the record."""
+                  _signal=None, _read=None, _scan=None, _open=None, _clock=None) -> dict:
+    """Run `argv` contained, as described above, and return the record.
+
+    Never raises: anything that goes wrong is recorded under "errors", which
+    fails the check. Processes already proven owned keep being settled within
+    the same deadline whatever else fails, and are reported if they remain.
+    """
     send = _signal or signal.pidfd_send_signal
     read = _read or _proc_identity
+    scan = _scan or _all_stats
+    open_handle = _open or os.pidfd_open
+    clock = _clock or time.monotonic
     me = os.getpid()
     token = uuid.uuid4().hex
     record: dict = {"argv": [str(a) for a in argv], "log": str(log_path),
                     "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
                     "exit": None, "timed_out": False, "owned": {}, "ambiguous": [],
-                    "remaining": [], "deadline_hit": False}
-    previous = _subreaper()
-    _subreaper(True)
-    before = {pid: stat["start"] for pid, stat in _all_stats().items() if stat["ppid"] == me}
-    record["helper_children_before"] = sorted(before)
-    handles: dict[int, int] = {}         # owned pid -> its pidfd, until reaped
-    started = time.monotonic()
-    proc = None
+                    "remaining": [], "deadline_hit": False, "errors": []}
+
+    def error(where: str, exc: BaseException) -> None:
+        record["errors"].append(f"{where}: {type(exc).__name__}: {exc}")
+
     try:
+        previous = _subreaper()
+    except Exception as exc:             # nothing has been changed yet
+        error("reading the subreaper flag", exc)
+        return record
+
+    handles: dict[int, int] = {}         # owned pid -> its pidfd, until reaped
+    seen: set[int] = set()
+    proc = None
+    session = None
+    before: dict[int, int] = {}
+    started = clock()
+    deadline: float | None = None
+
+    def ambiguous(pid: int, reason: str, scanned: dict, identity=None) -> None:
+        record["ambiguous"].append({"pid": pid, "reason": reason, "scan": scanned,
+                                    "identity": identity})
+
+    def classify(pid: int, scanned: dict) -> None:
+        try:
+            fd = open_handle(pid)
+        except ProcessLookupError:
+            ambiguous(pid, "exited before it could be opened", scanned)
+            return
+        except OSError as exc:
+            ambiguous(pid, f"could not be opened: {type(exc).__name__}: {exc}", scanned)
+            return
+        try:
+            identity = read(pid)
+            gone = identity is None or _exited(fd)
+        except Exception as exc:         # noqa: BLE001 — unknown: never signalled
+            os.close(fd)
+            ambiguous(pid, f"could not be read: {type(exc).__name__}: {exc}", scanned)
+            return
+        if gone:
+            os.close(fd)
+            ambiguous(pid, "exited before it could be identified", scanned, identity)
+            return
+        if identity["start"] != scanned["start"]:
+            os.close(fd)
+            ambiguous(pid, "identity changed between the scan and the handle", scanned, identity)
+            return
+        if identity["token"] != token:
+            os.close(fd)
+            why = {None: "no token", _UNREADABLE: "token unreadable"}.get(
+                identity["token"], "a different token")
+            ambiguous(pid, why, scanned, identity)
+            return
+        handles[pid] = fd
+        identity = {k: v for k, v in identity.items() if k != "token"}
+        record["owned"][str(pid)] = dict(identity, signals=[], reaped=None)
+
+    def reap(pid: int) -> None:
+        fd = handles[pid]
+        entry = record["owned"][str(pid)]
+        if proc is not None and pid == proc.pid:
+            try:
+                proc.wait(timeout=max(0.0, deadline - clock()))
+            except subprocess.TimeoutExpired:
+                return                       # the deadline decides
+            entry["reaped"] = "by the helper (its direct child)"
+        else:
+            try:
+                if os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG) is None:
+                    return                   # not yet collectable; next pass
+                entry["reaped"] = "by the helper, through its pidfd"
+            except ChildProcessError:
+                # Still the child of an owned process: once that one is gone
+                # it is re-parented here, so try again next pass.
+                stat = _stat(pid)
+                if stat is not None and stat["ppid"] in handles:
+                    return
+                entry["reaped"] = "not the helper's child; left to its parent"
+        os.close(fd)
+        del handles[pid]
+
+    def settle_owned() -> None:
+        """Signal and reap what is already proven owned; one pass."""
+        for pid, fd in list(handles.items()):
+            entry = record["owned"][str(pid)]
+            try:
+                if _exited(fd):
+                    reap(pid)
+                    continue
+                if not entry["signals"]:
+                    entry["term_at"] = clock()
+                    entry["signals"].append(["SIGTERM", round(clock() - started, 3)])
+                    send(fd, signal.SIGTERM)
+                elif len(entry["signals"]) == 1 and clock() - entry["term_at"] >= term_grace:
+                    entry["signals"].append(["SIGKILL", round(clock() - started, 3)])
+                    send(fd, signal.SIGKILL)
+            except ProcessLookupError:
+                pass                         # exited meanwhile; reaped next pass
+            except Exception as exc:         # noqa: BLE001 — kept, retried, reported
+                error(f"settling owned process {pid}", exc)
+
+    def wait_a_little() -> None:
+        remaining = max(0.0, min(0.2, deadline - clock()))
+        if handles:
+            poller = select.poll()
+            for fd in handles.values():
+                poller.register(fd, select.POLLIN)
+            poller.poll(int(remaining * 1000))
+        else:
+            time.sleep(min(0.1, remaining))
+
+    try:
+        _subreaper(True)
+        before = {pid: stat["start"] for pid, stat in scan().items() if stat["ppid"] == me}
+        record["helper_children_before"] = sorted(before)
         try:
             with open(log_path, "wb") as log:
                 proc = subprocess.Popen(argv, env=dict(env, **{TOKEN_NAME: token}),
                                         stdin=subprocess.DEVNULL, stdout=log,
                                         stderr=subprocess.STDOUT, start_new_session=True)
         except OSError as exc:
-            record["error"] = f"could not start: {type(exc).__name__}: {exc}"
+            error("starting the invocation", exc)
             return record
         record["session"] = session = proc.pid
         try:
             record["exit"] = proc.wait(timeout=invocation_seconds)
         except subprocess.TimeoutExpired:
             record["timed_out"] = True
-        record["invocation_seconds"] = round(time.monotonic() - started, 3)
+        record["invocation_seconds"] = round(clock() - started, 3)
 
-        deadline = time.monotonic() + cleanup_seconds
-        seen: set[int] = set()
-
-        def ambiguous(pid: int, reason: str, scanned: dict, identity=None) -> None:
-            record["ambiguous"].append({"pid": pid, "reason": reason, "scan": scanned,
-                                        "identity": identity})
-
-        def classify(pid: int, scanned: dict) -> None:
-            try:
-                fd = os.pidfd_open(pid)
-            except ProcessLookupError:
-                ambiguous(pid, "exited before it could be opened", scanned)
-                return
-            identity = read(pid)
-            if identity is None or _exited(fd):
-                os.close(fd)
-                ambiguous(pid, "exited before it could be identified", scanned, identity)
-                return
-            if identity["start"] != scanned["start"]:
-                os.close(fd)
-                ambiguous(pid, "identity changed between the scan and the handle",
-                          scanned, identity)
-                return
-            if identity["token"] != token:
-                os.close(fd)
-                why = {None: "no token", _UNREADABLE: "token unreadable"}.get(
-                    identity["token"], "a different token")
-                ambiguous(pid, why, scanned, identity)
-                return
-            handles[pid] = fd
-            identity = {k: v for k, v in identity.items() if k != "token"}
-            record["owned"][str(pid)] = dict(identity, signals=[], reaped=None)
-
-        def reap(pid: int) -> None:
-            fd = handles[pid]
-            entry = record["owned"][str(pid)]
-            if proc is not None and pid == proc.pid:
+        deadline = clock() + cleanup_seconds
+        scanning = True
+        while clock() < deadline:
+            relevant: set[int] = set()
+            if scanning:
                 try:
-                    proc.wait(timeout=max(0.0, deadline - time.monotonic()))
-                except subprocess.TimeoutExpired:
-                    return                   # the deadline decides
-                entry["reaped"] = "by the helper (its direct child)"
-            else:
-                try:
-                    if os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG) is None:
-                        return               # not yet collectable; next pass
-                    entry["reaped"] = "by the helper, through its pidfd"
-                except ChildProcessError:
-                    # Still the child of an owned process: once that one is
-                    # gone it is re-parented here, so try again next pass.
-                    stat = _stat(pid)
-                    if stat is not None and stat["ppid"] in handles:
-                        return
-                    entry["reaped"] = "not the helper's child; left to its parent"
-            os.close(fd)
-            del handles[pid]
-
-        while time.monotonic() < deadline:
-            stats = _all_stats()
-            relevant = {pid for pid, s in stats.items()
-                        if pid != me and pid not in seen
-                        and (s["session"] == session
-                             or (s["ppid"] == me and before.get(pid) != s["start"])
-                             or s["ppid"] in handles)}
-            for pid in sorted(relevant):
-                seen.add(pid)
-                classify(pid, stats[pid])
-            for pid, fd in list(handles.items()):
-                entry = record["owned"][str(pid)]
-                if _exited(fd):
-                    reap(pid)
-                    continue
-                try:
-                    if not entry["signals"]:
-                        entry["term_at"] = time.monotonic()
-                        entry["signals"].append(["SIGTERM", round(time.monotonic() - started, 3)])
-                        send(fd, signal.SIGTERM)
-                    elif (len(entry["signals"]) == 1
-                          and time.monotonic() - entry["term_at"] >= term_grace):
-                        entry["signals"].append(["SIGKILL", round(time.monotonic() - started, 3)])
-                        send(fd, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass                         # exited meanwhile; reaped next pass
+                    stats = scan()
+                    relevant = {pid for pid, s in stats.items()
+                                if pid != me and pid not in seen
+                                and (s["session"] == session
+                                     or (s["ppid"] == me and before.get(pid) != s["start"])
+                                     or s["ppid"] in handles)}
+                except Exception as exc:     # noqa: BLE001 — stop discovering, keep settling
+                    error("scanning /proc", exc)
+                    scanning = False
+                for pid in sorted(relevant):
+                    if clock() >= deadline:
+                        break
+                    seen.add(pid)
+                    classify(pid, stats[pid])
+            if clock() >= deadline:
+                break
+            settle_owned()
             if not relevant and not handles:
                 break
-            if handles:
-                poller = select.poll()
-                for fd in handles.values():
-                    poller.register(fd, select.POLLIN)
-                poller.poll(int(max(0.0, min(0.2, deadline - time.monotonic())) * 1000))
-            else:
-                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
-        else:
-            record["deadline_hit"] = True
-        if handles:
+            wait_a_little()
+    except Exception as exc:                 # noqa: BLE001 — recorded, never raised
+        error("containment", exc)
+    finally:
+        # Whatever happened above, keep settling what is already proven owned,
+        # inside the same deadline (or a fresh one if it was never set).
+        if deadline is None:
+            deadline = clock() + cleanup_seconds
+        try:
+            while handles and clock() < deadline:
+                settle_owned()
+                if handles:
+                    wait_a_little()
+        except Exception as exc:             # noqa: BLE001
+            error("settling after an error", exc)
+        if clock() > deadline or handles:
             record["deadline_hit"] = True
         record["remaining"] = sorted(handles)
-        record["cleanup_seconds"] = round(time.monotonic() - started
-                                          - record["invocation_seconds"], 3)
-    finally:
+        if "invocation_seconds" in record:
+            record["cleanup_seconds"] = round(clock() - started - record["invocation_seconds"], 3)
         for fd in handles.values():
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError as exc:
+                error("closing a handle", exc)
         for entry in record["owned"].values():
             entry.pop("term_at", None)
-        _subreaper(previous)
+        try:
+            _subreaper(previous)
+        except Exception as exc:             # noqa: BLE001
+            error("restoring the subreaper flag", exc)
     return record
 
 
@@ -552,6 +621,8 @@ def run_check_export(ev: "Evidence", appimage: Path, label: str, run_env: dict,
                json.dumps(run["ambiguous"])[:400])
     ev.require(f"{label}: nothing of its own remains", not run["remaining"], str(run["remaining"]))
     ev.require(f"{label}: cleanup finished within {CLEANUP_SECONDS} s", not run["deadline_hit"])
+    ev.require(f"{label}: containment ran without errors", not run.get("errors"),
+               "; ".join(run.get("errors", []))[:400])
 
 
 def _absent_system_tools() -> dict[str, list[str]]:

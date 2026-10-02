@@ -680,3 +680,92 @@ def test_containment_never_signals_a_process_whose_identity_changed(tmp_path):
         assert _still_running(pid, found["scan"]["start"])
     finally:
         _clean_up(pid, start)
+
+
+@linux_only
+def test_containment_a_scan_that_crosses_the_deadline_fails(tmp_path):
+    # Sol C1: the clock jumps past the 30 s budget during the cleanup scan,
+    # which finds nothing. That must be a hit deadline, not a quiet pass.
+    offset = [0.0]
+    scans = []
+
+    def clock():
+        return time.monotonic() + offset[0]
+
+    def scan():
+        scans.append(1)
+        found = check_bundle._all_stats()
+        if len(scans) == 2:              # the first cleanup scan
+            offset[0] += 31
+        return found
+
+    record, _, _ = _run(tmp_path, "exit 0", _clock=clock, _scan=scan)
+    assert record["exit"] == 0 and record["owned"] == {}
+    assert record["deadline_hit"] is True
+    assert record["cleanup_seconds"] >= 31
+
+
+@linux_only
+def test_containment_an_unopenable_process_does_not_abandon_the_owned_one(tmp_path):
+    # Sol C2: after one process is proven owned, opening the next fails. The
+    # owned one must still be stopped and reaped; the other is ambiguous and
+    # never signalled; nothing escapes as an exception.
+    pidfile = tmp_path / "pids"
+
+    def open_handle(pid):
+        pids = _pids(pidfile)
+        if len(pids) == 2 and pid == pids[1]:
+            raise PermissionError(13, "Permission denied")
+        return os.pidfd_open(pid)
+
+    record, (first, second), _ = _run(
+        tmp_path, 'sleep 300 &\necho $! >> "$PIDFILE"\nsleep 300 &\necho $! >> "$PIDFILE"\nexit 3',
+        _open=open_handle)
+    second_start = _start(second)
+    try:
+        owned = record["owned"][str(first)]
+        assert owned["signals"][0][0] == "SIGTERM"
+        assert owned["reaped"] == "by the helper, through its pidfd"
+        assert not _still_running(first, owned["start"])
+        [found] = [a for a in record["ambiguous"] if a["pid"] == second]
+        assert found["reason"].startswith("could not be opened: PermissionError")
+        assert str(second) not in record["owned"]
+        assert _still_running(second, second_start)          # never signalled
+        assert record["remaining"] == []
+    finally:
+        _clean_up(second, second_start)
+
+
+@linux_only
+def test_containment_a_failed_setup_scan_restores_the_subreaper_and_reports(tmp_path):
+    before = check_bundle._subreaper()
+
+    def scan():
+        raise PermissionError(13, "/proc unreadable")
+
+    record, pids, _ = _run(tmp_path, 'sleep 300 &\necho $! >> "$PIDFILE"\nexit 0', _scan=scan)
+    assert check_bundle._subreaper() == before
+    assert record["errors"] and record["errors"][0].startswith("containment: PermissionError")
+    assert pids == [] and record.get("session") is None      # nothing was started
+
+
+@linux_only
+def test_containment_a_failed_read_is_ambiguous_and_never_signalled(tmp_path):
+    sent = []
+    pidfile = tmp_path / "pids"
+
+    def read(pid):
+        if pid in _pids(pidfile):
+            raise OSError(5, "Input/output error")
+        return check_bundle._proc_identity(pid)
+
+    record, (pid,), _ = _run(tmp_path, 'sleep 300 &\necho $! >> "$PIDFILE"\nexit 3',
+                             _signal=lambda fd, sig: sent.append(sig), _read=read)
+    start = _start(pid)
+    try:
+        assert sent == []
+        [found] = [a for a in record["ambiguous"] if a["pid"] == pid]
+        assert found["reason"].startswith("could not be read: OSError")
+        assert _still_running(pid, start)
+    finally:
+        _clean_up(pid, start)
