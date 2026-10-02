@@ -252,19 +252,21 @@ works. `_encoder_runs()` performs a real three-frame encode. Hardcoding
 `h264_amf` because it worked on the development machine would have failed on
 the laptop, which is how this was found.
 
-**ffmpeg options are not stable, and the app does not bundle one on Linux or
-macOS.** `-fps_mode` replaced `-vsync` in ffmpeg 5.1. Ubuntu 22.04 ships 4.4,
-the AppImage is built for 22.04 on purpose, and every re-encoding export plus
-the filmstrip extraction used `-fps_mode` — so on that distribution every
-export failed with `Unrecognized option 'fps_mode'` and the trim panel stayed
-empty. `frame_rate_mode()` in `media.py` probes for it once, the same way the
-hardware encoders are probed, and falls back to `-vsync`.
+**ffmpeg options are not stable, and a source checkout or the macOS app uses
+whatever ffmpeg the system has.** `-fps_mode` replaced `-vsync` in ffmpeg 5.1.
+Ubuntu 22.04 ships 4.4, the AppImage was built for 22.04 on purpose and then
+carried no ffmpeg, and every re-encoding export plus the filmstrip extraction
+used `-fps_mode` — so on that distribution every export failed with
+`Unrecognized option 'fps_mode'` and the trim panel stayed empty.
+`frame_rate_mode()` in `media.py` probes for it once, the same way the hardware
+encoders are probed, and falls back to `-vsync`.
 
-The general rule: the Windows build knows exactly which ffmpeg it has because
-the binary is pinned, and the other two know nothing at all. Anything added to
-a command that is newer than the oldest supported distribution's ffmpeg has to
-be probed. The integration suite runs on `ubuntu-22.04` during the AppImage
-build precisely so this class of problem shows up.
+The general rule: the Windows installer and the AppImage know exactly which
+ffmpeg they have because the binary is pinned, and a source run or the macOS
+app knows nothing at all. Anything added to a command that is newer than the
+oldest supported distribution's ffmpeg has to be probed. The integration suite
+runs on `ubuntu-22.04`'s own ffmpeg during the AppImage build precisely so this
+class of problem shows up, and again on the pinned Linux pair.
 
 **The goggles have no clock battery.** The Box Pro's own log reports
 `rtc_init has NOT detected a battery`, so the clock restarts from the same
@@ -368,13 +370,96 @@ All three share `packaging/flightdvr_studio.spec`, which branches on
 `sys.platform` for the icon format, the macOS `BUNDLE` step, and whether ffmpeg
 is bundled.
 
-**ffmpeg is bundled on Windows only.** Windows users have no package manager to
-supply one, and the app has to work on a machine that never had it. Linux and
-macOS both do, so bundling there would mean redistributing a second GPL binary
-and carrying a second corresponding-source offer for no user benefit.
+**ffmpeg is bundled on Windows and Linux.** Windows users have no package
+manager to supply one. On Linux the distributions' ffmpeg ranges from 4.4 on
+Ubuntu 22.04 to Fedora's restricted `ffmpeg-free`, so the AppImage carries the
+pinned BtbN Linux build of the same FFmpeg commit the Windows installer uses,
+and every export runs against one known ffmpeg. macOS uses Homebrew's.
+
+**The bundled Linux ffmpeg is pinned the same way, and checked at every step.**
+`packaging/ffmpeg-build-linux.json` records the archive URL, its size and
+SHA-256, both programs' sizes and SHA-256, and the build-system commit (the
+GitHub release is not immutable, so the commit and the hashes are the fixed
+references, not the release name). `packaging/fetch-ffmpeg.sh` downloads that
+archive once, under a temporary name, and `packaging/verify_ffmpeg_linux.py`
+checks its size and hash before opening it, refuses absolute or climbing
+paths, links and duplicate candidates, reads out only `ffmpeg`, `ffprobe` and
+the licence, checks both programs, and only then publishes the folder.
+`build-appimage.sh` checks the folder it is given, checks that
+`packaging/ffmpeg-configuration-linux.txt` matches the binary's own version
+output, checks the pair again inside the PyInstaller output, and accepts only
+`--check` exit 0 with the bundled copy resolved; the spec refuses to build on
+Linux without the pinned pair. Run it with `FFMPEG_DIR` set to the folder
+`fetch-ffmpeg.sh` prints, or unset to fetch into `build/ffmpeg-linux`.
+
+CI then proves the artifact rather than the source: on `ubuntu-22.04` and
+`ubuntu-latest`, `packaging/check_linux_bundle.py` runs the built AppImage with
+no system ffmpeg anywhere the app looks, and again with a decoy pair first on
+`PATH` that fails the check if it is ever run. Each time, `--check` must
+resolve the bundled pair, whose bytes are checked in the extracted AppImage,
+and `--check-export <folder>` must pass. That mode
+(`flightdvr/package_check.py`) runs inside the packaged process with no window
+and no settings: it generates a short HEVC recording in a new folder of its
+own, reads it with the app's `probe`, exports a trimmed Master with the Rec.709
+conversion, an Edit and a Remux through the real `ExportWorker` under a time
+limit, reads the results back with `probe`, and writes `receipt.json` with the
+tools, their origin and hashes, and every measured property. It refuses to run
+on an ffmpeg that is not the bundled one. The helper also records the pair's
+version, configuration, encoders and filters, cross-checks its ELF
+dependencies with `readelf` and `objdump` and resolves them with `ldd` on the
+runner, records which of those libraries the bundle carries itself
+(`libgcc_s.so.1` and `libmvec.so.1`, collected by PyInstaller), and exports
+generated media through the pair directly. Evidence is uploaded as `linux-bundle-evidence-*`.
+
+Which copy of each library the bundled ffmpeg really loads is measured, not
+assumed: one more `--check-export` run sets `LD_DEBUG=libs,files` with
+`LD_DEBUG_OUTPUT`, so the glibc loader writes, for every ffmpeg and ffprobe the
+frozen app starts, the file it opened for each library. The helper reports, per
+process, whether `libgcc_s.so.1`, `libmvec.so.1`, `libc.so.6` and `libm.so.6`
+came from the bundle (`usr/bin/_internal`) or the host
+(`loader_selection` in `appimage-check.json`).
+
+**Corresponding source ships with the release.** The build job records its
+inputs (`linux-ffmpeg-source-inputs`: the FFmpeg and build-system archives at
+the pinned commits, and the Ubuntu packages the carried libraries were copied
+from). The `linux-ffmpeg-source` job then runs
+`packaging/collect_linux_sources.py collect` on them:
+
+- **Which dependencies.** It runs the pinned build system's own `generate.sh
+  linux64 gpl 7.1` to learn which dependency stages it enables. It requires
+  every configure flag those stages add to appear in the shipped binary's
+  recorded configuration.
+- **Fetching.** It fetches each stage with the build system's own download
+  recipe and helpers, naming each archive as its `download.sh` cache would.
+  Every declared source of a stage (`SCRIPT_COMMIT`/`SCRIPT_REV` and any
+  numbered ones) is bound to the repository fetched from its own declared
+  remote, and that repository must be at the declared commit, resolved tag or
+  SVN revision. A match in a submodule or another repository never counts.
+  Only two named declarations, AMF's and libiconv's gnulib, may be pinned by a
+  recipe that deletes its own `.git`, and only while the recipe still does. It
+  also vendors rav1e's locked crates.
+- **Ubuntu sources.** It fetches the two Ubuntu source packages from
+  Launchpad. Each must match its `.dsc`, **and** that `.dsc` must be listed in
+  the Ubuntu archive index, whose `InRelease` is verified with the Ubuntu
+  archive keyring. If the signed index cannot confirm it, the package counts as
+  missing.
+- **Output.** It writes one `FlightDVR_Studio-<version>-linux-ffmpeg-source.tar`
+  with `MANIFEST.json` and build instructions. If anything required fails, it
+  writes no bundle and the job fails. The bundle must stay under GitHub's
+  2 GiB release-asset limit.
+
+The release job downloads only `linux-appimage`, `macos-dmg`,
+`windows-installer` and `linux-ffmpeg-source`. `select-release-files` then
+attaches exactly one AppImage, one `.dmg`, one installer and one source
+bundle. Evidence folders and other artifacts are never attached.
+
+What that does not cover: a person starting the AppImage in a normal desktop
+session, real recordings, devices, listening, hardware encoders on real GPUs,
+and library selection on systems other than the two CI runners.
 
 **The AppImage is built on the oldest supported LTS on purpose.** An AppImage
-carries no glibc; one built on Ubuntu 24.04 will not start on 22.04. If the
+carries no `libc.so.6` or loader of its own; one built on Ubuntu 24.04 will not
+start on 22.04. If the
 `ubuntu-22.04` runner label is ever retired, `ubuntu-latest` works but raises
 the floor and will break users on older distributions.
 
@@ -800,7 +885,7 @@ release attached to them yet.
 
 ## Deliberately not done
 
-- **Bundling ffmpeg on Linux or macOS.** Reasoning above.
+- **Bundling ffmpeg on macOS.** Reasoning above.
 - **Converting colour tags by default.** Reasoning above.
 - **Parallel exports.** ffmpeg already saturates every core; running two at
   once makes both slower and the progress display meaningless.

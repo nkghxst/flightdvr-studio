@@ -5,14 +5,16 @@
 #
 # ffmpeg bundling
 # ---------------
-# The Windows build bundles ffmpeg and ffprobe so the app works on a machine
-# that has never had them installed, and media.py looks inside the bundle
-# before it looks at PATH. Linux and macOS builds do not bundle by default:
-# both have a package manager that supplies a maintained ffmpeg, and shipping
-# a second GPL binary means shipping a second corresponding-source offer.
+# The Windows and Linux builds bundle ffmpeg and ffprobe so the app works on a
+# machine that has never had them installed, and media.py looks inside the
+# bundle before it looks at PATH. The macOS build does not bundle by default:
+# Homebrew supplies a maintained ffmpeg there.
 #
-# Set FFMPEG_DIR to bundle anyway. On Windows it defaults to C:\ffmpeg\bin and
-# is required; elsewhere it is only honoured when you set it explicitly.
+# On Windows FFMPEG_DIR defaults to C:\ffmpeg\bin and is required. On Linux it
+# is required and must hold exactly the pair ffmpeg-build-linux.json pins,
+# which packaging/fetch-ffmpeg.sh downloads and verifies; the folder is checked
+# again here so nothing else can be bundled under the notices' attribution. On
+# macOS it is only honoured when you set it explicitly.
 
 import os
 import re
@@ -24,6 +26,7 @@ PACKAGING = ROOT / "packaging"
 
 WINDOWS = sys.platform == "win32"
 MACOS = sys.platform == "darwin"
+LINUX = sys.platform.startswith("linux")
 
 VERSION = re.search(
     r'__version__\s*=\s*"([^"]+)"',
@@ -35,8 +38,22 @@ VERSION = re.search(
 TOOL_NAMES = ("ffmpeg.exe", "ffprobe.exe") if WINDOWS else ("ffmpeg", "ffprobe")
 
 ffmpeg_dir = os.environ.get("FFMPEG_DIR") or (r"C:\ffmpeg\bin" if WINDOWS else "")
-# Required on Windows; opt-in elsewhere, so an unset FFMPEG_DIR is not an error.
-ffmpeg_required = WINDOWS or bool(os.environ.get("FFMPEG_DIR"))
+# Required on Windows and Linux; opt-in on macOS, where an unset FFMPEG_DIR is
+# not an error.
+ffmpeg_required = WINDOWS or LINUX or bool(os.environ.get("FFMPEG_DIR"))
+
+if LINUX:
+    if not ffmpeg_dir:
+        raise SystemExit(
+            "The Linux build bundles the pinned ffmpeg/ffprobe pair. Set "
+            "FFMPEG_DIR to the folder packaging/fetch-ffmpeg.sh prints."
+        )
+    sys.path.insert(0, str(PACKAGING))
+    from verify_ffmpeg_linux import PinError, check_dir
+    try:
+        check_dir(Path(ffmpeg_dir))
+    except PinError as exc:
+        raise SystemExit(f"Refusing to bundle {ffmpeg_dir} ({exc.reason}): {exc}")
 
 ffmpeg_files = []
 if ffmpeg_dir:

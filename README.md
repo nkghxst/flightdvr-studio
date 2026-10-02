@@ -54,25 +54,19 @@ chmod +x FlightDVR_Studio-*.AppImage
 ./FlightDVR_Studio-*.AppImage
 ```
 
-About 63 MB. One file, nothing installed, delete it to uninstall. It is built on
-Ubuntu 22.04 and needs glibc 2.35 or newer. Some supported enterprise
-distributions still carry an older glibc; `ldd --version` reports yours.
+One file, nothing installed, delete it to uninstall. It is built on Ubuntu
+22.04 and needs glibc 2.35 or newer. Some supported enterprise distributions
+still carry an older glibc; `ldd --version` reports yours.
 
-Unlike the Windows build it does **not** carry its own ffmpeg, because your
-distribution already ships a maintained one:
-
-```bash
-sudo apt install ffmpeg      # Debian, Ubuntu, Mint, Pop!_OS
-sudo dnf install ffmpeg      # Nobara; Fedora after enabling RPM Fusion
-sudo pacman -S ffmpeg        # Arch, Manjaro
-```
-
-Fedora's own `ffmpeg-free` package has limited codec support and does not cover
-every FlightDVR export. Enable [RPM Fusion](https://rpmfusion.org/Configuration)
-and install its full `ffmpeg` package first.
-
-Some image-based systems already include a suitable ffmpeg. Run the app with
-`--check` before installing anything to see exactly what it found.
+Like the Windows build, it carries **its own ffmpeg and ffprobe**: the pinned
+build named in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), so every
+export uses the same ffmpeg whatever your distribution ships. Nothing needs
+installing first, and an ffmpeg you have installed yourself is left alone; the
+app always prefers the copy inside the AppImage. The bundled ffmpeg needs the
+system's C library. It also needs `libgcc_s.so.1` and `libmvec.so.1`; the
+AppImage carries a copy of each and, on the systems measured (Ubuntu 22.04 and
+24.04), ffmpeg uses those copies.
+Run the app with `--check` to see exactly which ffmpeg it is using.
 
 Playback happens in the window and needs nothing else. Install VLC or mpv as
 well if you want **Open in player…** to have somewhere to send a clip.
@@ -781,10 +775,10 @@ not work, clear the quarantine flag:
 xattr -dr com.apple.quarantine "/Applications/FlightDVR Studio.app"
 ```
 
-**"Could not find ffmpeg" at startup.** On Linux and macOS the app uses your
-system ffmpeg, so install it — see [Installing](#installing) for the command.
-On Windows this only happens when running from source; the installed build
-carries its own copy.
+**"Could not find ffmpeg" at startup.** On macOS the app uses your system
+ffmpeg, so install it — see [Installing](#installing) for the command. The
+Windows installer and the Linux AppImage carry their own copy, so there this
+only happens when running from source.
 
 If you have installed it and the app still cannot see it, ask the app what it
 found:
@@ -817,6 +811,12 @@ alone* instead.
 
 **Every clip has the same date.** Expected — see
 [above](#the-goggles-cannot-keep-time).
+
+**A `.flightdvr-part` file was left after cancelling (Windows).** A known issue:
+cancelling while the sound is being checked can occasionally leave the
+cancelled export's unfinished temporary file. The queue names the exact file.
+It is not your export, and your existing file is untouched. See
+[docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) for how to remove it safely.
 
 ---
 
