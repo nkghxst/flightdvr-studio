@@ -454,7 +454,12 @@ def contained_run(argv: list[str], env: dict, log_path: Path, *,
         identity = {k: v for k, v in identity.items() if k != "token"}
         record["owned"][str(pid)] = dict(identity, signals=[], reaped=None)
 
+    def expired() -> bool:
+        return clock() >= deadline
+
     def reap(pid: int) -> None:
+        if expired():
+            return                           # past the deadline: report, do not start
         fd = handles[pid]
         entry = record["owned"][str(pid)]
         if proc is not None and pid == proc.pid:
@@ -479,13 +484,22 @@ def contained_run(argv: list[str], env: dict, log_path: Path, *,
         del handles[pid]
 
     def settle_owned() -> None:
-        """Signal and reap what is already proven owned; one pass."""
+        """Signal and reap what is already proven owned; one pass.
+
+        The deadline is checked before every process and again before each
+        signal or reap, so nothing is started once it has passed; whatever
+        is left is reported as remaining.
+        """
         for pid, fd in list(handles.items()):
+            if expired():
+                return
             entry = record["owned"][str(pid)]
             try:
                 if _exited(fd):
                     reap(pid)
                     continue
+                if expired():
+                    return
                 if not entry["signals"]:
                     entry["term_at"] = clock()
                     entry["signals"].append(["SIGTERM", round(clock() - started, 3)])

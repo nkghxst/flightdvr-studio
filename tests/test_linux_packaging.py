@@ -769,3 +769,34 @@ def test_containment_a_failed_read_is_ambiguous_and_never_signalled(tmp_path):
         assert _still_running(pid, start)
     finally:
         _clean_up(pid, start)
+
+
+@linux_only
+def test_containment_starts_nothing_once_the_deadline_passes_while_settling(tmp_path):
+    # Sol C1 (second part): the first SIGTERM uses up the rest of the budget.
+    # The second owned process must then be neither signalled nor reaped,
+    # and both must be reported as remaining.
+    offset = [0.0]
+    sent = []
+
+    def clock():
+        return time.monotonic() + offset[0]
+
+    def signal_(fd, sig):
+        sent.append(sig)                 # nothing is really sent
+        offset[0] += 31
+
+    record, pids, _ = _run(
+        tmp_path, 'sleep 300 &\necho $! >> "$PIDFILE"\nsleep 300 &\necho $! >> "$PIDFILE"\nexit 3',
+        _clock=clock, _signal=signal_)
+    starts = {pid: _start(pid) for pid in pids}
+    try:
+        assert len(pids) == 2 and sorted(record["owned"]) == sorted(str(p) for p in pids)
+        assert len(sent) == 1                                 # no second, late signal
+        assert sum(bool(e["signals"]) for e in record["owned"].values()) == 1
+        assert all(e["reaped"] is None for e in record["owned"].values())   # no late reap
+        assert record["deadline_hit"] is True
+        assert sorted(record["remaining"]) == sorted(pids)
+    finally:
+        for pid, start in starts.items():
+            _clean_up(pid, start)
