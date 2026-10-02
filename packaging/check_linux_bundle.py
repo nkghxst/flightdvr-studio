@@ -6,6 +6,7 @@ programs and the built AppImage.
     python3 packaging/check_linux_bundle.py inspect-pair FOLDER OUT
     python3 packaging/check_linux_bundle.py export-check FOLDER OUT
     python3 packaging/check_linux_bundle.py appimage-check APPIMAGE OUT
+    python3 packaging/check_linux_bundle.py environment-check APPIMAGE OUT [EXTERNAL_DIR]
 
 inspect-pair   identity, version, configuration, encoders and filters, and the
                ELF dynamic requirements read by readelf and objdump (independent
@@ -936,11 +937,125 @@ def source_material(bundle_internal: Path, out: Path) -> int:
     return ev.finish()
 
 
+# -- the child-process environment, inside the actual AppImage ----------------------
+#
+# Runs the app's --check-environment (flightdvr/package_check.py) twice,
+# contained like --check-export: once with no LD_LIBRARY_PATH before the app
+# starts (so PyInstaller saves no LD_LIBRARY_PATH_ORIG) and once with one (so
+# it does). An owned stand-in outside the bundle must get back exactly what was
+# there before, the bundled pair must keep the bundle's path, an unrelated
+# sentinel must survive, and the app's own environment must be unchanged.
+# With an external folder (the runner's system ffmpeg, before it is removed),
+# those named external programs must also probe a generated clip and stream a
+# generated track through the app's own readers.
+
+PRESET_LIBRARY_PATH = "/opt/flightdvr-preexisting-lib"
+
+
+def run_check_environment(ev: "Evidence", appimage: Path, label: str, run_env: dict,
+                          pin: dict, external: str | None, sentinel: str,
+                          expected_child: str) -> None:
+    parent = ev.out / label
+    parent.mkdir(parents=True, exist_ok=False)
+    argv = [str(appimage), "--check-environment", str(parent)]
+    if external:
+        argv += ["--external-tools", external]
+    run = contained_run(argv, run_env, ev.out / f"{label}.log")
+    receipts = sorted(parent.glob("flightdvr-check-environment-*/receipt.json"))
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8")) if len(receipts) == 1 else {}
+    ev.record[label] = {"exit": run["exit"], "containment": run,
+                        "receipts": [str(r) for r in receipts], "receipt": receipt}
+    ev.require(f"{label}: --check-environment exits 0 in time",
+               run["exit"] == 0 and not run["timed_out"],
+               f"exit {run['exit']}, timed out {run['timed_out']}")
+    ev.require(f"{label}: one receipt, reporting PASS",
+               len(receipts) == 1 and receipt.get("result") == "PASS",
+               f"{len(receipts)} receipts; failures {receipt.get('failures')}")
+    ev.require(f"{label}: ran frozen", receipt.get("app", {}).get("frozen") is True)
+    saw = receipt.get("stand_in", {}).get("saw", {})
+    ev.require(f"{label}: the external stand-in got LD_LIBRARY_PATH {expected_child!r}",
+               saw.get("LD_LIBRARY_PATH") == expected_child, json.dumps(saw))
+    ev.require(f"{label}: the stand-in never saw LD_LIBRARY_PATH_ORIG",
+               saw.get("LD_LIBRARY_PATH_ORIG") == "<unset>", json.dumps(saw))
+    ev.require(f"{label}: the unrelated sentinel survived", saw.get("SENTINEL") == sentinel,
+               json.dumps(saw))
+    ev.require(f"{label}: the app's own environment was unchanged",
+               receipt.get("parent_unchanged") is True)
+    kept = receipt.get("bundled_child_LD_LIBRARY_PATH") or ""
+    ev.require(f"{label}: the bundled pair keeps the bundle's library path",
+               "/usr/bin/_internal" in kept, kept)
+    for tool in ("ffmpeg", "ffprobe"):
+        used = receipt.get("bundled_tools", {}).get(tool, {})
+        ev.require(f"{label}: {tool} found normally is the bundled, pinned copy",
+                   used.get("bundled") is True and used.get("sha256") == pin["binaries"][tool],
+                   json.dumps(used))
+    track = receipt.get("bundled_track", {})
+    ev.require(f"{label}: the bundled streaming reader read a block and closed",
+               track.get("block", {}).get("values", 0) > 0 and track.get("reader_closed") is True,
+               json.dumps(track)[:300])
+    if external:
+        outside = receipt.get("external", {})
+        ev.require(f"{label}: the named external pair was used, not the bundle",
+                   isinstance(outside, dict)
+                   and all(not outside.get(t, {}).get("bundled", True) for t in ("ffmpeg", "ffprobe")),
+                   json.dumps(outside)[:300])
+        probe = outside.get("probe", {}) if isinstance(outside, dict) else {}
+        ev.require(f"{label}: the external ffprobe read the generated clip",
+                   probe.get("video_codec") == "h264" and probe.get("audio_codec") == "aac",
+                   json.dumps(probe))
+        ext_track = outside.get("track", {}) if isinstance(outside, dict) else {}
+        ev.require(f"{label}: the external ffmpeg streamed a block and closed",
+                   ext_track.get("block", {}).get("values", 0) > 0
+                   and ext_track.get("reader_closed") is True, json.dumps(ext_track)[:300])
+    ev.require(f"{label}: no process of its own outlived it", not run["owned"],
+               json.dumps(run["owned"])[:400])
+    ev.require(f"{label}: no process of uncertain ownership", not run["ambiguous"],
+               json.dumps(run["ambiguous"])[:400])
+    ev.require(f"{label}: nothing of its own remains", not run["remaining"], str(run["remaining"]))
+    ev.require(f"{label}: cleanup finished within {CLEANUP_SECONDS} s", not run["deadline_hit"])
+    ev.require(f"{label}: containment ran without errors", not run.get("errors"),
+               "; ".join(run.get("errors", []))[:400])
+
+
+def environment_check(appimage: Path, out: Path, external: str | None = None) -> int:
+    ev = Evidence(out, "environment-check")
+    _machine(ev)
+    pin = load_pin()
+    appimage = appimage.resolve()
+    ev.record["appimage"] = {"name": appimage.name, "size": appimage.stat().st_size,
+                             "sha256": sha256_file(appimage)}
+    if external:
+        ev.record["external_tools"] = {
+            tool: {"path": str(Path(external) / tool),
+                   "sha256": sha256_file(Path(external) / tool)
+                   if (Path(external) / tool).is_file() else None}
+            for tool in ("ffmpeg", "ffprobe")}
+    home = out / "home"
+    for sub in ("config", "data", "cache", "tmp"):
+        (home / sub).mkdir(parents=True, exist_ok=True)
+    sentinel = uuid.uuid4().hex
+    base = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(home / "config"),
+                XDG_DATA_HOME=str(home / "data"), XDG_CACHE_HOME=str(home / "cache"),
+                TMPDIR=str(home / "tmp"), QT_QPA_PLATFORM="offscreen",
+                APPIMAGE_EXTRACT_AND_RUN="1", FLIGHTDVR_ENV_SENTINEL=sentinel)
+    base.pop("LD_LIBRARY_PATH", None)
+    base.pop("LD_LIBRARY_PATH_ORIG", None)
+    run_check_environment(ev, appimage, "environment-orig-absent", base, pin, external,
+                          sentinel, "<unset>")
+    run_check_environment(ev, appimage, "environment-orig-present",
+                          dict(base, LD_LIBRARY_PATH=PRESET_LIBRARY_PATH), pin, external,
+                          sentinel, PRESET_LIBRARY_PATH)
+    return ev.finish()
+
+
 def main(argv: list[str]) -> int:
     commands = {"inspect-pair": inspect_pair, "export-check": export_check,
                 "appimage-check": appimage_check, "source-material": source_material}
     if len(argv) == 3 and argv[0] in commands:
         return commands[argv[0]](Path(argv[1]).resolve(), Path(argv[2]).resolve())
+    if argv[:1] == ["environment-check"] and len(argv) in (3, 4):
+        return environment_check(Path(argv[1]).resolve(), Path(argv[2]).resolve(),
+                                 argv[3] if len(argv) == 4 else None)
     print(__doc__.split("\n\n")[1], file=sys.stderr)
     return 2
 

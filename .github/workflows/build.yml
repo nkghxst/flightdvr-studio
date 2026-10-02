@@ -206,6 +206,16 @@ jobs:
 
       # The build's own smoke check ran with a system ffmpeg installed. Take it
       # away so the packaged app can only succeed through its bundle.
+      # The child-process environment inside the actual AppImage (#131): an
+      # external program gets the loader path that was there before the app,
+      # the bundled pair keeps the bundle's; and the runner's own system
+      # ffmpeg, named explicitly while it is still installed, runs through the
+      # app's probe and streaming reader. The normal discovery is unchanged.
+      - name: Check the child environment, with the system ffmpeg as external tools
+        run: |
+          python packaging/check_linux_bundle.py environment-check \
+            dist/*.AppImage "$RUNNER_TEMP/evidence/baseline/environment-check" /usr/bin
+
       - name: Remove the system ffmpeg
         run: |
           sudo apt-get remove -y ffmpeg
@@ -244,22 +254,32 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install Qt's runtime libraries, without ffmpeg
+      - name: Install Qt's runtime libraries, and this release's ffmpeg for the external phase
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libegl1 libgl1 libdbus-1-3 libxkbcommon-x11-0 \
-            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0
-          if dpkg -s ffmpeg > /dev/null 2>&1; then sudo apt-get remove -y ffmpeg; fi
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 \
+            ffmpeg
 
       - uses: actions/download-artifact@v4
         with:
           name: linux-appimage
           path: dist
 
-      - name: Check the built AppImage with no system ffmpeg
+      - name: Check the child environment, with the system ffmpeg as external tools
         run: |
           chmod +x dist/*.AppImage
+          python packaging/check_linux_bundle.py environment-check \
+            dist/*.AppImage "$RUNNER_TEMP/evidence/current/environment-check" /usr/bin
+
+      - name: Remove the system ffmpeg
+        run: |
+          sudo apt-get remove -y ffmpeg
+          if command -v ffmpeg || command -v ffprobe; then exit 1; fi
+
+      - name: Check the built AppImage with no system ffmpeg
+        run: |
           python packaging/check_linux_bundle.py appimage-check \
             dist/*.AppImage "$RUNNER_TEMP/evidence/current/appimage-check"
 

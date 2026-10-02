@@ -8211,6 +8211,17 @@ def launch(argv: list[str] | None = None) -> int:
         report, code = check_export(args[at] if at < len(args) else None)
         _say(report)
         return code
+    if "--check-environment" in args:
+        # Headless child-environment diagnostic; see package_check.
+        from .package_check import check_environment
+        at = args.index("--check-environment") + 1
+        tools_at = (args.index("--external-tools") + 1
+                    if "--external-tools" in args else None)
+        report, code = check_environment(
+            args[at] if at < len(args) else None,
+            args[tools_at] if tools_at is not None and tools_at < len(args) else None)
+        _say(report)
+        return code
     if "--check" in args:
         report, code = _describe_environment()
         _say(report)

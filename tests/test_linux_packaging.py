@@ -902,3 +902,102 @@ def test_ci_collects_the_source_material_and_traces_the_loader():
     assert "name: linux-ffmpeg-source" in workflow
     helper = (PACKAGING / "check_linux_bundle.py").read_text(encoding="utf-8")
     assert "run_loader_trace(ev, appimage, env, pin)" in helper
+
+
+# -- the child-process environment inside the AppImage (#131) -----------------------
+
+def _fake_environment_run(monkeypatch, pin, stand_in_sees=None):
+    """Stand in for the AppImage's --check-environment at the containment
+    boundary, answering as the real diagnostic would for the environment it
+    was started with -- or, with `stand_in_sees`, as a broken one would."""
+    runs = []
+    inside = "/tmp/appimage_extracted_test/usr/bin/_internal"
+
+    def contained(argv, env, log_path, **_kwargs):
+        runs.append((list(argv), dict(env)))
+        child = Path(argv[2]) / "flightdvr-check-environment-test"
+        child.mkdir()
+        preset = env.get("LD_LIBRARY_PATH")
+        saw = stand_in_sees or {"LD_LIBRARY_PATH": preset if preset is not None else "<unset>",
+                                "LD_LIBRARY_PATH_ORIG": "<unset>",
+                                "SENTINEL": env["FLIGHTDVR_ENV_SENTINEL"]}
+        track = {"block": {"frames": 4800, "values": 9600}, "reader_closed": True}
+        receipt = {"result": "PASS", "failures": [], "app": {"frozen": True},
+                   "stand_in": {"exit": 0, "saw": saw}, "parent_unchanged": True,
+                   "bundled_child_LD_LIBRARY_PATH": f"{inside}:{preset or ''}",
+                   "bundled_tools": {t: {"bundled": True, "sha256": pin["binaries"][t]}
+                                     for t in ("ffmpeg", "ffprobe")},
+                   "bundled_track": track}
+        if "--external-tools" in argv:
+            receipt["external"] = {"ffmpeg": {"bundled": False}, "ffprobe": {"bundled": False},
+                                   "probe": {"video_codec": "h264", "audio_codec": "aac"},
+                                   "track": track}
+        (child / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+        return {"exit": 0, "timed_out": False, "owned": {}, "ambiguous": [],
+                "remaining": [], "deadline_hit": False}
+
+    monkeypatch.setattr(check_bundle, "contained_run", contained)
+    monkeypatch.setattr(check_bundle, "load_pin", lambda path=None: pin)
+    monkeypatch.setattr(check_bundle, "_machine", lambda ev: None)
+    return runs
+
+
+def test_the_environment_check_runs_with_and_without_a_saved_loader_path(tmp_path,
+                                                                          monkeypatch):
+    pin = {"binaries": {"ffmpeg": "a" * 64, "ffprobe": "b" * 64}}
+    runs = _fake_environment_run(monkeypatch, pin)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/runner/own")          # never passed through
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/runner/orig")
+    external = tmp_path / "system"
+    external.mkdir()
+    for tool in ("ffmpeg", "ffprobe"):
+        (external / tool).write_bytes(tool.encode())
+    appimage = tmp_path / "FlightDVR_Studio-test.AppImage"
+    appimage.write_bytes(b"never executed")
+    out = tmp_path / "out"
+    assert check_bundle.environment_check(appimage, out, str(external)) == 0
+    (absent_argv, absent), (present_argv, present) = runs
+    assert absent_argv[1] == "--check-environment" and present_argv[1] == "--check-environment"
+    assert absent_argv[-2:] == ["--external-tools", str(external)]
+    assert "LD_LIBRARY_PATH" not in absent and "LD_LIBRARY_PATH_ORIG" not in absent
+    assert present["LD_LIBRARY_PATH"] == check_bundle.PRESET_LIBRARY_PATH
+    assert "LD_LIBRARY_PATH_ORIG" not in present
+    assert absent["FLIGHTDVR_ENV_SENTINEL"] == present["FLIGHTDVR_ENV_SENTINEL"]
+    assert Path(absent["HOME"]).is_relative_to(out)
+    record = json.loads((out / "environment-check.json").read_text(encoding="utf-8"))
+    assert record["result"] == "PASS"
+    assert record["external_tools"]["ffmpeg"]["sha256"] == hashlib.sha256(b"ffmpeg").hexdigest()
+    assert ("environment-orig-present: the external stand-in got LD_LIBRARY_PATH "
+            f"{check_bundle.PRESET_LIBRARY_PATH!r}") in record["checks"]
+    assert "environment-orig-absent: the external ffprobe read the generated clip" in record["checks"]
+
+
+@pytest.mark.parametrize("seen, failed", [
+    ({"LD_LIBRARY_PATH": "/tmp/appimage_extracted_test/usr/bin/_internal",
+      "LD_LIBRARY_PATH_ORIG": "<unset>"}, "the external stand-in got LD_LIBRARY_PATH"),
+    ({"LD_LIBRARY_PATH": "<unset>", "LD_LIBRARY_PATH_ORIG": "/x"},
+     "the stand-in never saw LD_LIBRARY_PATH_ORIG"),
+    ({"LD_LIBRARY_PATH": "<unset>", "LD_LIBRARY_PATH_ORIG": "<unset>", "SENTINEL": "<unset>"},
+     "the unrelated sentinel survived"),
+], ids=["bundle-path-leaked", "orig-leaked", "sentinel-lost"])
+def test_the_environment_check_fails_on_what_the_stand_in_saw(tmp_path, monkeypatch,
+                                                             seen, failed):
+    pin = {"binaries": {"ffmpeg": "a" * 64, "ffprobe": "b" * 64}}
+    _fake_environment_run(monkeypatch, pin, stand_in_sees=seen)
+    appimage = tmp_path / "FlightDVR_Studio-test.AppImage"
+    appimage.write_bytes(b"never executed")
+    out = tmp_path / "out"
+    assert check_bundle.environment_check(appimage, out) == 1
+    record = json.loads((out / "environment-check.json").read_text(encoding="utf-8"))
+    assert any(f.startswith(f"environment-orig-absent: {failed}") for f in record["failures"])
+    assert "external_tools" not in record                     # none were named
+
+
+def test_ci_checks_the_child_environment_while_the_system_ffmpeg_is_there():
+    workflow = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
+    assert workflow.count("check_linux_bundle.py environment-check") == 2
+    for job, evidence in (("  appimage:", "baseline"), ("  appimage-current-linux:", "current")):
+        steps = workflow[workflow.index(job):]
+        checked = steps.index(f'"$RUNNER_TEMP/evidence/{evidence}/environment-check" /usr/bin')
+        assert checked < steps.index("Remove the system ffmpeg") < steps.index(
+            "check_linux_bundle.py appimage-check")

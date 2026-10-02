@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -328,3 +329,173 @@ def test_a_receipt_that_cannot_be_written_fails_the_check(stand_in, monkeypatch)
     assert report.startswith("check-export FAIL\nreceipt NOT WRITTEN in ")
     assert "the receipt could not be written: OSError" in report
     assert package_check._UNSTOPPED == []
+
+
+# -- --check-environment: the child-process environment (#131) ------------------------------
+
+def _environment_receipt(parent: Path) -> dict:
+    found = sorted(parent.glob("flightdvr-check-environment-*/receipt.json"))
+    assert len(found) == 1, found
+    return json.loads(found[0].read_text(encoding="utf-8"))
+
+
+def _no_tools():
+    raise ToolsMissing("none")
+
+
+def _frozen_linux(monkeypatch, tmp_path, orig: str | None) -> Path:
+    """The frozen Linux app as the bootloader leaves it: the bundle first on
+    LD_LIBRARY_PATH, and whatever was there before saved as _ORIG."""
+    bundle = tmp_path / "bundle"
+    (bundle / "ffmpeg").mkdir(parents=True)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
+    monkeypatch.setattr(sys, "executable", str(bundle / "flightdvr-studio"))
+    monkeypatch.setenv("LD_LIBRARY_PATH", str(bundle))
+    if orig is None:
+        monkeypatch.delenv("LD_LIBRARY_PATH_ORIG", raising=False)
+    else:
+        monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", orig)
+    monkeypatch.setenv(package_check.ENVIRONMENT_SENTINEL, "sentinel-7f3a")
+    return bundle
+
+
+def test_check_environment_needs_an_existing_folder(tmp_path):
+    assert package_check.check_environment(None)[1] == 2
+    missing = tmp_path / "nowhere"
+    _report, code = package_check.check_environment(str(missing))
+    assert code == 2 and not missing.exists()
+
+
+def test_check_environment_outside_the_frozen_linux_app_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    monkeypatch.setattr(media, "find_tools", _no_tools)
+    report, code = package_check.check_environment(str(tmp_path))
+    receipt = _environment_receipt(tmp_path)
+    assert code == 1 and report.startswith("check-environment FAIL")
+    assert receipt["failures"] == [
+        "the stand-in phase needs the frozen Linux app (sys.frozen on Linux)",
+        "ffmpeg not found: none"]
+    assert "stand_in" not in receipt and receipt["parent_unchanged"] is True
+
+
+posix_stand_in = pytest.mark.skipif(os.name == "nt", reason="the stand-in is a POSIX shell script")
+
+
+@posix_stand_in
+@pytest.mark.parametrize("orig", [None, "/opt/system/lib"], ids=["orig-absent", "orig-present"])
+def test_the_stand_in_gets_the_saved_loader_path_and_keeps_the_sentinel(
+        tmp_path, monkeypatch, orig):
+    _frozen_linux(monkeypatch, tmp_path, orig)
+    monkeypatch.setattr(media, "find_tools", _no_tools)
+    out = tmp_path / "out"
+    out.mkdir()
+    package_check.check_environment(str(out))
+    receipt = _environment_receipt(out)
+    assert receipt["stand_in"]["exit"] == 0
+    assert receipt["stand_in"]["saw"] == {
+        "LD_LIBRARY_PATH": orig or "<unset>", "LD_LIBRARY_PATH_ORIG": "<unset>",
+        "SENTINEL": "sentinel-7f3a"}
+    assert receipt["failures"] == ["ffmpeg not found: none"]     # the stand-in phase passed
+    assert receipt["parent_unchanged"] is True
+
+
+@posix_stand_in
+def test_a_stand_in_given_the_bundles_path_fails(tmp_path, monkeypatch):
+    bundle = _frozen_linux(monkeypatch, tmp_path, "/opt/system/lib")
+    monkeypatch.setattr(media, "find_tools", _no_tools)
+    monkeypatch.setattr(media, "child_env", lambda _program: dict(os.environ))  # #131 undone
+    out = tmp_path / "out"
+    out.mkdir()
+    package_check.check_environment(str(out))
+    failures = _environment_receipt(out)["failures"]
+    assert (f"the stand-in got LD_LIBRARY_PATH={str(bundle)!r}, expected '/opt/system/lib'"
+            in failures)
+    assert "the stand-in still received LD_LIBRARY_PATH_ORIG" in failures
+
+
+@posix_stand_in
+def test_a_change_to_the_apps_own_environment_fails(tmp_path, monkeypatch):
+    _frozen_linux(monkeypatch, tmp_path, None)
+    monkeypatch.setattr(media, "find_tools", _no_tools)
+    real = media.run_hidden
+
+    def leaky(args, timeout=60):
+        monkeypatch.setenv("FLIGHTDVR_LEAKED", "1")
+        return real(args, timeout=timeout)
+
+    monkeypatch.setattr(media, "run_hidden", leaky)
+    out = tmp_path / "out"
+    out.mkdir()
+    package_check.check_environment(str(out))
+    receipt = _environment_receipt(out)
+    assert receipt["parent_unchanged"] is False
+    assert "the app's own environment changed: ['FLIGHTDVR_LEAKED']" in receipt["failures"]
+
+
+def test_external_tools_must_exist_and_be_outside_the_bundle(tmp_path, monkeypatch):
+    monkeypatch.setattr(media, "find_tools", _no_tools)
+    named = tmp_path / "named"
+    named.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+    package_check.check_environment(str(out), str(named))
+    assert (f"--external-tools {named} does not hold ffmpeg and ffprobe"
+            in _environment_receipt(out)["failures"])
+    for name in ("ffmpeg", "ffprobe"):
+        (named / name).write_bytes(b"")
+    monkeypatch.setattr(media, "is_bundled", lambda _path: True)
+    again = tmp_path / "again"
+    again.mkdir()
+    package_check.check_environment(str(again), str(named))
+    assert (f"--external-tools {named} is inside the bundle; it must be external"
+            in _environment_receipt(again)["failures"])
+
+
+@pytest.mark.integration
+@posix_stand_in
+@pytest.mark.parametrize("orig", [None, "/opt/system/lib"], ids=["orig-absent", "orig-present"])
+def test_the_real_external_and_bundled_readers_pass(tmp_path, monkeypatch, tools, orig):
+    """The ffmpeg on PATH plays the bundled pair; links to it in another
+    folder play the named external pair. Both go through the app's own
+    probe, inspection and streaming reader."""
+    bundle = _frozen_linux(monkeypatch, tmp_path, orig)
+    pair = {Path(tools.ffmpeg), Path(tools.ffprobe)}
+    monkeypatch.setattr(media, "find_tools", lambda: tools)
+    monkeypatch.setattr(media, "is_bundled", lambda path: Path(path) in pair)
+    external = tmp_path / "system"
+    external.mkdir()
+    for name, path in (("ffmpeg", tools.ffmpeg), ("ffprobe", tools.ffprobe)):
+        (external / name).symlink_to(Path(path).resolve())
+    out = tmp_path / "out"
+    out.mkdir()
+    report, code = package_check.check_environment(str(out), str(external))
+    receipt = _environment_receipt(out)
+    assert code == 0, report
+    assert receipt["result"] == "PASS" and receipt["failures"] == []
+    assert receipt["stand_in"]["saw"]["LD_LIBRARY_PATH"] == (orig or "<unset>")
+    assert receipt["bundled_child_LD_LIBRARY_PATH"] == str(bundle)
+    assert receipt["external"]["probe"]["video_codec"] == "h264"
+    assert receipt["external"]["probe"]["audio_codec"] == "aac"
+    for track in (receipt["external"]["track"], receipt["bundled_track"]):
+        assert track["block"]["values"] == 2 * track["block"]["frames"] > 0
+        assert track["reader_closed"] is True
+    assert receipt["parent_unchanged"] is True
+
+
+def test_launch_dispatches_the_environment_check_before_any_window_exists(
+        monkeypatch, tmp_path):
+    import flightdvr.ui as ui
+    calls = []
+
+    def stub(folder, external=None):
+        calls.append((folder, external))
+        return "stub report", 5
+
+    monkeypatch.setattr(package_check, "check_environment", stub)
+    monkeypatch.setattr(ui, "MainWindow", _never_export)
+    assert ui.launch(["--check-environment", str(tmp_path)]) == 5
+    assert ui.launch(["--check-environment", str(tmp_path), "--external-tools", "/usr/bin"]) == 5
+    assert ui.launch(["--check-environment"]) == 5
+    assert calls == [(str(tmp_path), None), (str(tmp_path), "/usr/bin"), (None, None)]
