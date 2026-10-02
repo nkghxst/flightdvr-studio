@@ -197,9 +197,10 @@ jobs:
           python packaging/check_linux_bundle.py source-material \
             dist/FlightDVRStudio/_internal "$RUNNER_TEMP/linux-ffmpeg-source"
 
+      # Internal input for the linux-ffmpeg-source job, not a release file.
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-ffmpeg-source
+          name: linux-ffmpeg-source-inputs
           path: ${{ runner.temp }}/linux-ffmpeg-source
           if-no-files-found: error
 
@@ -373,18 +374,88 @@ jobs:
           path: dist/installer/*.exe
           if-no-files-found: error
 
+  linux-ffmpeg-source:
+    name: Linux FFmpeg source bundle
+    needs: appimage
+    # On the same release as the AppImage build, so the Ubuntu source packages
+    # match the carried libraries recorded there. Fetches the source of every
+    # dependency stage the pinned build system enables, with its own recipes,
+    # and writes one bundle with a manifest and build instructions; anything
+    # required that cannot be fetched or matched fails the job, and no bundle
+    # is uploaded.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the source-fetching tools the build system's recipes use
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends subversion
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-ffmpeg-source-inputs
+          path: ${{ runner.temp }}/source-inputs
+
+      - name: Collect the corresponding source
+        run: |
+          python packaging/collect_linux_sources.py collect \
+            "$RUNNER_TEMP/source-inputs" "$RUNNER_TEMP/source-bundle"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-ffmpeg-source-report
+          path: ${{ runner.temp }}/source-bundle/*.manifest.json
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-ffmpeg-source
+          path: |
+            ${{ runner.temp }}/source-bundle/*-linux-ffmpeg-source.tar
+            ${{ runner.temp }}/source-bundle/*-linux-ffmpeg-source.manifest.json
+          if-no-files-found: error
+
   release:
     name: Attach to the release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [appimage, appimage-current-linux, macos, windows-installer]
+    needs: [appimage, appimage-current-linux, linux-ffmpeg-source, macos, windows-installer]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
+      # Only the named release artifacts, each into its own folder; internal
+      # evidence and inputs are never downloaded here.
       - uses: actions/download-artifact@v4
         with:
-          path: artifacts
-          merge-multiple: true
+          name: linux-appimage
+          path: artifacts/linux-appimage
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-dmg
+          path: artifacts/macos-dmg
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: artifacts/windows-installer
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-ffmpeg-source
+          path: artifacts/linux-ffmpeg-source
+
+      # Exactly one AppImage, .dmg, installer and source bundle, or it fails.
+      - name: Select the files to attach
+        run: python3 packaging/collect_linux_sources.py select-release-files artifacts release-files
 
       # Drafted rather than published. What is automated is the building, not
       # the shipping: a person still writes the notes and decides to publish.
@@ -393,12 +464,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          ls -lh artifacts
+          ls -lh release-files
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             > /dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" \
                  --repo "$GITHUB_REPOSITORY" --draft \
                  --title "$GITHUB_REF_NAME" \
                  --notes "Windows, Linux and macOS builds attached automatically."
-          gh release upload "$GITHUB_REF_NAME" artifacts/* \
+          gh release upload "$GITHUB_REF_NAME" release-files/* \
             --repo "$GITHUB_REPOSITORY" --clobber

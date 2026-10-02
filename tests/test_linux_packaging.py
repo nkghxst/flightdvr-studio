@@ -390,7 +390,23 @@ def test_ci_gates_the_linux_bundle_without_softening_failures():
 
 def test_a_release_waits_for_the_current_linux_check():
     workflow = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
-    assert "needs: [appimage, appimage-current-linux, macos, windows-installer]" in workflow
+    assert ("needs: [appimage, appimage-current-linux, linux-ffmpeg-source, macos, "
+            "windows-installer]") in workflow
+
+
+def test_the_release_attaches_only_the_named_artifacts():
+    workflow = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
+    release = workflow[workflow.index("  release:"):]
+    assert "merge-multiple" not in release
+    for name in ("linux-appimage", "macos-dmg", "windows-installer", "linux-ffmpeg-source"):
+        assert f"name: {name}\n          path: artifacts/{name}" in release
+    assert release.count("actions/download-artifact@v4") == 4
+    assert "select-release-files artifacts release-files" in release
+    assert 'gh release upload "$GITHUB_REF_NAME" release-files/*' in release
+    assert "--draft" in release
+    # The source bundle is built in its own job from the AppImage job's inputs.
+    assert "name: linux-ffmpeg-source-inputs" in workflow
+    assert "collect_linux_sources.py collect" in workflow
 
 
 # -- the CI helper's own verdict on the actual AppImage ---------------------------------------
