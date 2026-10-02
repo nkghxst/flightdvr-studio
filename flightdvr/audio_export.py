@@ -23,7 +23,7 @@ import subprocess
 from pathlib import Path
 
 from .audio_plan import AudioMode, OutputAudioPlan
-from .media import NO_WINDOW, Tools
+from .media import NO_WINDOW, Tools, child_env
 
 
 AUDIO_FRAME_SAMPLES = 1_024
@@ -169,7 +169,7 @@ def validate_expected_audio(tools: Tools, path: Path,
     command += ["-show_streams", "-of", "json", str(path)]
     proc = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        creationflags=NO_WINDOW,
+        env=child_env(command[0]), creationflags=NO_WINDOW,
     )
     while True:
         try:
@@ -273,7 +273,7 @@ def count_pcm_samples(tools: Tools, path: Path, *, cancelled=lambda: False
                "-i", str(path), "-map", "0:a:0", "-f", "s16le", "-"]
     proc = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        creationflags=NO_WINDOW,
+        env=child_env(command[0]), creationflags=NO_WINDOW,
     )
     reports: queue.Queue = queue.Queue(maxsize=8)
     stop = threading.Event()

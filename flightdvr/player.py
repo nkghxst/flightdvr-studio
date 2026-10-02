@@ -60,7 +60,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from .media import (
-    NO_WINDOW, ClipInfo, Tools, frame_rate_mode, request_stop, stop_process,
+    NO_WINDOW, ClipInfo, Tools, child_env, frame_rate_mode, request_stop, stop_process,
 )
 from .presets import VerticalCrop, colour_filters
 from .preview_recipe import PictureOccurrence, PreviewRecipe, PictureTerminal
@@ -589,7 +589,7 @@ class DecodeWorker(QThread):
         try:
             proc = subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                bufsize=1 << 20, creationflags=NO_WINDOW,
+                bufsize=1 << 20, env=child_env(command[0]), creationflags=NO_WINDOW,
             )
         except OSError as exc:
             self.failed.emit(self.generation, f"Could not start ffmpeg: {exc}")
@@ -694,7 +694,7 @@ class FrameWindowWorker(QThread):
         try:
             proc = subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                bufsize=1 << 20, creationflags=NO_WINDOW,
+                bufsize=1 << 20, env=child_env(command[0]), creationflags=NO_WINDOW,
             )
         except OSError as exc:
             self.failed.emit(self.generation, f"Could not start ffmpeg: {exc}")

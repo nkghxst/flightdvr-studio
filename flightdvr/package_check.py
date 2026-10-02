@@ -319,3 +319,232 @@ def _run(child: Path, receipt: dict, fail, export_seconds: float, owned: dict) -
     receipt["unfinished_files_left"] = leftovers
     if leftovers:
         fail("unfinished export files were left behind: " + ", ".join(leftovers))
+
+
+# -- `--check-environment <folder> [--external-tools <dir>]` ---------------------------
+#
+# A second, separate diagnostic for the child-process environment (#131,
+# adapted in child_env). It never replaces or weakens --check-export: the
+# normal tools are still found by find_tools and must be the bundled pair.
+#
+# 1. An owned stand-in program written into the new folder (so outside the
+#    bundle) is run through the real media.run_hidden. It reports the loader
+#    variables it received and an unrelated sentinel. In the frozen Linux app
+#    it must get the saved LD_LIBRARY_PATH_ORIG back as LD_LIBRARY_PATH (or
+#    none when there was none to save), never the _ORIG itself, and keep the
+#    sentinel; the app's own environment must be unchanged afterwards.
+# 2. With --external-tools, that folder's ffmpeg and ffprobe -- explicitly
+#    named, never discovered -- generate a short clip and a track, which the
+#    app's own probe, music-asset inspection and streaming PCM reader read
+#    with those external programs.
+# 3. The bundled pair (from find_tools, required to be bundled) does the same
+#    for a generated track: inspection, one bounded block from the streaming
+#    reader, and an explicit close of that reader.
+
+ENVIRONMENT_SENTINEL = "FLIGHTDVR_ENV_SENTINEL"
+
+_STAND_IN = """#!/bin/sh
+printf 'LD_LIBRARY_PATH=%s\\n' "${LD_LIBRARY_PATH-<unset>}"
+printf 'LD_LIBRARY_PATH_ORIG=%s\\n' "${LD_LIBRARY_PATH_ORIG-<unset>}"
+printf 'SENTINEL=%s\\n' "${FLIGHTDVR_ENV_SENTINEL-<unset>}"
+"""
+
+
+def _new_named_child(parent: Path, kind: str) -> Path:
+    child = parent / f"flightdvr-check-{kind}-{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
+    child.mkdir()                      # FileExistsError rather than reuse
+    return child
+
+
+def _stand_in_report(stdout: str) -> dict:
+    return dict(line.split("=", 1) for line in stdout.splitlines() if "=" in line)
+
+
+def _read_track(tools, track: Path, fail, label: str) -> dict:
+    """The app's music-asset inspection and one bounded block from its
+    streaming PCM reader, closed explicitly whatever happens."""
+    from .audio_reader import MAX_READ_FRAMES, FfmpegPcmReader, inspect_music_asset
+    record: dict = {}
+    asset = inspect_music_asset(tools, track)
+    record["asset"] = {"sample_rate": asset.sample_rate, "channels": asset.channels,
+                       "decoded_samples": asset.decoded_samples}
+    reader = FfmpegPcmReader.for_music(tools, asset)
+    try:
+        frames = min(MAX_READ_FRAMES, reader.frames)      # the reader's own bound
+        values = reader.read(0, frames, lambda: False)
+        record["block"] = {"frames": frames, "values": len(values),
+                           "peak": round(max(abs(v) for v in values), 4)}
+        if len(values) != frames * 2:
+            fail(f"{label}: the reader returned {len(values)} values for {frames} frames")
+        if not any(abs(v) > 0.01 for v in values):
+            fail(f"{label}: the block read back silent")
+    finally:
+        reader.close()
+        record["reader_closed"] = reader._closed and reader._process is None
+    if not record["reader_closed"]:
+        fail(f"{label}: the reader did not settle on close")
+    return record
+
+
+def _generate(tools, folder: Path, fail, label: str) -> tuple[Path | None, Path | None]:
+    from .media import run_hidden
+    clip, track = folder / f"{label}-clip.ts", folder / f"{label}-track.wav"
+    made = run_hidden([str(tools.ffmpeg), "-hide_banner", "-nostdin", "-loglevel", "error",
+                       "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=1",
+                       "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                       "-f", "mpegts", str(clip)], timeout=120)
+    if made.returncode != 0 or not clip.is_file():
+        fail(f"{label}: could not generate a clip (exit {made.returncode}): "
+             f"{made.stderr.strip()[-200:]}")
+        clip = None
+    made = run_hidden([str(tools.ffmpeg), "-hide_banner", "-nostdin", "-loglevel", "error",
+                       "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+                       "-ac", "2", "-c:a", "pcm_s16le", str(track)], timeout=120)
+    if made.returncode != 0 or not track.is_file():
+        fail(f"{label}: could not generate a track (exit {made.returncode}): "
+             f"{made.stderr.strip()[-200:]}")
+        track = None
+    return clip, track
+
+
+def check_environment(argument: str | None, external: str | None = None
+                      ) -> tuple[str, int]:
+    """Run the environment diagnostic and return (report, exit code)."""
+    if not argument:
+        return "--check-environment needs a folder to write into.", 2
+    parent = Path(argument)
+    if not parent.is_dir():
+        return f"--check-environment: {parent} is not an existing folder.", 2
+    try:
+        child = _new_named_child(parent, "environment")
+    except OSError as exc:
+        return f"--check-environment: could not create a new folder in {parent}: {exc}", 2
+    receipt: dict = {"result": "FAIL", "failures": [], "folder": str(child),
+                     "started": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+
+    def fail(message: str) -> None:
+        receipt["failures"].append(message)
+
+    try:
+        _run_environment(child, receipt, fail, external)
+    except Exception:                    # noqa: BLE001 — recorded, never raised
+        fail("unexpected error:\n" + traceback.format_exc())
+    finally:
+        if not receipt["failures"]:
+            receipt["result"] = "PASS"
+        receipt["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        try:
+            where = str(_write_receipt(child, receipt))
+        except Exception as exc:         # noqa: BLE001 — reported, never raised
+            receipt["result"] = "FAIL"
+            fail(f"the receipt could not be written: {type(exc).__name__}: {exc}")
+            where = f"NOT WRITTEN in {child}"
+    lines = [f"check-environment {receipt['result']}", f"receipt {where}"]
+    lines += [f"  {line}" for message in receipt["failures"] for line in message.splitlines()]
+    return "\n".join(lines), 0 if receipt["result"] == "PASS" else 1
+
+
+def _run_environment(child: Path, receipt: dict, fail, external: str | None) -> None:
+    from . import __version__
+    from .media import Tools, ToolsMissing, child_env, find_tools, is_bundled, probe, run_hidden
+
+    frozen_linux = bool(getattr(sys, "frozen", False)) and sys.platform.startswith("linux")
+    before = dict(os.environ)
+    receipt["app"] = {"version": __version__, "frozen": bool(getattr(sys, "frozen", False)),
+                      "platform": sys.platform, "bundle": getattr(sys, "_MEIPASS", None)}
+    receipt["parent"] = {
+        "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH"),
+        "LD_LIBRARY_PATH_ORIG": os.environ.get("LD_LIBRARY_PATH_ORIG"),
+        "orig_present": "LD_LIBRARY_PATH_ORIG" in os.environ,
+        "sentinel": os.environ.get(ENVIRONMENT_SENTINEL)}
+    receipt["paths_exercised"] = [
+        "flightdvr.media.child_env", "flightdvr.media.run_hidden", "flightdvr.media.probe",
+        "flightdvr.audio_reader.inspect_music_asset", "flightdvr.audio_reader.FfmpegPcmReader"]
+
+    # 1. An owned program outside the bundle, through the real run_hidden.
+    stand_in = child / "stand-in"
+    stand_in.write_text(_STAND_IN, encoding="utf-8")
+    stand_in.chmod(0o755)
+    if not frozen_linux:
+        fail("the stand-in phase needs the frozen Linux app (sys.frozen on Linux)")
+    elif is_bundled(stand_in):
+        fail(f"the stand-in at {stand_in} counts as bundled; it must be outside")
+    else:
+        ran = run_hidden([str(stand_in)], timeout=30)
+        seen = _stand_in_report(ran.stdout)
+        expected = (os.environ["LD_LIBRARY_PATH_ORIG"]
+                    if "LD_LIBRARY_PATH_ORIG" in os.environ else "<unset>")
+        receipt["stand_in"] = {"exit": ran.returncode, "saw": seen,
+                               "expected_LD_LIBRARY_PATH": expected}
+        if ran.returncode != 0:
+            fail(f"the stand-in exited {ran.returncode}")
+        if seen.get("LD_LIBRARY_PATH") != expected:
+            fail(f"the stand-in got LD_LIBRARY_PATH={seen.get('LD_LIBRARY_PATH')!r}, "
+                 f"expected {expected!r}")
+        if seen.get("LD_LIBRARY_PATH_ORIG") != "<unset>":
+            fail("the stand-in still received LD_LIBRARY_PATH_ORIG")
+        if receipt["parent"]["sentinel"] is None:
+            fail(f"no {ENVIRONMENT_SENTINEL} was set for the app, so retention is unchecked")
+        elif seen.get("SENTINEL") != receipt["parent"]["sentinel"]:
+            fail("the unrelated sentinel variable did not reach the stand-in")
+
+    # The normal tools: still found the normal way, and still bundled.
+    try:
+        tools = find_tools()
+    except ToolsMissing as exc:
+        fail(f"ffmpeg not found: {exc}")
+        tools = None
+    if tools is not None:
+        receipt["bundled_tools"] = {
+            name: dict(_identity(Path(path)), bundled=is_bundled(Path(path)))
+            for name, path in (("ffmpeg", tools.ffmpeg), ("ffprobe", tools.ffprobe))}
+        if not all(t["bundled"] for t in receipt["bundled_tools"].values()):
+            fail("find_tools did not return the bundled pair")
+            tools = None
+        elif frozen_linux:
+            kept = child_env(tools.ffmpeg).get("LD_LIBRARY_PATH")
+            receipt["bundled_child_LD_LIBRARY_PATH"] = kept
+            if kept != os.environ.get("LD_LIBRARY_PATH"):
+                fail("the bundled ffmpeg's environment lost the bundle's library path")
+
+    # 2. Explicitly named external tools through the app's own readers.
+    if external:
+        folder = Path(external)
+        outside = Tools(folder / "ffmpeg", folder / "ffprobe")
+        record = {name: {"path": str(path), "exists": path.is_file(),
+                         "bundled": is_bundled(path)}
+                  for name, path in (("ffmpeg", outside.ffmpeg), ("ffprobe", outside.ffprobe))}
+        receipt["external"] = record
+        if not all(r["exists"] for r in record.values()):
+            fail(f"--external-tools {folder} does not hold ffmpeg and ffprobe")
+        elif any(r["bundled"] for r in record.values()):
+            fail(f"--external-tools {folder} is inside the bundle; it must be external")
+        else:
+            version = run_hidden([str(outside.ffmpeg), "-hide_banner", "-version"], timeout=30)
+            record["version"] = (version.stdout.splitlines() or [""])[0]
+            if version.returncode != 0:
+                fail(f"the external ffmpeg could not run under its environment "
+                     f"(exit {version.returncode}): {version.stderr.strip()[-200:]}")
+            clip, track = _generate(outside, child, fail, "external")
+            if clip is not None:
+                info = probe(outside, clip)
+                record["probe"] = _clip_facts(info)
+                if info.error or info.video_codec != "h264" or info.audio_codec != "aac":
+                    fail(f"external probe: {info.error or (info.video_codec, info.audio_codec)}")
+            if track is not None:
+                record["track"] = _read_track(outside, track, fail, "external")
+    else:
+        receipt["external"] = "not requested"
+
+    # 3. The bundled streaming reader on a generated track.
+    if tools is not None:
+        _clip, track = _generate(tools, child, fail, "bundled")
+        if track is not None:
+            receipt["bundled_track"] = _read_track(tools, track, fail, "bundled")
+
+    after = dict(os.environ)
+    receipt["parent_unchanged"] = before == after
+    if before != after:
+        changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+        fail(f"the app's own environment changed: {changed}")

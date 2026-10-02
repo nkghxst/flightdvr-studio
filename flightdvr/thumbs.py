@@ -30,7 +30,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
-from .media import NO_WINDOW, ClipInfo, Tools, request_stop, stop_process
+from .media import NO_WINDOW, ClipInfo, Tools, child_env, request_stop, stop_process
 
 THUMB_WIDTH = 240
 
@@ -111,10 +111,11 @@ def extract(tools: Tools, clip: ClipInfo, *, register=None, cancelled=None,
     try:
         if cancelled is not None and cancelled():
             return None
+        command = build_command(tools, clip, staged)
         proc = subprocess.Popen(
-            build_command(tools, clip, staged),
+            command,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=NO_WINDOW,
+            env=child_env(command[0]), creationflags=NO_WINDOW,
         )
         if register is not None:
             register(proc)

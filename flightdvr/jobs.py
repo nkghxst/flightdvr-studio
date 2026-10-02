@@ -35,7 +35,7 @@ from typing import Iterable
 from PySide6.QtCore import QThread, Signal
 
 from .media import (
-    NO_WINDOW, TERMINATE_SECONDS, ClipInfo, Tools, request_stop, stop_process,
+    NO_WINDOW, TERMINATE_SECONDS, ClipInfo, Tools, child_env, request_stop, stop_process,
 )
 from .audio_plan import MusicChoice, OUTPUT_RATE, resolve_audio_plan, round_samples
 from .format import DEFAULT_TEMPLATE
@@ -673,7 +673,7 @@ class ExportWorker(QThread):
                  "-show_entries", "stream=codec_name:format=duration",
                  "-of", "default=nw=1", str(path)],
                 capture_output=True, text=True, timeout=60,
-                creationflags=NO_WINDOW,
+                env=child_env(self.tools.ffprobe), creationflags=NO_WINDOW,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return False, f"Could not check the finished file: {exc}"
@@ -713,6 +713,7 @@ class ExportWorker(QThread):
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
+                env=child_env(command[0]),
                 creationflags=NO_WINDOW,
             )
         except OSError as exc:
