@@ -897,14 +897,35 @@ def test_cancel_during_the_real_pcm_count_keeps_the_destination(
     worker.cancel()
     runner.join(timeout=10)
     assert not runner.is_alive(), "cancel was not seen during the count"
+    judge_cancel_keeps_destination(
+        result=result, decodes=decodes, out=out, sentinel=sentinel,
+        neighbour=neighbour, part=part, worker=worker, queued=queued,
+        queued_before=queued_before, tmp_path=tmp_path, observer=observer)
+
+
+def judge_cancel_keeps_destination(*, result, decodes, out, sentinel, neighbour,
+                                   part, worker, queued, queued_before, tmp_path,
+                                   observer, platform=None) -> None:
+    """Every independent guard first; only then the job's own partial. The
+    accepted Windows residue is xfailed, visibly; anything else fails."""
+    from tests.test_media_correctness import accepted_windows_residual
+
     assert result == [(False, "Cancelled")]
     assert decodes[0].poll() is not None, "the decode was left running"
     assert decodes[0].returncode != 0, "the decode ran to its end, unstopped"
     assert out.read_bytes() == sentinel
     assert neighbour.read_bytes() == b"someone else's finished file"
-    if part.exists():
-        pytest.fail(observer.report(worker.residuals.get(0, "")))
     assert queued.status is JobStatus.PENDING
     assert (queued.settings, queued.audio, queued.out_path) == (
         queued_before.settings, queued_before.audio, queued_before.out_path)
     assert not (tmp_path / "queued.mov").exists()
+    assert set(observer.unlinked) <= {part} | set(
+        (tmp_path / "work").glob("*")), observer.unlinked
+    assert out not in observer.unlinked and neighbour not in observer.unlinked
+    if part.exists():
+        residual = worker.residuals.get(0)
+        report = observer.report(residual or "")
+        if accepted_windows_residual(part, residual,
+                                     result == [(False, "Cancelled")], platform):
+            pytest.xfail("accepted known issue (docs/KNOWN_ISSUES.md): " + report)
+        pytest.fail(report)

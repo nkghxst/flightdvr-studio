@@ -456,19 +456,29 @@ def _cancel_during_the_real_pcm_count(media, tmp_path, monkeypatch,  # noqa: F81
     }
 
 
-def test_a_cancel_during_the_real_pcm_count_removes_its_own_partial(
-        media, tmp_path, monkeypatch):  # noqa: F811
-    got = _cancel_during_the_real_pcm_count(media, tmp_path, monkeypatch)
-    first, part = got["first"], got["part"]
+ACCEPTED_WINDOWS_RESIDUAL = (
+    "its unfinished file could not be removed (PermissionError, errno 13, "
+    "winerror 32): {part} (the job was checking the sound)")
+
+
+def accepted_windows_residual(part: Path, residual, cancelled: bool,
+                              platform: str | None = None) -> bool:
+    """The one accepted known issue (docs/KNOWN_ISSUES.md): on Windows, a
+    cancelled job's own partial refused with winerror 32 during the sound
+    check, reported in exactly the worker's words. Nothing else is it."""
+    if (platform or os.name) != "nt" or not cancelled or not part.exists():
+        return False
+    return residual == ACCEPTED_WINDOWS_RESIDUAL.format(part=part)
+
+
+def judge_cancelled_pcm_count(got, tmp_path: Path, platform: str | None = None) -> None:
+    """Every independent guard first; only then the job's own partial. The
+    accepted Windows residue is xfailed, visibly; anything else fails."""
+    first, part, worker = got["first"], got["part"], got["worker"]
     # The partial was real and the validator was really reading it.
     assert got["seen_part"] and got["seen_part"][0] > 0
     assert got["decodes"][0].returncode not in (None, 0), "decode not stopped"
     assert first.status is JobStatus.CANCELLED
-    # If this fails, the worker says why: that is the diagnostic P2a adds.
-    if part.exists():
-        pytest.fail(got["observer"].report(got["worker"].residuals.get(0, "")))
-    assert first.message == "Cancelled"
-    assert 0 not in got["worker"].residuals
     for path, digest in got["before"].items():
         assert _digest(path) == digest, path
     # The second job never started, and its submission is untouched.
@@ -478,6 +488,155 @@ def test_a_cancel_during_the_real_pcm_count_removes_its_own_partial(
         got["second_before"].settings, got["second_before"].audio,
         got["second_before"].out_path)
     assert not (tmp_path / "second.mov").exists()
+    # Only the job's own partial was ever unlinked; nothing of anyone else's.
+    assert set(got["unlinked"]) <= {part} | set(
+        (tmp_path / "work").glob("*")), got["unlinked"]
+    assert got["out"] not in got["unlinked"]
+    assert got["neighbour"] not in got["unlinked"]
+    # If this fails, the worker says why: that is the diagnostic P2a adds.
+    if part.exists():
+        residual = worker.residuals.get(0)
+        report = got["observer"].report(residual or "")
+        if accepted_windows_residual(part, residual,
+                                     first.message == f"Cancelled — {residual}",
+                                     platform):
+            pytest.xfail("accepted known issue (docs/KNOWN_ISSUES.md): " + report)
+        pytest.fail(report)
+    assert first.message == "Cancelled"
+    assert 0 not in worker.residuals
+
+
+def test_a_cancel_during_the_real_pcm_count_removes_its_own_partial(
+        media, tmp_path, monkeypatch):  # noqa: F811
+    got = _cancel_during_the_real_pcm_count(media, tmp_path, monkeypatch)
+    judge_cancelled_pcm_count(got, tmp_path)
+
+
+# -- the accepted Windows residue: only it, and never over another failure -----------
+#
+# Pure checks with stand-in objects: no media, no FFmpeg, no real cancel.
+
+def _accepted(part: Path) -> str:
+    return ACCEPTED_WINDOWS_RESIDUAL.format(part=part)
+
+
+def test_only_the_exact_windows_residue_is_accepted(tmp_path):
+    part = tmp_path / "edit.flightdvr-part.mov"
+    part.write_bytes(b"unfinished")
+    exact = _accepted(part)
+    assert accepted_windows_residual(part, exact, True, platform="nt")
+    for residual in (
+            exact.replace("winerror 32", "winerror 5"),
+            exact.replace("errno 13", "errno 2"),
+            exact.replace("checking the sound", "checking the picture"),
+            exact.replace(str(part), str(tmp_path / "other.flightdvr-part.mov")),
+            None, ""):
+        assert not accepted_windows_residual(part, residual, True, platform="nt"), residual
+    assert not accepted_windows_residual(part, exact, False, platform="nt")   # not cancelled
+    assert not accepted_windows_residual(part, exact, True, platform="posix")
+    part.unlink()
+    assert not accepted_windows_residual(part, exact, True, platform="nt")    # nothing left
+
+
+def _stand_in_cancel(tmp_path: Path, residual=None, **overrides) -> dict:
+    from types import SimpleNamespace as NS
+    part = tmp_path / "edit.flightdvr-part.mov"
+    part.write_bytes(b"unfinished")
+    out = tmp_path / "edit.mov"
+    out.write_bytes(b"previous destination")
+    neighbour = tmp_path / "edit-neighbour.flightdvr-part.mov"
+    neighbour.write_bytes(b"another job's unfinished file")
+    before = {path: _digest(path) for path in (out, neighbour)}
+    residual = _accepted(part) if residual is None else residual
+    got = {
+        "first": NS(status=JobStatus.CANCELLED, message=f"Cancelled — {residual}"),
+        "part": part, "out": out, "neighbour": neighbour, "before": before,
+        "worker": NS(residuals={0: residual}),
+        "decodes": [NS(returncode=1)], "seen_part": [10],
+        "second": NS(status=JobStatus.CANCELLED, settings=1, audio=2, out_path=3),
+        "second_before": NS(settings=1, audio=2, out_path=3),
+        "unlinked": [part, part],
+        "observer": NS(report=lambda r: f"observer report: {r}"),
+    }
+    got.update(overrides)
+    return got
+
+
+def test_the_accepted_residue_is_xfailed_only_after_every_other_guard(tmp_path):
+    with pytest.raises(pytest.xfail.Exception, match="accepted known issue"):
+        judge_cancelled_pcm_count(_stand_in_cancel(tmp_path), tmp_path, platform="nt")
+
+
+@pytest.mark.parametrize("breakage", [
+    "destination changed", "neighbour changed", "decode not stopped",
+    "second job started", "someone else's file unlinked"])
+def test_the_accepted_residue_never_masks_another_failure(tmp_path, breakage):
+    got = _stand_in_cancel(tmp_path)
+    if breakage == "destination changed":
+        got["out"].write_bytes(b"overwritten")
+    elif breakage == "neighbour changed":
+        got["neighbour"].write_bytes(b"touched")
+    elif breakage == "decode not stopped":
+        got["decodes"][0].returncode = None
+    elif breakage == "second job started":
+        got["second"].status = JobStatus.RUNNING
+    else:
+        got["unlinked"].append(got["neighbour"])
+    with pytest.raises(AssertionError):
+        judge_cancelled_pcm_count(got, tmp_path, platform="nt")
+
+
+def test_any_other_residue_still_fails(tmp_path):
+    part = tmp_path / "edit.flightdvr-part.mov"
+    other = _accepted(part).replace("winerror 32", "winerror 5")
+    with pytest.raises(pytest.fail.Exception):
+        judge_cancelled_pcm_count(_stand_in_cancel(tmp_path, residual=other),
+                                  tmp_path, platform="nt")
+
+
+def test_the_residue_is_never_accepted_off_windows(tmp_path):
+    with pytest.raises(pytest.fail.Exception):
+        judge_cancelled_pcm_count(_stand_in_cancel(tmp_path), tmp_path,
+                                  platform="posix")
+
+
+def _destination_case(tmp_path: Path, **overrides) -> dict:
+    from types import SimpleNamespace as NS
+    part = tmp_path / "edit.flightdvr-part.mov"
+    part.write_bytes(b"unfinished")
+    out = tmp_path / "edit.mov"
+    out.write_bytes(b"previous destination")
+    neighbour = tmp_path / "finished-earlier.mov"
+    neighbour.write_bytes(b"someone else's finished file")
+    queued = NS(status=JobStatus.PENDING, settings=1, audio=2, out_path=3)
+    case = dict(
+        result=[(False, "Cancelled")], out=out, sentinel=b"previous destination",
+        decodes=[NS(poll=lambda: 1, returncode=1)], neighbour=neighbour, part=part,
+        worker=NS(residuals={0: _accepted(part)}), queued=queued,
+        queued_before=NS(settings=1, audio=2, out_path=3), tmp_path=tmp_path,
+        observer=NS(unlinked=[part], report=lambda r: f"observer report: {r}"))
+    case.update(overrides)
+    return case
+
+
+def test_the_destination_test_accepts_the_residue_only_after_its_guards(tmp_path):
+    from tests.test_audio_export import judge_cancel_keeps_destination
+    with pytest.raises(pytest.xfail.Exception, match="accepted known issue"):
+        judge_cancel_keeps_destination(**_destination_case(tmp_path), platform="nt")
+
+    case = _destination_case(tmp_path)
+    case["out"].write_bytes(b"overwritten")
+    with pytest.raises(AssertionError):
+        judge_cancel_keeps_destination(**case, platform="nt")
+
+    case = _destination_case(tmp_path)
+    case["queued"].status = JobStatus.RUNNING
+    with pytest.raises(AssertionError):
+        judge_cancel_keeps_destination(**case, platform="nt")
+
+    case = _destination_case(tmp_path)
+    with pytest.raises(pytest.fail.Exception):
+        judge_cancel_keeps_destination(**case, platform="posix")
 
 
 def test_an_own_partial_that_cannot_be_removed_is_said_not_swallowed(

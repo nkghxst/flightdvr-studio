@@ -105,7 +105,7 @@ jobs:
       - name: Run the tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -rs
+        run: python -m pytest -rsx
 
   appimage:
     name: Linux AppImage
@@ -143,14 +143,141 @@ jobs:
           ffmpeg -version | head -n 1
           python -m pytest -q tests/test_audio_export.py tests/test_music_export_media.py tests/test_sequence_music_export_media.py -rs
 
+      # The AppImage bundles exactly the build in packaging/ffmpeg-build-linux.json,
+      # which THIRD-PARTY-NOTICES.md names. The fetcher checks the archive's size
+      # and hash before opening it and both programs after, and publishes the
+      # folder only when everything has passed.
+      - name: Fetch the pinned Linux ffmpeg
+        id: ffmpeg
+        run: |
+          folder="$(packaging/fetch-ffmpeg.sh "$RUNNER_TEMP/ffmpeg-linux")"
+          echo "dir=$folder" >> "$GITHUB_OUTPUT"
+
+      # Identity, configuration, encoders and filters, and the ELF requirements
+      # read by readelf and objdump, on the oldest system the AppImage supports.
+      - name: Inspect the pinned pair on the baseline system
+        run: |
+          python packaging/check_linux_bundle.py inspect-pair \
+            "${{ steps.ffmpeg.outputs.dir }}" "$RUNNER_TEMP/evidence/baseline/inspect-pair"
+
+      - name: Export generated media through the pinned pair
+        run: |
+          python packaging/check_linux_bundle.py export-check \
+            "${{ steps.ffmpeg.outputs.dir }}" "$RUNNER_TEMP/evidence/baseline/export-check"
+
+      # The app's own export paths, with the pinned pair first on PATH. The step
+      # above proves the system copy still works; this proves the bundled one.
+      - name: Prove the media exports on the pinned Linux pair
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          folder="${{ steps.ffmpeg.outputs.dir }}"
+          export PATH="$folder:$PATH"
+          test "$(command -v ffmpeg)" = "$folder/ffmpeg"
+          test "$(command -v ffprobe)" = "$folder/ffprobe"
+          ffmpeg -version | sed -n 1p
+          python -m pytest -q -rs \
+            tests/test_audio_export.py tests/test_music_export_media.py \
+            tests/test_sequence_music_export_media.py tests/test_audio_reader_media.py \
+            tests/test_integration.py tests/test_media_correctness.py \
+            tests/test_slow_motion_media.py tests/test_vertical_media.py \
+            tests/test_preview_recipe_media.py
+
       - name: Build
+        env:
+          FFMPEG_DIR: ${{ steps.ffmpeg.outputs.dir }}
         run: packaging/build-appimage.sh
+
+      # What the AppImage's FFmpeg and its carried libraries are built from:
+      # FFmpeg and the build system at the pinned commits, the build system's
+      # declared dependency sources, and the distribution packages the two
+      # carried libraries were copied from on this build machine.
+      - name: Collect the Linux FFmpeg source material
+        run: |
+          python packaging/check_linux_bundle.py source-material \
+            dist/FlightDVRStudio/_internal "$RUNNER_TEMP/linux-ffmpeg-source"
+
+      # Internal input for the linux-ffmpeg-source job, not a release file.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-ffmpeg-source-inputs
+          path: ${{ runner.temp }}/linux-ffmpeg-source
+          if-no-files-found: error
+
+      # The build's own smoke check ran with a system ffmpeg installed. Take it
+      # away so the packaged app can only succeed through its bundle.
+      - name: Remove the system ffmpeg
+        run: |
+          sudo apt-get remove -y ffmpeg
+          if command -v ffmpeg || command -v ffprobe; then exit 1; fi
+
+      - name: Check the built AppImage with no system ffmpeg
+        run: |
+          python packaging/check_linux_bundle.py appimage-check \
+            dist/*.AppImage "$RUNNER_TEMP/evidence/baseline/appimage-check"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-bundle-evidence-ubuntu-22.04
+          path: |
+            ${{ runner.temp }}/evidence
+            !${{ runner.temp }}/evidence/**/extract
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
           path: dist/*.AppImage
           if-no-files-found: error
+
+  appimage-current-linux:
+    name: Linux AppImage on current Ubuntu
+    needs: appimage
+    # The same artifact on the newest runner: built for 22.04, it has to keep
+    # working on what people install today, without a system ffmpeg.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Qt's runtime libraries, without ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libdbus-1-3 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0
+          if dpkg -s ffmpeg > /dev/null 2>&1; then sudo apt-get remove -y ffmpeg; fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-appimage
+          path: dist
+
+      - name: Check the built AppImage with no system ffmpeg
+        run: |
+          chmod +x dist/*.AppImage
+          python packaging/check_linux_bundle.py appimage-check \
+            dist/*.AppImage "$RUNNER_TEMP/evidence/current/appimage-check"
+
+      # The pair exactly as shipped, read out of the AppImage above.
+      - name: Inspect and export through the bundled pair on current Ubuntu
+        run: |
+          pair="$RUNNER_TEMP/evidence/current/appimage-check/extract/squashfs-root/usr/bin/_internal/ffmpeg"
+          python packaging/check_linux_bundle.py inspect-pair "$pair" "$RUNNER_TEMP/evidence/current/inspect-pair"
+          python packaging/check_linux_bundle.py export-check "$pair" "$RUNNER_TEMP/evidence/current/export-check"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-bundle-evidence-ubuntu-latest
+          path: |
+            ${{ runner.temp }}/evidence
+            !${{ runner.temp }}/evidence/**/extract
+          if-no-files-found: warn
 
   macos:
     name: macOS app
@@ -247,18 +374,88 @@ jobs:
           path: dist/installer/*.exe
           if-no-files-found: error
 
+  linux-ffmpeg-source:
+    name: Linux FFmpeg source bundle
+    needs: appimage
+    # On the same release as the AppImage build, so the Ubuntu source packages
+    # match the carried libraries recorded there. Fetches the source of every
+    # dependency stage the pinned build system enables, with its own recipes,
+    # and writes one bundle with a manifest and build instructions; anything
+    # required that cannot be fetched or matched fails the job, and no bundle
+    # is uploaded.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the source-fetching tools the build system's recipes use
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends subversion
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-ffmpeg-source-inputs
+          path: ${{ runner.temp }}/source-inputs
+
+      - name: Collect the corresponding source
+        run: |
+          python packaging/collect_linux_sources.py collect \
+            "$RUNNER_TEMP/source-inputs" "$RUNNER_TEMP/source-bundle"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-ffmpeg-source-report
+          path: ${{ runner.temp }}/source-bundle/*.manifest.json
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-ffmpeg-source
+          path: |
+            ${{ runner.temp }}/source-bundle/*-linux-ffmpeg-source.tar
+            ${{ runner.temp }}/source-bundle/*-linux-ffmpeg-source.manifest.json
+          if-no-files-found: error
+
   release:
     name: Attach to the release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [appimage, macos, windows-installer]
+    needs: [appimage, appimage-current-linux, linux-ffmpeg-source, macos, windows-installer]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
+      # Only the named release artifacts, each into its own folder; internal
+      # evidence and inputs are never downloaded here.
       - uses: actions/download-artifact@v4
         with:
-          path: artifacts
-          merge-multiple: true
+          name: linux-appimage
+          path: artifacts/linux-appimage
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-dmg
+          path: artifacts/macos-dmg
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: artifacts/windows-installer
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-ffmpeg-source
+          path: artifacts/linux-ffmpeg-source
+
+      # Exactly one AppImage, .dmg, installer and source bundle, or it fails.
+      - name: Select the files to attach
+        run: python3 packaging/collect_linux_sources.py select-release-files artifacts release-files
 
       # Drafted rather than published. What is automated is the building, not
       # the shipping: a person still writes the notes and decides to publish.
@@ -267,12 +464,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          ls -lh artifacts
+          ls -lh release-files
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             > /dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" \
                  --repo "$GITHUB_REPOSITORY" --draft \
                  --title "$GITHUB_REF_NAME" \
                  --notes "Windows, Linux and macOS builds attached automatically."
-          gh release upload "$GITHUB_REF_NAME" artifacts/* \
+          gh release upload "$GITHUB_REF_NAME" release-files/* \
             --repo "$GITHUB_REPOSITORY" --clobber

@@ -5,10 +5,13 @@
 # Produces dist/FlightDVR_Studio-<version>-<arch>.AppImage: one executable file
 # that runs on any reasonably current distribution without installing anything.
 #
-# ffmpeg is not bundled. Every distribution ships a maintained build and the
-# app finds it on PATH, so bundling would mean shipping a second GPL binary
-# with its own corresponding-source obligation for no user benefit. Set
-# FFMPEG_DIR to a folder holding an ffmpeg/ffprobe pair to bundle one anyway.
+# ffmpeg and ffprobe are bundled: exactly the pair packaging/ffmpeg-build-linux.json
+# pins, which THIRD-PARTY-NOTICES.md names. The app looks inside its own bundle
+# before PATH, so the AppImage behaves the same whatever ffmpeg the system has,
+# or whether it has one at all. Set FFMPEG_DIR to a folder holding the pinned
+# pair; left unset, packaging/fetch-ffmpeg.sh downloads and verifies it into
+# build/ffmpeg-linux. A folder that is missing either program, or holds
+# anything other than the pinned bytes, stops the build before packaging.
 #
 # Requirements: python3 with PySide6 and pyinstaller, plus curl. appimagetool
 # is downloaded on first run and cached under build/.
@@ -29,6 +32,22 @@ APPDIR="build/AppDir"
 OUT="dist/FlightDVR_Studio-${VERSION}-${ARCH}.AppImage"
 
 step() { printf '\n=== %s ===\n' "$1"; }
+
+step "ffmpeg"
+if [ -z "${FFMPEG_DIR:-}" ]; then
+    FFMPEG_DIR="$(packaging/fetch-ffmpeg.sh build/ffmpeg-linux)"
+fi
+python3 packaging/verify_ffmpeg_linux.py check-dir "$FFMPEG_DIR"
+# The notices point at this record of the configuration, so it has to be the
+# binary actually being shipped rather than a copy that has drifted.
+VERSION_TEXT="$("$FFMPEG_DIR/ffmpeg" -hide_banner -version)"
+if ! diff <(printf '%s\n' "$VERSION_TEXT" | sed -n '1,3p') \
+          packaging/ffmpeg-configuration-linux.txt; then
+    echo "packaging/ffmpeg-configuration-linux.txt does not describe $FFMPEG_DIR/ffmpeg" >&2
+    exit 1
+fi
+echo "  configuration matches packaging/ffmpeg-configuration-linux.txt"
+export FFMPEG_DIR
 
 if [ "${SKIP_TESTS:-0}" != "1" ]; then
     step "Tests"
@@ -51,6 +70,9 @@ if [ ! -x "$BUNDLE" ]; then
     exit 1
 fi
 printf '  bundle: %s\n' "$(du -sh dist/FlightDVRStudio | cut -f1)"
+# What PyInstaller copied, not what it was given: the pair inside the bundle is
+# the one media.py will find first.
+python3 packaging/verify_ffmpeg_linux.py check-dir dist/FlightDVRStudio/_internal/ffmpeg
 
 step "AppDir"
 rm -rf "$APPDIR"
@@ -88,7 +110,8 @@ chmod +x "$APPDIR/AppRun"
 
 # Licences travel with the binary. The LGPL text accompanies Qt as its section
 # 4(b) requires; the GPL text is our own licence.
-cp LICENSE LICENSE.LGPL-3.0.txt THIRD-PARTY-NOTICES.md "$APPDIR/"
+cp LICENSE LICENSE.LGPL-3.0.txt THIRD-PARTY-NOTICES.md \
+   packaging/ffmpeg-configuration-linux.txt "$APPDIR/"
 
 step "appimagetool"
 TOOL="build/appimagetool-${ARCH}.AppImage"
@@ -109,16 +132,24 @@ chmod +x "$OUT"
 
 step "Smoke check"
 # --check starts Qt, loads the platform plugin and resolves ffmpeg, then exits.
-# Exit 3 means the build is fine but this machine has no ffmpeg installed.
+# The AppImage carries its own pair, so only exit 0 with the bundled copy
+# passes: exit 3 (no ffmpeg found) or a system copy winning means the bundle
+# is broken. CI repeats this on a machine with no system ffmpeg at all
+# (packaging/check_linux_bundle.py).
 set +e
-APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=offscreen "$OUT" --check
+REPORT="$(APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=offscreen "$OUT" --check)"
 code=$?
 set -e
-case "$code" in
-    0) echo "  the packaged app starts and found ffmpeg" ;;
-    3) echo "  the packaged app starts; no ffmpeg on this machine to find" ;;
-    *) echo "  --check failed with exit code $code" >&2; exit 1 ;;
-esac
+printf '%s\n' "$REPORT"
+if [ "$code" -ne 0 ]; then
+    echo "  --check failed with exit code $code" >&2
+    exit 1
+fi
+if ! printf '%s\n' "$REPORT" | grep -q '^ffmpeg .*(bundled)$'; then
+    echo "  --check did not resolve the bundled ffmpeg" >&2
+    exit 1
+fi
+echo "  the packaged app starts and found its bundled ffmpeg"
 
 step "Launch check"
 # --check proves Qt started. This proves the whole window builds, which is the

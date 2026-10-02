@@ -8204,6 +8204,13 @@ def launch(argv: list[str] | None = None) -> int:
         from . import __version__
         _say(f"{APP_NAME} {__version__}")
         return 0
+    if "--check-export" in args:
+        # Headless and windowless: see package_check for what it proves.
+        from .package_check import check_export
+        at = args.index("--check-export") + 1
+        report, code = check_export(args[at] if at < len(args) else None)
+        _say(report)
+        return code
     if "--check" in args:
         report, code = _describe_environment()
         _say(report)
