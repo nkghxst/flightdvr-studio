@@ -188,6 +188,21 @@ jobs:
           FFMPEG_DIR: ${{ steps.ffmpeg.outputs.dir }}
         run: packaging/build-appimage.sh
 
+      # What the AppImage's FFmpeg and its carried libraries are built from:
+      # FFmpeg and the build system at the pinned commits, the build system's
+      # declared dependency sources, and the distribution packages the two
+      # carried libraries were copied from on this build machine.
+      - name: Collect the Linux FFmpeg source material
+        run: |
+          python packaging/check_linux_bundle.py source-material \
+            dist/FlightDVRStudio/_internal "$RUNNER_TEMP/linux-ffmpeg-source"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-ffmpeg-source
+          path: ${{ runner.temp }}/linux-ffmpeg-source
+          if-no-files-found: error
+
       # The build's own smoke check ran with a system ffmpeg installed. Take it
       # away so the packaged app can only succeed through its bundle.
       - name: Remove the system ffmpeg

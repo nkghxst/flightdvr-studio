@@ -721,6 +721,7 @@ def appimage_check(appimage: Path, out: Path) -> int:
 
     check("check-isolated", env)
     run_check_export(ev, appimage, "check-export-isolated", env, pin)
+    run_loader_trace(ev, appimage, env, pin)
 
     # A conflicting pair first on PATH, which would win if bundled-first broke.
     # Each one leaves a marker if it is ever run, and that fails the check.
@@ -745,9 +746,199 @@ def appimage_check(appimage: Path, out: Path) -> int:
     return ev.finish()
 
 
+# -- which copies of its libraries the bundled ffmpeg actually loads ------------
+#
+# The AppImage carries copies of two of ffmpeg's declared dependencies
+# (libgcc_s.so.1 and libmvec.so.1, collected by PyInstaller), and a child the
+# frozen app starts inherits the app's environment. Which copy each ffmpeg or
+# ffprobe the app starts really loads is measured, not inferred: the glibc
+# loader is asked to log its library decisions (LD_DEBUG=libs,files) to one file per
+# process (LD_DEBUG_OUTPUT), for one more --check-export run. The log names the
+# program each process ran and the file it opened for each library.
+
+WATCHED_LIBRARIES = ("libgcc_s.so.1", "libmvec.so.1", "libc.so.6", "libm.so.6")
+_LD_LINE = re.compile(r"^\s*\d+:\s+(.*)$")
+
+
+def parse_loader_log(text: str) -> dict:
+    """Program and the file chosen for each library, from one log made with
+    LD_DEBUG=libs,files: for each `find library=NAME` the loader prints every
+    `trying file=PATH`, and `file=NAME ...; generating link map` once one has
+    been opened -- the last path tried for that name is the one it used."""
+    program, chosen, search = None, {}, []
+    current, last_try = None, {}
+    for raw in text.splitlines():
+        match = _LD_LINE.match(raw)
+        line = match.group(1).strip() if match else raw.strip()
+        if line.startswith("initialize program:"):
+            program = line.split(":", 1)[1].strip()
+        elif line.startswith("find library="):
+            current = line[len("find library="):].split(" ", 1)[0]
+        elif line.startswith("trying file=") and current:
+            last_try[current] = line[len("trying file="):].strip()
+        elif line.startswith("file=") and "generating link map" in line:
+            name = line[len("file="):].split(" ", 1)[0]
+            chosen[name] = last_try.get(name, name)
+        elif line.startswith("search path=") and len(search) < 4:
+            search.append(line[:300])
+    return {"program": program, "chosen": chosen, "search": search}
+
+
+def loader_selection(log_dir: Path) -> list[dict]:
+    """One entry per traced ffmpeg/ffprobe process, with where each watched
+    library came from: the bundle (…/usr/bin/_internal/…) or the host."""
+    found = []
+    for log in sorted(log_dir.glob("loader.*")):
+        parsed = parse_loader_log(log.read_text(encoding="utf-8", errors="replace"))
+        program = parsed["program"] or ""
+        name = Path(program).name
+        if name not in ("ffmpeg", "ffprobe"):
+            continue
+        libs = {}
+        for library in WATCHED_LIBRARIES:
+            path = parsed["chosen"].get(library)
+            libs[library] = {
+                "path": path,
+                "origin": ("not loaded" if path is None
+                           else "bundle" if "/usr/bin/_internal/" in path else "host"),
+            }
+        found.append({"log": log.name, "program": program, "tool": name,
+                      "bundled_program": "/usr/bin/_internal/ffmpeg/" in program,
+                      "libraries": libs, "search": parsed["search"]})
+    return found
+
+
+def run_loader_trace(ev: "Evidence", appimage: Path, env: dict, pin: dict) -> None:
+    label = "check-export-loader-trace"
+    log_dir = ev.out / "loader-trace"
+    log_dir.mkdir(parents=True, exist_ok=False)
+    traced_env = dict(env, LD_DEBUG="libs,files", LD_DEBUG_OUTPUT=str(log_dir / "loader"))
+    run_check_export(ev, appimage, label, traced_env, pin)
+    selection = loader_selection(log_dir)
+    ev.record["loader_selection"] = selection
+    summary: dict = {}
+    for entry in selection:
+        for library, seen in entry["libraries"].items():
+            key = f"{entry['tool']} {library}"
+            summary.setdefault(key, set()).add(seen["origin"])
+    ev.record["loader_selection_summary"] = {k: sorted(v) for k, v in summary.items()}
+    print(f"  loader selection: {ev.record['loader_selection_summary']}")
+    for tool in ("ffmpeg", "ffprobe"):
+        traced = [e for e in selection if e["tool"] == tool]
+        ev.require(f"{label}: the loader was traced for the bundled {tool}",
+                   bool(traced) and all(e["bundled_program"] for e in traced),
+                   f"{len(traced)} traced")
+        ev.require(f"{label}: the file each traced {tool} used for libgcc_s.so.1 "
+                   "and libmvec.so.1 is known",
+                   bool(traced) and all(e["libraries"][lib]["path"]
+                                        for e in traced
+                                        for lib in ("libgcc_s.so.1", "libmvec.so.1")))
+
+
+# -- corresponding-source material ----------------------------------------------------
+
+def _download(url: str, target: Path) -> dict:
+    result = subprocess.run(
+        ["curl", "--fail", "--location", "--silent", "--show-error",
+         "--retry", "2", "--max-time", "900", "--output", str(target), url],
+        capture_output=True, text=True, timeout=960)
+    if result.returncode != 0 or not target.is_file():
+        return {"url": url, "error": result.stderr.strip()[-300:] or f"exit {result.returncode}"}
+    return {"url": url, "file": target.name, "size": target.stat().st_size,
+            "sha256": sha256_file(target)}
+
+
+_SCRIPT_VAR = re.compile(r"^(SCRIPT_[A-Z0-9_]+)=[\"']?([^\"'\n]*)[\"']?\s*$", re.M)
+
+
+def build_system_sources(archive: Path) -> list[dict]:
+    """Every scripts.d entry's declared source (SCRIPT_* variables) in the
+    pinned build-system archive: what it fetches, at which commit or tag."""
+    import tarfile
+    entries = []
+    with tarfile.open(archive, "r:gz") as tar:
+        for member in sorted(tar.getmembers(), key=lambda m: m.name):
+            parts = Path(member.name).parts
+            if not member.isfile() or "scripts.d" not in parts or not member.name.endswith(".sh"):
+                continue
+            text = tar.extractfile(member).read().decode("utf-8", "replace")
+            declared = dict(_SCRIPT_VAR.findall(text))
+            if declared:
+                entries.append({"script": "/".join(parts[parts.index("scripts.d"):]),
+                                **declared})
+    return entries
+
+
+def _dpkg_owner(path: Path) -> dict:
+    owner = subprocess.run(["dpkg", "-S", str(path)], capture_output=True, text=True)
+    if owner.returncode != 0:
+        return {"path": str(path), "package": None, "detail": owner.stderr.strip()[-200:]}
+    package = owner.stdout.split(":", 1)[0].strip()
+    query = subprocess.run(
+        ["dpkg-query", "-W", "-f", "${Package} ${Version} ${source:Package} ${source:Version}",
+         package], capture_output=True, text=True)
+    fields = query.stdout.split()
+    return {"path": str(path), "package": package,
+            "version": fields[1] if len(fields) > 1 else None,
+            "source_package": fields[2] if len(fields) > 2 else None,
+            "source_version": fields[3] if len(fields) > 3 else None}
+
+
+def source_material(bundle_internal: Path, out: Path) -> int:
+    """Gather what the Linux AppImage's FFmpeg and its carried libraries
+    come from, as an artifact: the FFmpeg source and the build system at the
+    pinned commits, the build system's declared dependency sources, and the
+    distribution packages the carried libraries were copied from. It does
+    not mirror every dependency's source, and says so."""
+    ev = Evidence(out, "source-material")
+    pin = load_pin()
+    ffmpeg_url = f"https://github.com/FFmpeg/FFmpeg/archive/{pin['ffmpeg_git_commit_full']}.tar.gz"
+    build_url = f"https://github.com/BtbN/FFmpeg-Builds/archive/{pin['build_system_commit']}.tar.gz"
+    ffmpeg = _download(ffmpeg_url, out / f"FFmpeg-{pin['ffmpeg_git_commit_full']}.tar.gz")
+    build = _download(build_url, out / f"FFmpeg-Builds-{pin['build_system_commit']}.tar.gz")
+    ev.record["ffmpeg_source"] = ffmpeg
+    ev.record["build_system_source"] = build
+    ev.require("FFmpeg source at the pinned commit downloaded", "sha256" in ffmpeg,
+               ffmpeg.get("error", ""))
+    ev.require("build system at the pinned commit downloaded", "sha256" in build,
+               build.get("error", ""))
+    if "sha256" in build:
+        declared = build_system_sources(out / build["file"])
+        ev.record["declared_dependency_sources"] = declared
+        ev.require("the build system declares its dependency sources", len(declared) > 0,
+                   f"{len(declared)} scripts")
+    carried = {}
+    for name in ("libgcc_s.so.1", "libmvec.so.1"):
+        copy = bundle_internal / name
+        if not copy.is_file():
+            carried[name] = {"in_bundle": False}
+            continue
+        entry = {"in_bundle": True, "size": copy.stat().st_size, "sha256": sha256_file(copy)}
+        host = Path("/lib/x86_64-linux-gnu") / name
+        if host.is_file():
+            entry["host_copy"] = {"path": str(host), "sha256": sha256_file(host)}
+            entry["same_bytes_as_host"] = entry["host_copy"]["sha256"] == entry["sha256"]
+            owner = _dpkg_owner(host)
+            if not owner.get("package"):          # merged /usr: try the real path
+                owner = _dpkg_owner(host.resolve())
+            entry["host_package"] = owner
+        carried[name] = entry
+    ev.record["carried_libraries"] = carried
+    ev.require("each carried library traced to a distribution package",
+               all(not e.get("in_bundle") or (e.get("same_bytes_as_host")
+                                                and (e.get("host_package") or {}).get("package"))
+                   for e in carried.values()),
+               json.dumps(carried)[:400])
+    ev.record["not_included"] = (
+        "The source of each dependency the build system fetches is listed by URL "
+        "and commit or tag (declared_dependency_sources), not mirrored here. The "
+        "carried libraries' distribution source packages are named, not included.")
+    return ev.finish()
+
+
 def main(argv: list[str]) -> int:
     commands = {"inspect-pair": inspect_pair, "export-check": export_check,
-                "appimage-check": appimage_check}
+                "appimage-check": appimage_check, "source-material": source_material}
     if len(argv) == 3 and argv[0] in commands:
         return commands[argv[0]](Path(argv[1]).resolve(), Path(argv[2]).resolve())
     print(__doc__.split("\n\n")[1], file=sys.stderr)

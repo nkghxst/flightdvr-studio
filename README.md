@@ -812,6 +812,12 @@ alone* instead.
 **Every clip has the same date.** Expected — see
 [above](#the-goggles-cannot-keep-time).
 
+**A `.flightdvr-part` file was left after cancelling (Windows).** A known issue:
+cancelling while the sound is being checked can occasionally leave the
+cancelled export's unfinished temporary file. The queue names the exact file.
+It is not your export, and your existing file is untouched. See
+[docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) for how to remove it safely.
+
 ---
 
 ## Building from source

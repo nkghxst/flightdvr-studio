@@ -800,3 +800,84 @@ def test_containment_starts_nothing_once_the_deadline_passes_while_settling(tmp_
     finally:
         for pid, start in starts.items():
             _clean_up(pid, start)
+
+
+# -- runtime library selection and source material: the parsers ---------------------
+
+_BUNDLE = "/tmp/appimage_extracted_x/usr/bin/_internal"
+
+
+def _loader_log(program: str, choices: dict[str, list[str]]) -> str:
+    """An LD_DEBUG=libs,files log in glibc's shape: every path tried for a
+    library, then the link map for the one that opened."""
+    lines = [f"      4242:\tfile=libc.so.6 [0];  needed by {program} [0]"]
+    for name, tried in choices.items():
+        lines.append(f"      4242:\tfind library={name} [0]; searching")
+        lines.append(f"      4242:\t search path={_BUNDLE}:/lib\t\t(LD_LIBRARY_PATH)")
+        for path in tried:
+            lines.append(f"      4242:\t  trying file={path}")
+        lines.append(f"      4242:\tfile={name} [0];  generating link map")
+    lines.append(f"      4242:\tinitialize program: {program}")
+    return "\n".join(lines) + "\n"
+
+
+def test_the_loader_log_names_the_file_each_library_came_from():
+    text = _loader_log(f"{_BUNDLE}/ffmpeg/ffmpeg", {
+        "libgcc_s.so.1": [f"{_BUNDLE}/glibc-hwcaps/x86-64-v3/libgcc_s.so.1",
+                          f"{_BUNDLE}/libgcc_s.so.1"],
+        "libmvec.so.1": [f"{_BUNDLE}/libmvec.so.1"],
+        "libc.so.6": [f"{_BUNDLE}/libc.so.6", "/lib/x86_64-linux-gnu/libc.so.6"],
+    })
+    parsed = check_bundle.parse_loader_log(text)
+    assert parsed["program"] == f"{_BUNDLE}/ffmpeg/ffmpeg"
+    assert parsed["chosen"] == {
+        "libgcc_s.so.1": f"{_BUNDLE}/libgcc_s.so.1",       # the last one tried
+        "libmvec.so.1": f"{_BUNDLE}/libmvec.so.1",
+        "libc.so.6": "/lib/x86_64-linux-gnu/libc.so.6",
+    }
+
+
+def test_loader_selection_keeps_only_the_pair_and_says_bundle_or_host(tmp_path):
+    (tmp_path / "loader.100").write_text(_loader_log(f"{_BUNDLE}/ffmpeg/ffmpeg", {
+        "libgcc_s.so.1": [f"{_BUNDLE}/libgcc_s.so.1"],
+        "libmvec.so.1": ["/lib/x86_64-linux-gnu/libmvec.so.1"]}))
+    (tmp_path / "loader.101").write_text(_loader_log(f"{_BUNDLE}/ffmpeg/ffprobe", {
+        "libgcc_s.so.1": [f"{_BUNDLE}/libgcc_s.so.1"]}))
+    (tmp_path / "loader.102").write_text(_loader_log(f"{_BUNDLE}/FlightDVRStudio", {
+        "libgcc_s.so.1": [f"{_BUNDLE}/libgcc_s.so.1"]}))
+    found = check_bundle.loader_selection(tmp_path)
+    assert [(e["tool"], e["bundled_program"]) for e in found] == [
+        ("ffmpeg", True), ("ffprobe", True)]               # the app itself is not counted
+    ffmpeg, ffprobe = found
+    assert ffmpeg["libraries"]["libgcc_s.so.1"]["origin"] == "bundle"
+    assert ffmpeg["libraries"]["libmvec.so.1"]["origin"] == "host"
+    assert ffprobe["libraries"]["libmvec.so.1"] == {"path": None, "origin": "not loaded"}
+
+
+def test_the_build_systems_declared_sources_are_listed(tmp_path):
+    archive = tmp_path / "builds.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for name, text in (
+                ("FFmpeg-Builds-abc/scripts.d/25-gmp.sh",
+                 'SCRIPT_REPO="https://example.invalid/gmp.git"\nSCRIPT_COMMIT="1234"\nffbuild_dockerbuild() {\n}\n'),
+                ("FFmpeg-Builds-abc/scripts.d/50-x264.sh",
+                 "SCRIPT_REPO='https://example.invalid/x264.git'\nSCRIPT_COMMIT=5678\n"),
+                ("FFmpeg-Builds-abc/README.md", "SCRIPT_REPO=not-a-script\n")):
+            data = text.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    assert check_bundle.build_system_sources(archive) == [
+        {"script": "scripts.d/25-gmp.sh", "SCRIPT_REPO": "https://example.invalid/gmp.git",
+         "SCRIPT_COMMIT": "1234"},
+        {"script": "scripts.d/50-x264.sh", "SCRIPT_REPO": "https://example.invalid/x264.git",
+         "SCRIPT_COMMIT": "5678"},
+    ]
+
+
+def test_ci_collects_the_source_material_and_traces_the_loader():
+    workflow = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
+    assert "check_linux_bundle.py source-material" in workflow
+    assert "name: linux-ffmpeg-source" in workflow
+    helper = (PACKAGING / "check_linux_bundle.py").read_text(encoding="utf-8")
+    assert "run_loader_trace(ev, appimage, env, pin)" in helper

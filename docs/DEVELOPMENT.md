@@ -411,10 +411,26 @@ runner, records which of those libraries the bundle carries itself
 (`libgcc_s.so.1` and `libmvec.so.1`, collected by PyInstaller), and exports
 generated media through the pair directly. Evidence is uploaded as `linux-bundle-evidence-*`.
 
+Which copy of each library the bundled ffmpeg really loads is measured, not
+assumed: one more `--check-export` run sets `LD_DEBUG=libs,files` with
+`LD_DEBUG_OUTPUT`, so the glibc loader writes, for every ffmpeg and ffprobe the
+frozen app starts, the file it opened for each library. The helper reports, per
+process, whether `libgcc_s.so.1`, `libmvec.so.1`, `libc.so.6` and `libm.so.6`
+came from the bundle (`usr/bin/_internal`) or the host
+(`loader_selection` in `appimage-check.json`).
+
+The build job also uploads `linux-ffmpeg-source`: FFmpeg and the BtbN build
+system as GitHub archives of the two pinned commits, with their SHA-256 as
+downloaded; every dependency source the build system declares (each
+`scripts.d` script's `SCRIPT_*` repository and commit or tag); and, for the two
+libraries the bundle carries, the Ubuntu package and source package they were
+copied from on the build machine. It lists dependency sources by URL and
+commit rather than mirroring each one, and names the Ubuntu source packages
+rather than including them.
+
 What that does not cover: a person starting the AppImage in a normal desktop
 session, real recordings, devices, listening, hardware encoders on real GPUs,
-and which copies of `libgcc_s.so.1` and `libmvec.so.1` ffmpeg actually loads
-when the packaged app starts it.
+and library selection on systems other than the two CI runners.
 
 **The AppImage is built on the oldest supported LTS on purpose.** An AppImage
 carries no `libc.so.6` or loader of its own; one built on Ubuntu 24.04 will not
