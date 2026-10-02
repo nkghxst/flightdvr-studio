@@ -103,16 +103,26 @@ release name, are the fixed references:
 | The complete build system | https://github.com/BtbN/FFmpeg-Builds/tree/a99e8230eae00d1cee38f23076a7a1f55cd984e2 |
 | Every dependency, with the version and source of each | https://github.com/BtbN/FFmpeg-Builds/tree/a99e8230eae00d1cee38f23076a7a1f55cd984e2/scripts.d |
 
-Each build of the AppImage also records its source material as a separate
-CI artifact, `linux-ffmpeg-source`:
-- GitHub's archives of the two commits above, with the SHA-256 as downloaded;
-- every dependency source the build system's `scripts.d` declares (repository
-  and commit or tag), including scripts for other targets;
-- the Ubuntu packages above, with their source package names and versions.
+The release that carries the AppImage also carries
+`FlightDVR_Studio-<version>-linux-ffmpeg-source.tar`, built by the same CI run.
+It contains:
+- FFmpeg and the build system at the two commits above;
+- the source of every dependency stage that build system enables for this
+  build (linux64, gpl, FFmpeg 7.1), fetched with the build system's own
+  download recipes and checked to be at the commit, tag or revision each one
+  declares. That includes rav1e's Rust crates, vendored from its lock file;
+- the Ubuntu source packages, with their Debian patches, for the two carried
+  libraries above. They are checked against their `.dsc` and the signed
+  Ubuntu archive index;
+- `MANIFEST.json`, giving every file's SHA-256, origin and why it matches;
+- `README.md`, explaining how to rebuild with the build system.
 
-It names the dependency sources and the Ubuntu source packages rather than
-including them, and this project does not yet keep its own copy of that
-source.
+Two things are deliberately not in it, and the manifest says so:
+- **The toolchain's own sources.** The binaries take GCC's runtime libraries
+  under the GCC Runtime Library Exception and link glibc dynamically. The
+  toolchain's component versions are listed.
+- **The `cc` build crate.** rav1e's build updates it at build time; it
+  compiles rav1e's C and assembly parts and is not linked into the binary.
 
 ## Qt / PySide6
 

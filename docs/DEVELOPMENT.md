@@ -419,14 +419,31 @@ process, whether `libgcc_s.so.1`, `libmvec.so.1`, `libc.so.6` and `libm.so.6`
 came from the bundle (`usr/bin/_internal`) or the host
 (`loader_selection` in `appimage-check.json`).
 
-The build job also uploads `linux-ffmpeg-source`: FFmpeg and the BtbN build
-system as GitHub archives of the two pinned commits, with their SHA-256 as
-downloaded; every dependency source the build system declares (each
-`scripts.d` script's `SCRIPT_*` repository and commit or tag); and, for the two
-libraries the bundle carries, the Ubuntu package and source package they were
-copied from on the build machine. It lists dependency sources by URL and
-commit rather than mirroring each one, and names the Ubuntu source packages
-rather than including them.
+**Corresponding source ships with the release.** The build job records its
+inputs (`linux-ffmpeg-source-inputs`: the FFmpeg and build-system archives at
+the pinned commits, and the Ubuntu packages the carried libraries were copied
+from). The `linux-ffmpeg-source` job then runs
+`packaging/collect_linux_sources.py collect` on them:
+
+- **Which dependencies.** It runs the pinned build system's own `generate.sh
+  linux64 gpl 7.1` to learn which dependency stages it enables. It requires
+  every configure flag those stages add to appear in the shipped binary's
+  recorded configuration.
+- **Fetching.** It fetches each stage with the build system's own download
+  recipe and helpers, naming each archive as its `download.sh` cache would.
+  It checks each fetched tree is at its declared commit, tag or SVN revision,
+  and vendors rav1e's locked crates.
+- **Ubuntu sources.** It fetches the two Ubuntu source packages from
+  Launchpad and checks them against their `.dsc` and the signed archive index.
+- **Output.** It writes one `FlightDVR_Studio-<version>-linux-ffmpeg-source.tar`
+  with `MANIFEST.json` and build instructions. If anything required fails, it
+  writes no bundle and the job fails. The bundle must stay under GitHub's
+  2 GiB release-asset limit.
+
+The release job downloads only `linux-appimage`, `macos-dmg`,
+`windows-installer` and `linux-ffmpeg-source`. `select-release-files` then
+attaches exactly one AppImage, one `.dmg`, one installer and one source
+bundle. Evidence folders and other artifacts are never attached.
 
 What that does not cover: a person starting the AppImage in a normal desktop
 session, real recordings, devices, listening, hardware encoders on real GPUs,
