@@ -342,7 +342,6 @@ def _run(child: Path, receipt: dict, fail, export_seconds: float, owned: dict) -
 #    reader, and an explicit close of that reader.
 
 ENVIRONMENT_SENTINEL = "FLIGHTDVR_ENV_SENTINEL"
-PCM_BLOCK_FRAMES = 4800
 
 _STAND_IN = """#!/bin/sh
 printf 'LD_LIBRARY_PATH=%s\\n' "${LD_LIBRARY_PATH-<unset>}"
@@ -364,14 +363,14 @@ def _stand_in_report(stdout: str) -> dict:
 def _read_track(tools, track: Path, fail, label: str) -> dict:
     """The app's music-asset inspection and one bounded block from its
     streaming PCM reader, closed explicitly whatever happens."""
-    from .audio_reader import FfmpegPcmReader, inspect_music_asset
+    from .audio_reader import MAX_READ_FRAMES, FfmpegPcmReader, inspect_music_asset
     record: dict = {}
     asset = inspect_music_asset(tools, track)
     record["asset"] = {"sample_rate": asset.sample_rate, "channels": asset.channels,
                        "decoded_samples": asset.decoded_samples}
     reader = FfmpegPcmReader.for_music(tools, asset)
     try:
-        frames = min(PCM_BLOCK_FRAMES, reader.frames)
+        frames = min(MAX_READ_FRAMES, reader.frames)      # the reader's own bound
         values = reader.read(0, frames, lambda: False)
         record["block"] = {"frames": frames, "values": len(values),
                            "peak": round(max(abs(v) for v in values), 4)}

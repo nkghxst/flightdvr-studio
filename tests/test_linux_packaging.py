@@ -921,7 +921,7 @@ def _fake_environment_run(monkeypatch, pin, stand_in_sees=None):
         saw = stand_in_sees or {"LD_LIBRARY_PATH": preset if preset is not None else "<unset>",
                                 "LD_LIBRARY_PATH_ORIG": "<unset>",
                                 "SENTINEL": env["FLIGHTDVR_ENV_SENTINEL"]}
-        track = {"block": {"frames": 4800, "values": 9600}, "reader_closed": True}
+        track = {"block": {"frames": 480, "values": 960}, "reader_closed": True}
         receipt = {"result": "PASS", "failures": [], "app": {"frozen": True},
                    "stand_in": {"exit": 0, "saw": saw}, "parent_unchanged": True,
                    "bundled_child_LD_LIBRARY_PATH": f"{inside}:{preset or ''}",
