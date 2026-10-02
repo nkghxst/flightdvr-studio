@@ -441,6 +441,11 @@ def _fake_appimage(tmp_path, monkeypatch, pin, run_decoy: bool):
                    "exports": {n: {"status": "Done", "probe": {}}
                                for n in ("master", "edit", "remux")}}
         (child / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+        if "LD_DEBUG_OUTPUT" in env:            # the loader-trace run
+            for pid, tool in ((900, "ffmpeg"), (901, "ffprobe")):
+                Path(f"{env['LD_DEBUG_OUTPUT']}.{pid}").write_text(_loader_log(
+                    f"{inside}/{tool}", {"libgcc_s.so.1": [f"{inside}/../libgcc_s.so.1"],
+                                         "libmvec.so.1": ["/lib/x86_64-linux-gnu/libmvec.so.1"]}))
         return {"exit": 0, "timed_out": False, "owned": {}, "ambiguous": [],
                 "remaining": [], "deadline_hit": False}
 

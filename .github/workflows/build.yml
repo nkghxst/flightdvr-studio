@@ -105,7 +105,7 @@ jobs:
       - name: Run the tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -rs
+        run: python -m pytest -rsx
 
   appimage:
     name: Linux AppImage
