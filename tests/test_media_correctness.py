@@ -279,8 +279,10 @@ class UnlinkObserver:
     anything before the unlink.
     """
 
-    def __init__(self, monkeypatch, part: Path, refusal=None, children=None):
+    def __init__(self, monkeypatch, part: Path, refusal=None, children=None,
+                 trace=None):
         self.part = part
+        self.trace = trace                # PhaseTrace: in memory, no file I/O
         self.unlinked: list[Path] = []
         self.holders_at_failure = None
         self.holders_queried = None       # (started, finished) after the fail
@@ -300,18 +302,28 @@ class UnlinkObserver:
 
         def watched(path_self, *args, **kwargs):
             observer.unlinked.append(Path(path_self))
+            traced = (observer.trace.begin("unlink")
+                      if observer.trace is not None and Path(path_self) == part
+                      else None)
             if refusal is not None and Path(path_self) == part:
+                if traced is not None:
+                    observer.trace.end(traced, outcome="refused by the test")
                 raise refusal
             try:
-                return real_unlink(path_self, *args, **kwargs)
+                result = real_unlink(path_self, *args, **kwargs)
             except PermissionError:
                 # The moment of the failure, taken before anything else.
                 failed_at = time.monotonic()
                 failed_ns = time.time_ns()
+                if traced is not None:
+                    observer.trace.end(traced, outcome="PermissionError")
                 if Path(path_self) == part and observer._thread is None:
                     observer._first_look(failed_ns)
                     observer._start(failed_at)
                 raise
+            if traced is not None:
+                observer.trace.end(traced, outcome="removed")
+            return result
 
         monkeypatch.setattr(Path, "unlink", watched)
 
@@ -373,7 +385,8 @@ class UnlinkObserver:
                 f" | {self.first_look()}"
                 f" | secondary: exclusive access: {release}"
                 f" | Restart Manager holders, queried {queried}: "
-                f"{self.holders_at_failure or '(none named)'}")
+                f"{self.holders_at_failure or '(none named)'}"
+                + (f" | {self.trace.report()}" if self.trace is not None else ""))
 
     def first_look(self) -> str:
         """The PID query at the failure, and the known children then. A named
@@ -396,6 +409,154 @@ class UnlinkObserver:
                 f" | known children then: {children}")
 
 
+class PhaseTrace:
+    """In-memory phase events for one PCM-count decode. Diagnostic only.
+
+    Records, with ``time.perf_counter_ns()`` (``time.time_ns()`` alongside, to
+    set them against a child's kernel exit time), when the owned decode is
+    terminated, waited on and killed; each read/readline on its own two pipes
+    from entry to exit, with the reading thread; each pipe's close; the
+    count's entry and return; and the cleanup unlink. It writes no file, makes
+    no native query and adds no wait: recording costs a little time, so the
+    timings are observational.
+
+    The reader joins inside count_pcm_samples are deliberately not
+    instrumented (no hook is installed on any thread), so the report says so
+    and attributes no time to a join. What it can show is where the time sits
+    between the decode's wait returning, its pipes' last reads and closes, the
+    count's return and the unlink.
+    """
+
+    JOINS = "reader joins: unobserved (not instrumented)"
+
+    def __init__(self):
+        self.events: list[dict] = []
+
+    def mark(self, name: str, **detail) -> dict:
+        event = {"name": name, "perf_ns": time.perf_counter_ns(),
+                 "wall_ns": time.time_ns(), **detail}
+        self.events.append(event)
+        return event
+
+    def begin(self, name: str, **detail) -> dict:
+        return self.mark(name + ".enter", **detail)
+
+    def end(self, opened: dict, **detail) -> None:
+        opened["closed"] = True
+        self.mark(opened["name"][:-len(".enter")] + ".exit", **detail)
+
+    def report(self, origin_name: str = "unlink.enter") -> str:
+        """Every event in ms relative to the last `origin_name` (perf clock)."""
+        origins = [e for e in self.events if e["name"] == origin_name]
+        if not origins:
+            return (f"phase trace: no {origin_name} recorded; "
+                    f"{len(self.events)} events | {self.JOINS}")
+        zero = origins[-1]["perf_ns"]
+        parts = []
+        for e in self.events:
+            extra = {k: v for k, v in e.items()
+                     if k not in ("name", "perf_ns", "wall_ns", "closed")}
+            parts.append(f"{e['name']} {(e['perf_ns'] - zero) / 1e6:+.3f}"
+                         + (f" {extra}" if extra else ""))
+        still_open = [e["name"] for e in self.events
+                      if e["name"].endswith(".enter") and not e.get("closed")]
+        anchor = origins[-1]["wall_ns"]
+        return (f"phase trace (ms from the cleanup unlink, perf clock; wall "
+                f"{anchor} ns; observational, recording adds time): "
+                + "; ".join(parts)
+                + f" | open at report: {still_open or 'none'}"
+                + f" | {self.JOINS}")
+
+
+class _PipeProxy:
+    """Pass-through for one owned decode pipe, recording each operation."""
+
+    def __init__(self, raw, label: str, trace: PhaseTrace):
+        self._raw, self._label, self._trace = raw, label, trace
+        self._count = 0
+
+    def _op(self, kind: str, call, *args):
+        self._count += 1
+        opened = self._trace.begin(f"{self._label}.{kind}#{self._count}",
+                                   thread=threading.get_ident())
+        try:
+            data = call(*args)
+        except BaseException as exc:
+            self._trace.end(opened, error=type(exc).__name__)
+            raise
+        self._trace.end(opened, size=len(data), eof=not data)
+        return data
+
+    def read(self, *args):
+        return self._op("read", self._raw.read, *args)
+
+    def readline(self, *args):
+        return self._op("readline", self._raw.readline, *args)
+
+    def close(self):
+        opened = self._trace.begin(f"{self._label}.close")
+        try:
+            return self._raw.close()
+        finally:
+            self._trace.end(opened)
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+def traced_decode(real_popen, trace: PhaseTrace, command, *args, **kwargs):
+    """Start the PCM-count decode as a Popen whose own process calls and two
+    pipes are traced. Only this one object is affected."""
+
+    class TracedPopen(real_popen):
+        def terminate(self):
+            opened = trace.begin("decode.terminate")
+            try:
+                return super().terminate()
+            finally:
+                trace.end(opened)
+
+        def kill(self):
+            opened = trace.begin("decode.kill")
+            try:
+                return super().kill()
+            finally:
+                trace.end(opened)
+
+        def wait(self, timeout=None):
+            opened = trace.begin("decode.wait", timeout=timeout)
+            try:
+                code = super().wait(timeout)
+            except subprocess.TimeoutExpired:
+                trace.end(opened, outcome="timeout")
+                raise
+            trace.end(opened, outcome=code)
+            return code
+
+    proc = TracedPopen(command, *args, **kwargs)
+    trace.mark("decode.started", pid=proc.pid)
+    proc.stdout = _PipeProxy(proc.stdout, "stdout", trace)
+    proc.stderr = _PipeProxy(proc.stderr, "stderr", trace)
+    return proc
+
+
+def trace_the_count(monkeypatch, trace: PhaseTrace) -> None:
+    """Record the count's own entry and return (it is a module global)."""
+    real_count = audio_export.count_pcm_samples
+
+    def counted(*args, **kwargs):
+        opened = trace.begin("count")
+        try:
+            result = real_count(*args, **kwargs)
+        except BaseException as exc:
+            trace.end(opened, error=type(exc).__name__)
+            raise
+        trace.end(opened, result=str(result)[:60])
+        return result
+
+    monkeypatch.setattr(audio_export, "count_pcm_samples", counted)
+
+
 def _cancel_during_the_real_pcm_count(media, tmp_path, monkeypatch,  # noqa: F811
                                       unlink_refusal=None):
     """Two Edit jobs; the first is cancelled while the real PCM count is
@@ -414,15 +575,17 @@ def _cancel_during_the_real_pcm_count(media, tmp_path, monkeypatch,  # noqa: F81
 
     real_popen = subprocess.Popen
     decodes, seen_part, known = [], [], []
+    trace = PhaseTrace()
 
     def slow_decode(command, *args, **kwargs):
         # Only the count's decode is slowed: read at playback speed. Every
         # child the audio check starts is kept, for the observer's receipts.
+        # The decode alone is traced, through its own object and pipes.
         if "s16le" in command and "-map" in command:
             seen_part.append(part.exists() and part.stat().st_size)
             command = list(command)
             command.insert(command.index("-i"), "-re")
-            proc = real_popen(command, *args, **kwargs)
+            proc = traced_decode(real_popen, trace, command, *args, **kwargs)
             decodes.append(proc)
             known.append(proc)
             return proc
@@ -431,8 +594,9 @@ def _cancel_during_the_real_pcm_count(media, tmp_path, monkeypatch,  # noqa: F81
         return proc
 
     monkeypatch.setattr(audio_export.subprocess, "Popen", slow_decode)
+    trace_the_count(monkeypatch, trace)
     observer = UnlinkObserver(monkeypatch, part, refusal=unlink_refusal,
-                              children=lambda: list(known))
+                              children=lambda: list(known), trace=trace)
     unlinked = observer.unlinked
     worker = ExportWorker(None, [first, second], tmp_path / "work")
     from flightdvr.media import find_tools
@@ -453,6 +617,7 @@ def _cancel_during_the_real_pcm_count(media, tmp_path, monkeypatch,  # noqa: F81
         "second_before": second_before, "out": out, "neighbour": neighbour,
         "before": before, "part": part, "decodes": decodes,
         "seen_part": seen_part, "unlinked": unlinked, "observer": observer,
+        "trace": trace,
     }
 
 
@@ -714,6 +879,86 @@ from datetime import datetime  # noqa: E402
 
 import flightdvr.media as media_module  # noqa: E402
 from flightdvr.media import ClipInfo, video_origin  # noqa: E402
+
+
+
+# -- the phase trace's own checks (transparency, report, restoration)
+
+def _pcm_mov(tools_, path: Path, seconds: float = 0.5) -> Path:
+    subprocess.run(
+        [str(tools_.ffmpeg), "-hide_banner", "-nostdin", "-v", "error", "-y",
+         "-f", "lavfi", "-i", f"sine=f=440:r=48000:d={seconds}", "-ac", "2",
+         "-c:a", "pcm_s16le", str(path)], check=True, capture_output=True)
+    return path
+
+
+def test_the_phase_trace_leaves_a_count_unchanged_and_restores_its_patches(
+        tools, tmp_path):  # noqa: F811
+    source = _pcm_mov(tools, tmp_path / "pcm.mov")
+    plain = audio_export.count_pcm_samples(tools, source)
+    assert plain == (24_000, "")          # 0.5 s at 48 kHz, per channel
+
+    originals = (subprocess.Popen, audio_export.count_pcm_samples, Path.unlink,
+                 threading.Thread.join)
+    trace = PhaseTrace()
+    scratch = tmp_path / "scratch.bin"
+    scratch.write_bytes(b"x")
+    with pytest.MonkeyPatch.context() as patch:
+        real_popen = subprocess.Popen
+
+        def traced(command, *args, **kwargs):
+            if "s16le" in command and "-map" in command:
+                return traced_decode(real_popen, trace, command, *args, **kwargs)
+            return real_popen(command, *args, **kwargs)
+
+        patch.setattr(audio_export.subprocess, "Popen", traced)
+        trace_the_count(patch, trace)
+        UnlinkObserver(patch, scratch, trace=trace)
+        counted = audio_export.count_pcm_samples(tools, source)
+        scratch.unlink()
+
+    assert counted == plain
+    assert (subprocess.Popen, audio_export.count_pcm_samples, Path.unlink,
+            threading.Thread.join) == originals
+    names = [e["name"] for e in trace.events]
+    assert names[0] == "count.enter" and "count.exit" in names
+    assert "decode.started" in names
+    assert any(e["name"].startswith("stdout.read#") and e.get("eof")
+               for e in trace.events)
+    assert any(e["name"].startswith("stderr.readline#") for e in trace.events)
+    assert {"stdout.close.exit", "stderr.close.exit"} <= set(names)
+    assert [e.get("outcome") for e in trace.events
+            if e["name"] == "unlink.exit"] == ["removed"]
+    assert not [e for e in trace.events
+                if e["name"].endswith(".enter") and not e.get("closed")]
+    assert not any("join" in name for name in names)    # joins not instrumented
+
+
+def test_a_pipe_error_is_recorded_and_still_raised():
+    class Broken:
+        def read(self, *args):
+            raise OSError(9, "bad file descriptor")
+
+    trace = PhaseTrace()
+    proxy = _PipeProxy(Broken(), "stdout", trace)
+    with pytest.raises(OSError):
+        proxy.read(4)
+    assert [(e["name"], e.get("error")) for e in trace.events] == [
+        ("stdout.read#1.enter", None), ("stdout.read#1.exit", "OSError")]
+
+
+def test_the_phase_trace_report_is_relative_to_the_cleanup_unlink():
+    trace = PhaseTrace()
+    trace.mark("decode.started", pid=1)
+    opened = trace.begin("unlink")
+    trace.end(opened, outcome="PermissionError")
+    trace.begin("stdout.read#1")
+    text = trace.report()
+    assert text.startswith("phase trace (ms from the cleanup unlink")
+    assert "unlink.enter +0.000" in text
+    assert "open at report: ['stdout.read#1.enter']" in text
+    assert text.endswith("reader joins: unobserved (not instrumented)")
+    assert PhaseTrace().report().startswith("phase trace: no unlink.enter recorded")
 
 
 @pytest.mark.parametrize("fmt, video, expected", [
