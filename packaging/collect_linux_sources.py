@@ -171,7 +171,11 @@ def fetch_stage(build_system: Path, stage: dict, helpers: Path, work: Path,
     record["dl_hash"] = hashlib.sha256((recipe + "\n").encode()).hexdigest()
     tree = work / stage["stage"]
     tree.mkdir(parents=True)
-    env = dict(os.environ, PATH=f"{helpers}{os.pathsep}{os.environ['PATH']}")
+    # No detached `git gc --auto` / maintenance after a fetch: one repacking
+    # in the background changed a tree while it was being packed (libjxl).
+    env = dict(os.environ, PATH=f"{helpers}{os.pathsep}{os.environ['PATH']}",
+               GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_0="gc.auto", GIT_CONFIG_VALUE_0="0",
+               GIT_CONFIG_KEY_1="maintenance.auto", GIT_CONFIG_VALUE_1="false")
     started = time.monotonic()
     try:
         result = _bash(f'set -xe -o pipefail; shopt -s dotglob; eval "set -e; $STG"',
