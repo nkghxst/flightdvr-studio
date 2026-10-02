@@ -501,12 +501,15 @@ build instead of silently changing the binary being shipped.
 
 1. Bump `__version__` in `flightdvr/__init__.py` and `AppVersion` in
    `packaging/installer.iss`. They are separate strings; both need changing.
-2. Update `CHANGELOG.md`.
+   The AppImage, the macOS build and the Linux source bundle read
+   `__version__`, so nothing else carries a version literal.
+2. Update `CHANGELOG.md`, replacing an *unreleased candidate* heading with the
+   release and its date.
 3. Push to `main` and let CI go green.
 4. Tag `vX.Y.Z` and push the tag. CI drafts a release and attaches the AppImage,
-   the DMG and the Windows installer.
-5. Inspect the three artifacts, write the release notes, and add their SHA-256
-   values to the table in the README.
+   the DMG, the Windows installer and the Linux FFmpeg source bundle.
+5. Inspect the four files, write the release notes, and add the SHA-256 of the
+   three downloads to the table in the README.
 6. Publish.
 
 The release is drafted rather than published because inspecting the artifacts,
