@@ -76,11 +76,19 @@ Its declared dynamic dependencies are the GNU C library (`libc.so.6`,
 the loader `ld-linux-x86-64.so.2`, symbol versions up to `GLIBC_2.28`) and
 `libgcc_s.so.1`, the GCC runtime library. The AppImage does not carry the C
 library itself (`libc.so.6`) or its loader; those always come from the system
-it runs on. It does carry copies of two of the others, `libgcc_s.so.1` and
-glibc's vector maths library `libmvec.so.1`, which PyInstaller collects for
-Python and Qt from the system the AppImage is built on. Either those copies or
-the system's may be the ones ffmpeg loads when the app starts it; which has not
-been measured.
+it runs on. It does carry copies of two of the others, which PyInstaller
+collects for Python and Qt from the Ubuntu 22.04 system the AppImage is built
+on, byte-identical to that system's files:
+
+| Library | Ubuntu package (source package) |
+|---|---|
+| `libgcc_s.so.1` (GCC runtime library) | `libgcc-s1` 12.3.0-1ubuntu1~22.04.3 (`gcc-12`) |
+| `libmvec.so.1` (glibc's vector maths library) | `libc6` 2.35-0ubuntu3.15 (`glibc`) |
+
+When the app starts ffmpeg or ffprobe, those use the AppImage's copies of these
+two and the system's `libc.so.6` and `libm.so.6`. This was measured from the
+loader's own log, for every ffmpeg and ffprobe the packaged app started, on
+Ubuntu 22.04 and Ubuntu 24.04 in CI. Other systems have not been measured.
 Hardware encoding, where it works, uses the graphics drivers already installed
 on the system.
 
@@ -95,7 +103,16 @@ release name, are the fixed references:
 | The complete build system | https://github.com/BtbN/FFmpeg-Builds/tree/a99e8230eae00d1cee38f23076a7a1f55cd984e2 |
 | Every dependency, with the version and source of each | https://github.com/BtbN/FFmpeg-Builds/tree/a99e8230eae00d1cee38f23076a7a1f55cd984e2/scripts.d |
 
-This project does not yet keep its own copy of that source for the Linux build.
+Each build of the AppImage also records its source material as a separate
+CI artifact, `linux-ffmpeg-source`:
+- GitHub's archives of the two commits above, with the SHA-256 as downloaded;
+- every dependency source the build system's `scripts.d` declares (repository
+  and commit or tag), including scripts for other targets;
+- the Ubuntu packages above, with their source package names and versions.
+
+It names the dependency sources and the Ubuntu source packages rather than
+including them, and this project does not yet keep its own copy of that
+source.
 
 ## Qt / PySide6
 
