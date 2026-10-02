@@ -431,10 +431,18 @@ from). The `linux-ffmpeg-source` job then runs
   recorded configuration.
 - **Fetching.** It fetches each stage with the build system's own download
   recipe and helpers, naming each archive as its `download.sh` cache would.
-  It checks each fetched tree is at its declared commit, tag or SVN revision,
-  and vendors rav1e's locked crates.
+  Every declared source of a stage (`SCRIPT_COMMIT`/`SCRIPT_REV` and any
+  numbered ones) is bound to the repository fetched from its own declared
+  remote, and that repository must be at the declared commit, resolved tag or
+  SVN revision. A match in a submodule or another repository never counts.
+  Only two named declarations, AMF's and libiconv's gnulib, may be pinned by a
+  recipe that deletes its own `.git`, and only while the recipe still does. It
+  also vendors rav1e's locked crates.
 - **Ubuntu sources.** It fetches the two Ubuntu source packages from
-  Launchpad and checks them against their `.dsc` and the signed archive index.
+  Launchpad. Each must match its `.dsc`, **and** that `.dsc` must be listed in
+  the Ubuntu archive index, whose `InRelease` is verified with the Ubuntu
+  archive keyring. If the signed index cannot confirm it, the package counts as
+  missing.
 - **Output.** It writes one `FlightDVR_Studio-<version>-linux-ffmpeg-source.tar`
   with `MANIFEST.json` and build instructions. If anything required fails, it
   writes no bundle and the job fails. The bundle must stay under GitHub's

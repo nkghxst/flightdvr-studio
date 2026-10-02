@@ -142,18 +142,26 @@ def _helpers(build_system: Path, into: Path) -> Path:
 
 
 def _repo_identities(tree: Path) -> list[dict]:
+    """Every fetched repository: where, what kind, its remote and its commit
+    or revision. Submodules are listed too, with their own remotes."""
     found = []
     for marker in sorted(tree.rglob(".git")):
         repo = marker.parent
         head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
                               capture_output=True, text=True)
+        url = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"],
+                             capture_output=True, text=True)
         found.append({"path": str(repo.relative_to(tree)) or ".", "kind": "git",
+                      "url": url.stdout.strip() or None,
                       "commit": head.stdout.strip() or None})
     for marker in sorted(tree.rglob(".svn")):
         repo = marker.parent
         info = subprocess.run(["svn", "info", "--show-item", "revision", str(repo)],
                               capture_output=True, text=True)
+        url = subprocess.run(["svn", "info", "--show-item", "url", str(repo)],
+                             capture_output=True, text=True)
         found.append({"path": str(repo.relative_to(tree)) or ".", "kind": "svn",
+                      "url": url.stdout.strip() or None,
                       "revision": info.stdout.strip() or None})
     return found
 
@@ -190,7 +198,8 @@ def fetch_stage(build_system: Path, stage: dict, helpers: Path, work: Path,
         shutil.rmtree(tree, ignore_errors=True)
         return record
     record["identities"] = _repo_identities(tree)
-    record["matches_declared"] = _matches_declared(record["declared"], record["identities"])
+    record["declared_sources"] = bind_declared(stage["stage"], record["declared"],
+                                               record["identities"], recipe)
     target = out_dir / f"{stage['stage']}_{record['dl_hash']}.tar.xz"
     packed = subprocess.run(["tar", "-I", "xz -T0", "-cpf", str(target), "-C", str(tree), "."],
                             capture_output=True, text=True)
@@ -201,36 +210,101 @@ def fetch_stage(build_system: Path, stage: dict, helpers: Path, work: Path,
         record["status"] = f"FAILED: packing: {packed.stderr.strip()[-300:]}"
         return record
     record["archive"] = _identity(target)
-    record["status"] = (
-        "FAILED: fetched tree does not match the declared commit"
-        if record["matches_declared"] is False
-        else "collected" if record["matches_declared"]
-        else "collected (the recipe removes VCS metadata, so the commit is "
-             "pinned by the recipe, not re-read)")
+    record["status"] = declared_status(record["declared_sources"])
     return record
 
 
-def _matches_declared(declared: dict, identities: list[dict]):
-    """True when a fetched repository is at the declared commit (a tag is
-    resolved on its remote); None when the recipe left no VCS metadata to
-    check; False when it is at something else."""
-    if not identities:
-        return None
-    commit = declared.get("SCRIPT_COMMIT")
-    revision = declared.get("SCRIPT_REV")
-    heads = {i.get("commit") for i in identities} | {i.get("revision") for i in identities}
-    if revision:
-        return revision in heads
-    if not commit:
-        return None
-    if re.fullmatch(r"[0-9a-f]{40}", commit):
-        return commit in heads
-    remote = declared.get("SCRIPT_REPO") or declared.get("SCRIPT_MIRROR")
-    listed = subprocess.run(["git", "ls-remote", remote, f"refs/tags/{commit}",
-                             f"refs/tags/{commit}^{{}}"],
+# Declared sources whose recipe itself deletes the VCS metadata, so the
+# fetched tree cannot be re-read: (stage, declaration number) -> the part of
+# the recipe that does it. Checked against the actual recipe, never assumed.
+RECIPE_ONLY = {
+    ("50-amf", 1): "rm -rf .git",
+    ("20-libiconv", 2): "rm -rf gnulib/.git",
+}
+
+
+def _normal_url(url) -> str:
+    url = (url or "").strip().rstrip("/")
+    return url[:-4] if url.endswith(".git") else url
+
+
+def _declared_numbers(declared: dict) -> list[int]:
+    numbers = set()
+    for key in declared:
+        match = re.fullmatch(r"SCRIPT_(?:COMMIT|REV)(\d*)", key)
+        if match:
+            numbers.add(int(match.group(1) or 1))
+    return sorted(numbers)
+
+
+def _resolve_tag(remote: str, tag: str) -> set:
+    listed = subprocess.run(["git", "ls-remote", remote, f"refs/tags/{tag}",
+                             f"refs/tags/{tag}^{{}}"],
                             capture_output=True, text=True, timeout=120)
-    resolved = {line.split()[0] for line in listed.stdout.splitlines() if line.strip()}
-    return bool(resolved & heads)
+    return {line.split()[0] for line in listed.stdout.splitlines() if line.strip()}
+
+
+def bind_declared(stage: str, declared: dict, identities: list[dict], recipe: str,
+                  resolve=_resolve_tag) -> list[dict]:
+    """Bind every declared source (SCRIPT_COMMIT/REV, ...2, ...3) to the
+    fetched repository that came from its own remote (SCRIPT_REPO or
+    SCRIPT_MIRROR of the same number) and check that one is at the declared
+    commit, resolved tag or revision. A match in some other repository or
+    submodule never counts. Each fetched repository is used once."""
+    used: set = set()
+    bound = []
+    for number in _declared_numbers(declared):
+        suffix = "" if number == 1 else str(number)
+        commit = declared.get(f"SCRIPT_COMMIT{suffix}")
+        revision = declared.get(f"SCRIPT_REV{suffix}")
+        remotes = [declared[k] for k in (f"SCRIPT_REPO{suffix}", f"SCRIPT_MIRROR{suffix}")
+                   if declared.get(k)]
+        wanted_urls = {_normal_url(r) for r in remotes}
+        entry = {"number": number, "remotes": remotes, "declared": revision or commit}
+        candidates = [i for i in identities if i["path"] not in used
+                      and _normal_url(i.get("url")) in wanted_urls]
+        if revision:
+            accepted, key = {revision}, "revision"
+        elif commit and re.fullmatch(r"[0-9a-f]{40}", commit):
+            accepted, key = {commit}, "commit"
+        elif commit:
+            accepted, key = set(), "commit"
+            for remote in remotes:
+                accepted |= resolve(remote, commit)
+            entry["resolved"] = sorted(accepted)
+        else:
+            accepted, key = set(), "commit"
+        match = next((i for i in candidates if i.get(key) in accepted), None)
+        allowed = RECIPE_ONLY.get((stage, number))
+        if match is not None:
+            used.add(match["path"])
+            entry.update(status="matched", path=match["path"], fetched=match.get(key))
+        elif not candidates and allowed and allowed in recipe:
+            entry.update(status="recipe-only",
+                         reason=f"the recipe runs `{allowed}`, so the fetched tree's "
+                                "commit cannot be re-read; it is pinned by the recipe")
+        elif not candidates:
+            entry["status"] = "missing: no fetched repository came from its remote"
+        else:
+            entry.update(status="wrong: fetched from its remote but not at the "
+                                "declared identity",
+                         fetched=[(i["path"], i.get(key)) for i in candidates])
+        bound.append(entry)
+    return bound
+
+
+def declared_status(bound: list) -> str:
+    bad = [b for b in bound if b["status"] not in ("matched", "recipe-only")]
+    if bad:
+        return "FAILED: " + "; ".join(f"declared source {b['number']}: {b['status']}"
+                                       for b in bad)
+    if not bound:
+        return "FAILED: no declared source to check"
+    recipe_only = [str(b["number"]) for b in bound if b["status"] == "recipe-only"]
+    if recipe_only:
+        return ("collected (declared source " + ", ".join(recipe_only)
+                + " pinned by a recipe that removes its VCS metadata)")
+    return "collected"
 
 
 def vendor_crates(tree: Path, out_dir: Path) -> dict:
@@ -335,8 +409,13 @@ def fetch_ubuntu_source(package: str, version: str, out_dir: Path, scratch: Path
     except OSError as exc:
         record["status"] = f"FAILED: {type(exc).__name__}: {exc}"
         return record
-    ok = record["files"] and all(f["matches_dsc"] for f in record["files"])
-    record["status"] = "collected" if ok else "FAILED: a file does not match the .dsc"
+    if not (record["files"] and all(f["matches_dsc"] for f in record["files"])):
+        record["status"] = "FAILED: a file does not match the .dsc"
+    elif not record["archive_index"].get("listed"):
+        record["status"] = ("FAILED: not authenticated by the signed Ubuntu archive index: "
+                            + record["archive_index"].get("rationale", "unavailable"))
+    else:
+        record["status"] = "collected"
     return record
 
 

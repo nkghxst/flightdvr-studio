@@ -109,8 +109,9 @@ It contains:
 - FFmpeg and the build system at the two commits above;
 - the source of every dependency stage that build system enables for this
   build (linux64, gpl, FFmpeg 7.1), fetched with the build system's own
-  download recipes and checked to be at the commit, tag or revision each one
-  declares. That includes rav1e's Rust crates, vendored from its lock file;
+  download recipes. Every source each one declares is checked to be at that
+  commit, tag or revision, in the repository fetched from its own declared
+  location. That includes rav1e's Rust crates, vendored from its lock file;
 - the Ubuntu source packages, with their Debian patches, for the two carried
   libraries above. They are checked against their `.dsc` and the signed
   Ubuntu archive index;
