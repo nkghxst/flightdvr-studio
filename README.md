@@ -12,7 +12,17 @@ It also fixes the colour problem these recordings have, which is the reason
 footage converted with a plain ffmpeg command often comes out with crushed
 blacks.
 
+> **This page describes 2.0.0, an unreleased release candidate.** The latest
+> published release is **1.5.0**. Flow, Music, the Assembly, bundles, Vertical,
+> Slow motion, stills, naming templates and the Linux AppImage's own FFmpeg all
+> came after it, and are not in the 1.5.0 downloads. The
+> [user guide](docs/USER_GUIDE.md) covers 2.0's workflow, and
+> [CHANGELOG.md](CHANGELOG.md) what changed.
+
 ![Ticking clips, trimming one, and exporting](docs/demo.gif)
+
+*Recorded with an earlier version, before Flow and Music; the current window
+looks different.*
 
 Free and open source under the GPL v3. Nothing is gated and there is no
 account, no telemetry, and nothing to sign up for.
@@ -58,7 +68,8 @@ One file, nothing installed, delete it to uninstall. It is built on Ubuntu
 22.04 and needs glibc 2.35 or newer. Some supported enterprise distributions
 still carry an older glibc; `ldd --version` reports yours.
 
-Like the Windows build, it carries **its own ffmpeg and ffprobe**: the pinned
+From 2.0.0, like the Windows build, it carries **its own ffmpeg and ffprobe**
+(the published 1.5.0 AppImage uses the system's ffmpeg instead): the pinned
 build named in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), so every
 export uses the same ffmpeg whatever your distribution ships. Nothing needs
 installing first, and an ffmpeg you have installed yourself is left alone; the
@@ -107,6 +118,8 @@ Get-FileHash FlightDVRStudio-1.5.0-Setup.exe -Algorithm SHA256
 sha256sum FlightDVR_Studio-1.5.0-x86_64.AppImage    # Linux
 shasum -a 256 FlightDVR-Studio-1.5.0-arm64.dmg      # macOS
 ```
+
+2.0.0 is not published yet; its hashes are added here when it is.
 
 **1.5.0**
 
@@ -195,13 +208,17 @@ there is no reason to choose it.
 4. Pick an export preset on the right.
 5. **Add to queue**, then **Start export**.
 
-That is the whole loop. Everything below is detail.
+That is the whole loop. Everything below is detail. For Flow, Music, the
+Assembly and bundles, start with the [user guide](docs/USER_GUIDE.md).
 
 ---
 
 ## The clip browser
 
 ![The clip list, with thumbnails, review states and export settings](docs/01-browse.png)
+
+*Screenshots on this page were taken with an earlier version, before Flow and
+Music; the current window looks different.*
 
 Clips are listed with a thumbnail taken from a representative frame, plus
 length, size, card date and format. Click any column heading to sort by it. The
@@ -221,12 +238,11 @@ Clips that already have an export for the current preset are marked
 Widening the window makes the thumbnails bigger rather than leaving an empty
 filename column.
 
-### Length and browser layout in the development build
+### Length and browser layout
 
-The controls in this section are in the post-1.5 development tree. They are
-not part of the published 1.5.0 downloads yet; native compact readability and
-the complete acceptance of [issue #96](https://github.com/nkghxst/flightdvr-studio/issues/96)
-remain open.
+These controls are new since 1.5.0 and are part of the 2.0.0 candidate.
+Native compact readability and the complete acceptance of
+[issue #96](https://github.com/nkghxst/flightdvr-studio/issues/96) remain open.
 
 **Length** filters the list without changing the recordings. **At least** and
 **At most** are whole-second bounds; their starting value is **off**, and an
@@ -252,8 +268,8 @@ filtered list remains scrollable. It does not cap the list at nine rows.
 **View ▸ Export queue** mirrors the queue strip, and **View ▸ Restore default
 layout** returns the browser to Normal, closes the queue and restores the
 default split. These are layout controls, not documented session settings, so
-this page makes no promise that browser modes persist after reopening. There
-is deliberately no Music item and this change does not provide a Flow UI.
+this page makes no promise that browser modes persist after reopening. Flow
+and Music are described in the [user guide](docs/USER_GUIDE.md).
 
 Collapsed hides the list but does not enlarge the preview: the current
 preview/list height clamp still reserves room for the list. The existing native
@@ -373,8 +389,11 @@ written beside its target and moved into place only once ffmpeg has produced a
 readable image, so a cancelled or failed capture leaves nothing behind and never
 damages a file already there.
 
-The preview is silent. Sound would need a second pipe and a second clock, and
-DVR audio is motor whine — an in point is something you find by eye.
+Trimming itself is done by eye. To hear what an output will sound like —
+its original audio, chosen music or a mix — select that output and use
+**Listen**; see [choosing the sound](docs/USER_GUIDE.md#choose-the-sound-for-this-output)
+in the user guide. Monitoring volume changes only what you hear, not the
+export, and Slow motion exports silently.
 
 Playback decodes through ffmpeg rather than through Qt's video widget. On
 Windows that widget uses Media Foundation, the same decoder behind Media
@@ -522,7 +541,8 @@ It is quality-based and never size-targeted. Spreading a fixed byte budget over
 not offered.
 
 **Social** hits an exact file size using a two-pass encode, landing within about
-one percent of the number you ask for. It can also downscale and halve the frame
+one percent of the number you ask for. With a hardware encoder, size targeting
+is a single pass and less precise. It can also downscale and halve the frame
 rate. Only sizes smaller than the source are offered, so it never upscales.
 
 **Vertical** crops a 9:16 slice out of the recording for phone feeds. It crops
@@ -777,8 +797,9 @@ xattr -dr com.apple.quarantine "/Applications/FlightDVR Studio.app"
 
 **"Could not find ffmpeg" at startup.** On macOS the app uses your system
 ffmpeg, so install it — see [Installing](#installing) for the command. The
-Windows installer and the Linux AppImage carry their own copy, so there this
-only happens when running from source.
+Windows installer and, from 2.0.0, the Linux AppImage carry their own copy, so
+there this only happens when running from source (or with the 1.5.0
+AppImage, which uses the system's ffmpeg).
 
 If you have installed it and the app still cannot see it, ask the app what it
 found:
@@ -898,17 +919,19 @@ Matching the licence of the bundled ffmpeg is deliberate. It removes any
 question about whether the app and the binary form a combined work, which is the
 one genuinely murky part of shipping ffmpeg inside an installer.
 
-Only the Windows installer bundles ffmpeg. The AppImage and the macOS app use
-whatever your package manager installed, so they redistribute no ffmpeg binary
-and carry no obligation for its source.
+The Windows installer bundles ffmpeg, and from 2.0.0 so does the Linux
+AppImage. The macOS app, and the published 1.5.0 AppImage, use whatever your
+package manager installed, so they redistribute no ffmpeg binary and carry no
+obligation for its source.
 
 The bundled Windows build is `n7.1.5-12-g1fdbca85aa` from
 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), tag
 `autobuild-2026-07-31-14-10`, configured `--enable-gpl --enable-version3`. It is
 **not** an `--enable-nonfree` build, which could not be redistributed at all.
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) records the version, origin and
-licence, along with a written offer for the corresponding source as required by
-section 6 of the GPL.
+The AppImage carries the Linux build of the same FFmpeg commit.
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) records the versions, origins
+and licences, and how the corresponding source is provided, as section 6 of
+the GPL requires.
 
 Qt is used via PySide6 under the **LGPL v3**, dynamically linked and unmodified.
 

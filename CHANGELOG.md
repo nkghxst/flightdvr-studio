@@ -1,5 +1,68 @@
 # Changelog
 
+## 2.0.0 — unreleased candidate
+
+**From card to finished video.** Not yet published: this entry describes the
+release candidate on the development branch, and has no date, download or
+checksums until the release is accepted and published. 2.0 brings Flow
+alongside Classic: review recordings, keep ranges, arrange an Assembly, choose
+music and prepare deliveries in one session. Selected outputs own their
+settings, while queued jobs retain the choices you submitted. The
+[user guide](docs/USER_GUIDE.md) walks through it.
+
+- **Two workspaces for the same session.** Keep the familiar Classic
+  arrangement or use Flow's Browse, Trim, Assemble, Music, Output and Queue
+  pages.
+- **Visual music editing.** Choose a passage on the song waveform, see its
+  place on the output timeline, set Loop or Play once, and adjust levels and
+  fades. Original audio, No sound, Replace and Mix express the intended file.
+  Listening and monitoring volume are distinct from export settings.
+- **A visible output decision.** The selected output's identity, picture and
+  clock distinguish it from source inspection. Submitted settings are
+  read-only; later plan edits do not reach queued jobs.
+- **Assemblies and compatible bundles.** Arrange repeated ranges in output
+  order, then deliver compatible presets with the selected target's captured
+  sound choice. Each bundle member remains a separate export job; incompatible
+  members require an explicit decision.
+- **Social sound and size choices.** Supported Social sound uses AAC at
+  128 kbit/s. Size mode accounts for that audio; CPU two-pass and hardware
+  single-pass targeting have different precision. Quality mode does not promise
+  a target size.
+- **Practical compact controls.** Music lanes, More… controls and conditional
+  Classic list folding preserve access to the current decision. Typed numeric
+  edits commit when finished.
+- **More ways to deliver.** A Vertical 9:16 preset with a crop position you
+  choose, silent 2× Slow motion that keeps every recorded frame, full-resolution
+  stills from the paused preview, and naming templates for exports,
+  assemblies and stills.
+- **A browser for long cards.** Length bounds and Collapsed, Normal and
+  Expanded list modes; hiding a ticked clip does not untick it.
+- **The Linux AppImage carries its own FFmpeg.** A pinned, verified
+  FFmpeg/FFprobe pair is the AppImage's normal tool path, so it no longer needs
+  a separately installed FFmpeg, and the release is set up to carry the
+  corresponding source beside it. See
+  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). The published 1.5.0
+  AppImage is unchanged by this.
+- **A system ffmpeg or player started from the AppImage gets a clean library
+  path.** Programs from outside the bundle get back the loader path the system
+  had rather than the bundle's libraries, which could make a system ffmpeg fail
+  before reading a frame. Reported and diagnosed by Rory Lambert (#131).
+
+Known limits in this candidate:
+
+- Slow motion export is silent. Judge speed in the completed file; smooth timed
+  Slow audition is not promised.
+- Remux copies streams and keeps keyframe-constrained boundaries; it cannot
+  apply configured music or audio choices.
+- Rec.709 conversion needs the FFmpeg build's zscale filter, so it depends on
+  the build in use.
+- On Windows, cancelling during the sound check can occasionally leave the
+  job's own unfinished temporary file. This is accepted as a documented,
+  non-blocking limitation, not fixed; see
+  [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
+- Installed-package, real-recording, listening-device and final user
+  acceptance are still to be recorded for the actual candidate.
+
 ## 1.5.0
 
 **You can get through a whole card now.** 1.4 made one clip worth opening; this

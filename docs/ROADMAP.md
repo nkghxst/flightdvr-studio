@@ -24,8 +24,8 @@ matched by path, size and modification time rather than by a filename a card
 will reuse. The State column says which clips have ranges saved and roughly how
 many flights each one looks like it holds.
 
-The next releases are about what happens after that: getting the footage out,
-and getting it in.
+2.0, below, brings the delivery and music work after that together. It is a
+release candidate, not yet published.
 
 ---
 
@@ -70,113 +70,55 @@ would cost far more than no guess at all.
 
 ---
 
-## Post-1.5 development — browser workspace
+## 2.0 — from card to finished video — planned, not yet released
 
-The development tree after 1.5 adds a more useful way to work through a long
-card. The browser has inclusive **at least** and **at most** length bounds,
-`off` reset values, an explicit **Show unknown** choice and a visible shown /
-hidden count. Length composes with the existing review/list filter, so a row
-must pass both. It hides rows only: a hidden tick stays selected for export,
-and review states, saved ranges and queued work are not removed.
+Bring the existing card-review workflow together with Classic/Flow,
+output-owned choices, Assembly, visual music editing, supported sound exports
+and compatible bundles. The work once staged as 1.6 Delivery and 1.6.1 Music —
+stills, Vertical, Slow motion, the Assembly, naming templates, delivery bundles
+and the music bed — and the post-1.5 browser workspace are part of it, along
+with a Linux AppImage that carries its own FFmpeg. Complete packaging and
+integrated acceptance, reconcile the user guide, and qualify the candidate
+through the three agreed journeys. Publication follows acceptance; a feature on
+main is not itself a released download.
 
-The same tree adds **Collapsed**, **Normal** and **Expanded** browser modes,
-local list controls and matching **View** menu actions. Collapsed keeps the
-active clip's identity, thumbnail, review/range summary and a reopen action.
-Expanded gives the list more height by capping the preview and still lets the
-user scroll through the complete filtered list. **View** also mirrors the
-Export queue toggle and offers **Restore default layout**.
-
-This is development work, not a new published release and not a claim that
-the full duration-filter issue is complete. The current preview/list clamp
-means Collapsed does not enlarge the preview, and native compact readability
-has not been accepted from offscreen captures. Browser modes are not promised
-as persisted session settings. Music UI and Flow UI are separate work; neither
-is supplied by this browser change.
+What is in it, and its known limits, are in the
+[changelog](../CHANGELOG.md#200--unreleased-candidate) and the
+[user guide](USER_GUIDE.md).
 
 ---
 
-## 1.6 — Delivery
+## After 2.0 — focused workspace improvements
 
-*Making something worth posting.*
-
-- **Grab a still** from the preview, full resolution, for a thumbnail.
-- **A vertical preset** that crops to 9:16 with a position you choose. The
-  platforms crop a widescreen upload anyway, and not where you would have.
-- **Slow motion**, using the frames a 60 fps recording already has.
-- **Assembly** — an ordered list of clips and ranges, cuts only, exported as
-  one file. DVR counter order stays the default, because the goggles' clock
-  cannot be trusted.
-- **Naming templates**, so exports come out named after the flight and the
-  moment rather than after a counter.
-- **Delivery bundles** — one range, several presets, one action.
+Breakout or detached windows are a later workspace improvement, potentially a
+2.1 topic. They are not a 2.0 prerequisite and have no promised delivery date.
 
 ---
 
-## 1.6.1 — Music bed
+## Later direction — health and salvage
 
-*Something other than motor whine.*
-
-A fade-in, a fade-out, and your own track over a finished export, for anyone who
-would rather not share four minutes of propellers.
-
-It was in 1.6 and is now on its own, because it is not one feature. There is a
-second input to probe, a policy for looping or trimming it to length, a choice
-between replacing the original audio and mixing with it, fade rules, keeping
-audio and video the same length across an assembly, and cancelling a graph that
-is half audio. It also depends on assembly and delivery bundles, the two largest
-items in 1.6.
-
-Gated behind those and larger than any of them, it was the item most likely to
-slip. Out here it can take as long as it takes without holding a release.
+Explore clearer health reporting and recovery options for interrupted or
+damaged recordings, together with content-based duplicate detection. Keep the
+original footage untouched. This is direction, not a claim that those tools
+exist in 2.0.
 
 ---
 
-## 1.7 — Health and salvage
+## Later direction — ingest and library
 
-*The recordings that went wrong.*
-
-FPV recordings get cut short by flat batteries, crashes and cards pulled while
-writing. Right now the app just fails on those, which is the least useful thing
-it could do with them.
-
-Each clip gets a health result — healthy, ends abruptly but decodable,
-timestamp discontinuities, decoder warnings, unusable audio, partly
-recoverable, unreadable — and where something can be done, the app offers to do
-it: rewrap the decodable packets into a clean container, rebuild timestamps,
-keep the video when the audio is beyond saving, salvage the longest good
-stretch, and say plainly what it did.
-
-The original file is never modified.
-
-Alongside it, duplicate detection based on content rather than filename,
-because DVR counters wrap around and the same name comes back.
+Explore explicit copy-and-verify ingest, manifests and a library understandable
+as ordinary folders. Earlier versions of this roadmap numbered this and health
+and salvage as 1.8 and 1.7; the direction is kept, without a release number.
+VAAPI and Flatpak remain future packaging topics, not added 2.0 commitments.
 
 ---
 
-## 1.8 — Ingest and library
+## Scope stays focused
 
-*Card in, archive out.*
-
-An explicit ingest: find the card, name the flight, confirm its date, copy,
-verify every copy, record a manifest, and offer to eject. The date you give is
-the one that is kept — the goggles' own timestamps are not reliable.
-
-Then a library that is just folders and manifests, with no database:
-
-```
-FPV Library/
-└─ 2026/
-   └─ 2026-08-06 Hampstead Heath/
-      ├─ originals/
-      ├─ exports/
-      └─ session.flightdvr.json
-```
-
-Your footage stays understandable without this program, ordinary backup tools
-work on it, and an index that gets damaged can be rebuilt from what is on disk.
-
-This is also the release for the remaining packaging work: VAAPI encoding on
-Linux and Flatpak.
+FlightDVR prepares footage for an editor or delivery. It does not promise a
+general editor with titles, transitions, multicam or grading, a new playback
+engine, or selective inner-range Slow. No new architecture or feature package
+is introduced by changing the release name.
 
 ---
 
@@ -196,9 +138,9 @@ controller's own logs.
 backwards would mean decoding forward and buffering, and pretending otherwise
 would make it look like a feature rather than a compromise.
 
-**Audio in the preview.** A second decode path, an output device and a second
-clock, so that you can hear motor and wind noise while looking for a visual cut
-point. Trim points are found by eye.
+**Sound in Slow motion.** Listening now auditions the selected output's sound,
+but Slow motion exports silently and a smooth timed Slow audition is not
+promised. Judge Slow motion in the completed file.
 
 **Parallel exports.** ffmpeg already uses every core. Two at once makes both
 slower and the progress display meaningless.
