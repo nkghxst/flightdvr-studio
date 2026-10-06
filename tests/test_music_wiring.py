@@ -2600,6 +2600,10 @@ def test_remux_recording_sound_is_heard_and_slow_motion_stays_silent(
     remux = _with_choice(window, app, tmp_path, AudioMode.REPLACE, "remux")
     assert window._monitor_refusal(remux, Listening.SOURCE) == ""
     assert "Remux" in window._monitor_refusal(remux, Listening.MIX)
+    # Not refused and then failed one step later: Remux keeps the recording's
+    # sound exactly, so the audition resolves.
+    plan, samples = window._monitor_plan(remux, Listening.SOURCE)
+    assert plan is not None and samples > 0
     slow = _with_choice(window, app, tmp_path, None, "slowmo")
     assert window._monitor_refusal(slow, Listening.SOURCE) != ""
     assert window._monitor_refusal(slow, Listening.MIX) != ""
@@ -2609,3 +2613,21 @@ def test_the_picture_hint_makes_no_claim_about_sound():
     """Whether the preview is heard is the listening control's to say."""
     from flightdvr.preview_panel import PICTURE_KEYS
     assert "silent" not in PICTURE_KEYS.lower()
+
+
+def test_choosing_source_only_lifts_a_music_reason_on_the_transport(
+        window, app, tmp_path):
+    """The refusal is read again when what is listened to changes; the
+    transport otherwise kept the mix's reason after Source only was chosen."""
+    target = _with_choice(window, app, tmp_path, AudioMode.REPLACE)
+    window._music_reading[target] = tmp_path / "song.wav"
+    window._sync_live_preview()
+    assert "still being read" in window.live_preview.status.reason
+    combo = window.preview_view.listening_combo
+    combo.setCurrentIndex(combo.findData("source"))
+    app.processEvents()
+    assert "still being read" not in window.live_preview.status.reason
+    combo.setCurrentIndex(combo.findData("mix"))
+    app.processEvents()
+    assert "still being read" in window.live_preview.status.reason
+    window._music_reading.clear()

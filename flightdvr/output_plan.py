@@ -29,6 +29,7 @@ from typing import Iterable
 
 from .assembly import Item
 from .audio_plan import MusicChoice
+from .media import editing_range
 from .presets import PRESETS, ExportSettings
 
 
@@ -268,11 +269,8 @@ def _resolved_target_data(
     fingerprint = getattr(clip, "fingerprint", "")
     if not fingerprint:
         return None
-    ranges = getattr(clip, "real_selects", None) or []
-    sid = ""
-    if ranges:
-        current = min(getattr(clip, "current", 0), len(ranges) - 1)
-        sid = ranges[max(0, current)].sid
+    chosen = editing_range(clip)
+    sid = chosen.sid if chosen is not None else ""
     target = OutputTarget.clip_or_range(fingerprint, sid)
     return target, fingerprint, sid
 
@@ -326,9 +324,7 @@ def piece_label(piece) -> str:
     """What to call one output: its recording, and its range when it has one."""
     clip = getattr(piece, "clip", piece)
     name = getattr(getattr(clip, "path", None), "name", "") or "this recording"
-    ranges = getattr(clip, "real_selects", None) or []
-    if not ranges:
+    chosen = editing_range(clip)
+    if chosen is None:
         return name
-    current = min(getattr(clip, "current", 0), len(ranges) - 1)
-    chosen = ranges[max(0, current)]
     return f"{name} · {chosen.name}" if chosen.name else name

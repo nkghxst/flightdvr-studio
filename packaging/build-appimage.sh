@@ -73,6 +73,9 @@ printf '  bundle: %s\n' "$(du -sh dist/FlightDVRStudio | cut -f1)"
 # What PyInstaller copied, not what it was given: the pair inside the bundle is
 # the one media.py will find first.
 python3 packaging/verify_ffmpeg_linux.py check-dir dist/FlightDVRStudio/_internal/ffmpeg
+# Listen needs QtMultimedia's PCM sink and a backend for it. What else PySide6
+# brought with it is read from its bytes; anything but LGPL fails the build.
+python3 packaging/check_qt_multimedia.py dist/FlightDVRStudio dist/qt-multimedia.json
 
 step "AppDir"
 rm -rf "$APPDIR"

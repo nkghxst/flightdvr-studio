@@ -87,12 +87,19 @@ for name in ("LICENSE", "LICENSE.LGPL-3.0.txt", "THIRD-PARTY-NOTICES.md"):
 # -- trimming Qt --------------------------------------------------------------
 
 # Qt modules this app never touches. Excluding them roughly halves the build.
+#
+# QtMultimedia is not on this list. The audio output (`flightdvr/audio_device.py`)
+# hands already-decoded PCM to `QAudioSink`; decoding stays with ffmpeg. It was
+# excluded until 2.0.0 shipped that way: the import is inside a function, so
+# the package started and passed every check, and Listen failed for the person
+# using it. `tests/test_packaging_imports.py` now holds this list against what
+# the app imports, and `--check` reports the audio output module.
 EXCLUDED_QT = [
     "QtWebEngineCore", "QtWebEngineWidgets", "QtWebEngineQuick", "QtWebChannel",
     "QtQml", "QtQuick", "QtQuick3D", "QtQuickWidgets", "QtQuickControls2",
     "Qt3DCore", "Qt3DRender", "Qt3DInput", "Qt3DLogic", "Qt3DAnimation",
     "Qt3DExtras", "QtCharts", "QtDataVisualization", "QtGraphs",
-    "QtMultimedia", "QtMultimediaWidgets", "QtPdf", "QtPdfWidgets",
+    "QtMultimediaWidgets", "QtPdf", "QtPdfWidgets",
     "QtSql", "QtTest", "QtDesigner", "QtHelp", "QtUiTools",
     "QtBluetooth", "QtNfc", "QtPositioning", "QtLocation", "QtSerialPort",
     "QtSensors", "QtSpatialAudio", "QtTextToSpeech", "QtWebSockets",

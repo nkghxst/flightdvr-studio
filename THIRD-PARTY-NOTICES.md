@@ -141,6 +141,27 @@ needed to do so is here: the application is plain Python, the Qt libraries live
 alongside it inside the package, and rebuilding is documented in
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
+### Qt Multimedia, and the FFmpeg libraries it brings
+
+From 2.0.0 the packages include **Qt Multimedia** for one job: sending sound
+that the app has already decoded to your audio output. Recordings and music
+are never decoded through it; that stays with the ffmpeg programs above.
+
+PySide6 distributes Qt Multimedia together with a multimedia backend plugin
+and **FFmpeg's shared libraries** (libavcodec, libavformat, libavutil,
+libswresample, libswscale) as built by the Qt project, which that plugin may
+load. They are separate from, and not the same build as, the ffmpeg and
+ffprobe programs described under FFmpeg above.
+
+Each of these libraries states its own licence in its compiled bytes. Every
+package build reads it with `packaging/check_qt_multimedia.py`, which fails
+the build unless every one says **"LGPL version 2.1 or later"** and none is a
+nonfree build, and records each library's FFmpeg version tag in the build's
+`qt-multimedia.json`. The FFmpeg source for that tag is at
+https://github.com/FFmpeg/FFmpeg; PySide6 itself is at
+https://pypi.org/project/PySide6/. The same freedom to replace them applies as
+for Qt.
+
 ## Patents
 
 H.264 and H.265 are covered by patents in some jurisdictions. This software is

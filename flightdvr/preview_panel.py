@@ -102,9 +102,11 @@ SILENT_PREVIEW = QUIET_PREVIEW
 # #88 was missing: with the name field focused there was no way to know that
 # Enter keeps a name and Escape puts the old one back, because neither did
 # anything at all.
-PICTURE_KEYS = "Silent · click the picture, then Space plays"
-# The same hint for an output's picture: whether it is heard is the listening
-# row's to say, so this one makes no claim about sound.
+# Neither hint makes a claim about sound: whether the preview is heard is the
+# listening row's to say. "Silent" here outlived the listening work and sat
+# beside a ticked Listen box on the installed 2.0.0 candidate.
+PICTURE_KEYS = "Click the picture, then Space plays"
+# The same hint for an output's picture.
 OUTPUT_PICTURE_KEYS = "Click the picture, then Space plays this output"
 SOURCE_EDITS_ELSEWHERE = ("In, Out and Reset edit the recording's ranges on "
                           "Trim. This picture is the selected output.")

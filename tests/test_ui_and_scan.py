@@ -1804,6 +1804,29 @@ def test_check_reports_where_it_found_both_licences(qt_app):
     assert code != 5
 
 
+def test_check_reports_the_audio_output_module(qt_app):
+    """Present in a source checkout, which has PySide6's QtMultimedia."""
+    from flightdvr.ui import _describe_environment
+    report, code = _describe_environment()
+    assert "audio output  QtMultimedia, backends: " in report
+    assert code != 6
+
+
+def test_check_fails_a_package_without_its_audio_output(qt_app, monkeypatch):
+    """The installed 2.0.0 candidate passed --check without QtMultimedia,
+    because the sink imports it only when someone presses Listen."""
+    import flightdvr.audio_device as audio_device
+    from flightdvr.ui import _describe_environment
+
+    monkeypatch.setattr(
+        audio_device, "describe_output_module",
+        lambda: ("audio output  NOT AVAILABLE: No module named "
+                 "'PySide6.QtMultimedia'", False))
+    report, code = _describe_environment()
+    assert "audio output  NOT AVAILABLE" in report
+    assert code == 6
+
+
 def test_muted_labels_are_allowed_to_grow_downwards(qt_app):
     """Wrapped text was clipped when the window narrowed.
 
