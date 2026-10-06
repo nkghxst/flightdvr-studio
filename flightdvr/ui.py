@@ -75,7 +75,8 @@ from .audio_plan import (
     OUTPUT_RATE, AudioMode, MusicChoice, SampleSpan, ShortTrackPolicy,
     resolve_monitor_audio_plan, round_samples,
 )
-from .audio_device import AudioOutput
+from .audio_device import (SYSTEM_DEFAULT, AudioOutput, OutputChoice,
+                           QtDeviceCatalog, resolve_output)
 from .audio_reader import FfmpegPcmReader, MusicAssetProbe
 from .audio_stream import (
     AudioStream, LiveAudioMapping, MonitorState, SequencePcmReader,
@@ -350,6 +351,10 @@ class _BundleTrackCheck(QThread):
         if not self.isInterruptionRequested():
             self.result.emit(self.generation, problem)
 
+
+# The person's chosen output for the preview. Empty key: the system default.
+OUTPUT_DEVICE_KEY = "audio_output_device"
+OUTPUT_DEVICE_NAME = "audio_output_device_name"
 
 # What a recording's own sound is auditioned under when no music is heard: any
 # 1x preset that carries sound resolves it alike.
@@ -916,6 +921,7 @@ class MainWindow(QMainWindow):
         bindings = [
             ("Space", self._toggle_play),
             ("K", self._toggle_play),
+            ("M", self._toggle_sound),
             ("I", self._set_in),
             ("N", self._add_select),
             ("O", self._set_out),
@@ -2660,10 +2666,17 @@ class MainWindow(QMainWindow):
     def _build_live_preview(self) -> None:
         """One transport, wired to the picture's own clock and controls."""
         view = self.preview_view
+        self.audio_output = AudioOutput()
         self.live_preview = LivePreview(
             stream_factory=self._build_monitor_stream,
-            output=AudioOutput(),
+            output=self.audio_output,
         )
+        # Which output plays the preview: resolved when sound is first asked
+        # for (or the Audio menu opened), never at start-up, so building a
+        # window lists no devices.
+        self._device_catalog = None
+        self._output_choice: OutputChoice | None = None
+        view.listen_check.toggled.connect(self._mirror_sound_action)
         view.listen_toggled.connect(self._on_listen_toggled)
         view.listen_level_changed.connect(
             lambda value: self.live_preview.set_level(value / 100.0))
@@ -2771,12 +2784,9 @@ class MainWindow(QMainWindow):
             if any(clip is None for clip in clips):
                 raise ValueError("an Assembly source is no longer available")
             source_has_audio = any(clip.has_audio for clip in clips)
-            if listening is Listening.SOURCE:
-                choice = MusicChoice(mode=AudioMode.ORIGINAL)
-            else:
-                choice = self._planned_music(target)
-                if not choice.configured:
-                    return None, 0
+            choice = self._monitored_choice(target, listening, source_has_audio)
+            if choice is None:
+                return None, 0
             samples = snapshot.samples
             return resolve_monitor_audio_plan(
                 choice, samples, source_has_audio=source_has_audio,
@@ -2785,20 +2795,44 @@ class MainWindow(QMainWindow):
         clip = self._monitor_clip(target)
         if clip is None:
             return None, 0
-        if listening is Listening.SOURCE:
-            if not clip.has_audio:
-                return None, 0          # nothing of its own to hear
-            choice = MusicChoice(mode=AudioMode.ORIGINAL)
-        else:
-            choice = self._planned_music(target)
-            if not choice.configured:
-                return None, 0
+        if listening is Listening.SOURCE and not clip.has_audio:
+            return None, 0              # nothing of its own to hear
+        choice = self._monitored_choice(target, listening, clip.has_audio)
+        if choice is None:
+            return None, 0
         samples = snapshot.samples
         if samples <= 0:
             return None, 0
         return resolve_monitor_audio_plan(
             choice, samples, source_has_audio=clip.has_audio,
             preset_key=self._audition_preset(target, choice)), samples
+
+    def _monitored_choice(self, target, listening: Listening,
+                          source_has_audio: bool) -> MusicChoice | None:
+        """What is listened to for this output, or None for nothing.
+
+        Source only is the recording. Otherwise the output's own choice —
+        except when nobody has chosen sound for it at all: then the export
+        keeps the recording's sound if *Keep the audio track* is on, so the
+        finished mix is the recording, and there is nothing to hear when it
+        is off or there is no track. Explicit No sound stays silent whatever
+        Keep the audio track says.
+        """
+        if Listening(listening) is Listening.SOURCE:
+            return MusicChoice(mode=AudioMode.ORIGINAL)
+        choice = self._planned_music(target)
+        if choice.configured:
+            return choice
+        if self._monitor_keeps_audio(target) and source_has_audio:
+            return MusicChoice(mode=AudioMode.ORIGINAL)
+        return None
+
+    def _monitor_keeps_audio(self, target) -> bool:
+        """*Keep the audio track* for this output, asked the way its preset
+        is: the panel's in Classic, the output's own in Flow."""
+        if self._view_mode is Mode.FLOW and isinstance(target, OutputTarget):
+            return bool(self._choices_for(target)[1].keep_audio)
+        return bool(self.current_settings().keep_audio)
 
     def _audition_preset(self, target, choice: MusicChoice) -> str:
         """The preset an audition is resolved under.
@@ -2904,16 +2938,14 @@ class MainWindow(QMainWindow):
                     else:
                         occurrence_sources.append((occurrence, None, clip))
 
-                if listening is Listening.SOURCE:
-                    choice = MusicChoice(mode=AudioMode.ORIGINAL)
-                else:
-                    choice = self._planned_music(target)
-                    if not choice.configured:
-                        return None
+                choice = self._monitored_choice(
+                    target, listening, source_has_audio)
+                if choice is None:
+                    return None
                 plan = resolve_monitor_audio_plan(
                     choice, snapshot.samples,
                     source_has_audio=source_has_audio,
-                    preset_key=self._monitor_preset(target))
+                    preset_key=self._audition_preset(target, choice))
 
                 leaves = {}
                 for occurrence, key, clip in occurrence_sources:
@@ -2939,18 +2971,15 @@ class MainWindow(QMainWindow):
                 clip = self._monitor_clip(target)
                 if clip is None:
                     return None
-                if listening is Listening.SOURCE:
-                    if not clip.has_audio:
-                        return None
-                    choice = MusicChoice(mode=AudioMode.ORIGINAL)
-                else:
-                    choice = self._planned_music(target)
-                    if not choice.configured:
-                        return None
+                if listening is Listening.SOURCE and not clip.has_audio:
+                    return None
+                choice = self._monitored_choice(target, listening, clip.has_audio)
+                if choice is None:
+                    return None
                 plan = resolve_monitor_audio_plan(
                     choice, snapshot.samples,
                     source_has_audio=clip.has_audio,
-                    preset_key=self._monitor_preset(target))
+                    preset_key=self._audition_preset(target, choice))
                 source_reader = None
                 if clip.has_audio:
                     source_reader = FfmpegPcmReader.for_source(
@@ -2998,8 +3027,190 @@ class MainWindow(QMainWindow):
         # picture was not playing yet — so asking to listen looked like it had
         # been refused.
         self.preview_view.show_monitoring(not status.muted, status.reason)
+        self.preview_view.show_sound(self._sound_state())
+
+    def _sound_state(self) -> str:
+        """What the preview's sound is doing, in the order that settles it.
+
+        Muted first; then anything that makes this output unmonitorable
+        (the stated reason, which includes a lost or missing output device);
+        then what would be heard and whether there is anything to hear —
+        a recording with no track, an output that exports no sound, or
+        Keep the audio track off for an output nobody chose sound for.
+        Never says "no track" for a muted or unavailable sound, and never
+        calls muted an error.
+        """
+        live = self.live_preview
+        if live is None:
+            return ""
+        status = live.status
+        if not self.preview_view.listen_check.isChecked():
+            return "Muted. The export is unchanged."
+        if status.reason:
+            if status.reason.startswith(("there is nothing to listen on",
+                                         "the audio device stopped")):
+                return (f"No output: {status.reason}. Choose one under "
+                        "Audio ▸ Output device.")
+            return status.reason
+        target = self._music_target
+        if target is None:
+            return "Choose a clip to hear it."
+        listening = live.listening
+        recording_has_audio = self._monitor_has_source_audio(target)
+        if listening is Listening.SOURCE:
+            if not recording_has_audio:
+                return "This recording has no audio track."
+            heard = "the recording"
+        else:
+            mode = self._planned_music(target).mode
+            if mode is AudioMode.NO_SOUND:
+                return "This output exports no sound."
+            if mode is AudioMode.ORIGINAL:
+                if not recording_has_audio:
+                    return "This recording has no audio track."
+                heard = "the recording (original audio)"
+            elif mode in (AudioMode.REPLACE, AudioMode.MIX):
+                heard = "the finished mix"
+            elif not self._monitor_keeps_audio(target):
+                return ("The export has no sound: Keep the audio track is "
+                        "off and no music is chosen.")
+            elif not recording_has_audio:
+                return ("The export has no sound: this recording has no "
+                        "audio track and no music is chosen.")
+            else:
+                heard = "the recording (no music chosen)"
+        device = self._output_device_name()
+        where = f" on {device}" if device else ""
+        state = "playing" if status.playing else "plays with the picture"
+        return f"Hearing {heard}{where}; {state}."
+
+    def _monitor_has_source_audio(self, target) -> bool:
+        if isinstance(target, OutputTarget) and target.is_assembly:
+            fingerprints = {item.fingerprint for item in target.items}
+            return any(clip.has_audio for clip in self.clips
+                       if clip.fingerprint in fingerprints)
+        clip = self._monitor_clip(target) if target is not None else None
+        return bool(clip is not None and clip.has_audio)
+
+    # -- which output device ---------------------------------------------------
+
+    # Replaced in tests: the real one lists the machine's outputs.
+    device_catalog_factory = QtDeviceCatalog
+
+    def _catalog(self):
+        if self._device_catalog is None:
+            self._device_catalog = type(self).device_catalog_factory(
+                on_change=self._outputs_changed)
+        return self._device_catalog
+
+    def _resolve_output(self) -> OutputChoice:
+        """The output this run uses, from the saved preference, once.
+
+        A saved device that is not connected falls back to the system default
+        for this run and says so once; the preference is not touched, so the
+        device is used again when it returns.
+        """
+        if self._output_choice is not None:
+            return self._output_choice
+        key = str(self.settings_store.value(OUTPUT_DEVICE_KEY, "") or "")
+        name = str(self.settings_store.value(OUTPUT_DEVICE_NAME, "") or "")
+        try:
+            choice = resolve_output(key, name, self._catalog())
+        except Exception as exc:          # noqa: BLE001 — report, never raise
+            choice = OutputChoice(
+                SYSTEM_DEFAULT, "",
+                notice=f"The audio outputs could not be listed: {exc}")
+        self._output_choice = choice
+        select = getattr(self.audio_output, "select_device", None)
+        if select is not None:
+            select(choice.key, choice.name)
+        if choice.notice:
+            self.statusBar().showMessage(choice.notice, 12000)
+        return choice
+
+    def _output_device_name(self) -> str:
+        choice = self._output_choice
+        return choice.name if choice is not None else ""
+
+    def _fill_output_menu(self) -> None:
+        """System default, named by what it is now, then each output."""
+        menu = self.output_menu
+        menu.clear()
+        self._resolve_output()
+        saved = str(self.settings_store.value(OUTPUT_DEVICE_KEY, "") or "")
+        saved_name = str(self.settings_store.value(OUTPUT_DEVICE_NAME, "") or "")
+        try:
+            outputs = self._catalog().outputs()
+            default = self._catalog().default()
+        except Exception:                 # noqa: BLE001 — a menu, not a crash
+            outputs, default = [], None
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        now = default.name if default is not None else "no output found"
+        entries = [(SYSTEM_DEFAULT, f"System default (now: {now})", "", True)]
+        entries += [(one.key, one.name, one.name, True) for one in outputs]
+        if saved and all(one.key != saved for one in outputs):
+            entries.append((saved, f"{saved_name or 'Chosen output'} — not "
+                            "connected", saved_name, False))
+        for key, label, name, enabled in entries:
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(key == saved)
+            action.setEnabled(enabled)
+            action.triggered.connect(
+                lambda *_, key=key, name=name: self._choose_output(key, name))
+            group.addAction(action)
+
+    def _choose_output(self, key: str, name: str) -> None:
+        """Remember the person's choice and use it now. App-local: the
+        system's own default output is never changed."""
+        self.settings_store.setValue(OUTPUT_DEVICE_KEY, key)
+        self.settings_store.setValue(OUTPUT_DEVICE_NAME, name)
+        self._output_choice = None
+        listening = self.preview_view.listen_check.isChecked()
+        if self.live_preview is not None:
+            self.live_preview.pause()
+        self._resolve_output()
+        if listening:
+            self._on_listen_toggled(True)
+        else:
+            self._show_monitoring()
+
+    def _outputs_changed(self) -> None:
+        """Outputs came or went. The one being used going away stops the
+        sound and says so; nothing switches or resumes by itself."""
+        choice = self._output_choice
+        if choice is None or not choice.key:
+            self._show_monitoring()
+            return
+        try:
+            present = any(one.key == choice.key
+                          for one in self._catalog().outputs())
+        except Exception:                 # noqa: BLE001
+            present = False
+        if present:
+            self._show_monitoring()
+            return
+        why = f"{choice.name or 'the chosen output'} was disconnected"
+        lost = getattr(self.audio_output, "device_lost", None)
+        if lost is not None:
+            lost(why)
+        self._silence_monitoring(f"there is nothing to listen on: {why}")
+
+    def _mirror_sound_action(self, on: bool) -> None:
+        action = getattr(self, "sound_action", None)
+        if action is not None and action.isChecked() != bool(on):
+            blocked = action.blockSignals(True)
+            action.setChecked(bool(on))
+            action.blockSignals(blocked)
+
+    def _toggle_sound(self) -> None:
+        """M with the picture focused: the Sound control beside Play."""
+        self.preview_view.toggle_sound()
 
     def _on_listen_toggled(self, listening: bool) -> None:
+        if listening:
+            self._resolve_output()
         if self._output_picture_active() and self._output_recipe is not None:
             coordinate = self._picture_monitor_coordinate(
                 self.preview_view.sequence_strip.position)
@@ -3569,7 +3780,7 @@ class MainWindow(QMainWindow):
                 self._refresh_output_picture()
             self.play_button.setToolTip(
                 "Play or pause the assembled picture in joined output time.\n"
-                "Listen previews its joined sound; the finished exported file "
+                "Sound previews its joined sound; the finished exported file "
                 "is not previewed.")
             # A row is an occurrence now, not an instruction to retarget the
             # source editor.  Its start is a useful joined position.
@@ -4790,6 +5001,19 @@ class MainWindow(QMainWindow):
         reset_action.setToolTip(
             "Put the clip list, the queue and the split back as they open")
         reset_action.triggered.connect(lambda *_: self.restore_default_layout())
+
+        # Sound for the preview, and which output it plays on. App-local:
+        # choosing an output here never changes the system's default.
+        audio_menu = self.audio_menu = self.menuBar().addMenu("&Audio")
+        self.sound_action = audio_menu.addAction("Sound for the preview")
+        self.sound_action.setCheckable(True)
+        self.sound_action.setToolTip(
+            "The same as the Sound control beside Play, and M on the picture. "
+            "It never changes the export.")
+        self.sound_action.toggled.connect(
+            lambda on: self.preview_view.sound_button.setChecked(bool(on)))
+        self.output_menu = audio_menu.addMenu("Output device")
+        self.output_menu.aboutToShow.connect(self._fill_output_menu)
 
         # About was reachable only from a button beside the queue, which is a
         # strange home for a licence notice and the last place anyone looks for

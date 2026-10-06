@@ -84,6 +84,7 @@ SHORTCUT_GROUPS: tuple[ShortcutGroup, ...] = (
         "will get.",
         (
             Shortcut(("Space", "K"), "Play or pause"),
+            Shortcut(("M",), "Sound on or off (the preview only)"),
             Shortcut(("I",), "In point at the playhead"),
             Shortcut(("O",), "Out point at the playhead"),
             Shortcut(("N",), "Add another range"),

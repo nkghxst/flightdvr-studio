@@ -828,7 +828,7 @@ def test_the_band_says_the_preview_is_silent(window):
     said = window.preview_view.music_silence_note.text()
     assert "no sound" in said
     assert "finished file" in said
-    assert "Listen" in said
+    assert "Sound" in said
     assert "source picture" not in said
 
 
@@ -2274,15 +2274,17 @@ def test_a_classic_refusal_sits_above_the_lane(
         window, monkeypatch, tmp_path, app):
     target, view = classic_band(window, monkeypatch, tmp_path, app)
     note = view.music_silence_note
-    assert "Listen" in note.text()
+    assert "Sound" in note.text()
     window.export_panel.preset_buttons["remux"].setChecked(True)
     for _ in range(20):
         app.processEvents()
     assert "Remux" in note.text()
     assert in_band_view(view, note) == note.height(), (
         "the refusal is below the band's fold")
-    # And it did not get there by scrolling the track and Listen rows away.
-    for row in (view.track_button, view.listen_check):
+    # And it did not get there by scrolling the track and listening rows
+    # away. (The listening row's tick box now lives beside Play as Sound;
+    # its level and restart controls are what remain in the band.)
+    for row in (view.track_button, view.restart_button):
         assert in_band_view(view, row) == row.height(), row
     assert window._planned_music(target).mode is AudioMode.MIX, "choice kept"
     window.export_panel.preset_buttons["master"].setChecked(True)
@@ -2361,7 +2363,7 @@ def test_squeezing_the_band_leaves_the_standing_note_and_scroll_alone(
     _target, view = classic_band(window, monkeypatch, tmp_path, app)
     note, bar = view.music_silence_note, view.music_body.verticalScrollBar()
     squeeze_band(view, app, 54)
-    assert "Listen" in note.text()
+    assert "Sound" in note.text()
     bar.setValue(10)
     app.processEvents()
     squeeze_band(view, app, 28)
@@ -2639,3 +2641,206 @@ def test_choosing_source_only_lifts_a_music_reason_on_the_transport(
     app.processEvents()
     assert "still being read" in window.live_preview.status.reason
     window._music_reading.clear()
+
+
+# -- stage 2: the Sound control and the output device ------------------------------
+
+from flightdvr.audio_device import OutputDevice  # noqa: E402
+
+SPEAKERS = OutputDevice("aa01", "Speakers")
+HEADSET = OutputDevice("bb02", "USB headset")
+
+
+class _FakeCatalog:
+    """The machine's outputs, as the window is told them. Lists no device."""
+
+    outputs_now = [SPEAKERS, HEADSET]
+    default_now = SPEAKERS
+    made = []
+
+    def __init__(self, on_change=None):
+        self.on_change = on_change
+        _FakeCatalog.made.append(self)
+
+    def outputs(self):
+        return list(_FakeCatalog.outputs_now)
+
+    def default(self):
+        return _FakeCatalog.default_now
+
+
+class _QuietStream:
+    """Stands in for a monitoring stream: every call succeeds, nothing is
+    read or played. These tests are about what the window says and stores."""
+
+    def __getattr__(self, _name):
+        return lambda *_a, **_k: True
+
+
+@pytest.fixture
+def quiet(window, monkeypatch):
+    monkeypatch.setattr(window.live_preview, "_make_stream",
+                        lambda _target, _listening: _QuietStream())
+
+
+@pytest.fixture
+def catalog(monkeypatch):
+    from flightdvr.ui import MainWindow
+    _FakeCatalog.outputs_now = [SPEAKERS, HEADSET]
+    _FakeCatalog.default_now = SPEAKERS
+    _FakeCatalog.made = []
+    monkeypatch.setattr(MainWindow, "device_catalog_factory", _FakeCatalog)
+    return _FakeCatalog
+
+
+def _export_state(window, target):
+    """Everything monitoring must never touch."""
+    return (window._planned_music(target), window.export_panel.capture(),
+            window._choices_for(target))
+
+
+def test_sound_beside_play_is_the_one_switch(window, app, catalog):
+    """Hearing a recording needs no Music band, and M on the picture is the
+    same switch."""
+    view = window.preview_view
+    focus(window, 0)
+    assert not view.listen_check.isVisible() or not view.music_band.isChecked()
+    view.sound_button.click()
+    assert view.listen_check.isChecked() and view.sound_button.text() == "Sound: on"
+    assert window.sound_action.isChecked()
+    window._toggle_sound()
+    assert not view.listen_check.isChecked()
+    assert view.sound_button.text() == "Sound: off"
+    assert not window.sound_action.isChecked()
+    window.sound_action.setChecked(True)
+    assert view.listen_check.isChecked()
+    view.sound_actions["source"].trigger()
+    assert view.listening_combo.currentData() == "source"
+    view.listening_combo.setCurrentIndex(view.listening_combo.findData("mix"))
+    assert view.sound_actions["mix"].isChecked()
+    window._toggle_sound()
+
+
+def test_no_window_lists_devices_until_sound_is_asked_for(window, app, catalog):
+    assert catalog.made == []
+    focus(window, 0)
+    window.preview_view.sound_button.click()
+    assert len(catalog.made) == 1
+    window._toggle_sound()
+
+
+@pytest.mark.parametrize("mode, listening, keep, has_audio, says", [
+    (None, "mix", True, False,
+     "The export has no sound: this recording has no audio track"),
+    (None, "mix", False, True,
+     "The export has no sound: Keep the audio track is off"),
+    (None, "mix", True, True, "Hearing the recording (no music chosen) on Speakers"),
+    (AudioMode.NO_SOUND, "mix", True, True, "This output exports no sound."),
+    (AudioMode.ORIGINAL, "mix", True, True,
+     "Hearing the recording (original audio) on Speakers"),
+    (AudioMode.ORIGINAL, "mix", True, False, "This recording has no audio track."),
+    (AudioMode.REPLACE, "mix", True, True, "Hearing the finished mix on Speakers"),
+    (None, "source", False, True, "Hearing the recording on Speakers"),
+    (AudioMode.REPLACE, "source", True, False, "This recording has no audio track."),
+])
+def test_the_sound_line_says_what_is_heard(window, app, tmp_path, catalog, quiet,
+                                           mode, listening, keep, has_audio, says):
+    target = _with_choice(window, app, tmp_path, mode)
+    clip = window._trim_clip
+    clip.audio_codec = "aac" if has_audio else ""
+    window.export_panel.audio_check.setChecked(keep)
+    view = window.preview_view
+    view.listening_combo.setCurrentIndex(view.listening_combo.findData(listening))
+    before = _export_state(window, target)
+    view.sound_button.click()
+    app.processEvents()
+    assert window._sound_state().startswith(says), window._sound_state()
+    assert _export_state(window, target) == before, "monitoring changed the export"
+    window._toggle_sound()
+    assert window._sound_state() == "Muted. The export is unchanged."
+
+
+def test_an_output_nobody_chose_sound_for_plays_the_recording_when_kept(
+        window, app, tmp_path, catalog):
+    """The legacy fallback, and only for it: explicit No sound stays silent
+    whatever Keep the audio track says."""
+    target = _with_choice(window, app, tmp_path, None)
+    window.export_panel.audio_check.setChecked(True)
+    plan, samples = window._monitor_plan(target, Listening.MIX)
+    assert plan is not None and plan.mode is AudioMode.ORIGINAL and samples > 0
+    window.export_panel.audio_check.setChecked(False)
+    assert window._monitor_plan(target, Listening.MIX) == (None, 0)
+    silent = _with_choice(window, app, tmp_path, AudioMode.NO_SOUND)
+    window.export_panel.audio_check.setChecked(True)
+    plan, _ = window._monitor_plan(silent, Listening.MIX)
+    assert plan is not None and plan.mode is AudioMode.NO_SOUND
+
+
+def test_remux_recording_sound_reaches_the_stream_too(window, app, tmp_path,
+                                                      monkeypatch):
+    """Stage 1 resolved the Remux audition in `_monitor_plan` but not in the
+    stream builder, which still refused it as unsupported for Remux."""
+    from flightdvr.audio_reader import FfmpegPcmReader
+
+    class _Reached(Exception):
+        pass
+
+    def reached(*_a, **_k):
+        raise _Reached
+    monkeypatch.setattr(FfmpegPcmReader, "for_source", classmethod(reached))
+    remux = _with_choice(window, app, tmp_path, AudioMode.REPLACE, "remux")
+    with pytest.raises(_Reached):           # the plan resolved; the reader was next
+        window._build_monitor_stream(remux, Listening.SOURCE)
+
+
+def test_a_missing_saved_output_uses_the_default_for_now_and_keeps_the_choice(
+        window, app, catalog):
+    from flightdvr.ui import OUTPUT_DEVICE_KEY, OUTPUT_DEVICE_NAME
+    window.settings_store.setValue(OUTPUT_DEVICE_KEY, "cc03")
+    window.settings_store.setValue(OUTPUT_DEVICE_NAME, "Bluetooth speaker")
+    focus(window, 0)
+    window.preview_view.sound_button.click()
+    said = window.statusBar().currentMessage()
+    assert "Bluetooth speaker is not connected" in said and "(Speakers)" in said
+    assert window.audio_output.device_key == ""
+    assert window.audio_output.device_name == "Speakers"
+    assert window.settings_store.value(OUTPUT_DEVICE_KEY) == "cc03"
+    window._fill_output_menu()
+    labels = [(a.text(), a.isChecked(), a.isEnabled())
+              for a in window.output_menu.actions()]
+    assert labels == [("System default (now: Speakers)", False, True),
+                      ("Speakers", False, True), ("USB headset", False, True),
+                      ("Bluetooth speaker — not connected", True, False)]
+    window._toggle_sound()
+
+
+def test_choosing_an_output_is_saved_and_used(window, app, catalog):
+    from flightdvr.ui import OUTPUT_DEVICE_KEY, OUTPUT_DEVICE_NAME
+    focus(window, 0)
+    window._fill_output_menu()
+    headset = next(a for a in window.output_menu.actions()
+                   if a.text() == "USB headset")
+    headset.trigger()
+    assert window.settings_store.value(OUTPUT_DEVICE_KEY) == "bb02"
+    assert window.settings_store.value(OUTPUT_DEVICE_NAME) == "USB headset"
+    assert window.audio_output.device_key == "bb02"
+    window._fill_output_menu()
+    checked = [a.text() for a in window.output_menu.actions() if a.isChecked()]
+    assert checked == ["USB headset"]
+
+
+def test_unplugging_the_output_in_use_stops_and_says_so(window, app, catalog,
+                                                       quiet):
+    focus(window, 0)
+    window._choose_output("bb02", "USB headset")
+    window.preview_view.sound_button.click()
+    catalog.outputs_now = [SPEAKERS]
+    catalog.made[-1].on_change()
+    app.processEvents()
+    assert "USB headset was disconnected" in window.live_preview.status.reason
+    assert window._sound_state().startswith("No output:")
+    assert window.audio_output.device_key == "bb02", "no silent switch"
+    catalog.outputs_now = [SPEAKERS, HEADSET]
+    catalog.made[-1].on_change()                 # it comes back:
+    assert not window.live_preview.status.playing, "nothing resumes by itself"
+    window._toggle_sound()

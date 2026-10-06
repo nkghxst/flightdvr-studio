@@ -18,10 +18,11 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QBoxLayout, QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpacerItem,
-    QVBoxLayout, QWidget,
+    QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy, QSlider,
+    QSpacerItem, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .music_panel import MusicPanel
@@ -85,11 +86,11 @@ class ControlsColumn(QWidget):
 # What the sound is doing when nothing is wrong. The preview used to say it
 # had no sound at all; since the monitor it can, when asked, so the standing
 # note says which of the two it is and how to change it.
-QUIET_PREVIEW = ("Listening is off, so the preview plays with no sound. Tick "
-                 "Listen to hear this output; the finished file is not "
-                 "affected either way.")
-LISTENING_PREVIEW = ("Listening to this output as it plays. The level here is "
-                     "for monitoring; it does not change the file.")
+QUIET_PREVIEW = ("Sound is off, so the preview plays with no sound. Turn "
+                 "Sound on beside Play (or press M on the picture) to hear "
+                 "this output; the finished file is not affected either way.")
+LISTENING_PREVIEW = ("Sound is on for this output as it plays. The level here "
+                     "is for monitoring; it does not change the file.")
 # Kept for callers that only need the quiet wording.
 SILENT_PREVIEW = QUIET_PREVIEW
 
@@ -102,6 +103,11 @@ SILENT_PREVIEW = QUIET_PREVIEW
 # #88 was missing: with the name field focused there was no way to know that
 # Enter keeps a name and Escape puts the old one back, because neither did
 # anything at all.
+# The Sound control's own label: on or off, and nothing else. What is heard,
+# on which output, and why not, is the status line under it.
+SOUND_ON = "Sound: on"
+SOUND_OFF = "Sound: off"
+
 # Neither hint makes a claim about sound: whether the preview is heard is the
 # listening row's to say. "Silent" here outlived the listening work and sat
 # beside a ticked Listen box on the installed 2.0.0 candidate.
@@ -194,6 +200,7 @@ class PreviewView(QObject):
         self.sequence_strip.hide()
         self.trim_band = self._build_trim_band()
         self.music_band = self._build_music_band()
+        self._wire_sound_control()
         # The output strip is the output's picture on the output's clock. When
         # it is showing, the compact band need not show that picture again.
         self.sequence_strip.installEventFilter(self)
@@ -289,6 +296,38 @@ class PreviewView(QObject):
             lambda *_: self.grab_still_requested.emit())
         self._side_actions.addWidget(self.still_button)
         column.addLayout(self._side_actions)
+
+        # Sound for the preview, beside the transport rather than inside
+        # Music: hearing a recording needs no music chosen, and on the
+        # installed 2.0.0 candidate the only way to listen was to open the
+        # music band. One toggle (M with the picture focused), with what is
+        # heard — the finished mix or the recording alone — on its menu.
+        self.sound_button = QToolButton()
+        self.sound_button.setCheckable(True)
+        self.sound_button.setText(SOUND_OFF)
+        self.sound_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.sound_button.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                        QSizePolicy.Policy.Fixed)
+        self.sound_button.setToolTip(
+            "Hear the preview, or not (M with the picture focused).\n"
+            "The arrow chooses what you hear. Nothing here changes the export.")
+        sound_menu = QMenu(self.sound_button)
+        self._sound_choices = QActionGroup(sound_menu)
+        self._sound_choices.setExclusive(True)
+        self.sound_actions: dict[str, QAction] = {}
+        for data, text in (("mix", "Finished mix"), ("source", "Source only")):
+            action = sound_menu.addAction(text)
+            action.setCheckable(True)
+            action.setData(data)
+            self._sound_choices.addAction(action)
+            self.sound_actions[data] = action
+        self.sound_actions["mix"].setChecked(True)
+        self.sound_button.setMenu(sound_menu)
+        column.addWidget(self.sound_button)
+        self.sound_status = dim(QLabel(""))
+        self.sound_status.setWordWrap(True)
+        column.addWidget(self.sound_status)
 
         trim_row = QHBoxLayout()
         trim_row.setContentsMargins(0, 0, 0, 0)
@@ -602,6 +641,53 @@ class PreviewView(QObject):
         row.addWidget(self.restart_button)
         row.addStretch(1)
         return row
+
+    def _wire_sound_control(self) -> None:
+        """One state, two places to see it.
+
+        The listening row in the music band stays the model the window
+        already drives — `listen_check` and `listening_combo` — but is no
+        longer shown there: two switches for the same sound is one too many.
+        The Sound control beside Play drives that model and follows it.
+        """
+        self.listen_check.hide()
+        self.listening_combo.hide()
+        self.sound_button.toggled.connect(self._sound_toggled)
+        self._sound_choices.triggered.connect(self._sound_choice_made)
+        self.listen_check.toggled.connect(self._follow_listen_check)
+        self.listening_combo.currentIndexChanged.connect(
+            lambda *_: self._follow_listening_combo())
+
+    def _sound_toggled(self, on: bool) -> None:
+        self.sound_button.setText(SOUND_ON if on else SOUND_OFF)
+        if self.listen_check.isChecked() != on:
+            self.listen_check.setChecked(on)
+
+    def _sound_choice_made(self, action: QAction) -> None:
+        index = self.listening_combo.findData(action.data())
+        if index >= 0 and index != self.listening_combo.currentIndex():
+            self.listening_combo.setCurrentIndex(index)
+
+    def _follow_listen_check(self, on: bool) -> None:
+        if self.sound_button.isChecked() != on:
+            blocked = self.sound_button.blockSignals(True)
+            self.sound_button.setChecked(on)
+            self.sound_button.blockSignals(blocked)
+        self.sound_button.setText(SOUND_ON if on else SOUND_OFF)
+
+    def _follow_listening_combo(self) -> None:
+        action = self.sound_actions.get(str(self.listening_combo.currentData()))
+        if action is not None and not action.isChecked():
+            action.setChecked(True)
+
+    def toggle_sound(self) -> None:
+        """M on the picture: the same as pressing the Sound button."""
+        self.sound_button.toggle()
+
+    def show_sound(self, text: str) -> None:
+        """The one line that says what the preview's sound is doing."""
+        self.sound_status.setText(text)
+        self.sound_status.setToolTip(text)
 
     def show_monitoring(self, listening: bool, reason: str) -> None:
         """Say what the sound is doing, including when it is doing nothing.
