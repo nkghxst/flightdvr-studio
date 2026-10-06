@@ -2548,10 +2548,18 @@ def test_a_typed_source_folder_is_the_one_scanned(window, app, tmp_path):
 
 
 def _with_choice(window, app, tmp_path, mode, preset="master"):
+    """The focused range as the output being monitored, under `preset`.
+
+    Through the same sync an edit makes: setting the range on the clip
+    without it leaves `_music_target` naming the whole recording, which is
+    the stale target the rescan repair is about, not what is tested here."""
+    window.export_panel.preset_buttons[preset].setChecked(True)
     clip = focus(window, 0)
     clip.selects = [Select(1.0, 5.0, "A", sid="r-a")]
     clip.current = 0
+    window._sync_music_panel()
     target = window._music_target_for(clip)
+    assert window._music_target == target
     asset = an_asset(tmp_path / "song.wav") if mode in (
         AudioMode.REPLACE, AudioMode.MIX) else None
     passage = SampleSpan(0, 4 * 44_100, 44_100) if asset else None

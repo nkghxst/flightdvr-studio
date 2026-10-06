@@ -162,7 +162,10 @@ def describe_output_module() -> tuple[str, bool]:
     app's plugin folder is only on the library paths from then.
     """
     try:
-        from PySide6.QtMultimedia import QMediaDevices  # noqa: F401
+        # Imported to prove it loads; nothing is called on it. (No trailing
+        # comment on the import itself: test_player reads import lines.)
+        from PySide6.QtMultimedia import QMediaDevices
+        del QMediaDevices
     except ImportError as exc:
         return f"audio output  NOT AVAILABLE: {exc}", False
     from pathlib import Path
