@@ -61,8 +61,84 @@ def pytest_configure(config):
     )
 
 
+HOME_VARIABLES = ("HOME", "USERPROFILE")
+
+
+def _storage_inventory(folder: Path) -> dict[str, tuple[int, int]]:
+    """Every file under `folder`, with its size and modification time."""
+    if not folder.is_dir():
+        return {}
+    return {str(path.relative_to(folder)): (stat.st_size, stat.st_mtime_ns)
+            for path in folder.rglob("*") if path.is_file()
+            for stat in (path.stat(),)}
+
+
+def _close_every_window() -> None:
+    """Close what is still open, so its last session write happens now."""
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in list(app.topLevelWidgets()):
+        try:
+            widget.close()
+        except RuntimeError:              # its C++ side is already gone
+            pass
+    app.processEvents()
+
+
 @pytest.fixture(scope="session", autouse=True)
-def settings_backend(tmp_path_factory):
+def user_storage(tmp_path_factory):
+    """Give the whole run a disposable home, before any window exists.
+
+    The app keeps sessions, the recent list, thumbnails and filmstrips under
+    `Path.home() / ".flightdvr"`, resolved each time they are used. Most UI
+    tests never redirected that, so every one that scanned a temporary card
+    left an autosave in the developer's real home — six thousand of them on
+    one machine, all of them in its Recent sessions menu.
+
+    The environment is what `Path.home()` reads (USERPROFILE on Windows, HOME
+    elsewhere), so pointing it here covers every one of those paths and any
+    added later, and a test that patches `Path.home`, `sessions_dir` or the
+    variables itself still nests inside this one.
+
+    Session-scoped and autouse so it is in place before any module-scoped
+    window is built, and torn down last: still-open windows are closed and
+    pending saves stopped while the redirect holds, so a close-time flush or a
+    late Recent entry lands here rather than in the real home. The real
+    `.flightdvr` is inventoried before and after, and the run fails if it
+    changed — a run is not isolated just because it meant to be.
+    """
+    real = Path.home() / ".flightdvr"
+    before = _storage_inventory(real)
+    root = tmp_path_factory.mktemp("flightdvr-home")
+    saved = {name: os.environ.get(name) for name in HOME_VARIABLES}
+    for name in HOME_VARIABLES:
+        os.environ[name] = str(root)
+    try:
+        yield root
+    finally:
+        try:
+            _close_every_window()
+            stop_pending_session_writes()
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+        after = _storage_inventory(real)
+        if after != before:
+            changed = sorted(set(before) ^ set(after)
+                             | {k for k in set(before) & set(after)
+                                if before[k] != after[k]})
+            raise AssertionError(
+                f"the test run changed the real {real}: {changed[:10]}")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def settings_backend(tmp_path_factory, user_storage):
     """Give the UI suite a disposable settings store, never the real ones.
 
     `MainWindow` restores its export panel from `QSettings(ORG, APP_NAME)` —

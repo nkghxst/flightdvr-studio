@@ -2469,3 +2469,143 @@ def test_a_rename_of_the_same_output_keeps_the_typing(
     app.processEvents()
     assert window._planned_music(target).fade_in_samples == 12_000
     window.hide()
+
+
+# -- installed-candidate repairs (Nk feedback, 6 Oct) ------------------------------
+
+
+def _rescan_same_card(window, app) -> None:
+    """Scan the folder again and rediscover the same two recordings.
+
+    `_scan` empties the list and starts a generation; the clips it then finds
+    are new objects with the same fingerprints, which is exactly what a real
+    rescan of an unchanged card produces.
+    """
+    card = Path(window.source_combo.currentData())
+    window._scan()
+    for name in ("hdz_001.ts", "hdz_002.ts"):
+        window._add_clip(window._scan_generation, a_clip(name, card))
+    window._scan_done(window._scan_generation, 2)
+    app.processEvents()
+
+
+def test_after_a_rescan_the_focus_is_the_listed_recording(window, app):
+    """The installed candidate's "no longer resolves exactly": a range made
+    after a rescan went onto a recording the list no longer held, so
+    monitoring (which looks the recording up in the list) could not find it
+    and the session (which is written from the list) never saved it."""
+    focus(window, 0)
+    _rescan_same_card(window, app)
+    focused = focus(window, 0)
+    listed = next(c for c in window.clips if c.fingerprint == focused.fingerprint)
+    assert focused is listed, "the trim editor is editing a recording the list dropped"
+
+    window._add_select()
+    window._new_monitor_snapshot(window._music_target)     # resolves exactly
+    window._flush_session()
+    stored = window.session.clips[focused.fingerprint].selects
+    assert [s.sid for s in stored] == [s.sid for s in listed.real_selects]
+
+
+def test_the_edited_range_is_named_even_after_an_empty_one(window, app):
+    """`current` counts every select, including a cleared placeholder; the
+    range it names has to be found in that same list, not in the filtered
+    one."""
+    clip = focus(window, 0)
+    clip.selects = [Select(0.0, 0.0, sid="placeholder"),
+                    Select(2.0, 6.0, "A", sid="r-a"),
+                    Select(8.0, 12.0, "B", sid="r-b")]
+    clip.current = 1
+    assert window._music_target_for(clip).items[0].sid == "r-a"
+
+
+def test_a_ready_filmstrip_asks_for_the_real_frame(window, app, tmp_path):
+    """The 160px filmstrip still is only a stand-in until the decoded frame
+    arrives; nothing asked for that frame after a clip loaded, so the
+    preview stayed blurry until it was clicked."""
+    from flightdvr.trim import Filmstrip
+
+    clip = focus(window, 0)
+    still = tmp_path / "f_0001.jpg"
+    still.write_bytes(b"")
+    window._sharpen_timer.stop()
+    window._strip_ready(window._strip_generation, str(clip.path),
+                        Filmstrip(frames=[still], times=[0.0]))
+    assert window._sharpen_timer.isActive()
+
+
+def test_a_typed_source_folder_is_the_one_scanned(window, app, tmp_path):
+    """Typing over a remembered entry has to scan what was typed, not the
+    entry the box last had selected."""
+    typed = tmp_path / "typed"
+    typed.mkdir()
+    window.source_combo.setEditText(str(typed))
+    assert window._source_path() == typed
+
+    window._refresh_drives()
+    assert window.source_combo.currentText() == str(typed)
+    assert window._source_path() == typed
+
+
+def _with_choice(window, app, tmp_path, mode, preset="master"):
+    clip = focus(window, 0)
+    clip.selects = [Select(1.0, 5.0, "A", sid="r-a")]
+    clip.current = 0
+    target = window._music_target_for(clip)
+    asset = an_asset(tmp_path / "song.wav") if mode in (
+        AudioMode.REPLACE, AudioMode.MIX) else None
+    passage = SampleSpan(0, 4 * 44_100, 44_100) if asset else None
+    window.output_plan.set_choices(
+        target, preset, ExportSettings(),
+        MusicChoice(mode=mode, asset=asset, passage=passage))
+    return target
+
+
+@pytest.mark.parametrize("mode", [AudioMode.ORIGINAL, AudioMode.NO_SOUND, None])
+def test_music_troubles_never_refuse_sound_without_music(window, app, tmp_path,
+                                                         mode):
+    """Only a plan that carries music is held up by its music. Explicit
+    Original, explicit No sound and the unconfigured choice are not, and
+    Source only never is."""
+    target = _with_choice(window, app, tmp_path, mode)
+    for trouble in ("reading", "failed"):
+        window._music_reading.clear()
+        window._music_trouble.clear()
+        if trouble == "reading":
+            window._music_reading[target] = tmp_path / "song.wav"
+        else:
+            window._music_trouble[target] = "the track could not be read"
+        assert window._monitor_refusal(target, Listening.SOURCE) == ""
+        assert window._monitor_refusal(target, Listening.MIX) == ""
+    window._music_reading.clear()
+    window._music_trouble.clear()
+
+
+@pytest.mark.parametrize("mode", [AudioMode.REPLACE, AudioMode.MIX])
+def test_a_mix_with_music_keeps_its_music_reasons(window, app, tmp_path, mode):
+    target = _with_choice(window, app, tmp_path, mode)
+    window._music_reading[target] = tmp_path / "song.wav"
+    assert "still being read" in window._monitor_refusal(target, Listening.MIX)
+    assert window._monitor_refusal(target, Listening.SOURCE) == ""
+    window._music_reading.clear()
+    window._music_trouble[target] = "the track could not be read"
+    assert window._monitor_refusal(target, Listening.MIX) == \
+        "the track could not be read"
+    assert window._monitor_refusal(target, Listening.SOURCE) == ""
+    window._music_trouble.clear()
+
+
+def test_remux_recording_sound_is_heard_and_slow_motion_stays_silent(
+        window, app, tmp_path):
+    remux = _with_choice(window, app, tmp_path, AudioMode.REPLACE, "remux")
+    assert window._monitor_refusal(remux, Listening.SOURCE) == ""
+    assert "Remux" in window._monitor_refusal(remux, Listening.MIX)
+    slow = _with_choice(window, app, tmp_path, None, "slowmo")
+    assert window._monitor_refusal(slow, Listening.SOURCE) != ""
+    assert window._monitor_refusal(slow, Listening.MIX) != ""
+
+
+def test_the_picture_hint_makes_no_claim_about_sound():
+    """Whether the preview is heard is the listening control's to say."""
+    from flightdvr.preview_panel import PICTURE_KEYS
+    assert "silent" not in PICTURE_KEYS.lower()
