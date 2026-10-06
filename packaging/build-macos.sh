@@ -69,6 +69,9 @@ if [ ! -d "$APP" ]; then
     exit 1
 fi
 printf '  bundle: %s\n' "$(du -sh "$APP" | cut -f1)"
+# Listen needs QtMultimedia's PCM sink and a backend for it. What else PySide6
+# brought with it is read from its bytes; anything but LGPL fails the build.
+python3 packaging/check_qt_multimedia.py "$APP" dist/qt-multimedia.json
 
 step "Ad-hoc signature"
 # arm64 refuses to load an unsigned binary at all, so this is required rather

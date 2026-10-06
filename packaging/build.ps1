@@ -77,6 +77,13 @@ if (-not (Test-Path $exe)) { throw "Bundle did not produce $exe" }
 $mb = (Get-ChildItem "dist\FlightDVRStudio" -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
 Write-Host ("  bundle: {0:n1} MB" -f $mb)
 
+Step "Audio output: Qt Multimedia backend and the FFmpeg libraries it brings"
+# Listen needs QtMultimedia's PCM sink. PySide6 ships it with FFmpeg's shared
+# libraries; their licence is read from their own bytes, and anything other
+# than LGPL fails the build (THIRD-PARTY-NOTICES.md describes them).
+python packaging/check_qt_multimedia.py "dist\FlightDVRStudio" "dist\qt-multimedia.json"
+if ($LASTEXITCODE -ne 0) { throw "The bundle's audio output check failed." }
+
 Step "Smoke check: does the bundle run without ffmpeg on PATH?"
 $clean = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'ffmpeg' -and $_ -notmatch 'system32$' }) -join ';'
 

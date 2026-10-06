@@ -356,6 +356,31 @@ class Select:
                    **({"sid": stored} if stored else {}))
 
 
+def editing_range(clip) -> "Select | None":
+    """The real range being edited, or None when it is the whole recording.
+
+    `current` counts every select, including the empty placeholder a cleared
+    trim leaves behind, so the range it names has to be found in that list
+    rather than by indexing the filtered `real_selects` with it — which named
+    the next range along whenever a placeholder came first. When the select
+    being edited is itself a placeholder, the nearest real range before it
+    stands in, then the first, which is what the filtered index gave before
+    for every list without a leading placeholder.
+
+    Takes anything shaped like a clip, because export pieces and bundle
+    pieces reach the same question.
+    """
+    ranges = getattr(clip, "real_selects", None) or []
+    if not ranges:
+        return None
+    selects = getattr(clip, "selects", None) or []
+    current = getattr(clip, "current", 0)
+    for index in range(min(current, len(selects) - 1), -1, -1):
+        if any(selects[index] is one for one in ranges):
+            return selects[index]
+    return ranges[0]
+
+
 @dataclass
 class ClipInfo:
     """What a single DVR recording contains."""

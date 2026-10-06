@@ -69,7 +69,8 @@ from .format import (
 )
 from .help_content import naming_help_html, release_links
 from .jobs import ExportWorker, Job, JobStatus, write_concat_file
-from .media import ClipInfo, Select, Tools, available_encoders, child_env
+from .media import (ClipInfo, Select, Tools, available_encoders, child_env,
+                    editing_range)
 from .audio_plan import (
     OUTPUT_RATE, AudioMode, MusicChoice, SampleSpan, ShortTrackPolicy,
     resolve_monitor_audio_plan, round_samples,
@@ -348,6 +349,11 @@ class _BundleTrackCheck(QThread):
             problem = str(exc)
         if not self.isInterruptionRequested():
             self.result.emit(self.generation, problem)
+
+
+# What a recording's own sound is auditioned under when no music is heard: any
+# 1x preset that carries sound resolves it alike.
+AUDITION_PRESET = "master"
 
 
 class MainWindow(QMainWindow):
@@ -1538,12 +1544,9 @@ class MainWindow(QMainWindow):
         # `.clip`; every other route hands the recording itself. One identity
         # either way, or the same output would be keyed two ways.
         clip = getattr(clip, "clip", clip)
-        ranges = clip.real_selects
-        sid = ""
-        if ranges:
-            index = min(clip.current, len(ranges) - 1)
-            sid = ranges[index].sid
-        return OutputTarget.clip_or_range(clip.fingerprint, sid)
+        chosen = editing_range(clip)
+        return OutputTarget.clip_or_range(clip.fingerprint,
+                                          chosen.sid if chosen else "")
 
     def _music_context(self) -> tuple[str, str, bool, bool]:
         """Target name, and the same triple the queue resolves music under.
@@ -2677,26 +2680,53 @@ class MainWindow(QMainWindow):
         self._music_binding = LiveMusicBinding(
             self.live_preview, self._monitor_plan_for)
 
-    def _monitor_refusal(self, target) -> str:
+    def _monitor_carries_music(self, target, listening: Listening) -> bool:
+        """Whether what is being listened to includes the output's music.
+
+        Only the finished mix of a Replace or Mix choice does. Explicit
+        Original and No sound carry no music, an output nobody chose sound
+        for carries none, and Source only is the recording by definition.
+        Read from the requested mode alone, so a track still being read, or
+        one that failed, still counts: its reason is then the true one.
+        """
+        if Listening(listening) is not Listening.MIX:
+            return False
+        return self._planned_music(target).mode in (AudioMode.REPLACE,
+                                                    AudioMode.MIX)
+
+    def _monitor_refusal(self, target, listening: Listening | None = None) -> str:
         """Why this output cannot be monitored, in the words it is refused in.
 
         The same triple `_run_job` resolves music under, asked of the panel so
         there is one place the rule lives, plus the two states music wiring
         already models: a read still running, and one that failed.
+
+        Those music reasons apply only when the listening includes music. A
+        track that is loading or failed, or a preset that cannot carry music,
+        used to refuse the recording's own sound too — Source only on Remux,
+        or an explicit Original — though none of it was going to be heard.
+        Slow motion is refused whatever is listened to: its export is silent,
+        so its preview is too.
         """
         if target is None:
             return "Choose a clip to hear its output."
-        if target in self._music_reading:
-            return "Its music track is still being read."
-        if target in self._music_trouble:
-            return self._music_trouble[target]
+        if listening is None:
+            listening = (self.live_preview.listening
+                         if self.live_preview is not None else Listening.MIX)
         # The output's own preset, and never the Classic join switch: a
         # single range is one output whatever that switch says.
         preset_key = self._monitor_preset(target)
         joined = isinstance(target, OutputTarget) and target.is_assembly
         refusal = MusicPanel._refusal(preset_key, joined, False)
-        if refusal:
-            return refusal
+        if preset_key == "slowmo":
+            return refusal or "Slow motion exports silently, so its preview is silent."
+        if self._monitor_carries_music(target, listening):
+            if target in self._music_reading:
+                return "Its music track is still being read."
+            if target in self._music_trouble:
+                return self._music_trouble[target]
+            if refusal:
+                return refusal
         if joined and self._assembly_monitor_sequence(target) is None:
             return ("Assembly monitoring needs its compiled Assembly: open it "
                     "on Assemble, Music or Output.")
@@ -2750,7 +2780,7 @@ class MainWindow(QMainWindow):
             samples = snapshot.samples
             return resolve_monitor_audio_plan(
                 choice, samples, source_has_audio=source_has_audio,
-                preset_key=self._monitor_preset(target)), samples
+                preset_key=self._audition_preset(target, choice)), samples
 
         clip = self._monitor_clip(target)
         if clip is None:
@@ -2768,7 +2798,20 @@ class MainWindow(QMainWindow):
             return None, 0
         return resolve_monitor_audio_plan(
             choice, samples, source_has_audio=clip.has_audio,
-            preset_key=self._monitor_preset(target)), samples
+            preset_key=self._audition_preset(target, choice)), samples
+
+    def _audition_preset(self, target, choice: MusicChoice) -> str:
+        """The preset an audition is resolved under.
+
+        The output's own, except when nothing but the recording's own sound
+        (or none) is being heard. A preset's music capability is about music;
+        the recording sounds the same on every 1x preset, and Remux keeps it
+        exactly. Slow motion never gets here: it is refused first.
+        """
+        preset_key = self._monitor_preset(target)
+        if choice.mode in (AudioMode.ORIGINAL, AudioMode.NO_SOUND):
+            return AUDITION_PRESET
+        return preset_key
 
     def _new_monitor_snapshot(self, target: OutputTarget) -> _MonitorSnapshot:
         """Freeze the exact focused range or current compiled Assembly."""
@@ -2988,7 +3031,16 @@ class MainWindow(QMainWindow):
 
     def _on_listening_changed(self, name: str) -> None:
         """A rebuilt mix begins at the picture, never at its own zero."""
-        self.live_preview.set_listening(Listening(name))
+        before = self.live_preview.listening
+        chosen = Listening(name)
+        self.live_preview.set_listening(chosen)
+        # Music's reasons apply only to listening that includes music, so a
+        # change of what is listened to can lift a refusal or impose one;
+        # the transport rebuilt above still carried the old reason.
+        target = self._music_target
+        if (target is not None and self._monitor_refusal(target, before)
+                != self._monitor_refusal(target, chosen)):
+            self._sync_live_preview()
         if self._output_picture_active() and self._output_recipe is not None:
             coordinate = self._picture_monitor_coordinate(
                 self.preview_view.sequence_strip.position)
@@ -4228,11 +4280,9 @@ class MainWindow(QMainWindow):
                     if stage is Stage.ASSEMBLE
                     else "Source preview — choose an output to see it.")
         name = clip.path.name
-        ranges = clip.real_selects
-        if ranges:
-            chosen = ranges[min(clip.current, len(ranges) - 1)]
-            if chosen.name:
-                name = f"{name} · {chosen.name}"
+        chosen = editing_range(clip)
+        if chosen is not None and chosen.name:
+            name = f"{name} · {chosen.name}"
         return f"Source: {name} — not the finished file."
 
     def _focused_source(self) -> ClipInfo | None:
@@ -5245,10 +5295,21 @@ class MainWindow(QMainWindow):
 
     # -- source handling ------------------------------------------------------
 
+    def _chosen_entry(self) -> str | None:
+        """The selected entry's folder, but only while its text is what the
+        box shows. Typing over an entry leaves it selected underneath, and
+        its stored folder would otherwise win over what was typed."""
+        combo = self.source_combo
+        index = combo.currentIndex()
+        if index < 0 or combo.currentText().strip() != combo.itemText(index).strip():
+            return None
+        data = combo.itemData(index)
+        return str(data) if data else None
+
     def _refresh_drives(self) -> None:
         """Rebuild the drive list, keeping whatever is currently typed in."""
         current = self.source_combo.currentText()
-        current_data = self.source_combo.currentData()
+        current_data = self._chosen_entry()
         self.source_combo.blockSignals(True)
         self.source_combo.clear()
 
@@ -5259,16 +5320,20 @@ class MainWindow(QMainWindow):
             self.source_combo.addItem(drive.description, str(drive.path))
 
         if current:
-            self.source_combo.setCurrentText(current)
-            if current_data:
-                index = self.source_combo.findData(current_data)
-                if index >= 0:
-                    self.source_combo.setCurrentIndex(index)
+            index = (self.source_combo.findData(current_data)
+                     if current_data else -1)
+            if index >= 0:
+                self.source_combo.setCurrentIndex(index)
+            else:
+                # Typed, so kept exactly as typed rather than replaced by
+                # whichever entry happens to be selected underneath.
+                self.source_combo.setCurrentText(current)
         self.source_combo.blockSignals(False)
 
     def _source_path(self) -> Path | None:
-        data = self.source_combo.currentData()
-        text = data or self.source_combo.currentText()
+        """The folder the box shows: a chosen entry's stored folder (a drive
+        is shown by its description), otherwise the text as typed."""
+        text = self._chosen_entry() or self.source_combo.currentText().strip()
         if not text:
             return None
         path = Path(str(text))
@@ -5405,11 +5470,45 @@ class MainWindow(QMainWindow):
         # ends without a session still ends, and leaving this set would lock
         # decisions out for good.
         self._scan_rebuilding = False
+        self._refocus_rediscovered_clip()
         self._apply_decision_availability()
 
         self._flight_scan_ready = True
         self.thumbs.resume()
         self._start_flight_analysis()
+
+    def _refocus_rediscovered_clip(self) -> None:
+        """Point the focus at the listed copy of the recording it was on.
+
+        A rescan builds new `ClipInfo` objects and puts the session's
+        decisions back on them; `_trim_clip` still held the old one, and
+        selecting the same row again kept it, because the loader compares
+        paths. Every edit after that went onto a recording the list no longer
+        held — monitoring looked the range up in the list and refused it as
+        "no longer resolves exactly", and the session, written from the list,
+        never saved it. The same fingerprint is the same recording, so the
+        focus moves to the listed copy, keeping the range being edited by its
+        id. A recording that did not come back keeps the old focus, which
+        `_focused_source` already treats as gone.
+        """
+        old = self._trim_clip
+        if old is None:
+            return
+        listed = next((clip for clip in self.clips
+                       if clip.fingerprint == old.fingerprint), None)
+        if listed is None or listed is old:
+            return
+        editing = (old.selects[old.current]
+                   if 0 <= old.current < len(old.selects) else None)
+        if editing is not None:
+            index = next((i for i, one in enumerate(listed.selects)
+                          if one.sid == editing.sid), None)
+            if index is not None:
+                listed.current = index
+        self._trim_clip = listed
+        self._sync_music_panel()
+        self._show_selects()
+        self._update_trim_labels()
 
     def _is_open_for(self, source: Path) -> bool:
         return (self.session is not None
@@ -5914,6 +6013,11 @@ class MainWindow(QMainWindow):
         if self._music_target is not None and self.music_editor is not None:
             self._show_music_picture(self._music_target)
         self._show_frame(self.trim_bar.playhead)
+        # The still just painted is a 160px filmstrip frame. Ask for the real
+        # one, as a click on the filmstrip does: without this a newly loaded
+        # clip stayed blurry, and Grab still unavailable, until it was touched.
+        if not self.player.is_playing and self._precise_frame_number is None:
+            self._sharpen_timer.start()
 
     def _show_frame(self, seconds: float) -> None:
         """Paint the filmstrip still nearest a moment.
@@ -8183,6 +8287,15 @@ def _describe_environment() -> tuple[str, int]:
     except Exception as exc:              # noqa: BLE001 — report, never raise
         lines.append(f"Qt failed to start: {exc}")
         code = 4
+    else:
+        # The audio output module and a backend for it, found but not used:
+        # no device is opened or listed. A package without them starts,
+        # scans and exports, and fails only when someone presses Listen.
+        from .audio_device import describe_output_module
+        line, ok = describe_output_module()
+        lines.append(line)
+        if not ok:
+            code = code or 6
 
     try:
         tools = find_tools()

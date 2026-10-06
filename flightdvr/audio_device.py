@@ -151,6 +151,38 @@ def qt_sink_factory(fmt: DeviceFormat = DeviceFormat()) -> Sink:
     return QAudioSink(device, wanted)
 
 
+def describe_output_module() -> tuple[str, bool]:
+    """Whether a packaged build can reach its audio output, without using it.
+
+    Imports the module the sink needs and looks for a multimedia backend
+    plugin on Qt's library paths. It opens no device and lists none, so CI
+    and a machine with no audio answer the same way. Missing either one is
+    what made Listen fail on the installed 2.0.0 candidate while every
+    package check passed. Call after the QApplication exists: the frozen
+    app's plugin folder is only on the library paths from then.
+    """
+    try:
+        # Imported to prove it loads; nothing is called on it. (No trailing
+        # comment on the import itself: test_player reads import lines.)
+        from PySide6.QtMultimedia import QMediaDevices
+        del QMediaDevices
+    except ImportError as exc:
+        return f"audio output  NOT AVAILABLE: {exc}", False
+    from pathlib import Path
+
+    from PySide6.QtCore import QCoreApplication
+
+    backends = sorted({
+        plugin.name
+        for folder in QCoreApplication.libraryPaths()
+        for plugin in (Path(folder) / "multimedia").glob("*")
+        if plugin.is_file()})
+    if not backends:
+        return ("audio output  NO multimedia backend on "
+                f"{QCoreApplication.libraryPaths()}"), False
+    return f"audio output  QtMultimedia, backends: {', '.join(backends)}", True
+
+
 def _non_negative(value) -> int | None:
     """An integer the backend reported, or None when it did not answer."""
     if value is None:
