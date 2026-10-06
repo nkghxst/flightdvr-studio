@@ -35,9 +35,9 @@ from types import SimpleNamespace
 import pytest
 
 from flightdvr.audio_device import (
-    ACTIVE, FRAME_BYTES, IDLE, STOPPED, SUSPENDED, UNKNOWN, AudioOutput,
-    DeviceFormat, DeviceReport, DeviceUnavailable, block_bytes,
-    qt_error_text, qt_state_name,
+    ACTIVE, FRAME_BYTES, IDLE, STOPPED, SUSPENDED, SYSTEM_DEFAULT, UNKNOWN,
+    AudioOutput, DeviceFormat, DeviceReport, DeviceUnavailable, OutputDevice,
+    block_bytes, qt_error_text, qt_state_name, resolve_output,
 )
 from flightdvr.audio_plan import OUTPUT_CHANNELS, OUTPUT_RATE
 from flightdvr.audio_stream import PcmBlock
@@ -714,3 +714,89 @@ def test_an_unrecognised_answer_stays_an_error():
     assert qt_error_text("the backend fell over")
     # A bare number is not taken as a promise of health.
     assert qt_error_text(0)
+
+
+# -- which output (app-local selection) -----------------------------------------
+
+class FakeCatalog:
+    """The machine's outputs, as the window would be told them."""
+
+    def __init__(self, outputs, default=None):
+        self._outputs = list(outputs)
+        self._default = default
+
+    def outputs(self):
+        return list(self._outputs)
+
+    def default(self):
+        return self._default
+
+
+SPEAKERS = OutputDevice("aa01", "Speakers")
+HEADSET = OutputDevice("bb02", "USB headset")
+
+
+def test_the_system_default_is_named_by_what_it_resolves_to():
+    choice = resolve_output(SYSTEM_DEFAULT, "", FakeCatalog([SPEAKERS, HEADSET], SPEAKERS))
+    assert (choice.key, choice.name, choice.notice) == (SYSTEM_DEFAULT, "Speakers", "")
+
+
+def test_a_connected_saved_device_is_used():
+    choice = resolve_output("bb02", "USB headset", FakeCatalog([SPEAKERS, HEADSET], SPEAKERS))
+    assert (choice.key, choice.name, choice.notice) == ("bb02", "USB headset", "")
+
+
+def test_a_missing_saved_device_uses_the_default_for_now_and_says_so():
+    """The run falls back; the preference is the caller's and is kept."""
+    choice = resolve_output("bb02", "USB headset", FakeCatalog([SPEAKERS], SPEAKERS))
+    assert choice.key == SYSTEM_DEFAULT and choice.name == "Speakers"
+    assert "USB headset is not connected" in choice.notice
+    assert "(Speakers)" in choice.notice and "Your choice is kept" in choice.notice
+
+
+def test_a_machine_with_no_output_resolves_to_nothing_named():
+    choice = resolve_output(SYSTEM_DEFAULT, "", FakeCatalog([], None))
+    assert choice == resolve_output(SYSTEM_DEFAULT, "", FakeCatalog([], None))
+    assert choice.name == ""
+
+
+def test_selecting_another_device_releases_the_open_sink_and_does_not_restart():
+    out, sink = started()
+    out.resume()
+    assert out.select_device("bb02", "USB headset") is True
+    assert sink.calls[-2:] == ["reset", "stop"]
+    assert not out.running and out.failure == ""
+    assert (out.device_key, out.device_name) == ("bb02", "USB headset")
+    assert out.select_device("bb02", "USB headset") is False
+
+
+def test_the_default_factory_opens_the_selected_device(monkeypatch):
+    import flightdvr.audio_device as audio_device
+
+    opened = []
+
+    def factory(fmt, key, name):
+        opened.append((key, name))
+        return FakeSink()
+
+    monkeypatch.setattr(audio_device, "qt_sink_factory", factory)
+    out = AudioOutput()
+    out.select_device("bb02", "USB headset")
+    out.start()
+    assert opened == [("bb02", "USB headset")]
+
+
+def test_a_lost_device_stops_output_and_stays_stopped():
+    out, sink = started()
+    out.resume()
+    out.device_lost("USB headset was disconnected")
+    assert out.failure == "USB headset was disconnected"
+    assert not out.running and sink.calls[-1] == "stop"
+    out.resume()                                   # nothing resumes by itself
+    assert not out.running
+
+
+def test_losing_a_device_that_is_not_open_changes_nothing():
+    out = AudioOutput(sink_factory=lambda: FakeSink())
+    out.device_lost("USB headset was disconnected")
+    assert out.failure == ""
