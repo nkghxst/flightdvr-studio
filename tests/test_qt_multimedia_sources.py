@@ -102,6 +102,83 @@ def test_framework_source_resolves_only_an_exact_record_path(tmp_path, monkeypat
         qt.spec_receipt([(framework, "../outside", "BINARY")], inputs)
 
 
+def test_observed_macos_framework_toc_binds_binary_and_separate_links(tmp_path):
+    framework = "PySide6/Qt/lib/QtMultimedia.framework"
+    binary_name = f"{framework}/Versions/A/QtMultimedia"
+    binary = tmp_path / "QtMultimedia"
+    binary.write_bytes(b"recorded framework binary")
+    sha = hashlib.sha256(binary.read_bytes()).hexdigest()
+    inputs = {"platform": "macos", "source_complete": False, "release_ready": False,
+              "files": [{"package": "PySide6-Addons", "file": binary_name,
+                         "sha256": sha, "wheel_sha256": "a" * 64}]}
+    # These are the exact BINARY/SYMLINK shapes printed by CI diagnostic
+    # 37837725044. Neither framework alias exists in the installed wheel.
+    entries = [
+        (binary_name, str(binary), "BINARY"),
+        ("QtMultimedia", binary_name, "SYMLINK"),
+        (f"{framework}/QtMultimedia", "Versions/Current/QtMultimedia", "SYMLINK"),
+        (f"{framework}/Resources", "Versions/Current/Resources", "SYMLINK"),
+        (f"{framework}/Versions/Current", "A", "SYMLINK"),
+    ]
+    collection = qt.spec_receipt(entries, inputs)
+    assert [item["path"] for item in collection["files"]] == [binary_name]
+    assert {(item["path"], item["target"]) for item in collection["links"]} == {
+        (dest, source) for dest, source, kind in entries if kind == "SYMLINK"}
+    with pytest.raises(ValueError, match="unsafe multimedia symlink target"):
+        qt.spec_receipt(entries[:-1] + [(entries[-1][0], "../A", "SYMLINK")], inputs)
+    with pytest.raises(ValueError, match="unsafe multimedia collection path"):
+        qt.spec_receipt(entries + [("../QtMultimedia", "A", "SYMLINK")], inputs)
+
+
+def test_macos_framework_links_require_exact_targets_and_bound_content(tmp_path):
+    bundle = tmp_path / "app"
+    root = bundle / "Contents" / "Frameworks"
+    framework = "PySide6/Qt/lib/QtMultimedia.framework"
+    binary_name = f"{framework}/Versions/A/QtMultimedia"
+    binary = root / binary_name
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"\xcf\xfa\xed\xfe" + struct.pack("<I", 0x0100000c))
+    info_name = f"{framework}/Versions/A/Resources/Info.plist"
+    info = root / info_name
+    info.parent.mkdir()
+    info.write_bytes(b"plist")
+    links = [
+        ("QtMultimedia", binary_name),
+        (f"{framework}/QtMultimedia", "Versions/Current/QtMultimedia"),
+        (f"{framework}/Resources", "Versions/Current/Resources"),
+        (f"{framework}/Versions/Current", "A"),
+    ]
+    try:
+        for name, target in links:
+            path = root / name
+            path.symlink_to(target, target_is_directory=name.endswith(("Resources", "Current")))
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable on this host: {exc}")
+    sha = hashlib.sha256(binary.read_bytes()).hexdigest()
+    info_sha = hashlib.sha256(info.read_bytes()).hexdigest()
+    wheel = "a" * 64
+    collection = {"platform": "macos", "files": [
+        {"path": binary_name, "kind": "BINARY", "source_sha256": sha,
+         "wheel_package": "PySide6-Addons", "wheel_file": binary_name, "wheel_sha256": wheel},
+        {"path": info_name, "kind": "DATA", "source_sha256": info_sha,
+         "wheel_package": "PySide6-Addons", "wheel_file": info_name, "wheel_sha256": wheel},
+    ], "links": [{"path": name, "target": target} for name, target in links]}
+    inputs = {"platform": "macos", "release_ready": False,
+              "wheels": [{"package": "PySide6-Addons", "sha256": wheel}],
+              "files": [{"package": "PySide6-Addons", "file": binary_name, "sha256": sha},
+                        {"package": "PySide6-Addons", "file": info_name, "sha256": info_sha}]}
+    report = {"ffmpeg_libraries": []}
+    failures = scanner.binding_check(bundle, report, inputs, collection)
+    assert not any("symlink" in failure or "wheel collection origin" in failure
+                   or "architecture" in failure for failure in failures)
+    assert len(report["selected_links"]) == 4
+    alias = root / "QtMultimedia"
+    alias.unlink()
+    alias.symlink_to(info_name)
+    failures = scanner.binding_check(bundle, {"ffmpeg_libraries": []}, inputs, collection)
+    assert any("multimedia symlink target changed" in failure for failure in failures)
+
+
 def test_present_tag_and_fake_complete_manifest_cannot_cross_provenance_gate(tmp_path):
     manifest = {"schema_version": 1, "source_complete": True, "release_ready": True,
                 "unresolved": [], "delivery": {"approved": True, "format": "single-companion"}}

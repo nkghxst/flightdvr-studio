@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import re
 import struct
 import sys
@@ -147,14 +148,20 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
         return ["invalid macOS pre-sign inventory"]
     pre_files = {item["path"]: item for item in pre_sign.get("selected_files", [])} if pre_sign else {}
     selected = {item["path"]: dict(item) for item in collection.get("files", [])}
+    selected_links = {item["path"]: dict(item) for item in collection.get("links", [])}
     if len(selected) != len(collection.get("files", [])) or not selected:
         failures.append("empty or duplicate PyInstaller multimedia selection")
+    if len(selected_links) != len(collection.get("links", [])) or set(selected) & set(selected_links):
+        failures.append("duplicate or overlapping PyInstaller multimedia link selection")
     if pre_sign is not None and set(pre_files) != set(selected):
         failures.append("pre-sign multimedia path set differs from collection")
+    if pre_sign is not None and {x["path"] for x in pre_sign.get("selected_links", [])} != set(selected_links):
+        failures.append("pre-sign multimedia link set differs from collection")
     wheel_hashes = {w["package"]: w["sha256"] for w in inputs.get("wheels", [])}
     wheel_files = {(x["package"], x["file"], x["sha256"])
                    for x in inputs.get("files", [])}
     actual_paths = {}
+    actual_links = {}
     for path in bundle.rglob("*"):
         if not (path.is_file() or path.is_symlink()) or not (
                 ("multimedia" in str(path).lower() and path.suffix.lower() not in (".json", ".md"))
@@ -163,9 +170,11 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
         relative = path.relative_to(bundle).as_posix()
         if path.is_symlink():
             resolved = path.resolve()
-            if not resolved.is_relative_to(bundle.resolve()) or not resolved.is_file():
+            if not resolved.is_relative_to(bundle.resolve()) or not resolved.exists():
                 failures.append(f"broken or escaping multimedia symlink: {relative}")
                 continue
+            actual_links[relative] = path
+            continue
         actual_paths[relative] = path
     missing_selected = []
     for path, item in selected.items():
@@ -186,7 +195,7 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
         item["final_sha256"] = sha256(payload)
         item["final_bytes"] = payload.stat().st_size
         item["final_architecture"] = architecture(payload.read_bytes()[:4096])
-        if expected_arch not in item["final_architecture"]:
+        if item.get("kind", "BINARY") != "DATA" and expected_arch not in item["final_architecture"]:
             failures.append(f"wrong or unreadable architecture: {relative}")
         if ((item["wheel_package"], item["wheel_file"], item["source_sha256"]) not in wheel_files
                 or wheel_hashes.get(item["wheel_package"]) != item["wheel_sha256"]):
@@ -228,6 +237,28 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
     bound_paths = {item.get("final_path") for item in selected.values()}
     for relative in actual_paths.keys() - bound_paths:
         failures.append(f"shipped multimedia file lacks wheel collection origin: {relative}")
+    bound_files = {path.resolve() for path in actual_paths.values()
+                   if path.relative_to(bundle).as_posix() in bound_paths}
+    bound_link_paths = set()
+    final_links = []
+    for path, item in selected_links.items():
+        names = {prefix + path for prefix in ("", "_internal/", "Contents/Frameworks/",
+                                               "Contents/MacOS/_internal/")}
+        candidates = [(n, p) for n, p in actual_links.items() if n in names]
+        if len(candidates) != 1:
+            failures.append(f"selected multimedia symlink missing/ambiguous: {path}")
+            continue
+        relative, link = candidates[0]
+        bound_link_paths.add(relative)
+        resolved = link.resolve()
+        if os.readlink(link).replace("\\", "/") != item["target"]:
+            failures.append(f"multimedia symlink target changed: {relative}")
+        if not (resolved in bound_files if resolved.is_file() else
+                resolved.is_dir() and any(p.is_relative_to(resolved) for p in bound_files)):
+            failures.append(f"multimedia symlink lacks selected wheel content: {relative}")
+        final_links.append(dict(item, final_path=relative))
+    for relative in actual_links.keys() - bound_link_paths:
+        failures.append(f"shipped multimedia symlink lacks collection origin: {relative}")
     found_families = {family(p.name) for p in actual_paths.values()}
     missing = EXPECTED - found_families
     if missing:
@@ -244,6 +275,7 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
     report["platform"] = platform
     report["wheel_inputs"] = inputs["wheels"]
     report["selected_files"] = sorted(selected.values(), key=lambda x: x["path"])
+    report["selected_links"] = sorted(final_links, key=lambda x: x["path"])
     report["source_complete"] = False
     report["release_ready"] = False
     return failures

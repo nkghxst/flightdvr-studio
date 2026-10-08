@@ -86,27 +86,40 @@ def match_inputs(report: dict, lock: dict) -> dict:
 
 def multimedia_file(name: str) -> bool:
     p = PurePosixPath(name.replace("\\", "/"))
-    return ("multimedia" in [part.lower() for part in p.parts]
+    return (any("multimedia" in part.lower() for part in p.parts)
             or "multimedia" in p.name.lower() or "ffmpegstub" in p.name.lower()
             or bool(re.match(r"^(lib)?(avcodec|avformat|avutil|swresample|swscale)[-.]", p.name, re.I)))
 
 
 def spec_receipt(entries: list[tuple], inputs: dict) -> dict:
-    """Bind Analysis' selected multimedia files to installed wheel RECORD bytes."""
+    """Bind selected file bytes and record, separately, Analysis link topology."""
     if inputs.get("source_complete") is not False or inputs.get("release_ready") is not False:
         raise ValueError("unexpected input receipt readiness")
     by_hash = {}
     for item in inputs["files"]:
         by_hash.setdefault(item["sha256"], []).append(item)
     selected = []
+    links = []
     names = set()
-    for dest, source, _kind in entries:
+    for dest, source, kind in entries:
         if not multimedia_file(str(dest)):
             continue
         relative = str(dest).replace("\\", "/")
+        destination = PurePosixPath(relative)
+        if (not destination.parts or destination.is_absolute()
+                or ".." in destination.parts or ":" in destination.parts[0]):
+            raise ValueError(f"unsafe multimedia collection path: {relative}")
         if relative in names:
             raise ValueError(f"duplicate multimedia collection path: {relative}")
         names.add(relative)
+        if kind == "SYMLINK":
+            target = str(source).replace("\\", "/")
+            link = PurePosixPath(target)
+            if (not link.parts or link.is_absolute() or ".." in link.parts
+                    or ":" in link.parts[0]):
+                raise ValueError(f"unsafe multimedia symlink target: {relative}")
+            links.append(dict(path=relative, target=target))
+            continue
         source_path = Path(source)
         if not source_path.is_file():
             # PyInstaller names Qt libraries relative to site-packages; a
@@ -156,12 +169,14 @@ def spec_receipt(entries: list[tuple], inputs: dict) -> dict:
             raise ValueError(f"ambiguous multimedia wheel origin: {relative}")
         origin = sorted(matches, key=lambda x: x["file"])[0]
         selected.append(dict(path=relative, source_sha256=sha,
+                             kind=kind,
                              wheel_package=origin["package"], wheel_file=origin["file"],
                              wheel_sha256=origin["wheel_sha256"]))
     if not selected:
         raise ValueError("no multimedia files selected by PyInstaller")
     return dict(schema_version=1, platform=inputs["platform"],
                 files=sorted(selected, key=lambda x: x["path"]),
+                links=sorted(links, key=lambda x: x["path"]),
                 source_complete=False, release_ready=False,
                 transformation="Analysis source bytes; final package bytes checked separately")
 

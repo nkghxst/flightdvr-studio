@@ -168,26 +168,6 @@ from collect_qt_multimedia_sources import write_spec_receipt
 
 inputs_path = ROOT / "build" / "qt-inputs.json"
 collection_path = ROOT / "build" / "qt-collection.json"
-if os.environ.get("QT_LAYOUT_DIAGNOSTIC") == "1":
-    from hashlib import sha256
-    from importlib import metadata
-
-    for entry in a.binaries + a.datas:
-        if "QtMultimedia.framework" in str(entry[0]) or "QtMultimedia.framework" in str(entry[1]):
-            print(f"QT_DIAG_TOC {entry!r}", flush=True)
-    dist = metadata.distribution("PySide6-Addons")
-    print(f"QT_DIAG_ROOT {dist.locate_file('')}", flush=True)
-    candidates = {str(item) for item in dist.files or []
-                  if "QtMultimedia.framework" in str(item)}
-    candidates.update({"PySide6/Qt/lib/QtMultimedia.framework/QtMultimedia",
-                       "PySide6/Qt/lib/QtMultimedia.framework/Versions/Current",
-                       "PySide6/Qt/lib/QtMultimedia.framework/Versions/A/QtMultimedia"})
-    for name in sorted(candidates):
-        path = Path(dist.locate_file(name))
-        resolved = path.resolve()
-        hash_value = sha256(resolved.read_bytes()).hexdigest() if resolved.is_file() else "not_file"
-        print(f"QT_DIAG_PATH {name} exists={path.exists()} symlink={path.is_symlink()} "
-              f"resolved={resolved} sha256={hash_value}", flush=True)
 write_spec_receipt(a.binaries + a.datas, inputs_path, collection_path)
 a.datas.append(("qt-multimedia-source-reference.json", str(collection_path), "DATA"))
 a.datas.append(("qt-multimedia-sources.json", str(PACKAGING / "qt-multimedia-sources.json"), "DATA"))
