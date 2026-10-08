@@ -2944,8 +2944,15 @@ def test_a_level_that_does_not_apply_cannot_be_dragged(window, app, tmp_path,
     window._sync_music_panel()
     assert window._planned_music(target).mode is mode
     panel = window.music_panel
+
+    def own(widget):
+        """Its own setting. The band around both may be closed, which turns
+        every control off whatever it was told; that is not what is tested."""
+        return not widget.testAttribute(Qt.WidgetAttribute.WA_ForceDisabled)
+
     for slider, box in ((panel.music_slider, panel.music_level),
                         (panel.dvr_slider, panel.dvr_level)):
+        assert own(slider) == own(box), (mode, box)
         assert slider.isEnabled() == box.isEnabled(), (mode, box)
-    assert panel.dvr_slider.isEnabled() == (mode is AudioMode.MIX)
-    assert panel.music_slider.isEnabled() == (mode is not AudioMode.ORIGINAL)
+    assert own(panel.dvr_slider) == (mode is AudioMode.MIX)
+    assert own(panel.music_slider) == (mode is not AudioMode.ORIGINAL)
