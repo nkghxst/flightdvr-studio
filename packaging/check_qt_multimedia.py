@@ -158,7 +158,7 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
     for path in bundle.rglob("*"):
         if not (path.is_file() or path.is_symlink()) or not (
                 ("multimedia" in str(path).lower() and path.suffix.lower() not in (".json", ".md"))
-                or family(path.name)):
+                or "ffmpegstub" in path.name.lower() or family(path.name)):
             continue
         relative = path.relative_to(bundle).as_posix()
         if path.is_symlink():
@@ -167,9 +167,17 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
                 failures.append(f"broken or escaping multimedia symlink: {relative}")
                 continue
         actual_paths[relative] = path
+    missing_selected = []
     for path, item in selected.items():
-        # macOS BUNDLE relocates _internal files into Contents/Frameworks.
-        candidates = [(n, p) for n, p in actual_paths.items() if n == path or n.endswith("/" + path)]
+        # PyInstaller names Windows/Linux COLLECT entries relative to _internal;
+        # macOS BUNDLE places them in Contents/Frameworks. Match those exact
+        # roots, not any same-basename suffix elsewhere in the bundle.
+        names = {prefix + path for prefix in ("", "_internal/", "Contents/Frameworks/",
+                                               "Contents/MacOS/_internal/")}
+        candidates = [(n, p) for n, p in actual_paths.items() if n in names]
+        if not candidates:
+            missing_selected.append((path, item))
+            continue
         if len(candidates) != 1:
             failures.append(f"selected multimedia path missing/ambiguous: {path}")
             continue
@@ -198,6 +206,25 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
             prior = pre_files.get(path)
             if prior is None or prior.get("final_sha256") != item["source_sha256"]:
                 failures.append(f"missing or mismatched pre-sign receipt: {relative}")
+    for path, item in missing_selected:
+        # PyInstaller may coalesce two selected destinations that carry the
+        # same wheel file bytes. Name the surviving path explicitly; do not
+        # turn an absent library or a different wheel file into a pass.
+        matches = [other for other in selected.values()
+                   if other is not item and other.get("final_path")
+                   and other["wheel_package"] == item["wheel_package"]
+                   and other["wheel_file"] == item["wheel_file"]
+                   and other["source_sha256"] == item["source_sha256"]
+                   and other["final_sha256"] == item["source_sha256"]]
+        if len(matches) != 1:
+            failures.append(f"selected multimedia path missing/ambiguous: {path}")
+            continue
+        survivor = matches[0]
+        item.update(final_path=survivor["final_path"],
+                    final_sha256=survivor["final_sha256"],
+                    final_bytes=survivor["final_bytes"],
+                    final_architecture=survivor["final_architecture"],
+                    coalesced_to=survivor["path"])
     bound_paths = {item.get("final_path") for item in selected.values()}
     for relative in actual_paths.keys() - bound_paths:
         failures.append(f"shipped multimedia file lacks wheel collection origin: {relative}")

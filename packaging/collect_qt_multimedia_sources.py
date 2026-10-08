@@ -109,15 +109,31 @@ def spec_receipt(entries: list[tuple], inputs: dict) -> dict:
         names.add(relative)
         source_path = Path(source)
         if not source_path.is_file():
-            # PyInstaller sometimes names a macOS framework source relative to
-            # site-packages. Resolve only an exact wheel RECORD name; never
-            # interpret an arbitrary relative path against the checkout.
-            wheel_matches = [x for x in inputs["files"]
-                             if x["file"] == str(source).replace("\\", "/")]
-            if len(wheel_matches) != 1:
+            # PyInstaller names Qt libraries relative to site-packages; a
+            # macOS framework may use a top-level symlink alias. Resolve the
+            # entry within its installed distribution and accept it only if
+            # the target is an exact, hashed wheel RECORD file.
+            name = PurePosixPath(str(source).replace("\\", "/"))
+            if (not name.parts or name.is_absolute() or ".." in name.parts
+                    or ":" in name.parts[0]):
+                raise ValueError(f"unsafe multimedia source path: {relative}")
+            wheel_matches = []
+            for origin in inputs["files"]:
+                dist = metadata.distribution(origin["package"])
+                root = Path(dist.locate_file("")).resolve()
+                alias = Path(dist.locate_file(str(name)))
+                target = Path(dist.locate_file(origin["file"]))
+                try:
+                    resolved = alias.resolve(strict=True)
+                    recorded = target.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    continue
+                if (resolved.is_file() and resolved.is_relative_to(root)
+                        and recorded.is_relative_to(root) and resolved == recorded):
+                    wheel_matches.append((alias, origin))
+            if not wheel_matches or len({x[1]["package"] for x in wheel_matches}) != 1:
                 raise ValueError(f"unresolved multimedia framework source: {relative}")
-            origin = wheel_matches[0]
-            source_path = Path(metadata.distribution(origin["package"]).locate_file(origin["file"]))
+            source_path = wheel_matches[0][0]
         sha = digest(source_path)
         matches = by_hash.get(sha, [])
         if not matches:

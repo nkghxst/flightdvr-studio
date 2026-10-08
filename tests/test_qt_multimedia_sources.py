@@ -73,16 +73,24 @@ def test_framework_source_resolves_only_an_exact_record_path(tmp_path, monkeypat
     inputs = {"platform": platform, "source_complete": False, "release_ready": False,
               "files": [{"package": "PySide6-Addons", "file": framework,
                          "sha256": sha, "wheel_sha256": "a" * 64}]}
+    alias = framework.replace("/Versions/A/QtMultimedia", "/QtMultimedia")
 
     class Wheel:
         def locate_file(self, item):
+            if item == alias:
+                return source  # stand-in for a framework symlink to the RECORD target
             return tmp_path / item
 
     monkeypatch.setattr(qt.metadata, "distribution", lambda package: Wheel())
     entries = [(framework, framework, "BINARY")]
     assert qt.spec_receipt(entries, inputs)["files"][0]["source_sha256"] == sha
+    if alias != framework:
+        assert qt.spec_receipt([(alias, alias, "BINARY")], inputs)["files"][0][
+            "source_sha256"] == sha
     with pytest.raises(ValueError, match="unresolved multimedia framework"):
         qt.spec_receipt([(framework, "other/QtMultimedia", "BINARY")], inputs)
+    with pytest.raises(ValueError, match="unsafe multimedia source path"):
+        qt.spec_receipt([(framework, "../outside", "BINARY")], inputs)
 
 
 def test_present_tag_and_fake_complete_manifest_cannot_cross_provenance_gate(tmp_path):
@@ -229,6 +237,50 @@ def test_macos_signing_requires_a_matching_pre_sign_wheel_receipt(tmp_path):
     unsigned, _ = scanner.check(bundle)
     assert any("unreconciled" in failure
                for failure in scanner.binding_check(bundle, unsigned, inputs, collection))
+
+
+def test_linux_collection_coalesces_only_identical_wheel_destinations(tmp_path):
+    bundle = tmp_path / "bundle"
+    internal = bundle / "_internal"
+    payload = b"\x7fELF\x02\x01" + b"\0" * 12 + struct.pack("<H", 62)
+    payload += b"\0LGPL version 2.1 or later\0FFmpeg n7.1.5/lib\0"
+    sha = hashlib.sha256(payload).hexdigest()
+    files = []
+    entries = []
+
+    def add(dest: str, wheel_file: str, present: bool = True):
+        if present:
+            path = internal / dest
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        if not any(x["file"] == wheel_file for x in files):
+            files.append({"package": "PySide6-Addons", "file": wheel_file, "sha256": sha})
+        entries.append({"path": dest, "source_sha256": sha,
+                        "wheel_package": "PySide6-Addons", "wheel_file": wheel_file,
+                        "wheel_sha256": "a" * 64})
+
+    for name in ("libavcodec.so.61", "libavformat.so.61", "libavutil.so.59",
+                 "libswresample.so.5", "libswscale.so.8"):
+        add(name, "PySide6/Qt/lib/" + name)
+    add("PySide6/Qt/lib/libavcodec.so.61", "PySide6/Qt/lib/libavcodec.so.61", False)
+    add("libQt6FFmpegStub-ssl.so.3", "PySide6/Qt/lib/libQt6FFmpegStub-ssl.so.3")
+    add("PySide6/Qt/lib/libQt6FFmpegStub-ssl.so.3",
+        "PySide6/Qt/lib/libQt6FFmpegStub-ssl.so.3", False)
+    add("PySide6/Qt/plugins/multimedia/libffmpegmediaplugin.so",
+        "PySide6/Qt/plugins/multimedia/libffmpegmediaplugin.so")
+    inputs = {"platform": "linux", "release_ready": False,
+              "wheels": [{"package": "PySide6-Addons", "sha256": "a" * 64}], "files": files}
+    collection = {"platform": "linux", "files": entries}
+    report, failures = scanner.check(bundle)
+    assert failures == []
+    assert scanner.binding_check(bundle, report, inputs, collection) == []
+    coalesced = [x for x in report["selected_files"] if x.get("coalesced_to")]
+    assert {x["path"] for x in coalesced} == {
+        "PySide6/Qt/lib/libavcodec.so.61", "PySide6/Qt/lib/libQt6FFmpegStub-ssl.so.3"}
+    (internal / "libavcodec.so.61").unlink()
+    missing, _ = scanner.check(bundle)
+    assert any("selected multimedia path missing" in failure
+               for failure in scanner.binding_check(bundle, missing, inputs, collection))
 
 
 def test_selector_rejects_current_manifest_even_if_asset_bytes_exist(tmp_path):
