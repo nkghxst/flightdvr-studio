@@ -2935,24 +2935,29 @@ def test_export_level_sliders_are_the_numbers_dragged(window, app):
         assert slider.value() == 65
 
 
-@pytest.mark.parametrize("mode", [AudioMode.MIX, AudioMode.REPLACE,
-                                  AudioMode.ORIGINAL])
+@pytest.mark.parametrize("mode, music, recording", [
+    (AudioMode.MIX, True, True),
+    (AudioMode.REPLACE, True, False),
+    (AudioMode.ORIGINAL, False, False),
+])
 def test_a_level_that_does_not_apply_cannot_be_dragged(window, app, tmp_path,
-                                                       mode):
-    """The panel's own rule decides; the sliders follow it with their boxes."""
+                                                       mode, music, recording):
+    """The panel's own rule decides; the sliders follow it with their boxes.
+
+    With the Music band open: a checkable group box disables everything in
+    it while it is unchecked, so with the band closed every level reads
+    disabled whatever the rule says (measured, probe-enabled/ evidence),
+    and asserting the rule there tested the band, not the levels."""
     target = _with_choice(window, app, tmp_path, mode)
+    window.preview_view.music_band.setChecked(True)
+    app.processEvents()
     window._sync_music_panel()
     assert window._planned_music(target).mode is mode
     panel = window.music_panel
-
-    def own(widget):
-        """Its own setting. The band around both may be closed, which turns
-        every control off whatever it was told; that is not what is tested."""
-        return not widget.testAttribute(Qt.WidgetAttribute.WA_ForceDisabled)
-
-    for slider, box in ((panel.music_slider, panel.music_level),
-                        (panel.dvr_slider, panel.dvr_level)):
-        assert own(slider) == own(box), (mode, box)
-        assert slider.isEnabled() == box.isEnabled(), (mode, box)
-    assert own(panel.dvr_slider) == (mode is AudioMode.MIX)
-    assert own(panel.music_slider) == (mode is not AudioMode.ORIGINAL)
+    assert panel.music_level.isEnabled() is music
+    assert panel.music_slider.isEnabled() is music
+    assert panel.dvr_level.isEnabled() is recording
+    assert panel.dvr_slider.isEnabled() is recording
+    window.preview_view.music_band.setChecked(False)
+    app.processEvents()
+    assert not panel.music_slider.isEnabled(), "a closed band leaves nothing draggable"
