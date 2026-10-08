@@ -48,6 +48,44 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
+  qt-layout-diagnostic:
+    name: Qt macOS framework layout diagnostic
+    if: >-
+      github.event_name == 'push' &&
+      contains(github.event.head_commit.message, '[qt-layout-diagnostic]')
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Reproduce failing Analysis and record wheel layout
+        shell: bash
+        env:
+          QT_LAYOUT_DIAGNOSTIC: "1"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-deps --force-reinstall --require-hashes --report "${{ runner.temp }}/qt-pip-report.json" -r packaging/requirements-qt-build.txt
+          pip install -r requirements.txt pyinstaller
+          python packaging/collect_qt_multimedia_sources.py inputs "${{ runner.temp }}/qt-pip-report.json" build/qt-inputs.json
+          set +e
+          python -m PyInstaller packaging/flightdvr_studio.spec --noconfirm > build/qt-layout-diagnostic.log 2>&1
+          result=$?
+          set -e
+          cat build/qt-layout-diagnostic.log
+          test "$result" -ne 0
+          grep -q 'QT_DIAG_TOC' build/qt-layout-diagnostic.log
+          grep -q 'QT_DIAG_PATH' build/qt-layout-diagnostic.log
+          grep -q 'unresolved multimedia framework source' build/qt-layout-diagnostic.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qt-layout-diagnostic
+          path: |
+            build/qt-inputs.json
+            build/qt-layout-diagnostic.log
+          if-no-files-found: warn
+
   test:
     name: Tests on ${{ matrix.os }}
     # The pull_request trigger exists for forks only. A pull request from a
@@ -55,8 +93,10 @@ jobs:
     # so skip the duplicate. Every packaging job needs this one, so they skip
     # with it rather than each repeating the condition.
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name != github.repository
+      (github.event_name != 'push' ||
+       !contains(github.event.head_commit.message, '[qt-layout-diagnostic]')) &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
