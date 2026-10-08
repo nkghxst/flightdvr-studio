@@ -155,6 +155,60 @@ class RangeNameEdit(QLineEdit):
         self.focus_changed.emit(False)
 
 
+class _BandGrip(QWidget):
+    """A handle for the Music band's depth, by mouse or keyboard."""
+
+    requested = Signal(int)      # the body height asked for, in pixels
+    STEP = 24
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFixedSize(22, 22)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Music band height")
+        self.setToolTip("Drag up or down to make Music taller or shorter "
+                        "(or focus it and use Up and Down).")
+        self.body = lambda: None
+        self._press = None
+
+    def _height(self) -> int:
+        body = self.body()
+        return body.height() if body is not None else 0
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        self._press = (event.globalPosition().y(), self._height())
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._press is None:
+            return
+        y, height = self._press
+        # Up makes it taller: the band grows into the room above it.
+        self.requested.emit(int(height + (y - event.globalPosition().y())))
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._press = None
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            delta = self.STEP if event.key() == Qt.Key.Key_Up else -self.STEP
+            self.requested.emit(self._height() + delta)
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        from PySide6.QtGui import QPainter
+        painter = QPainter(self)
+        colour = self.palette().color(self.foregroundRole())
+        painter.setPen(colour)
+        middle = self.height() // 2
+        for offset in (-4, 0, 4):
+            painter.drawLine(5, middle + offset, self.width() - 5, middle + offset)
+        if self.hasFocus():
+            painter.drawRect(0, 0, self.width() - 1, self.height() - 1)
+        painter.end()
+
+
 class PreviewView(QObject):
     """Build the two preview boxes and expose only user-action signals.
 
@@ -182,6 +236,7 @@ class PreviewView(QObject):
     # window at once, and the window needs the size it had before that.
     music_band_changing = Signal(bool)
     music_focus_toggled = Signal(bool)
+    music_depth_requested = Signal(int)
     listen_toggled = Signal(bool)
     listen_level_changed = Signal(int)
     listening_changed = Signal(str)
@@ -861,6 +916,14 @@ class PreviewView(QObject):
         self.focus_button.toggled.connect(
             lambda on: self.music_focus_toggled.emit(bool(on)))
         chooser.addWidget(self.focus_button)
+        # Taller or shorter, with the picture and the export settings still
+        # there: drag this up or down, or focus it and use Up and Down. In the
+        # track row rather than a row of its own, so it costs no height.
+        self.band_grip = _BandGrip()
+        self.band_grip.requested.connect(
+            lambda height: self.music_depth_requested.emit(int(height)))
+        self.band_grip.body = lambda: self.music_body
+        chooser.addWidget(self.band_grip)
         body.addLayout(chooser)
 
         # Said plainly rather than left to be discovered by pressing play. The
@@ -952,6 +1015,12 @@ class PreviewView(QObject):
         """Whether Classic's band may grow past its shallow depth."""
         self._classic_reach = 16777215 if deep else CLASSIC_MUSIC_MAXIMUM
         self.restore_classic_reach()
+
+    def set_classic_depth(self, height: int) -> None:
+        """A depth the person chose for Classic's band: exactly this tall."""
+        self._classic_reach = int(height)
+        self.music_body.setMinimumHeight(int(height))
+        self.music_body.setMaximumHeight(int(height))
 
     def set_music_title(self, text: str) -> None:
         """Say which output the band edits, in its own heading."""

@@ -227,14 +227,20 @@ class QtDeviceCatalog:
 class OutputChoice:
     """What this run uses, and what to say about it once.
 
-    `key` is what the sink opens (empty: the system default); `name` is the
-    device that actually is, so "System default" can always say which one it
-    resolved to. `notice` is set when a saved choice could not be honoured.
+    `key` and `name` are the device the sink actually opens — for System
+    default too, resolved now to the device that is the default *now*. The
+    sink opens exactly that one from then on: a different default appearing
+    later is not followed silently, and losing this device stops the sound
+    like losing any other. Empty only when there is no output at all.
+    `preference` is the saved choice (empty: System default), which is what
+    the menu shows checked. `notice` is set when a saved choice could not be
+    honoured.
     """
 
     key: str
     name: str
     notice: str = ""
+    preference: str = SYSTEM_DEFAULT
 
 
 def resolve_output_device(saved_key: str, saved_name: str,
@@ -246,15 +252,16 @@ def resolve_output_device(saved_key: str, saved_name: str,
     device comes back. Nothing here writes anything.
     """
     default = catalog.default()
+    default_key = default.key if default else SYSTEM_DEFAULT
     default_name = default.name if default else ""
     if not saved_key:
-        return OutputChoice(SYSTEM_DEFAULT, default_name)
+        return OutputChoice(default_key, default_name)
     found = next((one for one in catalog.outputs() if one.key == saved_key), None)
     if found is not None:
-        return OutputChoice(found.key, found.name)
+        return OutputChoice(found.key, found.name, preference=saved_key)
     now = f" ({default_name})" if default_name else ""
     return OutputChoice(
-        SYSTEM_DEFAULT, default_name,
+        default_key, default_name, preference=saved_key,
         notice=(f"{saved_name or 'The chosen output'} is not connected, so the "
                 f"system default{now} is used for now. Your choice is kept."))
 

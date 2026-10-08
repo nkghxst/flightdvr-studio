@@ -738,26 +738,30 @@ HEADSET = OutputDevice("bb02", "USB headset")
 
 def test_the_system_default_is_named_by_what_it_resolves_to():
     choice = resolve_output_device(SYSTEM_DEFAULT, "", FakeCatalog([SPEAKERS, HEADSET], SPEAKERS))
-    assert (choice.key, choice.name, choice.notice) == (SYSTEM_DEFAULT, "Speakers", "")
+    # The device it actually is, not "whatever the default is when the sink
+    # next opens": a later default must not be followed silently.
+    assert (choice.key, choice.name, choice.notice) == ("aa01", "Speakers", "")
+    assert choice.preference == SYSTEM_DEFAULT
 
 
 def test_a_connected_saved_device_is_used():
     choice = resolve_output_device("bb02", "USB headset", FakeCatalog([SPEAKERS, HEADSET], SPEAKERS))
     assert (choice.key, choice.name, choice.notice) == ("bb02", "USB headset", "")
+    assert choice.preference == "bb02"
 
 
 def test_a_missing_saved_device_uses_the_default_for_now_and_says_so():
     """The run falls back; the preference is the caller's and is kept."""
     choice = resolve_output_device("bb02", "USB headset", FakeCatalog([SPEAKERS], SPEAKERS))
-    assert choice.key == SYSTEM_DEFAULT and choice.name == "Speakers"
+    assert choice.key == "aa01" and choice.name == "Speakers"
+    assert choice.preference == "bb02", "the saved choice is kept"
     assert "USB headset is not connected" in choice.notice
     assert "(Speakers)" in choice.notice and "Your choice is kept" in choice.notice
 
 
 def test_a_machine_with_no_output_resolves_to_nothing_named():
     choice = resolve_output_device(SYSTEM_DEFAULT, "", FakeCatalog([], None))
-    assert choice == resolve_output_device(SYSTEM_DEFAULT, "", FakeCatalog([], None))
-    assert choice.name == ""
+    assert (choice.key, choice.name) == (SYSTEM_DEFAULT, "")
 
 
 def test_selecting_another_device_releases_the_open_sink_and_does_not_restart():

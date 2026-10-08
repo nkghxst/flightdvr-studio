@@ -51,7 +51,7 @@ Select the intended output, then open **Music**. The sound modes describe the ex
 | **Replace with music** | Use your chosen music instead of the recording's sound. |
 | **Mix music with original** | Combine the chosen music and recording sound; adjust their levels separately. |
 
-Choose a track and wait for it to be read. The **Music time** lane represents the song; its passage handles choose the section you want. The **Output time** lane shows how that choice occupies the finished output. Read the passage times as you move the handles. For precise values, use the numeric controls, including **More…** in compact layouts. Finish a typed edit with Enter, Tab or by leaving the field; for example, type `0.5` into Fade in and commit it.
+Choose a track and wait for it to be read. The **Music time** lane represents the song; its passage handles choose the section you want, and dragging inside the shaded passage (or selecting it with Tab and using the arrow keys) moves the whole passage along the song without changing its length. The **Output time** lane shows how that choice occupies the finished output. Read the passage times as you move the handles. For precise values, use the numeric controls, including **More…** in compact layouts. Finish a typed edit with Enter, Tab or by leaving the field; for example, type `0.5` into Fade in and commit it.
 
 If the selected passage is shorter than the output, choose **Loop** to repeat that passage or **Play once** to let the music end. In Mix mode the recording sound can continue after the music ends. Fade requests belong to the output; if their combined length exceeds it, the applied fades are shortened to fit while your requested values are retained.
 
@@ -86,6 +86,8 @@ Bundling adds separate jobs to the queue. It is not an all-or-nothing export tra
 ## Work in a smaller window
 
 Classic's **Collapsed**, **Normal** and **Expanded** list modes change the space given to the browser. **Show clips** returns from its summary. With Music open, choosing **Collapsed** gives the list's room to the Music band, which then shows the whole song, the passage and fades at a usable depth, and the numbers. When Music and a complete browser row cannot fit together, Classic can temporarily fold the list and retain a selected-recording summary. Use its visible restore control or close Music to recover the space.
+
+To make Music taller while the picture and export settings stay in view, drag the grip beside **Focus** up or down, or select it and use the Up and Down keys; the band takes only the spare room, never making the window bigger, and keeps its height next time. With the list collapsed and Music closed, the list's room goes to the filmstrip instead, which shows bigger frames to find a moment by.
 
 For more room still, press **Focus** in the Music band (or **View ▸ Music in focus**). The list, picture and export settings step aside while you edit the music, the filmstrip stays, and pressing it again puts everything back. The band's heading names the output you are editing. The **Music level** and **Recording level** sliders are the export levels, each with its exact number beside it; they are separate from the listening volume.
 

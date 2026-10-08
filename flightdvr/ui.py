@@ -110,7 +110,8 @@ from .presets import (
 )
 from .player import PreviewPlayer, exact_timestamp
 from .preview_recipe import PreviewRecipe, PictureTerminal, make_preview_recipe
-from .preview_panel import CLASSIC_MUSIC_MINIMUM, PreviewView
+from .preview_panel import (CLASSIC_MUSIC_MINIMUM, MUSIC_BAND_MINIMUM,
+                            PreviewView)
 from .queue_panel import QueuePanel
 from .assembly import absent, default_items, export_piece, present, resolve
 from .bundle import (
@@ -352,6 +353,11 @@ class _BundleTrackCheck(QThread):
             self.result.emit(self.generation, problem)
 
 
+# Classic's Music band depth the person chose, and the filmstrip's cap when
+# it takes a collapsed list's room.
+MUSIC_DEPTH_KEY = "music_band_depth"
+FILMSTRIP_TALL = 112
+
 # The person's chosen output for the preview. Empty key: the system default.
 OUTPUT_DEVICE_KEY = "audio_output_device"
 OUTPUT_DEVICE_NAME = "audio_output_device_name"
@@ -392,6 +398,12 @@ class MainWindow(QMainWindow):
         self.splitter: QSplitter | None = None
         # Classic's Music band given the window while it is being edited.
         self._music_focus = False
+        # A depth the person set for Classic's band, or 0 for the shallow one.
+        try:
+            self._music_depth = max(0, int(self.settings_store.value(
+                MUSIC_DEPTH_KEY, 0) or 0))
+        except (TypeError, ValueError):
+            self._music_depth = 0
         self._trim_clip: ClipInfo | None = None
         self._precise_frame_number: int | None = None
         self._precise_frame_seconds: float | None = None
@@ -1154,6 +1166,7 @@ class MainWindow(QMainWindow):
         view.music_band_changing.connect(self._before_music_band)
         view.music_band.toggled.connect(self._on_music_band_toggled)
         view.music_focus_toggled.connect(self.set_music_focus)
+        view.music_depth_requested.connect(self.set_music_depth)
         self._build_live_preview()
         return view.music_band
 
@@ -2291,16 +2304,31 @@ class MainWindow(QMainWindow):
             # exactly as before.
             deep = self._music_focus or self._music_reclaims_list()
             view.set_classic_reach(deep)
+            depth = self._music_depth if not deep else 0
             if deep:
                 view.set_music_presentation(Presentation.FULL)
                 if not self._music_focus:
                     # The collapsed list's room, not a new demand on the
                     # window: no larger minimum than the shallow band's.
                     view.music_body.setMinimumHeight(CLASSIC_MUSIC_MINIMUM)
+            elif depth:
+                # A depth the person chose: the full lanes once there is
+                # room for them, the shallow band's arrangement below that.
+                view.set_music_presentation(
+                    Presentation.FULL if depth >= MUSIC_BAND_MINIMUM
+                    else Presentation.CLASSIC)
+                view.set_classic_depth(depth)
             else:
                 view.set_music_presentation(Presentation.CLASSIC)
+            view.band_grip.setVisible(not self._music_focus)
             self._outer_layout.setStretchFactor(view.music_band,
                                                 1 if deep else 0)
+            # The list collapsed with Music closed: its room goes to the
+            # filmstrip, whose stills are drawn at its height, up to a cap —
+            # bigger frames to find a moment by, rather than a blank block.
+            strip = self._collapsed_strip_reclaims()
+            self._outer_layout.setStretchFactor(view.trim_band, 1 if strip else 0)
+            view.trim_bar.setMaximumHeight(FILMSTRIP_TALL if strip else 16777215)
             return
         view.set_music_presentation(Presentation.FULL)
         room = view.music_body.viewport().height()
@@ -2327,6 +2355,32 @@ class MainWindow(QMainWindow):
                 and view.music_band.isChecked()
                 and self._layout_state.browser is BrowserMode.COLLAPSED
                 and not self.browser_panel.folded)
+
+    def _collapsed_strip_reclaims(self) -> bool:
+        """Collapsed by choice, in Classic, with Music closed."""
+        view = getattr(self, "preview_view", None)
+        return (view is not None and self._view_mode is Mode.CLASSIC
+                and not view.music_band.isChecked()
+                and self._layout_state.browser is BrowserMode.COLLAPSED
+                and not self.browser_panel.folded)
+
+    def set_music_depth(self, height: int) -> None:
+        """Make Classic's band this tall, taking room only from the slack
+        above it — the picture and export column stay, and the window is
+        never made taller for it. Remembered as a layout preference."""
+        view = self.preview_view
+        if self._view_mode is not Mode.CLASSIC or not view.music_band.isChecked():
+            return
+        current = view.music_body.height()
+        slack = 0
+        if self.splitter is not None and self.splitter.isVisible():
+            slack = max(0, self.splitter.height()
+                        - self.splitter.minimumSizeHint().height())
+        least = max(CLASSIC_MUSIC_MINIMUM, view.track_button.sizeHint().height())
+        height = max(least, min(int(height), current + slack))
+        self._music_depth = height
+        self.settings_store.setValue(MUSIC_DEPTH_KEY, height)
+        self._relayout()
 
     def set_music_focus(self, on: bool) -> None:
         """Give Classic's Music band the window, or give it back.
@@ -2737,6 +2791,9 @@ class MainWindow(QMainWindow):
         # window lists no devices.
         self._device_catalog = None
         self._output_choice: OutputChoice | None = None
+        # The device in use went away; held until Sound is turned on again
+        # or an output is chosen.
+        self._output_lost = False
         view.listen_check.toggled.connect(self._mirror_sound_action)
         view.listen_toggled.connect(self._on_listen_toggled)
         view.listen_level_changed.connect(
@@ -3228,6 +3285,7 @@ class MainWindow(QMainWindow):
         self.settings_store.setValue(OUTPUT_DEVICE_KEY, key)
         self.settings_store.setValue(OUTPUT_DEVICE_NAME, name)
         self._output_choice = None
+        self._output_lost = False
         listening = self.preview_view.listen_check.isChecked()
         if self.live_preview is not None:
             self.live_preview.pause()
@@ -3238,10 +3296,12 @@ class MainWindow(QMainWindow):
             self._show_monitoring()
 
     def _outputs_changed(self) -> None:
-        """Outputs came or went. The one being used going away stops the
-        sound and says so; nothing switches or resumes by itself."""
+        """Outputs came or went. The device actually in use — System default
+        and its fallback included, as resolved — going away stops the sound
+        and says so; nothing switches to a new default or resumes by itself.
+        Turning Sound on again, or choosing an output, resolves afresh."""
         choice = self._output_choice
-        if choice is None or not choice.key:
+        if choice is None or not choice.key or self._output_lost:
             self._show_monitoring()
             return
         try:
@@ -3253,6 +3313,7 @@ class MainWindow(QMainWindow):
             self._show_monitoring()
             return
         why = f"{choice.name or 'the chosen output'} was disconnected"
+        self._output_lost = True
         lost = getattr(self.audio_output, "device_lost", None)
         if lost is not None:
             lost(why)
@@ -3271,7 +3332,16 @@ class MainWindow(QMainWindow):
 
     def _on_listen_toggled(self, listening: bool) -> None:
         if listening:
+            relook = self._output_lost
+            if relook:
+                # Turning Sound on again is the person's own act: the device
+                # is looked up afresh now, and named, rather than followed
+                # silently when the default changed.
+                self._output_choice = None
+                self._output_lost = False
             self._resolve_output()
+            if relook:
+                self._sync_live_preview()     # the old "disconnected" goes
         if self._output_picture_active() and self._output_recipe is not None:
             coordinate = self._picture_monitor_coordinate(
                 self.preview_view.sequence_strip.position)

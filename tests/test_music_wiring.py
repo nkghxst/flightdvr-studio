@@ -2807,7 +2807,7 @@ def test_a_missing_saved_output_uses_the_default_for_now_and_keeps_the_choice(
     window.preview_view.sound_button.click()
     said = window.statusBar().currentMessage()
     assert "Bluetooth speaker is not connected" in said and "(Speakers)" in said
-    assert window.audio_output.device_key == ""
+    assert window.audio_output.device_key == "aa01", "the default as it is now"
     assert window.audio_output.device_name == "Speakers"
     assert window.settings_store.value(OUTPUT_DEVICE_KEY) == "cc03"
     window._fill_output_menu()
@@ -2961,3 +2961,160 @@ def test_a_level_that_does_not_apply_cannot_be_dragged(window, app, tmp_path,
     window.preview_view.music_band.setChecked(False)
     app.processEvents()
     assert not panel.music_slider.isEnabled(), "a closed band leaves nothing draggable"
+
+
+# -- the device actually in use, default and fallback included (Sol F1) ---------
+
+def _default_headset(catalog):
+    catalog.outputs_now = [SPEAKERS, HEADSET]
+    catalog.default_now = HEADSET
+
+
+def _lose_headset(catalog):
+    """The headset goes, and the speakers become the default."""
+    catalog.outputs_now = [SPEAKERS]
+    catalog.default_now = SPEAKERS
+    catalog.made[-1].on_change()
+
+
+@pytest.mark.parametrize("saved", ["", "cc03"], ids=["system-default",
+                                                     "missing-saved-fallback"])
+def test_losing_the_default_in_use_stops_and_names_it(window, app, catalog,
+                                                      quiet, saved):
+    from flightdvr.ui import OUTPUT_DEVICE_KEY, OUTPUT_DEVICE_NAME
+    _default_headset(catalog)
+    window.settings_store.setValue(OUTPUT_DEVICE_KEY, saved)
+    window.settings_store.setValue(OUTPUT_DEVICE_NAME,
+                                   "Bluetooth speaker" if saved else "")
+    focus(window, 0)
+    window.preview_view.sound_button.click()
+    assert window.audio_output.device_key == "bb02"     # resolved, not "default"
+    assert "on USB headset" in window._sound_state()
+    _lose_headset(catalog)
+    app.processEvents()
+    assert "USB headset was disconnected" in window.live_preview.status.reason
+    assert window._sound_state().startswith("No output:")
+    assert window.audio_output.device_key == "bb02", "no silent move to the new default"
+    # It coming back resumes nothing.
+    _default_headset(catalog)
+    catalog.made[-1].on_change()
+    assert not window.live_preview.status.playing
+    assert "USB headset was disconnected" in window.live_preview.status.reason
+    window._toggle_sound()
+
+
+def test_turning_sound_on_again_names_the_device_now_in_use(window, app, catalog,
+                                                            quiet):
+    _default_headset(catalog)
+    focus(window, 0)
+    window.preview_view.sound_button.click()
+    _lose_headset(catalog)
+    app.processEvents()
+    window._toggle_sound()                       # off
+    window._toggle_sound()                       # on: the person's own act
+    assert window.audio_output.device_key == "aa01"
+    assert "on Speakers" in window._sound_state()
+    assert "disconnected" not in window.live_preview.status.reason
+    window._toggle_sound()
+
+
+def test_choosing_an_output_after_a_loss_uses_it_and_names_it(window, app,
+                                                              catalog, quiet):
+    _default_headset(catalog)
+    focus(window, 0)
+    window.preview_view.sound_button.click()
+    _lose_headset(catalog)
+    app.processEvents()
+    window._choose_output("aa01", "Speakers")
+    assert window.audio_output.device_key == "aa01"
+    assert "on Speakers" in window._sound_state()
+    window._toggle_sound()
+
+
+# -- Sol F2: the passage as a block, the band's depth, the strip's room ------------
+
+def test_the_passage_moves_along_the_song_keeping_its_length(window, app, tmp_path):
+    from PySide6.QtTest import QTest
+    target = _with_choice(window, app, tmp_path, AudioMode.REPLACE)
+    window.preview_view.music_band.setChecked(True)
+    app.processEvents()
+    window._sync_music_panel()
+    song = window.preview_view.music_timeline.song
+    song.resize(600, song.height_hint)
+    before = window._planned_music(target).passage
+    length = before.end - before.start
+    # Inside the shaded passage is the passage; at its ends, the ends.
+    inside = (song._x(before.start) + song._x(before.end)) / 2
+    assert song._handle_at(inside) == "passage"
+    assert song._handle_at(song._x(before.start)) == "start"
+    # The keys move the whole passage, one edit per press.
+    song.setFocus()
+    song.active = "passage"
+    QTest.keyClick(song, Qt.Key.Key_Right, Qt.KeyboardModifier.ShiftModifier)
+    app.processEvents()
+    after = window._planned_music(target).passage
+    assert after.start > before.start
+    assert after.end - after.start == length, "moving changed the passage's length"
+    # Dragged past the end of the song, it stops there, still whole.
+    total = window._planned_music(target).asset.decoded_samples
+    moved = song.moved(window._planned_music(target), "passage", total * 2)
+    assert moved.passage.end == total
+    assert moved.passage.end - moved.passage.start == length
+
+
+def test_the_band_can_be_made_taller_without_growing_the_window(window, app):
+    view = window.preview_view
+    focus(window, 0)
+    window.show()
+    view.music_band.setChecked(True)
+    for _ in range(10):
+        app.processEvents()
+    size = window.size()
+    start = view.music_body.height()
+    window.set_music_depth(start + 60)
+    for _ in range(10):
+        app.processEvents()
+    assert window._music_depth >= start
+    assert window.size() == size, "the window grew for the band"
+    assert not window.splitter.isHidden(), "the picture and export went away"
+    from flightdvr.ui import MUSIC_DEPTH_KEY
+    assert int(window.settings_store.value(MUSIC_DEPTH_KEY)) == window._music_depth
+    # Asked for far more than there is: given only the room there is.
+    window.set_music_depth(100000)
+    for _ in range(10):
+        app.processEvents()
+    assert window.size() == size
+    assert window._music_depth < 100000
+    # The grip's keys do the same, a step at a time.
+    asked = []
+    view.band_grip.requested.connect(asked.append)
+    from PySide6.QtTest import QTest
+    QTest.keyClick(view.band_grip, Qt.Key.Key_Down)
+    assert asked and asked[-1] == view.music_body.height() - view.band_grip.STEP
+    view.music_band.setChecked(False)
+    window.hide()
+
+
+def test_a_collapsed_list_with_music_closed_gives_its_room_to_the_filmstrip(
+        window, app):
+    from flightdvr.classic_layout import BrowserMode
+    from flightdvr.ui import FILMSTRIP_TALL
+    view = window.preview_view
+    layout = window._outer_layout
+
+    def strip_stretch():
+        return layout.stretch(layout.indexOf(view.trim_band))
+
+    focus(window, 0)
+    window.set_browser_mode(BrowserMode.COLLAPSED)
+    _settle(app)
+    assert strip_stretch() == 1
+    assert view.trim_bar.maximumHeight() == FILMSTRIP_TALL
+    view.music_band.setChecked(True)          # then the room is Music's
+    _settle(app)
+    assert strip_stretch() == 0
+    view.music_band.setChecked(False)
+    window.set_browser_mode(BrowserMode.NORMAL)
+    _settle(app)
+    assert strip_stretch() == 0
+    assert view.trim_bar.maximumHeight() > FILMSTRIP_TALL
