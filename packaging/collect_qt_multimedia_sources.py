@@ -18,9 +18,11 @@ import hashlib
 import importlib.metadata as metadata
 import io
 import json
+import os
 import re
 import sys
 import tarfile
+import tempfile
 import urllib.request
 from pathlib import Path, PurePosixPath
 
@@ -124,6 +126,15 @@ def spec_receipt(entries: list[tuple], inputs: dict) -> dict:
                 transformation="Analysis source bytes; final package bytes checked separately")
 
 
+def write_spec_receipt(entries: list[tuple], inputs_path: Path, output_path: Path) -> None:
+    if not inputs_path.is_file():
+        raise ValueError("locked Qt input receipt missing; run the CI input step")
+    inputs = json.loads(inputs_path.read_text(encoding="utf-8"))
+    collection = spec_receipt(entries, inputs)
+    output_path.write_text(json.dumps(collection, indent=2, sort_keys=True) + "\n",
+                           encoding="utf-8")
+
+
 def installed_receipt(report: dict, lock: dict) -> dict:
     receipt = match_inputs(report, lock)
     files = []
@@ -153,12 +164,14 @@ def safe_archive(path: Path, required: list[str]) -> None:
     with tarfile.open(path, "r:*") as archive:
         for member in archive:
             name = PurePosixPath(member.name)
+            canonical = name.as_posix()
             if (name.is_absolute() or ".." in name.parts or "\\" in member.name
-                    or not name.parts or ":" in name.parts[0] or member.name in seen):
+                    or not name.parts or ":" in name.parts[0]
+                    or member.name.rstrip("/") != canonical or canonical in seen):
                 raise ValueError("unsafe or duplicate source member")
             if not member.isfile() and not member.isdir():
                 raise ValueError("source links/devices are not accepted")
-            seen.add(member.name)
+            seen.add(canonical)
     if not seen:
         raise ValueError("empty source archive")
     roots = {PurePosixPath(n).parts[0] for n in seen}
@@ -275,11 +288,27 @@ def prepare(out: Path, cache: Path, lock: dict, fetch: bool = False,
             if not path.exists() and fetch:
                 # One attempt only. Never accept partial bytes, never retry a
                 # failed origin in a loop, and never run the downloaded code.
-                with urllib.request.urlopen(source["url"], timeout=45) as response:
-                    data = response.read()
-                if len(data) >= ASSET_LIMIT or hashlib.sha256(data).hexdigest() != source["sha256"]:
-                    raise ValueError("source download size/hash mismatch")
-                path.write_bytes(data)
+                temporary = None
+                try:
+                    with tempfile.NamedTemporaryFile(dir=cache, prefix=name + ".",
+                                                     suffix=".partial", delete=False) as sink:
+                        temporary = Path(sink.name)
+                        size = 0
+                        h = hashlib.sha256()
+                        with urllib.request.urlopen(source["url"], timeout=45) as response:
+                            for block in iter(lambda: response.read(1024 * 1024), b""):
+                                size += len(block)
+                                if size >= ASSET_LIMIT:
+                                    raise ValueError("source download reaches 2 GiB limit")
+                                sink.write(block)
+                                h.update(block)
+                    if h.hexdigest() != source["sha256"]:
+                        raise ValueError("source download checksum mismatch")
+                    safe_archive(temporary, source["required_members"])
+                    os.replace(temporary, path)
+                finally:
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
             if not path.is_file() or path.is_symlink() or digest(path) != source["sha256"]:
                 raise ValueError("source unavailable or checksum differs")
             safe_archive(path, source["required_members"])

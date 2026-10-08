@@ -62,7 +62,7 @@ def sha256(path: Path) -> str:
 def architecture(data: bytes) -> list[str]:
     if data.startswith(b"MZ") and len(data) >= 0x40:
         offset = struct.unpack_from("<I", data, 0x3c)[0]
-        if data[offset:offset + 4] == b"PE\0\0":
+        if offset + 6 <= len(data) and data[offset:offset + 4] == b"PE\0\0":
             return [{0x8664: "x86_64", 0xaa64: "arm64"}.get(
                 struct.unpack_from("<H", data, offset + 4)[0], "unknown")]
     if data.startswith(b"\x7fELF") and len(data) >= 20:

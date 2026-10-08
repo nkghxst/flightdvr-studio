@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import struct
 import tarfile
 from pathlib import Path
 
@@ -132,6 +133,40 @@ def test_final_inventory_rejects_absent_library_and_unbound_extra(tmp_path):
     extra.write_bytes(b"unknown")
     failures = scanner.binding_check(bundle, {}, inputs, collection)
     assert any("lacks wheel collection origin" in x for x in failures)
+
+
+def test_final_inventory_binds_complete_pe_library_set_to_wheel_bytes(tmp_path):
+    bundle = tmp_path / "bundle"
+    directory = bundle / "_internal" / "PySide6"
+    directory.mkdir(parents=True)
+    payload = bytearray(128)
+    payload[:2] = b"MZ"
+    struct.pack_into("<I", payload, 0x3c, 64)
+    payload[64:68] = b"PE\0\0"
+    struct.pack_into("<H", payload, 68, 0x8664)
+    payload.extend(b"\0LGPL version 2.1 or later\0FFmpeg n7.1.5/lib\0")
+    names = ["avcodec-61.dll", "avformat-61.dll", "avutil-59.dll",
+             "swresample-5.dll", "swscale-8.dll"]
+    plugin = directory / "Qt" / "plugins" / "multimedia" / "ffmpegmediaplugin.dll"
+    plugin.parent.mkdir(parents=True)
+    paths = [directory / name for name in names] + [plugin]
+    for path in paths:
+        path.write_bytes(payload)
+    sha = hashlib.sha256(payload).hexdigest()
+    entries = [{"path": path.relative_to(bundle / "_internal").as_posix(),
+                "source_sha256": sha, "wheel_package": "PySide6-Addons",
+                "wheel_file": "PySide6/avcodec-61.dll", "wheel_sha256": "a" * 64}
+               for path in paths]
+    inputs = {"platform": "windows", "release_ready": False,
+              "wheels": [{"package": "PySide6-Addons", "sha256": "a" * 64}],
+              "files": [{"package": "PySide6-Addons", "file": "PySide6/avcodec-61.dll",
+                         "sha256": sha}]}
+    report, failures = scanner.check(bundle)
+    assert failures == []
+    assert scanner.binding_check(bundle, report, inputs,
+                                 {"platform": "windows", "files": entries}) == []
+    assert len(report["selected_files"]) == 6
+    assert all(x["final_architecture"] == ["x86_64"] for x in report["selected_files"])
 
 
 def test_selector_rejects_current_manifest_even_if_asset_bytes_exist(tmp_path):

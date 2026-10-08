@@ -164,16 +164,11 @@ print(f"[spec] dropped {_before - len(a.binaries) - len(a.datas)} unused Qt file
 # RECORD bytes to the exact selected Analysis entries, then carry the small
 # source reference with the package. This records inputs, not source clearance.
 sys.path.insert(0, str(PACKAGING))
-from collect_qt_multimedia_sources import spec_receipt
-import json
+from collect_qt_multimedia_sources import write_spec_receipt
 
 inputs_path = ROOT / "build" / "qt-inputs.json"
-if not inputs_path.is_file():
-    raise ValueError("locked Qt input receipt missing; run the CI input step")
-inputs = json.loads(inputs_path.read_text(encoding="utf-8"))
-collection = spec_receipt(a.binaries + a.datas, inputs)
 collection_path = ROOT / "build" / "qt-collection.json"
-collection_path.write_text(json.dumps(collection, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+write_spec_receipt(a.binaries + a.datas, inputs_path, collection_path)
 a.datas.append(("qt-multimedia-source-reference.json", str(collection_path), "DATA"))
 a.datas.append(("qt-multimedia-sources.json", str(PACKAGING / "qt-multimedia-sources.json"), "DATA"))
 
