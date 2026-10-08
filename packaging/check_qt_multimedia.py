@@ -134,16 +134,23 @@ def check(bundle: Path) -> tuple[dict, list[str]]:
     return report, failures
 
 
-def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict) -> list[str]:
+def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
+                  pre_sign: dict | None = None) -> list[str]:
     """Check the final payload against the wheel and PyInstaller selection receipts."""
     failures = []
     platform = inputs.get("platform")
     if platform != collection.get("platform") or platform not in ("windows", "linux", "macos"):
         return ["wheel and collection platforms differ"]
     expected_arch = "arm64" if platform == "macos" else "x86_64"
+    if pre_sign is not None and (platform != "macos" or pre_sign.get("platform") != "macos"
+                                 or pre_sign.get("failures")):
+        return ["invalid macOS pre-sign inventory"]
+    pre_files = {item["path"]: item for item in pre_sign.get("selected_files", [])} if pre_sign else {}
     selected = {item["path"]: dict(item) for item in collection.get("files", [])}
     if len(selected) != len(collection.get("files", [])) or not selected:
         failures.append("empty or duplicate PyInstaller multimedia selection")
+    if pre_sign is not None and set(pre_files) != set(selected):
+        failures.append("pre-sign multimedia path set differs from collection")
     wheel_hashes = {w["package"]: w["sha256"] for w in inputs.get("wheels", [])}
     wheel_files = {(x["package"], x["file"], x["sha256"])
                    for x in inputs.get("files", [])}
@@ -178,7 +185,19 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict) ->
             failures.append(f"unrecognized wheel origin: {relative}")
         if item["final_sha256"] != item["source_sha256"]:
             item["transformed"] = True
-            failures.append(f"unreconciled PyInstaller/signing transformation: {relative}")
+            prior = pre_files.get(path)
+            if (prior is None or prior.get("final_sha256") != item["source_sha256"]
+                    or prior.get("source_sha256") != item["source_sha256"]
+                    or prior.get("final_path") != relative
+                    or prior.get("final_architecture") != item["final_architecture"]):
+                failures.append(f"unreconciled PyInstaller/signing transformation: {relative}")
+            else:
+                item["pre_sign_sha256"] = prior["final_sha256"]
+                item["transformation"] = "ad-hoc codesign after verified wheel-byte collection"
+        elif pre_sign is not None:
+            prior = pre_files.get(path)
+            if prior is None or prior.get("final_sha256") != item["source_sha256"]:
+                failures.append(f"missing or mismatched pre-sign receipt: {relative}")
     bound_paths = {item.get("final_path") for item in selected.values()}
     for relative in actual_paths.keys() - bound_paths:
         failures.append(f"shipped multimedia file lacks wheel collection origin: {relative}")
@@ -204,26 +223,35 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict) ->
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) not in (1, 2, 5) or (len(argv) == 5 and argv[2] != "--inputs"):
+    if len(argv) not in (1, 2, 5, 6) or (len(argv) >= 5 and argv[2] != "--inputs"):
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
     bundle = Path(argv[0])
     report, failures = check(bundle)
-    if len(argv) == 5:
+    if len(argv) >= 5:
         if argv[4].startswith("--collection="):
             collection_path = argv[4].split("=", 1)[1]
         else:
             print("expected --collection=PATH", file=sys.stderr)
             return 2
+        pre_sign_path = None
+        if len(argv) == 6:
+            if not argv[5].startswith("--signed-pre="):
+                print("expected --signed-pre=PATH", file=sys.stderr)
+                return 2
+            pre_sign_path = Path(argv[5].split("=", 1)[1])
+        pre_sign = json.loads(pre_sign_path.read_text()) if pre_sign_path else None
         failures += binding_check(bundle, report, json.loads(Path(argv[3]).read_text()),
-                                  json.loads(Path(collection_path).read_text()))
+                                  json.loads(Path(collection_path).read_text()), pre_sign)
+        if pre_sign_path:
+            report["pre_sign_report_sha256"] = sha256(pre_sign_path)
         report["failures"] = failures
     for plugin in report["plugins"]:
         print(f"  multimedia plugin  {plugin}")
     for entry in report["ffmpeg_libraries"]:
         print(f"  {entry['file']:<24} {', '.join(entry['licences']) or 'no licence'}"
               f"  {', '.join('n' + v for v in entry['versions']) or 'version unread'}")
-    if len(argv) in (2, 5):
+    if len(argv) in (2, 5, 6):
         Path(argv[1]).write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")
     for failure in failures:
         print(f"  FAIL {failure}", file=sys.stderr)

@@ -362,6 +362,7 @@ jobs:
           path: |
             build/qt-inputs.json
             build/qt-collection.json
+            dist/qt-multimedia-pre-sign.json
             dist/qt-multimedia.json
           if-no-files-found: warn
 

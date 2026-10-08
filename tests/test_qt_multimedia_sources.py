@@ -194,6 +194,43 @@ def test_final_inventory_binds_complete_pe_library_set_to_wheel_bytes(tmp_path):
     assert all(x["final_architecture"] == ["x86_64"] for x in report["selected_files"])
 
 
+def test_macos_signing_requires_a_matching_pre_sign_wheel_receipt(tmp_path):
+    bundle = tmp_path / "app"
+    directory = bundle / "Contents" / "Frameworks" / "PySide6"
+    directory.mkdir(parents=True)
+    payload = b"\xcf\xfa\xed\xfe" + struct.pack("<I", 0x0100000c)
+    payload += b"\0LGPL version 2.1 or later\0FFmpeg n7.1.5/lib\0"
+    names = ["libavcodec.61.dylib", "libavformat.61.dylib", "libavutil.59.dylib",
+             "libswresample.5.dylib", "libswscale.8.dylib"]
+    plugin = directory / "plugins" / "multimedia" / "libffmpegmediaplugin.dylib"
+    plugin.parent.mkdir(parents=True)
+    paths = [directory / name for name in names] + [plugin]
+    for path in paths:
+        path.write_bytes(payload)
+    sha = hashlib.sha256(payload).hexdigest()
+    entries = [{"path": path.relative_to(bundle / "Contents" / "Frameworks").as_posix(),
+                "source_sha256": sha, "wheel_package": "PySide6-Addons",
+                "wheel_file": "PySide6/libavcodec.61.dylib", "wheel_sha256": "a" * 64}
+               for path in paths]
+    inputs = {"platform": "macos", "release_ready": False,
+              "wheels": [{"package": "PySide6-Addons", "sha256": "a" * 64}],
+              "files": [{"package": "PySide6-Addons", "file": "PySide6/libavcodec.61.dylib",
+                         "sha256": sha}]}
+    collection = {"platform": "macos", "files": entries}
+    pre, failures = scanner.check(bundle)
+    assert failures == []
+    assert scanner.binding_check(bundle, pre, inputs, collection) == []
+    pre["failures"] = []
+    paths[0].write_bytes(payload + b"signed")
+    post, _ = scanner.check(bundle)
+    assert scanner.binding_check(bundle, post, inputs, collection, pre) == []
+    assert next(x for x in post["selected_files"] if x["path"] == entries[0]["path"])[
+        "transformation"] == "ad-hoc codesign after verified wheel-byte collection"
+    unsigned, _ = scanner.check(bundle)
+    assert any("unreconciled" in failure
+               for failure in scanner.binding_check(bundle, unsigned, inputs, collection))
+
+
 def test_selector_rejects_current_manifest_even_if_asset_bytes_exist(tmp_path):
     spec = importlib.util.spec_from_file_location(
         "collect_linux_sources_for_qt", ROOT / "packaging" / "collect_linux_sources.py")

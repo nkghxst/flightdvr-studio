@@ -72,6 +72,8 @@ fi
 printf '  bundle: %s\n' "$(du -sh "$APP" | cut -f1)"
 # Listen needs QtMultimedia's PCM sink and a backend for it. What else PySide6
 # brought with it is read from its bytes; anything but LGPL fails the build.
+python3 packaging/check_qt_multimedia.py "$APP" dist/qt-multimedia-pre-sign.json \
+    --inputs build/qt-inputs.json --collection=build/qt-collection.json
 
 step "Ad-hoc signature"
 # arm64 refuses to load an unsigned binary at all, so this is required rather
@@ -80,7 +82,8 @@ step "Ad-hoc signature"
 codesign --force --deep --sign - --timestamp=none "$APP"
 codesign --verify --deep --strict "$APP" && echo "  signature verifies"
 python3 packaging/check_qt_multimedia.py "$APP" dist/qt-multimedia.json \
-    --inputs build/qt-inputs.json --collection=build/qt-collection.json
+    --inputs build/qt-inputs.json --collection=build/qt-collection.json \
+    --signed-pre=dist/qt-multimedia-pre-sign.json
 
 step "Smoke check"
 # --check starts Qt, loads the platform plugin and resolves ffmpeg, then exits.
