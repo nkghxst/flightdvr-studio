@@ -2937,4 +2937,6 @@ def test_export_level_sliders_are_the_numbers_dragged(window, app):
         box.setEnabled(False)
         assert not slider.isEnabled(), "a level that does not apply was draggable"
         box.setEnabled(True)
-        assert slider.isEnabled()
+        # Enabled exactly when the box is, whatever the group around both is.
+        assert slider.isEnabled() == box.isEnabled()
+        assert not slider.testAttribute(Qt.WidgetAttribute.WA_ForceDisabled)

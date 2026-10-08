@@ -127,7 +127,7 @@ class _LevelSlider(QSlider):
         box.installEventFilter(self)
         # Loads may set the box with its signals blocked; they follow up here.
         box.level_slider = self
-        self.setEnabled(box.isEnabled())
+        self._follow_enabled()
 
     def _moved(self, value: int) -> None:
         if not self.isSliderDown():
@@ -141,8 +141,16 @@ class _LevelSlider(QSlider):
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
         if watched is self._box and event.type() == QEvent.Type.EnabledChange:
-            self.setEnabled(self._box.isEnabled())
+            self._follow_enabled()
         return False
+
+    def _follow_enabled(self) -> None:
+        # The box's own setting, not its effective state: both sit in the
+        # same group, so a disabled group already disables this too, and
+        # copying the effective state would leave it off when only the
+        # group comes back.
+        self.setEnabled(not self._box.testAttribute(
+            Qt.WidgetAttribute.WA_ForceDisabled))
 
 
 def _level_row(slider: QSlider, box: QSpinBox) -> QWidget:
