@@ -398,6 +398,8 @@ class MainWindow(QMainWindow):
         self.splitter: QSplitter | None = None
         # Classic's Music band given the window while it is being edited.
         self._music_focus = False
+        # The depth last given to the band, fitted to the room at the time.
+        self._applied_depth = 0
         # A depth the person set for Classic's band, or 0 for the shallow one.
         try:
             self._music_depth = max(0, int(self.settings_store.value(
@@ -2312,12 +2314,21 @@ class MainWindow(QMainWindow):
                     # window: no larger minimum than the shallow band's.
                     view.music_body.setMinimumHeight(CLASSIC_MUSIC_MINIMUM)
             elif depth:
-                # A depth the person chose: the full lanes once there is
-                # room for them, the shallow band's arrangement below that.
+                # A depth the person chose, fitted to the room there is now:
+                # reopened in a smaller window it is given only the slack
+                # above it, never a taller window. The preference itself is
+                # kept, so a larger window gets it back. The full lanes once
+                # there is room for them, the shallow arrangement below that.
+                fitted = self._fitted_music_depth(depth)
                 view.set_music_presentation(
-                    Presentation.FULL if depth >= MUSIC_BAND_MINIMUM
+                    Presentation.FULL if fitted >= MUSIC_BAND_MINIMUM
                     else Presentation.CLASSIC)
-                view.set_classic_depth(depth)
+                view.set_classic_depth(fitted)
+                if fitted < depth and fitted != self._applied_depth:
+                    # Measured again once this has been laid out: the room
+                    # can only be read after the band has taken its place.
+                    QTimer.singleShot(0, self._fit_music_presentation)
+                self._applied_depth = fitted
             else:
                 view.set_music_presentation(Presentation.CLASSIC)
             view.band_grip.setVisible(not self._music_focus)
@@ -2364,6 +2375,18 @@ class MainWindow(QMainWindow):
                 and self._layout_state.browser is BrowserMode.COLLAPSED
                 and not self.browser_panel.folded)
 
+    def _fitted_music_depth(self, wanted: int) -> int:
+        """`wanted`, or as much of it as fits: the band's present height plus
+        the slack in the split above it, never below the band's least."""
+        view = self.preview_view
+        current = view.music_body.height() if view.music_body.isVisible() else 0
+        slack = 0
+        if self.splitter is not None and self.splitter.isVisible():
+            slack = max(0, self.splitter.height()
+                        - self.splitter.minimumSizeHint().height())
+        least = max(CLASSIC_MUSIC_MINIMUM, view.track_button.sizeHint().height())
+        return max(least, min(int(wanted), current + slack))
+
     def set_music_depth(self, height: int) -> None:
         """Make Classic's band this tall, taking room only from the slack
         above it — the picture and export column stay, and the window is
@@ -2371,13 +2394,7 @@ class MainWindow(QMainWindow):
         view = self.preview_view
         if self._view_mode is not Mode.CLASSIC or not view.music_band.isChecked():
             return
-        current = view.music_body.height()
-        slack = 0
-        if self.splitter is not None and self.splitter.isVisible():
-            slack = max(0, self.splitter.height()
-                        - self.splitter.minimumSizeHint().height())
-        least = max(CLASSIC_MUSIC_MINIMUM, view.track_button.sizeHint().height())
-        height = max(least, min(int(height), current + slack))
+        height = self._fitted_music_depth(height)
         self._music_depth = height
         self.settings_store.setValue(MUSIC_DEPTH_KEY, height)
         self._relayout()

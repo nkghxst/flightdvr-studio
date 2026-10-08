@@ -3118,3 +3118,27 @@ def test_a_collapsed_list_with_music_closed_gives_its_room_to_the_filmstrip(
     _settle(app)
     assert strip_stretch() == 0
     assert view.trim_bar.maximumHeight() > FILMSTRIP_TALL
+
+
+def test_a_saved_depth_is_fitted_to_the_room_when_music_opens(window, app):
+    """Sol F2-R1: a remembered 240 px band, opened in a window with less room,
+    grew the window (913 to 1065, measured). It is given the room there is,
+    and the preference is kept for a window that has more."""
+    from flightdvr.ui import MUSIC_DEPTH_KEY
+    view = window.preview_view
+    focus(window, 0)
+    window.show()
+    for _ in range(10):
+        app.processEvents()
+    window._music_depth = 240
+    window.settings_store.setValue(MUSIC_DEPTH_KEY, 240)
+    size = window.size()
+    view.music_band.setChecked(True)
+    for _ in range(20):
+        app.processEvents()
+    assert window.size() == size, "a remembered depth grew the window"
+    assert view.music_body.height() <= 240
+    assert window._music_depth == 240, "the preference was overwritten"
+    assert int(window.settings_store.value(MUSIC_DEPTH_KEY)) == 240
+    view.music_band.setChecked(False)
+    window.hide()
