@@ -40,7 +40,9 @@ It opens no device and runs nothing from the bundle. Text and bytes only.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
+import struct
 import sys
 from pathlib import Path
 
@@ -50,6 +52,43 @@ LIBRARY = re.compile(
 LICENCE = re.compile(rb"\b(L?GPL) version ([0-9.]+) or later")
 NONFREE = re.compile(rb"nonfree and unredistributable")
 VERSION = re.compile(rb"\bn([0-9]+\.[0-9]+(?:\.[0-9]+)?)/lib")
+EXPECTED = {"avcodec", "avformat", "avutil", "swresample", "swscale"}
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def architecture(data: bytes) -> list[str]:
+    if data.startswith(b"MZ") and len(data) >= 0x40:
+        offset = struct.unpack_from("<I", data, 0x3c)[0]
+        if data[offset:offset + 4] == b"PE\0\0":
+            return [{0x8664: "x86_64", 0xaa64: "arm64"}.get(
+                struct.unpack_from("<H", data, offset + 4)[0], "unknown")]
+    if data.startswith(b"\x7fELF") and len(data) >= 20:
+        order = "<" if data[5] == 1 else ">"
+        return [{62: "x86_64", 183: "arm64"}.get(
+            struct.unpack_from(order + "H", data, 18)[0], "unknown")]
+    if len(data) >= 8:
+        magic = data[:4]
+        if magic in (b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"):
+            order = ">" if magic == b"\xca\xfe\xba\xbe" else "<"
+            count = struct.unpack_from(order + "I", data, 4)[0]
+            if count > 16 or len(data) < 8 + count * 20:
+                return ["unknown"]
+            return sorted({{0x01000007: "x86_64", 0x0100000c: "arm64"}.get(
+                struct.unpack_from(order + "I", data, 8 + i * 20)[0], "unknown")
+                for i in range(count)})
+        if magic in (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf"):
+            order = "<" if magic == b"\xcf\xfa\xed\xfe" else ">"
+            return [{0x01000007: "x86_64", 0x0100000c: "arm64"}.get(
+                struct.unpack_from(order + "I", data, 4)[0], "unknown")]
+    return ["unknown"]
+
+
+def family(name: str) -> str | None:
+    match = LIBRARY.match(name)
+    return match.group(1).lower() if match else None
 
 
 def plugins(bundle: Path) -> list[Path]:
@@ -67,7 +106,8 @@ def read_library(path: Path) -> dict:
     licences = sorted({(kind.decode(), version.decode())
                        for kind, version in LICENCE.findall(data)})
     versions = sorted({v.decode() for v in VERSION.findall(data)})
-    return {"file": path.name, "bytes": len(data),
+    return {"file": path.name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+            "architecture": architecture(data),
             "licences": [f"{kind} {version}+" for kind, version in licences],
             "nonfree": bool(NONFREE.search(data)), "versions": versions}
 
@@ -92,18 +132,92 @@ def check(bundle: Path) -> tuple[dict, list[str]]:
     return report, failures
 
 
+def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict) -> list[str]:
+    """Check the final payload against the wheel and PyInstaller selection receipts."""
+    failures = []
+    platform = inputs.get("platform")
+    if platform != collection.get("platform") or platform not in ("windows", "linux", "macos"):
+        return ["wheel and collection platforms differ"]
+    expected_arch = "arm64" if platform == "macos" else "x86_64"
+    selected = {item["path"]: dict(item) for item in collection.get("files", [])}
+    if len(selected) != len(collection.get("files", [])) or not selected:
+        failures.append("empty or duplicate PyInstaller multimedia selection")
+    wheel_hashes = {w["package"]: w["sha256"] for w in inputs.get("wheels", [])}
+    wheel_files = {(x["package"], x["file"], x["sha256"])
+                   for x in inputs.get("files", [])}
+    actual_paths = {}
+    for path in bundle.rglob("*"):
+        if not (path.is_file() or path.is_symlink()) or not (
+                ("multimedia" in str(path).lower() and path.suffix.lower() not in (".json", ".md"))
+                or family(path.name)):
+            continue
+        relative = path.relative_to(bundle).as_posix()
+        if path.is_symlink():
+            resolved = path.resolve()
+            if not resolved.is_relative_to(bundle.resolve()) or not resolved.is_file():
+                failures.append(f"broken or escaping multimedia symlink: {relative}")
+                continue
+        actual_paths[relative] = path
+    for path, item in selected.items():
+        # macOS BUNDLE relocates _internal files into Contents/Frameworks.
+        candidates = [(n, p) for n, p in actual_paths.items() if n == path or n.endswith("/" + path)]
+        if len(candidates) != 1:
+            failures.append(f"selected multimedia path missing/ambiguous: {path}")
+            continue
+        relative, payload = candidates[0]
+        item["final_path"] = relative
+        item["final_sha256"] = sha256(payload)
+        item["final_bytes"] = payload.stat().st_size
+        item["final_architecture"] = architecture(payload.read_bytes()[:4096])
+        if expected_arch not in item["final_architecture"]:
+            failures.append(f"wrong or unreadable architecture: {relative}")
+        if ((item["wheel_package"], item["wheel_file"], item["source_sha256"]) not in wheel_files
+                or wheel_hashes.get(item["wheel_package"]) != item["wheel_sha256"]):
+            failures.append(f"unrecognized wheel origin: {relative}")
+        if item["final_sha256"] != item["source_sha256"]:
+            item["transformed"] = True
+            failures.append(f"unreconciled PyInstaller/signing transformation: {relative}")
+    bound_paths = {item.get("final_path") for item in selected.values()}
+    for relative in actual_paths.keys() - bound_paths:
+        failures.append(f"shipped multimedia file lacks wheel collection origin: {relative}")
+    found_families = {family(p.name) for p in actual_paths.values()}
+    missing = EXPECTED - found_families
+    if missing:
+        failures.append("missing FFmpeg shared library families: " + ", ".join(sorted(missing)))
+    plugins = {p.name.lower() for p in actual_paths.values() if p.parent.name == "multimedia"}
+    if not any("ffmpegmediaplugin" in name for name in plugins):
+        failures.append("missing FFmpeg multimedia backend")
+    if not inputs.get("wheels") or inputs.get("release_ready") is not False:
+        failures.append("invalid wheel receipt")
+    report["platform"] = platform
+    report["wheel_inputs"] = inputs["wheels"]
+    report["selected_files"] = sorted(selected.values(), key=lambda x: x["path"])
+    report["source_complete"] = False
+    report["release_ready"] = False
+    return failures
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) not in (1, 2):
+    if len(argv) not in (1, 2, 5) or (len(argv) == 5 and argv[2] != "--inputs"):
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
     bundle = Path(argv[0])
     report, failures = check(bundle)
+    if len(argv) == 5:
+        if argv[4].startswith("--collection="):
+            collection_path = argv[4].split("=", 1)[1]
+        else:
+            print("expected --collection=PATH", file=sys.stderr)
+            return 2
+        failures += binding_check(bundle, report, json.loads(Path(argv[3]).read_text()),
+                                  json.loads(Path(collection_path).read_text()))
+        report["failures"] = failures
     for plugin in report["plugins"]:
         print(f"  multimedia plugin  {plugin}")
     for entry in report["ffmpeg_libraries"]:
         print(f"  {entry['file']:<24} {', '.join(entry['licences']) or 'no licence'}"
               f"  {', '.join('n' + v for v in entry['versions']) or 'version unread'}")
-    if len(argv) == 2:
+    if len(argv) in (2, 5):
         Path(argv[1]).write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")
     for failure in failures:
         print(f"  FAIL {failure}", file=sys.stderr)

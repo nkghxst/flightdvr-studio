@@ -10,7 +10,9 @@ CI, not here.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import io
+import json
 import sys
 import tarfile
 from pathlib import Path
@@ -27,14 +29,52 @@ _spec.loader.exec_module(sources)
 
 # -- release file selection -------------------------------------------------------------
 
+def _qt_lock() -> dict:
+    lock = json.loads((ROOT / "packaging" / "qt-multimedia-sources.json").read_text())
+    for field in ("upstream_build_receipt", "dependency_source_closure",
+                  "modification_record", "replacement_acceptance"):
+        lock[field] = {"independently_verified": True, "evidence_sha256": "a" * 64}
+    lock["delivery"]["approved"] = True
+    lock["sources"] = [{"id": "synthetic", "filename": "synthetic.tar.xz",
+                        "sha256": hashlib.sha256(b"source").hexdigest()}]
+    return lock
+
+
 def _downloads(tmp_path: Path, **changes) -> Path:
     root = tmp_path / "artifacts"
+    lock = _qt_lock()
+    qt_name = "FlightDVR_Studio-2.0.0-qt-multimedia-source.tar"
+    declared = [{"id": x["id"], "verified": True, "sha256": x["sha256"]}
+                for x in lock["sources"]]
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as tar:
+        payloads = {"sources/synthetic.tar.xz": b"source",
+                    "MANIFEST.json": json.dumps({"source_complete": True,
+                                                   "release_ready": True,
+                                                   "sources": declared}).encode(),
+                    "LICENSE.LGPL-2.1.txt": b"licence",
+                    "THIRD-PARTY-NOTICES.md": b"notices",
+                    "qt-multimedia-sources.json": b"lock"}
+        for name, data in payloads.items():
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            tar.addfile(member, io.BytesIO(data))
+    qt_body = stream.getvalue()
+    qt_manifest = {"schema_version": 1, "source_complete": True,
+                   "release_ready": True, "unresolved": [], "delivery": lock["delivery"],
+                   "sources": declared,
+                   "platform_payloads": {p: {} for p in lock["platforms"]},
+                   "assets": [{"filename": qt_name, "bytes": len(qt_body),
+                               "sha256": hashlib.sha256(qt_body).hexdigest()}]}
     files = {
         "linux-appimage/FlightDVR_Studio-2.0.0-x86_64.AppImage": b"appimage",
         "macos-dmg/FlightDVR_Studio-2.0.0-arm64.dmg": b"dmg",
         "windows-installer/FlightDVR_Studio-2.0.0-setup.exe": b"exe",
         "linux-ffmpeg-source/FlightDVR_Studio-2.0.0-linux-ffmpeg-source.tar": b"tar",
         "linux-ffmpeg-source/FlightDVR_Studio-2.0.0-linux-ffmpeg-source.manifest.json": b"{}",
+        "qt-multimedia-source/" + qt_name: qt_body,
+        "qt-multimedia-source/qt-multimedia-source.manifest.json":
+            json.dumps(qt_manifest).encode(),
         # Present in the run, never meant for a release:
         "linux-bundle-evidence-ubuntu-22.04/baseline/appimage-check/appimage-check.json": b"{}",
         "linux-bundle-evidence-ubuntu-22.04/baseline/export-check/media/h264-aac.mp4": b"mp4",
@@ -52,12 +92,14 @@ def _downloads(tmp_path: Path, **changes) -> Path:
 
 
 def test_only_the_four_release_files_are_selected(tmp_path):
-    chosen = sources.select_release_files(_downloads(tmp_path), tmp_path / "release-files")
+    chosen = sources.select_release_files(_downloads(tmp_path), tmp_path / "release-files", _qt_lock())
     assert sorted(p.name for p in chosen) == [
         "FlightDVR_Studio-2.0.0-arm64.dmg",
         "FlightDVR_Studio-2.0.0-linux-ffmpeg-source.tar",
+        "FlightDVR_Studio-2.0.0-qt-multimedia-source.tar",
         "FlightDVR_Studio-2.0.0-setup.exe",
         "FlightDVR_Studio-2.0.0-x86_64.AppImage",
+        "qt-multimedia-source.manifest.json",
     ]
     assert sorted(p.name for p in (tmp_path / "release-files").iterdir()) == sorted(
         p.name for p in chosen)                         # nothing else, no folders
@@ -72,7 +114,7 @@ def test_only_the_four_release_files_are_selected(tmp_path):
 ], ids=["missing", "ambiguous", "source-bundle-missing"])
 def test_a_missing_or_ambiguous_release_file_fails(tmp_path, changes, message):
     with pytest.raises(SystemExit, match=message):
-        sources.select_release_files(_downloads(tmp_path, **changes), tmp_path / "out")
+        sources.select_release_files(_downloads(tmp_path, **changes), tmp_path / "out", _qt_lock())
 
 
 def test_a_release_artifact_that_was_not_downloaded_fails(tmp_path):
@@ -81,7 +123,7 @@ def test_a_release_artifact_that_was_not_downloaded_fails(tmp_path):
         path.unlink()
     (root / "windows-installer").rmdir()
     with pytest.raises(SystemExit, match="windows-installer was not downloaded"):
-        sources.select_release_files(root, tmp_path / "out")
+        sources.select_release_files(root, tmp_path / "out", _qt_lock())
 
 
 # -- reading the build system ---------------------------------------------------------------

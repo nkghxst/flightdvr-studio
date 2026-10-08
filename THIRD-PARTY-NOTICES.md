@@ -130,18 +130,22 @@ Two things are deliberately not in it, and the manifest says so:
 ## Qt / PySide6
 
 The user interface uses Qt via PySide6, used under the **GNU Lesser General
-Public License v3**. Qt is dynamically linked and unmodified. Sources are
-available from https://download.qt.io and https://pypi.org/project/PySide6/.
+Public License v3**. The package carries shared Qt libraries. Candidate source
+revisions and the installed wheel identities are recorded in
+`qt-multimedia-sources.json` and `qt-multimedia-source-reference.json` inside
+the package. Those records do not yet establish the precise upstream wheel
+build, its modifications or its complete dependency source closure.
 
-The LGPL's own text accompanies every build as
-[LICENSE.LGPL-3.0.txt](LICENSE.LGPL-3.0.txt), which section 4(b) requires with a
-combined work. The LGPL v3 supplements the GPL v3 rather than replacing it, so
-both texts are needed and both are included.
+The LGPL v3 text accompanies every build as
+[LICENSE.LGPL-3.0.txt](LICENSE.LGPL-3.0.txt). The LGPL v2.1 text applicable to
+the FFmpeg libraries below is [LICENSE.LGPL-2.1.txt](LICENSE.LGPL-2.1.txt).
+The application's GPL v3 text is included as [LICENSE](LICENSE).
 
-You may replace the Qt used by this program with your own build. Everything
-needed to do so is here: the application is plain Python, the Qt libraries live
-alongside it inside the package, and rebuilding is documented in
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+The application is plain Python and its Qt libraries are packaged as shared
+files. A compatible replacement must match the library and plugin ABI shown in
+the package inventory. Its practical use in the installer, AppImage and signed
+macOS app has not yet been tested. The final replacement procedure and
+corresponding source companion remain release gates, not established claims.
 
 ### Qt Multimedia, and the FFmpeg libraries it brings
 
@@ -155,14 +159,16 @@ libswresample, libswscale) as built by the Qt project, which that plugin may
 load. They are separate from, and not the same build as, the ffmpeg and
 ffprobe programs described under FFmpeg above.
 
-Each of these libraries states its own licence in its compiled bytes. Every
-package build reads it with `packaging/check_qt_multimedia.py`, which fails
-the build unless every one says **"LGPL version 2.1 or later"** and none is a
-nonfree build, and records each library's FFmpeg version tag in the build's
-`qt-multimedia.json`. The FFmpeg source for that tag is at
-https://github.com/FFmpeg/FFmpeg; PySide6 itself is at
-https://pypi.org/project/PySide6/. The same freedom to replace them applies as
-for Qt.
+Each library's compiled licence string, path, hash and architecture is checked
+by the package build. The expected five FFmpeg library families and the FFmpeg
+backend plugin must be present. The build also records the pinned PySide6 wheel
+inputs and the files PyInstaller selected. Its inventory is
+`qt-multimedia.json`; an unread individual version string is not treated as
+proof of origin. FFmpeg n7.1.5 source is identified by commit
+`3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587`, distinct from the GPL
+programs' source commit. A same-release Qt multimedia source companion is in
+preparation; it must not be represented as complete until the upstream build
+record, Qt/PySide source closure and package transformation records are bound.
 
 ## Patents
 

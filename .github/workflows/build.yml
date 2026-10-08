@@ -69,7 +69,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            packaging/requirements-qt-build.txt
 
       # PySide6 loads these at import time even under the offscreen platform.
       - name: Install Qt's runtime libraries
@@ -96,7 +98,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          python -m pip install --no-deps --force-reinstall --require-hashes --report "${{ runner.temp }}/qt-pip-report.json" -r packaging/requirements-qt-build.txt
           pip install -r requirements.txt pytest
+          python packaging/collect_qt_multimedia_sources.py inputs "${{ runner.temp }}/qt-pip-report.json" build/qt-inputs.json
 
       # -rs reports skips. The integration tests skip themselves when ffmpeg is
       # absent, so the summary is what tells you whether the half of the suite
@@ -106,6 +110,13 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -rsx
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qt-test-inputs-${{ matrix.os }}
+          path: build/qt-inputs.json
+          if-no-files-found: warn
 
   appimage:
     name: Linux AppImage
@@ -121,7 +132,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            packaging/requirements-qt-build.txt
 
       - name: Install Qt's runtime libraries and ffmpeg
         run: |
@@ -134,7 +147,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          python -m pip install --no-deps --force-reinstall --require-hashes --report "${{ runner.temp }}/qt-pip-report.json" -r packaging/requirements-qt-build.txt
           pip install -r requirements.txt pyinstaller pytest
+          python packaging/collect_qt_multimedia_sources.py inputs "${{ runner.temp }}/qt-pip-report.json" build/qt-inputs.json
 
       - name: Prove configured audio exports on the oldest packaged-system ffmpeg
         env:
@@ -187,6 +202,16 @@ jobs:
         env:
           FFMPEG_DIR: ${{ steps.ffmpeg.outputs.dir }}
         run: packaging/build-appimage.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qt-package-evidence-linux
+          path: |
+            build/qt-inputs.json
+            build/qt-collection.json
+            dist/qt-multimedia.json
+          if-no-files-found: warn
 
       # What the AppImage's FFmpeg and its carried libraries are built from:
       # FFmpeg and the build system at the pinned commits, the build system's
@@ -313,7 +338,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            packaging/requirements-qt-build.txt
 
       - name: Install ffmpeg
         run: brew install ffmpeg
@@ -321,10 +348,22 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          python -m pip install --no-deps --force-reinstall --require-hashes --report "${{ runner.temp }}/qt-pip-report.json" -r packaging/requirements-qt-build.txt
           pip install -r requirements.txt pyinstaller pytest
+          python packaging/collect_qt_multimedia_sources.py inputs "${{ runner.temp }}/qt-pip-report.json" build/qt-inputs.json
 
       - name: Build
         run: packaging/build-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qt-package-evidence-macos
+          path: |
+            build/qt-inputs.json
+            build/qt-collection.json
+            dist/qt-multimedia.json
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
         with:
@@ -343,12 +382,16 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            packaging/requirements-qt-build.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          python -m pip install --no-deps --force-reinstall --require-hashes --report "${{ runner.temp }}/qt-pip-report.json" -r packaging/requirements-qt-build.txt
           pip install -r requirements.txt pyinstaller pytest
+          python packaging/collect_qt_multimedia_sources.py inputs "${{ runner.temp }}/qt-pip-report.json" build/qt-inputs.json
 
       # Exactly the build described in packaging/ffmpeg-build.json, verified by
       # hash before it is unpacked. A different binary would make the offer of
@@ -387,6 +430,16 @@ jobs:
       - name: Build the installer
         shell: pwsh
         run: ./packaging/build.ps1 -FfmpegDir "${{ steps.ffmpeg.outputs.dir }}" -SkipTests
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qt-package-evidence-windows
+          path: |
+            build/qt-inputs.json
+            build/qt-collection.json
+            dist/qt-multimedia.json
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
         with:
@@ -441,10 +494,36 @@ jobs:
             ${{ runner.temp }}/source-bundle/*-linux-ffmpeg-source.manifest.json
           if-no-files-found: error
 
+  qt-multimedia-source:
+    name: Qt multimedia source evidence
+    needs: [appimage, macos, windows-installer]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: qt-package-evidence-*
+          path: ${{ runner.temp }}/qt-evidence
+      # Candidate source downloads from the official Qt archive returned two
+      # incomplete bodies. Preserve that gap; do not retry it on every run.
+      - name: Prepare the bounded source report
+        run: |
+          python packaging/collect_qt_multimedia_sources.py prepare \
+            "$RUNNER_TEMP/qt-source" --cache "$RUNNER_TEMP/qt-cache" \
+            --evidence "$RUNNER_TEMP/qt-evidence"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qt-multimedia-source
+          path: ${{ runner.temp }}/qt-source/
+          if-no-files-found: error
+
   release:
     name: Attach to the release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [appimage, appimage-current-linux, linux-ffmpeg-source, macos, windows-installer]
+    needs: [appimage, appimage-current-linux, linux-ffmpeg-source, macos, windows-installer, qt-multimedia-source]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -473,7 +552,12 @@ jobs:
           name: linux-ffmpeg-source
           path: artifacts/linux-ffmpeg-source
 
-      # Exactly one AppImage, .dmg, installer and source bundle, or it fails.
+      - uses: actions/download-artifact@v4
+        with:
+          name: qt-multimedia-source
+          path: artifacts/qt-multimedia-source
+
+      # The selector also requires the separate Qt source readiness gate.
       - name: Select the files to attach
         run: python3 packaging/collect_linux_sources.py select-release-files artifacts release-files
 
