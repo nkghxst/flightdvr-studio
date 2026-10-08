@@ -28,6 +28,11 @@ on:
   pull_request:
     paths-ignore: ["**.md", "docs/**", ".gitattributes"]
   workflow_dispatch:
+    inputs:
+      pr165_macos_diagnostic:
+        description: "One-shot isolated PR165 macOS geometry/audio probe"
+        type: boolean
+        default: false
 
 # A fork pull request runs code nobody here has vetted, so the default token
 # stays read-only and the repository has no secrets for such a run to take.
@@ -55,8 +60,9 @@ jobs:
     # so skip the duplicate. Every packaging job needs this one, so they skip
     # with it rather than each repeating the condition.
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name != github.repository
+      (github.event_name != 'workflow_dispatch' || inputs.pr165_macos_diagnostic != true) &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -323,6 +329,100 @@ jobs:
             ${{ runner.temp }}/evidence
             !${{ runner.temp }}/evidence/**/extract
           if-no-files-found: warn
+
+  pr165-macos-diagnostic:
+    name: PR165 isolated macOS diagnostic only
+    if: github.event_name == 'workflow_dispatch' && inputs.pr165_macos_diagnostic == true
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          ref: 11acd9464da05bb14afc3b695b2604966080c0b4
+          path: target
+
+      - uses: actions/checkout@v4
+        with:
+          ref: 581f86bed21e9a6e836761906cffeb9200e04091
+          path: base
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            target/requirements.txt
+            target/packaging/requirements-qt-build.txt
+
+      - name: Install the exact package-job dependency set
+        shell: bash
+        run: |
+          brew install ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install --no-deps --force-reinstall --require-hashes \
+            --report "$RUNNER_TEMP/qt-pip-report.json" \
+            -r target/packaging/requirements-qt-build.txt
+          python -m pip install -r target/requirements.txt pyinstaller pytest
+
+      - name: Measure only the two named tests on head and base
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p probe-logs
+          {
+            echo "diagnostic_workflow_ref=$GITHUB_SHA"
+            echo "target=$(git -C target rev-parse HEAD)"
+            echo "base=$(git -C base rev-parse HEAD)"
+            uname -a
+            sw_vers
+            python --version
+            python -m pip freeze
+            ffmpeg -version | head -n 1
+          } > probe-logs/inputs.txt
+          cp "$RUNNER_TEMP/qt-pip-report.json" probe-logs/qt-pip-report.json
+
+          probe_one() {
+            local revision="$1" case_name="$2" tree="$3" node="$4"
+            local state rc
+            state="$(mktemp -d "$RUNNER_TEMP/pr165-${revision}-${case_name}-XXXXXX")"
+            mkdir -p "$state/home" "$state/config" "$state/data"
+            set +e
+            (
+              cd "$GITHUB_WORKSPACE/$tree"
+              export HOME="$state/home"
+              export XDG_CONFIG_HOME="$state/config"
+              export XDG_DATA_HOME="$state/data"
+              export QT_QPA_PLATFORM=offscreen
+              export PYTHONPATH="$GITHUB_WORKSPACE/tools:$PWD"
+              export PR165_PROBE_LOG="$GITHUB_WORKSPACE/probe-logs/${revision}-${case_name}.jsonl"
+              python -m pytest -p pr165_macos_probe -vv -s --tb=short "$node"
+            ) 2>&1 | tee "probe-logs/${revision}-${case_name}.log"
+            rc="${PIPESTATUS[0]}"
+            set -e
+            printf '%s\t%s\t%s\n' "$revision" "$case_name" "$rc" >> probe-logs/results.tsv
+          }
+
+          probe_one head saved target \
+            tests/test_music_wiring.py::test_a_saved_depth_is_fitted_to_the_room_when_music_opens
+          probe_one head live target \
+            tests/test_live_preview.py::test_ui_constructed_all_silent_sequence_needs_no_source_reader
+          probe_one base saved base \
+            tests/test_music_wiring.py::test_a_saved_depth_is_fitted_to_the_room_when_music_opens
+          probe_one base live base \
+            tests/test_live_preview.py::test_ui_constructed_all_silent_sequence_needs_no_source_reader
+          cat probe-logs/results.tsv
+          if awk '$3 != 0 {failed=1} END {exit !failed}' probe-logs/results.tsv; then
+            echo "One or more isolated tests failed; see per-case logs and JSONL" >&2
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr165-macos-isolated-diagnostic
+          path: probe-logs/
+          if-no-files-found: error
 
   macos:
     name: macOS app
