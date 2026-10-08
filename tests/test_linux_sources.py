@@ -30,8 +30,11 @@ _spec.loader.exec_module(sources)
 # -- release file selection -------------------------------------------------------------
 
 def _qt_lock() -> dict:
+    # Synthetic satisfied prerequisites let selector negatives reach their named
+    # artifact checks; the real lock remains fail-closed on U1/U2/U3/U5.
     lock = json.loads((ROOT / "packaging" / "qt-multimedia-sources.json").read_text())
-    for field in ("upstream_build_receipt", "dependency_source_closure",
+    for field in ("upstream_build_receipt", "payload_lineage_receipt",
+                  "dependency_source_closure",
                   "modification_record", "replacement_acceptance"):
         lock[field] = {"independently_verified": True, "evidence_sha256": "a" * 64}
     lock["delivery"]["approved"] = True
@@ -63,7 +66,9 @@ def _downloads(tmp_path: Path, **changes) -> Path:
     qt_manifest = {"schema_version": 1, "source_complete": True,
                    "release_ready": True, "unresolved": [], "delivery": lock["delivery"],
                    "sources": declared,
-                   "platform_payloads": {p: {} for p in lock["platforms"]},
+                   "platform_payloads": {
+                       p: {"wheel_to_payload_bytes_verified": True}
+                       for p in lock["platforms"]},
                    "assets": [{"filename": qt_name, "bytes": len(qt_body),
                                "sha256": hashlib.sha256(qt_body).hexdigest()}]}
     files = {
@@ -112,9 +117,9 @@ def test_only_the_four_release_files_are_selected(tmp_path):
     ({"linux-ffmpeg-source/FlightDVR_Studio-2.0.0-linux-ffmpeg-source.tar": None},
      "linux-ffmpeg-source: expected one"),
     ({"qt-multimedia-source/FlightDVR_Studio-2.0.0-qt-multimedia-source.tar": None},
-     "Qt multimedia source release gate failed"),
+     "Qt multimedia source release gate failed: source companion size/hash mismatch"),
     ({"qt-multimedia-source/FlightDVR_Studio-2.0.0-qt-multimedia-source.tar": b"tampered"},
-     "Qt multimedia source release gate failed"),
+     "Qt multimedia source release gate failed: source companion size/hash mismatch"),
 ], ids=["missing", "ambiguous", "gpl-source-bundle-missing",
         "qt-source-bundle-missing", "qt-source-bundle-tampered"])
 def test_a_missing_or_ambiguous_release_file_fails(tmp_path, changes, message):
