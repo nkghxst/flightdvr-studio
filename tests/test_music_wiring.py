@@ -2929,14 +2929,23 @@ def test_export_level_sliders_are_the_numbers_dragged(window, app):
     panel = window.music_panel
     for slider, box in ((panel.music_slider, panel.music_level),
                         (panel.dvr_slider, panel.dvr_level)):
-        box.setEnabled(True)
         slider.setValue(40)                      # keys or a click: one edit
         assert box.value() == 40
         box.setValue(65)
         assert slider.value() == 65
-        box.setEnabled(False)
-        assert not slider.isEnabled(), "a level that does not apply was draggable"
-        box.setEnabled(True)
-        # Enabled exactly when the box is, whatever the group around both is.
-        assert slider.isEnabled() == box.isEnabled()
-        assert not slider.testAttribute(Qt.WidgetAttribute.WA_ForceDisabled)
+
+
+@pytest.mark.parametrize("mode", [AudioMode.MIX, AudioMode.REPLACE,
+                                  AudioMode.ORIGINAL])
+def test_a_level_that_does_not_apply_cannot_be_dragged(window, app, tmp_path,
+                                                       mode):
+    """The panel's own rule decides; the sliders follow it with their boxes."""
+    target = _with_choice(window, app, tmp_path, mode)
+    window._sync_music_panel()
+    assert window._planned_music(target).mode is mode
+    panel = window.music_panel
+    for slider, box in ((panel.music_slider, panel.music_level),
+                        (panel.dvr_slider, panel.dvr_level)):
+        assert slider.isEnabled() == box.isEnabled(), (mode, box)
+    assert panel.dvr_slider.isEnabled() == (mode is AudioMode.MIX)
+    assert panel.music_slider.isEnabled() == (mode is not AudioMode.ORIGINAL)

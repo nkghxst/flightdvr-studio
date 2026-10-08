@@ -53,7 +53,7 @@ from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QSpinBox, QVBoxLayout, QWidget, QSlider,
@@ -109,8 +109,9 @@ class _LevelSlider(QSlider):
     The number box stays the one value: dragging moves the box when the drag
     is let go (so one drag is one edit, as a typed number is one edit), the
     arrow keys move it a step at a time, and the box moving moves the slider.
-    It follows the box's enabled state, so a level that does not apply — the
-    recording's, when the music replaces it — cannot be dragged either.
+    The panel enables it with its box, in the one place that decides which
+    levels apply, so a level that does not — the recording's, when the music
+    replaces it — cannot be dragged either.
     This is the export's level; listening volume is a separate control.
     """
 
@@ -124,10 +125,8 @@ class _LevelSlider(QSlider):
         self.valueChanged.connect(self._moved)
         self.sliderReleased.connect(lambda: self._box.setValue(self.value()))
         box.valueChanged.connect(self._follow)
-        box.installEventFilter(self)
         # Loads may set the box with its signals blocked; they follow up here.
         box.level_slider = self
-        self._follow_enabled()
 
     def _moved(self, value: int) -> None:
         if not self.isSliderDown():
@@ -139,18 +138,6 @@ class _LevelSlider(QSlider):
             self.setValue(value)
             self.blockSignals(blocked)
 
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
-        if watched is self._box and event.type() == QEvent.Type.EnabledChange:
-            self._follow_enabled()
-        return False
-
-    def _follow_enabled(self) -> None:
-        # The box's own setting, not its effective state: both sit in the
-        # same group, so a disabled group already disables this too, and
-        # copying the effective state would leave it off when only the
-        # group comes back.
-        self.setEnabled(not self._box.testAttribute(
-            Qt.WidgetAttribute.WA_ForceDisabled))
 
 
 def _level_row(slider: QSlider, box: QSpinBox) -> QWidget:
@@ -613,9 +600,11 @@ class MusicPanel(QWidget):
                                     and self._asset is not None)
         self.passage_note.setVisible(self._asset is None)
         self.music_level.setEnabled(self._supported and musical)
+        self.music_slider.setEnabled(self._supported and musical)
         # The recording's own level only means something when it is still
         # audible, which is Mix and nothing else.
         self.dvr_level.setEnabled(self._supported and mode is AudioMode.MIX)
+        self.dvr_slider.setEnabled(self._supported and mode is AudioMode.MIX)
         for spin in (self.fade_in, self.fade_out):
             spin.setEnabled(self._supported and musical)
         self.short_track_combo.setEnabled(self._supported and musical)
