@@ -126,6 +126,8 @@ def check(bundle: Path) -> tuple[dict, list[str]]:
             failures.append(f"{entry['file']} declares no licence")
         elif kinds != {"LGPL"}:
             failures.append(f"{entry['file']} declares {entry['licences']}")
+        elif entry["licences"] != ["LGPL 2.1+"]:
+            failures.append(f"{entry['file']} declares unexpected LGPL version {entry['licences']}")
     report = {"bundle": str(bundle),
               "plugins": [str(p.relative_to(bundle)) for p in found_plugins],
               "ffmpeg_libraries": found, "failures": failures}
@@ -187,6 +189,10 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict) ->
     plugins = {p.name.lower() for p in actual_paths.values() if p.parent.name == "multimedia"}
     if not any("ffmpegmediaplugin" in name for name in plugins):
         failures.append("missing FFmpeg multimedia backend")
+    readable_versions = {version for item in report.get("ffmpeg_libraries", [])
+                         for version in item["versions"]}
+    if not readable_versions or readable_versions != {"7.1.5"}:
+        failures.append("FFmpeg library version evidence is absent or differs from 7.1.5")
     if not inputs.get("wheels") or inputs.get("release_ready") is not False:
         failures.append("invalid wheel receipt")
     report["platform"] = platform

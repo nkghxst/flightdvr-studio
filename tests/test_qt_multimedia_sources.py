@@ -108,6 +108,9 @@ def test_prepare_records_missing_sources_without_clearance(tmp_path):
     assert len([x for x in report["sources"] if not x["verified"]]) == len(lock["sources"])
     assert any("U1 wheel-build provenance" in gap for gap in report["unresolved"])
     assert json.loads((tmp_path / "out" / "qt-multimedia-source.manifest.json").read_text()) == report
+    first = (tmp_path / "out" / "qt-multimedia-source.manifest.json").read_bytes()
+    assert qt.prepare(tmp_path / "out", tmp_path / "cache", lock) == report
+    assert (tmp_path / "out" / "qt-multimedia-source.manifest.json").read_bytes() == first
 
 
 def test_final_inventory_rejects_absent_library_and_unbound_extra(tmp_path):

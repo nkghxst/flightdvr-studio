@@ -111,7 +111,12 @@ def test_only_the_four_release_files_are_selected(tmp_path):
     ({"linux-appimage/second.AppImage": b"again"}, "linux-appimage: expected one"),
     ({"linux-ffmpeg-source/FlightDVR_Studio-2.0.0-linux-ffmpeg-source.tar": None},
      "linux-ffmpeg-source: expected one"),
-], ids=["missing", "ambiguous", "source-bundle-missing"])
+    ({"qt-multimedia-source/FlightDVR_Studio-2.0.0-qt-multimedia-source.tar": None},
+     "Qt multimedia source release gate failed"),
+    ({"qt-multimedia-source/FlightDVR_Studio-2.0.0-qt-multimedia-source.tar": b"tampered"},
+     "Qt multimedia source release gate failed"),
+], ids=["missing", "ambiguous", "gpl-source-bundle-missing",
+        "qt-source-bundle-missing", "qt-source-bundle-tampered"])
 def test_a_missing_or_ambiguous_release_file_fails(tmp_path, changes, message):
     with pytest.raises(SystemExit, match=message):
         sources.select_release_files(_downloads(tmp_path, **changes), tmp_path / "out", _qt_lock())

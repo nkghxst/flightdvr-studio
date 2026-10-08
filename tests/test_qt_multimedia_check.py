@@ -63,6 +63,7 @@ def test_lgpl_libraries_and_a_backend_pass(tmp_path):
     (b"GPL version 3 or later", "declares ['GPL 3+']"),
     (LGPL + b"nonfree and unredistributable", "says it is nonfree"),
     (b"no licence here", "declares no licence"),
+    (b"LGPL version 3 or later", "unexpected LGPL version"),
 ])
 def test_anything_but_lgpl_fails(tmp_path, data, why):
     root = bundle(tmp_path, {"avcodec-61.dll": LGPL, "avformat-61.dll": data})
