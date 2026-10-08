@@ -154,8 +154,14 @@ def test_macos_framework_links_require_exact_targets_and_bound_content(tmp_path)
         for name, target in links:
             path = root / name
             path.symlink_to(target, target_is_directory=name.endswith(("Resources", "Current")))
+        bundle_resources = bundle / "Contents" / "Resources"
+        bundle_resources.mkdir()
+        (bundle_resources / "QtMultimedia").symlink_to(f"../Frameworks/{binary_name}")
     except OSError as exc:
         pytest.skip(f"symlinks unavailable on this host: {exc}")
+    signature = root / framework / "Versions" / "A" / "_CodeSignature" / "CodeResources"
+    signature.parent.mkdir()
+    signature.write_bytes(b"generated signing metadata")
     sha = hashlib.sha256(binary.read_bytes()).hexdigest()
     info_sha = hashlib.sha256(info.read_bytes()).hexdigest()
     wheel = "a" * 64
@@ -174,6 +180,8 @@ def test_macos_framework_links_require_exact_targets_and_bound_content(tmp_path)
     assert not any("symlink" in failure or "wheel collection origin" in failure
                    or "architecture" in failure for failure in failures), failures
     assert len(report["selected_links"]) == 4
+    assert len(report["generated_bundle_links"]) == 1
+    assert len(report["generated_signing_files"]) == 1
     alias = root / "QtMultimedia"
     alias.unlink()
     alias.symlink_to(info_name)
@@ -233,6 +241,17 @@ def test_prepare_records_missing_sources_without_clearance(tmp_path):
     first = (tmp_path / "out" / "qt-multimedia-source.manifest.json").read_bytes()
     assert qt.prepare(tmp_path / "out", tmp_path / "cache", lock) == report
     assert (tmp_path / "out" / "qt-multimedia-source.manifest.json").read_bytes() == first
+
+
+def test_prepare_keeps_the_macos_transformation_limit(tmp_path, monkeypatch):
+    gap = "U2: wheel bytes changed during PyInstaller/macOS signing"
+    monkeypatch.setattr(qt, "platform_evidence", lambda folder, lock: {
+        "macos": {"transformation_limit": gap}})
+    report = qt.prepare(tmp_path / "out", tmp_path / "cache", qt.load_lock(),
+                        evidence=tmp_path / "evidence")
+    assert gap in report["unresolved"]
+    assert report["source_complete"] is False
+    assert report["release_ready"] is False
 
 
 def test_final_inventory_rejects_absent_library_and_unbound_extra(tmp_path):
@@ -323,8 +342,44 @@ def test_macos_signing_requires_a_matching_pre_sign_wheel_receipt(tmp_path):
     assert next(x for x in post["selected_files"] if x["path"] == entries[0]["path"])[
         "transformation"] == "ad-hoc codesign after verified wheel-byte collection"
     unsigned, _ = scanner.check(bundle)
-    assert any("unreconciled" in failure
-               for failure in scanner.binding_check(bundle, unsigned, inputs, collection))
+    assert scanner.binding_check(bundle, unsigned, inputs, collection) == []
+    assert unsigned["transformation_limit"].startswith("U2:")
+
+
+def test_macos_pyinstaller_transformation_is_recorded_as_unresolved_u2(tmp_path):
+    bundle = tmp_path / "app"
+    directory = bundle / "Contents" / "Frameworks" / "PySide6"
+    directory.mkdir(parents=True)
+    source = b"\xcf\xfa\xed\xfe" + struct.pack("<I", 0x0100000c)
+    source += b"\0LGPL version 2.1 or later\0FFmpeg n7.1.5/lib\0"
+    transformed = source + b"PyInstaller ad-hoc signature"
+    names = ["libavcodec.61.dylib", "libavformat.61.dylib", "libavutil.59.dylib",
+             "libswresample.5.dylib", "libswscale.8.dylib"]
+    plugin = directory / "plugins" / "multimedia" / "libffmpegmediaplugin.dylib"
+    plugin.parent.mkdir(parents=True)
+    paths = [directory / name for name in names] + [plugin]
+    for path in paths:
+        path.write_bytes(transformed)
+    source_sha = hashlib.sha256(source).hexdigest()
+    entries = [{"path": path.relative_to(bundle / "Contents" / "Frameworks").as_posix(),
+                "kind": "BINARY", "source_sha256": source_sha,
+                "wheel_package": "PySide6-Addons", "wheel_file": "PySide6/libavcodec.61.dylib",
+                "wheel_sha256": "a" * 64} for path in paths]
+    inputs = {"platform": "macos", "release_ready": False,
+              "wheels": [{"package": "PySide6-Addons", "sha256": "a" * 64}],
+              "files": [{"package": "PySide6-Addons", "file": "PySide6/libavcodec.61.dylib",
+                         "sha256": source_sha}]}
+    collection = {"platform": "macos", "files": entries}
+    pre, failures = scanner.check(bundle)
+    assert failures == []
+    assert scanner.binding_check(bundle, pre, inputs, collection) == []
+    assert pre["transformation_limit"].startswith("U2:")
+    assert all(item["transformed"] for item in pre["selected_files"])
+    pre["failures"] = []
+    paths[0].write_bytes(transformed + b"explicit codesign")
+    post, _ = scanner.check(bundle)
+    assert scanner.binding_check(bundle, post, inputs, collection, pre) == []
+    assert post["transformation_limit"].startswith("U2:")
 
 
 def test_linux_collection_coalesces_only_identical_wheel_destinations(tmp_path):

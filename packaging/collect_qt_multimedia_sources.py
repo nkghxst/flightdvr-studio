@@ -281,13 +281,21 @@ def platform_evidence(folder: Path, lock: dict) -> dict:
                        or not item.get("final_sha256") or not item.get("final_architecture")
                        for item, source in zip(observed, collection["files"]))):
             raise ValueError(f"{platform}: package collection and inventory differ")
+        observed_links = inventory.get("selected_links", [])
+        if (len(observed_links) != len(collection.get("links", []))
+                or any({k: item.get(k) for k in source} != source
+                       or not item.get("final_path")
+                       for item, source in zip(observed_links, collection.get("links", [])))):
+            raise ValueError(f"{platform}: package link collection and inventory differ")
         if platform == "macos":
             pre_path = only("qt-multimedia-pre-sign.json")
             pre = json.loads(pre_path.read_text(encoding="utf-8"))
             if (digest(pre_path) != inventory.get("pre_sign_report_sha256")
                     or pre.get("platform") != platform or pre.get("failures")
                     or {x["path"] for x in pre.get("selected_files", [])}
-                    != {x["path"] for x in collection["files"]}):
+                    != {x["path"] for x in collection["files"]}
+                    or {x["path"] for x in pre.get("selected_links", [])}
+                    != {x["path"] for x in collection.get("links", [])}):
                 raise ValueError("macos: signed package lacks a matching pre-sign receipt")
         receipts[platform] = dict(inputs_sha256=digest(inputs_path),
                                   collection_sha256=digest(collection_path),
@@ -295,6 +303,8 @@ def platform_evidence(folder: Path, lock: dict) -> dict:
                                   selected_files=len(collection["files"]))
         if platform == "macos":
             receipts[platform]["pre_sign_sha256"] = digest(pre_path)
+            if inventory.get("transformation_limit"):
+                receipts[platform]["transformation_limit"] = inventory["transformation_limit"]
     return receipts
 
 
@@ -392,6 +402,8 @@ def prepare(out: Path, cache: Path, lock: dict, fetch: bool = False,
         gaps.append("U2 package evidence invalid: " + str(exc))
     if not payloads:
         gaps.append("U2 final platform payload manifests not reconciled")
+    gaps += sorted({item["transformation_limit"] for item in payloads.values()
+                    if item.get("transformation_limit")})
     assets = []
     if all(x["verified"] for x in results):
         try:

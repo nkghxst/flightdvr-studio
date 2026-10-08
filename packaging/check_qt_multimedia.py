@@ -162,12 +162,19 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
                    for x in inputs.get("files", [])}
     actual_paths = {}
     actual_links = {}
+    generated_signing_files = []
     for path in bundle.rglob("*"):
         if not (path.is_file() or path.is_symlink()) or not (
                 ("multimedia" in str(path).lower() and path.suffix.lower() not in (".json", ".md"))
                 or "ffmpegstub" in path.name.lower() or family(path.name)):
             continue
         relative = path.relative_to(bundle).as_posix()
+        if (platform == "macos" and not path.is_symlink()
+                and relative == ("Contents/Frameworks/PySide6/Qt/lib/"
+                                 "QtMultimedia.framework/Versions/A/_CodeSignature/CodeResources")):
+            generated_signing_files.append(dict(path=relative, sha256=sha256(path),
+                                                bytes=path.stat().st_size))
+            continue
         if path.is_symlink():
             resolved = path.resolve()
             if not resolved.is_relative_to(bundle.resolve()) or not resolved.exists():
@@ -203,14 +210,18 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
         if item["final_sha256"] != item["source_sha256"]:
             item["transformed"] = True
             prior = pre_files.get(path)
-            if (prior is None or prior.get("final_sha256") != item["source_sha256"]
-                    or prior.get("source_sha256") != item["source_sha256"]
-                    or prior.get("final_path") != relative
-                    or prior.get("final_architecture") != item["final_architecture"]):
+            if pre_sign is None and platform == "macos" and item.get("kind", "BINARY") != "DATA":
+                item["transformation"] = "PyInstaller-bundle transformation; original-byte lineage unresolved"
+            elif (prior is None or prior.get("source_sha256") != item["source_sha256"]
+                  or prior.get("final_path") != relative
+                  or prior.get("final_architecture") != item["final_architecture"]):
                 failures.append(f"unreconciled PyInstaller/signing transformation: {relative}")
             else:
                 item["pre_sign_sha256"] = prior["final_sha256"]
-                item["transformation"] = "ad-hoc codesign after verified wheel-byte collection"
+                item["transformation"] = (
+                    "ad-hoc codesign after verified wheel-byte collection"
+                    if prior["final_sha256"] == item["source_sha256"] else
+                    "ad-hoc codesign after PyInstaller bundle; original-byte lineage unresolved")
         elif pre_sign is not None:
             prior = pre_files.get(path)
             if prior is None or prior.get("final_sha256") != item["source_sha256"]:
@@ -257,8 +268,18 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
                 resolved.is_dir() and any(p.is_relative_to(resolved) for p in bound_files)):
             failures.append(f"multimedia symlink lacks selected wheel content: {relative}")
         final_links.append(dict(item, final_path=relative))
+    generated_bundle_links = []
     for relative in actual_links.keys() - bound_link_paths:
-        failures.append(f"shipped multimedia symlink lacks collection origin: {relative}")
+        link = actual_links[relative]
+        resolved = link.resolve()
+        if (platform == "macos" and relative.startswith("Contents/Resources/")
+                and "/" not in relative[len("Contents/Resources/"):]
+                and resolved in bound_files and link.name == resolved.name):
+            generated_bundle_links.append(dict(path=relative,
+                                               target=os.readlink(link).replace("\\", "/"),
+                                               bound_path=resolved.relative_to(bundle).as_posix()))
+        else:
+            failures.append(f"shipped multimedia symlink lacks collection origin: {relative}")
     found_families = {family(p.name) for p in actual_paths.values()}
     missing = EXPECTED - found_families
     if missing:
@@ -276,6 +297,11 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
     report["wheel_inputs"] = inputs["wheels"]
     report["selected_files"] = sorted(selected.values(), key=lambda x: x["path"])
     report["selected_links"] = sorted(final_links, key=lambda x: x["path"])
+    report["generated_signing_files"] = sorted(generated_signing_files, key=lambda x: x["path"])
+    report["generated_bundle_links"] = sorted(generated_bundle_links, key=lambda x: x["path"])
+    if platform == "macos" and any("unresolved" in item.get("transformation", "")
+                                    for item in selected.values()):
+        report["transformation_limit"] = "U2: wheel bytes changed during PyInstaller/macOS signing; original-byte lineage is not independently proven"
     report["source_complete"] = False
     report["release_ready"] = False
     return failures

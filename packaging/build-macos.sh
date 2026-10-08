@@ -70,6 +70,10 @@ if [ ! -d "$APP" ]; then
     exit 1
 fi
 printf '  bundle: %s\n' "$(du -sh "$APP" | cut -f1)"
+# PyInstaller ad-hoc signs the assembled BUNDLE before returning. Verify that
+# signature before recording its already-transformed bytes; this is not a
+# wheel-byte equality or release-clearance claim.
+codesign --verify --deep --strict "$APP"
 # Listen needs QtMultimedia's PCM sink and a backend for it. What else PySide6
 # brought with it is read from its bytes; anything but LGPL fails the build.
 python3 packaging/check_qt_multimedia.py "$APP" dist/qt-multimedia-pre-sign.json \
