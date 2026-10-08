@@ -53,10 +53,10 @@ from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout,
-    QLabel, QSpinBox, QVBoxLayout, QWidget,
+    QLabel, QSpinBox, QVBoxLayout, QWidget, QSlider,
 )
 
 from .audio_plan import (
@@ -101,6 +101,53 @@ def seconds_of(samples: int, rate: int = OUTPUT_RATE) -> float:
 def samples_of(seconds: float, rate: int = OUTPUT_RATE) -> int:
     """Seconds back to whole samples, the unit the contract stores."""
     return max(0, round(float(seconds) * rate))
+
+
+class _LevelSlider(QSlider):
+    """An export level to drag, beside the number that is its exact value.
+
+    The number box stays the one value: dragging moves the box when the drag
+    is let go (so one drag is one edit, as a typed number is one edit), the
+    arrow keys move it a step at a time, and the box moving moves the slider.
+    The panel enables it with its box, in the one place that decides which
+    levels apply, so a level that does not — the recording's, when the music
+    replaces it — cannot be dragged either.
+    This is the export's level; listening volume is a separate control.
+    """
+
+    def __init__(self, box: QSpinBox, name: str) -> None:
+        super().__init__(Qt.Orientation.Horizontal)
+        self._box = box
+        self.setRange(box.minimum(), box.maximum())
+        self.setValue(box.value())
+        self.setAccessibleName(name)
+        self.setToolTip(f"{name}. The number beside it is the exact value.")
+        self.valueChanged.connect(self._moved)
+        self.sliderReleased.connect(lambda: self._box.setValue(self.value()))
+        box.valueChanged.connect(self._follow)
+        # Loads may set the box with its signals blocked; they follow up here.
+        box.level_slider = self
+
+    def _moved(self, value: int) -> None:
+        if not self.isSliderDown():
+            self._box.setValue(value)
+
+    def _follow(self, value: int) -> None:
+        if self.value() != value:
+            blocked = self.blockSignals(True)
+            self.setValue(value)
+            self.blockSignals(blocked)
+
+
+
+def _level_row(slider: QSlider, box: QSpinBox) -> QWidget:
+    row = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(TIGHT)
+    layout.addWidget(slider, 1)
+    layout.addWidget(box)
+    return row
 
 
 class MusicPanel(QWidget):
@@ -284,13 +331,15 @@ class MusicPanel(QWidget):
         self.music_level.setRange(0, 100)
         self.music_level.setSuffix(" %")
         self.music_level.valueChanged.connect(self._on_edited)
-        form.addRow("Music level:", self.music_level)
+        self.music_slider = _LevelSlider(self.music_level, "Music level in the export")
+        form.addRow("Music level:", _level_row(self.music_slider, self.music_level))
 
         self.dvr_level = QSpinBox()
         self.dvr_level.setRange(0, 100)
         self.dvr_level.setSuffix(" %")
         self.dvr_level.valueChanged.connect(self._on_edited)
-        form.addRow("Recording level:", self.dvr_level)
+        self.dvr_slider = _LevelSlider(self.dvr_level, "Recording level in the export")
+        form.addRow("Recording level:", _level_row(self.dvr_slider, self.dvr_level))
 
         fades = QHBoxLayout()
         self.fade_in = QDoubleSpinBox()
@@ -538,6 +587,9 @@ class MusicPanel(QWidget):
         if typing and spin.valueFromText(spin.textFromValue(value)) == spin.value():
             return
         spin.setValue(value)
+        slider = getattr(spin, "level_slider", None)
+        if slider is not None:
+            slider._follow(spin.value())
 
     def _apply_enabled(self) -> None:
         """What can be edited, given the mode, the asset and the context."""
@@ -548,9 +600,11 @@ class MusicPanel(QWidget):
                                     and self._asset is not None)
         self.passage_note.setVisible(self._asset is None)
         self.music_level.setEnabled(self._supported and musical)
+        self.music_slider.setEnabled(self._supported and musical)
         # The recording's own level only means something when it is still
         # audible, which is Mix and nothing else.
         self.dvr_level.setEnabled(self._supported and mode is AudioMode.MIX)
+        self.dvr_slider.setEnabled(self._supported and mode is AudioMode.MIX)
         for spin in (self.fade_in, self.fade_out):
             spin.setEnabled(self._supported and musical)
         self.short_track_combo.setEnabled(self._supported and musical)

@@ -390,8 +390,8 @@ readable image, so a cancelled or failed capture leaves nothing behind and never
 damages a file already there.
 
 Trimming itself is done by eye. To hear what an output will sound like —
-its original audio, chosen music or a mix — select that output and use
-**Listen**; see [choosing the sound](docs/USER_GUIDE.md#choose-the-sound-for-this-output)
+its original audio, chosen music or a mix — select that output and turn
+**Sound** on beside Play; see [choosing the sound](docs/USER_GUIDE.md#choose-the-sound-for-this-output)
 in the user guide. Monitoring volume changes only what you hear, not the
 export, and Slow motion exports silently.
 

@@ -126,8 +126,14 @@ class DeviceUnavailable(RuntimeError):
     """There is no usable audio output, or the sink refused to start."""
 
 
-def qt_sink_factory(fmt: DeviceFormat = DeviceFormat()) -> Sink:
-    """Build a real `QAudioSink` for the default output.
+def qt_sink_factory(fmt: DeviceFormat = DeviceFormat(),
+                    device_key: str = "", device_name: str = "") -> Sink:
+    """Build a real `QAudioSink` for one output.
+
+    `device_key` empty means the system default output, resolved now. A key
+    means exactly that device: when it is not connected this refuses, naming
+    it, rather than quietly opening some other output — sound arriving
+    somewhere the person did not choose is the failure this exists to avoid.
 
     Imported inside the function on purpose. Nothing is loaded, and no device
     is looked at, until somebody actually asks for output — so importing this
@@ -138,7 +144,14 @@ def qt_sink_factory(fmt: DeviceFormat = DeviceFormat()) -> Sink:
     """
     from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
 
-    device = QMediaDevices.defaultAudioOutput()
+    if device_key:
+        device = next((one for one in QMediaDevices.audioOutputs()
+                       if _device_key(one) == device_key), None)
+        if device is None:
+            raise DeviceUnavailable(
+                f"{device_name or 'the chosen output'} is not connected")
+    else:
+        device = QMediaDevices.defaultAudioOutput()
     if device is None or device.isNull():
         raise DeviceUnavailable("this machine has no audio output")
     wanted = QAudioFormat()
@@ -149,6 +162,108 @@ def qt_sink_factory(fmt: DeviceFormat = DeviceFormat()) -> Sink:
         raise DeviceUnavailable(
             f"the audio output does not accept {fmt.rate} Hz float stereo")
     return QAudioSink(device, wanted)
+
+
+# -- which output -------------------------------------------------------------
+#
+# Chosen in the app and nowhere else: the Windows (or macOS, or Linux) default
+# output is never changed. The UI sees only `OutputDevice` values; every Qt name
+# stays in this module.
+
+# The saved preference that means "whatever the system default is now".
+SYSTEM_DEFAULT = ""
+
+
+@dataclass(frozen=True)
+class OutputDevice:
+    """One output, as the person sees it and as it is saved."""
+
+    key: str      # the device id, as hex: stable across launches and renames
+    name: str     # its description, for menus and messages
+
+
+def _device_key(device) -> str:
+    raw = device.id()
+    data = raw.data() if hasattr(raw, "data") else raw
+    return bytes(data).hex()
+
+
+class DeviceCatalog(Protocol):
+    """What the window needs to offer outputs. Tests supply their own."""
+
+    def outputs(self) -> list[OutputDevice]: ...
+    def default(self) -> OutputDevice | None: ...
+
+
+class QtDeviceCatalog:
+    """The machine's outputs, read through `QMediaDevices` when asked.
+
+    Built only when something actually needs the list — opening the Audio
+    menu or starting to listen — so constructing a window lists no devices.
+    `on_change` is told when outputs come or go (a headset unplugged), which
+    is how a lost device is noticed while it is being used.
+    """
+
+    def __init__(self, on_change: Callable[[], None] | None = None) -> None:
+        from PySide6.QtMultimedia import QMediaDevices
+        self._watch = QMediaDevices()
+        if on_change is not None:
+            self._watch.audioOutputsChanged.connect(on_change)
+
+    def outputs(self) -> list[OutputDevice]:
+        from PySide6.QtMultimedia import QMediaDevices
+        return [OutputDevice(_device_key(one), one.description())
+                for one in QMediaDevices.audioOutputs() if not one.isNull()]
+
+    def default(self) -> OutputDevice | None:
+        from PySide6.QtMultimedia import QMediaDevices
+        one = QMediaDevices.defaultAudioOutput()
+        if one is None or one.isNull():
+            return None
+        return OutputDevice(_device_key(one), one.description())
+
+
+@dataclass(frozen=True)
+class OutputChoice:
+    """What this run uses, and what to say about it once.
+
+    `key` and `name` are the device the sink actually opens — for System
+    default too, resolved now to the device that is the default *now*. The
+    sink opens exactly that one from then on: a different default appearing
+    later is not followed silently, and losing this device stops the sound
+    like losing any other. Empty only when there is no output at all.
+    `preference` is the saved choice (empty: System default), which is what
+    the menu shows checked. `notice` is set when a saved choice could not be
+    honoured.
+    """
+
+    key: str
+    name: str
+    notice: str = ""
+    preference: str = SYSTEM_DEFAULT
+
+
+def resolve_output_device(saved_key: str, saved_name: str,
+                   catalog: DeviceCatalog) -> OutputChoice:
+    """The output to use now, from the saved preference.
+
+    A saved device that is not connected falls back to the system default
+    *for this run* and says so; the preference itself is kept for when the
+    device comes back. Nothing here writes anything.
+    """
+    default = catalog.default()
+    default_key = default.key if default else SYSTEM_DEFAULT
+    default_name = default.name if default else ""
+    if not saved_key:
+        return OutputChoice(default_key, default_name)
+    found = next((one for one in catalog.outputs() if one.key == saved_key), None)
+    if found is not None:
+        return OutputChoice(found.key, found.name, preference=saved_key)
+    now = f" ({default_name})" if default_name else ""
+    return OutputChoice(
+        default_key, default_name, preference=saved_key,
+        notice=(f"{saved_name or 'The chosen output'} is not connected, so the "
+                f"system default{now} is used for now. Your choice is kept."))
 
 
 def describe_output_module() -> tuple[str, bool]:
@@ -253,7 +368,10 @@ class AudioOutput:
     def __init__(self, *, sink_factory: Callable[[], Sink] | None = None,
                  fmt: DeviceFormat = DeviceFormat(),
                  max_queued_bytes: int = MAX_QUEUED_BYTES) -> None:
-        self._make_sink = sink_factory or (lambda: qt_sink_factory(fmt))
+        self._device_key = SYSTEM_DEFAULT
+        self._device_name = ""
+        self._make_sink = sink_factory or (lambda: qt_sink_factory(
+            fmt, self._device_key, self._device_name))
         self._fmt = fmt
         self._max_queued = max(FRAME_BYTES, int(max_queued_bytes))
         self._sink: Sink | None = None
@@ -283,6 +401,38 @@ class AudioOutput:
     def failure(self) -> str:
         """Why output stopped, or empty. Never raised at the caller."""
         return self._failure
+
+    @property
+    def device_key(self) -> str:
+        return self._device_key
+
+    @property
+    def device_name(self) -> str:
+        return self._device_name
+
+    def select_device(self, key: str, name: str) -> bool:
+        """Use another output from the next start. True when it changed.
+
+        An open sink is released at once, quietly: what it was playing
+        belonged to the old device. The caller decides whether to start
+        again; nothing here resumes by itself.
+        """
+        name = str(name)
+        if key == self._device_key:
+            self._device_name = name or self._device_name
+            return False
+        self._device_key, self._device_name = str(key), name
+        if self._sink is not None:
+            self.stop()
+        self._failure = ""
+        return True
+
+    def device_lost(self, why: str) -> None:
+        """The output in use went away. Go quiet and say why, and stay
+        stopped: switching to another device without being asked, or
+        resuming when it returns, would put sound somewhere unchosen."""
+        if self._sink is not None:
+            self._fail(why)
 
     @property
     def queued_bytes(self) -> int:

@@ -598,12 +598,65 @@ class OutputMusicLane(_Lane):
 
 
 class SongOverview(_Lane):
-    """The whole track on its own clock, with the passage the output uses."""
+    """The whole track on its own clock, with the passage the output uses.
+
+    Its two ends are handles, and so is the passage itself: drag inside the
+    shaded passage (or Tab to it and use the arrow keys) to move it along the
+    song without changing its length — the length the output was given.
+    """
 
     height_hint = 44
 
+    def __init__(self, editor, parent=None) -> None:
+        super().__init__(editor, parent)
+        self._offset = 0          # where in the passage it was picked up
+
     def handles(self):
-        return ("start", "end")
+        return ("start", "end", "passage")
+
+    def _handle_at(self, x):
+        passage = self.editor.choice.passage
+        for name in ("start", "end"):
+            at = self.handle_sample(name)
+            if at is not None and abs(self._x(at) - x) <= HANDLE_REACH:
+                return name
+        if passage is not None and self._x(passage.start) <= x <= self._x(passage.end):
+            return "passage"
+        return None
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        super().mousePressEvent(event)
+        span, passage = self.span(), self.editor.choice.passage
+        if self._grab == "passage" and span is not None and passage is not None:
+            at = pixel_to_sample(event.position().x(), self.width(), span)
+            self._offset = at - passage.start
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._offset = 0
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        self._offset = 0          # the keys move the passage by its start
+        super().keyPressEvent(event)
+
+    def _paint_handles(self, painter, colour) -> None:
+        """The two ends as handles; the passage itself, when it is the one
+        the keys will move, outlined across its width."""
+        for name in ("start", "end"):
+            at = self.handle_sample(name)
+            if at is None:
+                continue
+            x = self._x(at)
+            size = 7 if name == self.active and self.hasFocus() else 5
+            painter.setPen(QPen(colour, 1))
+            painter.setBrush(colour if name == self.active else Qt.BrushStyle.NoBrush)
+            painter.drawRect(QRectF(x - size / 2, 1, size, size))
+        passage = self.editor.choice.passage
+        if self.active == "passage" and passage is not None:
+            painter.setPen(QPen(colour, 2 if self.hasFocus() else 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            x0, x1 = self._x(passage.start), self._x(passage.end)
+            painter.drawRect(QRectF(x0, 1, max(1.0, x1 - x0), self.height() - 2))
 
     def span(self):
         asset = self.editor.choice.asset
@@ -619,7 +672,7 @@ class SongOverview(_Lane):
         passage = self.editor.choice.passage
         if passage is None:
             return None
-        return passage.start if name == "start" else passage.end
+        return passage.end if name == "end" else passage.start
 
     def moved(self, choice, name, sample):
         from dataclasses import replace
@@ -627,6 +680,11 @@ class SongOverview(_Lane):
         if asset is None or passage is None:
             return choice
         total = asset.decoded_samples
+        if name == "passage":
+            length = passage.end - passage.start
+            start = min(max(0, sample - self._offset), max(0, total - length))
+            return replace(choice, passage=SampleSpan(
+                start, start + length, passage.rate))
         if name == "start":
             start, end = sample, passage.end
             start = min(start, end - 1)

@@ -75,7 +75,8 @@ from .audio_plan import (
     OUTPUT_RATE, AudioMode, MusicChoice, SampleSpan, ShortTrackPolicy,
     resolve_monitor_audio_plan, round_samples,
 )
-from .audio_device import AudioOutput
+from .audio_device import (SYSTEM_DEFAULT, AudioOutput, OutputChoice,
+                           QtDeviceCatalog, resolve_output_device)
 from .audio_reader import FfmpegPcmReader, MusicAssetProbe
 from .audio_stream import (
     AudioStream, LiveAudioMapping, MonitorState, SequencePcmReader,
@@ -109,7 +110,8 @@ from .presets import (
 )
 from .player import PreviewPlayer, exact_timestamp
 from .preview_recipe import PreviewRecipe, PictureTerminal, make_preview_recipe
-from .preview_panel import PreviewView
+from .preview_panel import (CLASSIC_MUSIC_MINIMUM, MUSIC_BAND_MINIMUM,
+                            PreviewView)
 from .queue_panel import QueuePanel
 from .assembly import absent, default_items, export_piece, present, resolve
 from .bundle import (
@@ -351,6 +353,15 @@ class _BundleTrackCheck(QThread):
             self.result.emit(self.generation, problem)
 
 
+# Classic's Music band depth the person chose, and the filmstrip's cap when
+# it takes a collapsed list's room.
+MUSIC_DEPTH_KEY = "music_band_depth"
+FILMSTRIP_TALL = 112
+
+# The person's chosen output for the preview. Empty key: the system default.
+OUTPUT_DEVICE_KEY = "audio_output_device"
+OUTPUT_DEVICE_NAME = "audio_output_device_name"
+
 # What a recording's own sound is auditioned under when no music is heard: any
 # 1x preset that carries sound resolves it alike.
 AUDITION_PRESET = "master"
@@ -385,6 +396,16 @@ class MainWindow(QMainWindow):
         self._queue_total = 1.0
         self._queue_done = 0.0
         self.splitter: QSplitter | None = None
+        # Classic's Music band given the window while it is being edited.
+        self._music_focus = False
+        # The depth last given to the band, fitted to the room at the time.
+        self._applied_depth = 0
+        # A depth the person set for Classic's band, or 0 for the shallow one.
+        try:
+            self._music_depth = max(0, int(self.settings_store.value(
+                MUSIC_DEPTH_KEY, 0) or 0))
+        except (TypeError, ValueError):
+            self._music_depth = 0
         self._trim_clip: ClipInfo | None = None
         self._precise_frame_number: int | None = None
         self._precise_frame_seconds: float | None = None
@@ -595,7 +616,7 @@ class MainWindow(QMainWindow):
     def _build(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        outer = QVBoxLayout(central)
+        outer = self._outer_layout = QVBoxLayout(central)
         outer.setContentsMargins(EDGE, EDGE, EDGE, EDGE)
         outer.setSpacing(INNER)
 
@@ -916,6 +937,7 @@ class MainWindow(QMainWindow):
         bindings = [
             ("Space", self._toggle_play),
             ("K", self._toggle_play),
+            ("M", self._toggle_sound),
             ("I", self._set_in),
             ("N", self._add_select),
             ("O", self._set_out),
@@ -1145,6 +1167,8 @@ class MainWindow(QMainWindow):
         view.music_changed.connect(self._on_music_changed)
         view.music_band_changing.connect(self._before_music_band)
         view.music_band.toggled.connect(self._on_music_band_toggled)
+        view.music_focus_toggled.connect(self.set_music_focus)
+        view.music_depth_requested.connect(self.set_music_depth)
         self._build_live_preview()
         return view.music_band
 
@@ -1162,6 +1186,8 @@ class MainWindow(QMainWindow):
             blocked = action.blockSignals(True)
             action.setChecked(bool(open_))
             action.blockSignals(blocked)
+        if not open_:
+            self.set_music_focus(False)
         if self._view_mode is Mode.CLASSIC:
             # Shallow before it is shown, so its first request is the
             # shallow one.
@@ -2067,12 +2093,14 @@ class MainWindow(QMainWindow):
                     self.output_plan.select(target)
             self._music_target = target
             if target is None:
+                self.preview_view.set_music_title("Music")
                 self.preview_view.show_track_status("")
                 self.export_panel.set_music_summary("")
                 self._sync_live_preview()
                 return
             choice = self._planned_music(target)
             name, preset_key, joined, bundle = self._music_context()
+            self._show_music_title(name, preset_key)
             self._music_audition = audition
             self.music_panel.load(
                 choice, target=name, preset_key=preset_key,
@@ -2273,7 +2301,45 @@ class MainWindow(QMainWindow):
         if view is None or self.music_editor is None:
             return
         if self._view_mode is not Mode.FLOW:
-            view.set_music_presentation(Presentation.CLASSIC)
+            # Deep when it has been given the room — Focus, or the list
+            # collapsed with Music open — and the shallow band otherwise,
+            # exactly as before.
+            deep = self._music_focus or self._music_reclaims_list()
+            view.set_classic_reach(deep)
+            depth = self._music_depth if not deep else 0
+            if deep:
+                view.set_music_presentation(Presentation.FULL)
+                if not self._music_focus:
+                    # The collapsed list's room, not a new demand on the
+                    # window: no larger minimum than the shallow band's.
+                    view.music_body.setMinimumHeight(CLASSIC_MUSIC_MINIMUM)
+            elif depth:
+                # A depth the person chose, fitted to the room there is now:
+                # reopened in a smaller window it is given only the slack
+                # above it, never a taller window. The preference itself is
+                # kept, so a larger window gets it back. The full lanes once
+                # there is room for them, the shallow arrangement below that.
+                fitted = self._fitted_music_depth(depth)
+                view.set_music_presentation(
+                    Presentation.FULL if fitted >= MUSIC_BAND_MINIMUM
+                    else Presentation.CLASSIC)
+                view.set_classic_depth(fitted)
+                if fitted < depth and fitted != self._applied_depth:
+                    # Measured again once this has been laid out: the room
+                    # can only be read after the band has taken its place.
+                    QTimer.singleShot(0, self._fit_music_presentation)
+                self._applied_depth = fitted
+            else:
+                view.set_music_presentation(Presentation.CLASSIC)
+            view.band_grip.setVisible(not self._music_focus)
+            self._outer_layout.setStretchFactor(view.music_band,
+                                                1 if deep else 0)
+            # The list collapsed with Music closed: its room goes to the
+            # filmstrip, whose stills are drawn at its height, up to a cap —
+            # bigger frames to find a moment by, rather than a blank block.
+            strip = self._collapsed_strip_reclaims()
+            self._outer_layout.setStretchFactor(view.trim_band, 1 if strip else 0)
+            view.trim_bar.setMaximumHeight(FILMSTRIP_TALL if strip else 16777215)
             return
         view.set_music_presentation(Presentation.FULL)
         room = view.music_body.viewport().height()
@@ -2283,6 +2349,78 @@ class MainWindow(QMainWindow):
                   - view.music_panel.sizeHint().height())
         if room > 0 and needed > room:
             view.set_music_presentation(Presentation.COMPACT)
+
+    def _show_music_title(self, name: str, preset_key: str) -> None:
+        """The band says which output it edits, so the source being looked
+        at and the output being changed cannot be taken for each other."""
+        label = PRESETS[preset_key].label if preset_key in PRESETS else ""
+        parts = [part for part in (name, label) if part]
+        self.preview_view.set_music_title(
+            "Music — for " + " · ".join(parts) if parts else "Music")
+
+    def _music_reclaims_list(self) -> bool:
+        """Collapsed by choice, in Classic, with Music open: the list's room
+        is the band's. A fold for Music is not a choice and is left alone."""
+        view = getattr(self, "preview_view", None)
+        return (view is not None and self._view_mode is Mode.CLASSIC
+                and view.music_band.isChecked()
+                and self._layout_state.browser is BrowserMode.COLLAPSED
+                and not self.browser_panel.folded)
+
+    def _collapsed_strip_reclaims(self) -> bool:
+        """Collapsed by choice, in Classic, with Music closed."""
+        view = getattr(self, "preview_view", None)
+        return (view is not None and self._view_mode is Mode.CLASSIC
+                and not view.music_band.isChecked()
+                and self._layout_state.browser is BrowserMode.COLLAPSED
+                and not self.browser_panel.folded)
+
+    def _fitted_music_depth(self, wanted: int) -> int:
+        """`wanted`, or as much of it as fits: the band's present height plus
+        the slack in the split above it, never below the band's least."""
+        view = self.preview_view
+        current = view.music_body.height() if view.music_body.isVisible() else 0
+        slack = 0
+        if self.splitter is not None and self.splitter.isVisible():
+            slack = max(0, self.splitter.height()
+                        - self.splitter.minimumSizeHint().height())
+        least = max(CLASSIC_MUSIC_MINIMUM, view.track_button.sizeHint().height())
+        return max(least, min(int(wanted), current + slack))
+
+    def set_music_depth(self, height: int) -> None:
+        """Make Classic's band this tall, taking room only from the slack
+        above it — the picture and export column stay, and the window is
+        never made taller for it. Remembered as a layout preference."""
+        view = self.preview_view
+        if self._view_mode is not Mode.CLASSIC or not view.music_band.isChecked():
+            return
+        height = self._fitted_music_depth(height)
+        self._music_depth = height
+        self.settings_store.setValue(MUSIC_DEPTH_KEY, height)
+        self._relayout()
+
+    def set_music_focus(self, on: bool) -> None:
+        """Give Classic's Music band the window, or give it back.
+
+        Only while the band is open in Classic. The browser, picture and
+        export column are hidden, not rebuilt; the filmstrip stays, and
+        nothing about the session, the selection or the plan changes.
+        """
+        view = self.preview_view
+        on = (bool(on) and self._view_mode is Mode.CLASSIC
+              and view.music_band.isChecked())
+        view.show_music_focus(on)
+        action = getattr(self, "music_focus_action", None)
+        if action is not None and action.isChecked() != on:
+            blocked = action.blockSignals(True)
+            action.setChecked(on)
+            action.blockSignals(blocked)
+        if on == self._music_focus:
+            return
+        self._music_focus = on
+        if self.splitter is not None:
+            self.splitter.setVisible(not on)
+        self._relayout()
 
     def _load_music_editor(self, target, choice: MusicChoice, name: str) -> None:
         editor = self.music_editor
@@ -2660,10 +2798,20 @@ class MainWindow(QMainWindow):
     def _build_live_preview(self) -> None:
         """One transport, wired to the picture's own clock and controls."""
         view = self.preview_view
+        self.audio_output = AudioOutput()
         self.live_preview = LivePreview(
             stream_factory=self._build_monitor_stream,
-            output=AudioOutput(),
+            output=self.audio_output,
         )
+        # Which output plays the preview: resolved when sound is first asked
+        # for (or the Audio menu opened), never at start-up, so building a
+        # window lists no devices.
+        self._device_catalog = None
+        self._output_choice: OutputChoice | None = None
+        # The device in use went away; held until Sound is turned on again
+        # or an output is chosen.
+        self._output_lost = False
+        view.listen_check.toggled.connect(self._mirror_sound_action)
         view.listen_toggled.connect(self._on_listen_toggled)
         view.listen_level_changed.connect(
             lambda value: self.live_preview.set_level(value / 100.0))
@@ -2771,12 +2919,9 @@ class MainWindow(QMainWindow):
             if any(clip is None for clip in clips):
                 raise ValueError("an Assembly source is no longer available")
             source_has_audio = any(clip.has_audio for clip in clips)
-            if listening is Listening.SOURCE:
-                choice = MusicChoice(mode=AudioMode.ORIGINAL)
-            else:
-                choice = self._planned_music(target)
-                if not choice.configured:
-                    return None, 0
+            choice = self._monitored_choice(target, listening, source_has_audio)
+            if choice is None:
+                return None, 0
             samples = snapshot.samples
             return resolve_monitor_audio_plan(
                 choice, samples, source_has_audio=source_has_audio,
@@ -2785,20 +2930,44 @@ class MainWindow(QMainWindow):
         clip = self._monitor_clip(target)
         if clip is None:
             return None, 0
-        if listening is Listening.SOURCE:
-            if not clip.has_audio:
-                return None, 0          # nothing of its own to hear
-            choice = MusicChoice(mode=AudioMode.ORIGINAL)
-        else:
-            choice = self._planned_music(target)
-            if not choice.configured:
-                return None, 0
+        if listening is Listening.SOURCE and not clip.has_audio:
+            return None, 0              # nothing of its own to hear
+        choice = self._monitored_choice(target, listening, clip.has_audio)
+        if choice is None:
+            return None, 0
         samples = snapshot.samples
         if samples <= 0:
             return None, 0
         return resolve_monitor_audio_plan(
             choice, samples, source_has_audio=clip.has_audio,
             preset_key=self._audition_preset(target, choice)), samples
+
+    def _monitored_choice(self, target, listening: Listening,
+                          source_has_audio: bool) -> MusicChoice | None:
+        """What is listened to for this output, or None for nothing.
+
+        Source only is the recording. Otherwise the output's own choice —
+        except when nobody has chosen sound for it at all: then the export
+        keeps the recording's sound if *Keep the audio track* is on, so the
+        finished mix is the recording, and there is nothing to hear when it
+        is off or there is no track. Explicit No sound stays silent whatever
+        Keep the audio track says.
+        """
+        if Listening(listening) is Listening.SOURCE:
+            return MusicChoice(mode=AudioMode.ORIGINAL)
+        choice = self._planned_music(target)
+        if choice.configured:
+            return choice
+        if self._monitor_keeps_audio(target) and source_has_audio:
+            return MusicChoice(mode=AudioMode.ORIGINAL)
+        return None
+
+    def _monitor_keeps_audio(self, target) -> bool:
+        """*Keep the audio track* for this output, asked the way its preset
+        is: the panel's in Classic, the output's own in Flow."""
+        if self._view_mode is Mode.FLOW and isinstance(target, OutputTarget):
+            return bool(self._choices_for(target)[1].keep_audio)
+        return bool(self.current_settings().keep_audio)
 
     def _audition_preset(self, target, choice: MusicChoice) -> str:
         """The preset an audition is resolved under.
@@ -2904,16 +3073,14 @@ class MainWindow(QMainWindow):
                     else:
                         occurrence_sources.append((occurrence, None, clip))
 
-                if listening is Listening.SOURCE:
-                    choice = MusicChoice(mode=AudioMode.ORIGINAL)
-                else:
-                    choice = self._planned_music(target)
-                    if not choice.configured:
-                        return None
+                choice = self._monitored_choice(
+                    target, listening, source_has_audio)
+                if choice is None:
+                    return None
                 plan = resolve_monitor_audio_plan(
                     choice, snapshot.samples,
                     source_has_audio=source_has_audio,
-                    preset_key=self._monitor_preset(target))
+                    preset_key=self._audition_preset(target, choice))
 
                 leaves = {}
                 for occurrence, key, clip in occurrence_sources:
@@ -2939,18 +3106,15 @@ class MainWindow(QMainWindow):
                 clip = self._monitor_clip(target)
                 if clip is None:
                     return None
-                if listening is Listening.SOURCE:
-                    if not clip.has_audio:
-                        return None
-                    choice = MusicChoice(mode=AudioMode.ORIGINAL)
-                else:
-                    choice = self._planned_music(target)
-                    if not choice.configured:
-                        return None
+                if listening is Listening.SOURCE and not clip.has_audio:
+                    return None
+                choice = self._monitored_choice(target, listening, clip.has_audio)
+                if choice is None:
+                    return None
                 plan = resolve_monitor_audio_plan(
                     choice, snapshot.samples,
                     source_has_audio=clip.has_audio,
-                    preset_key=self._monitor_preset(target))
+                    preset_key=self._audition_preset(target, choice))
                 source_reader = None
                 if clip.has_audio:
                     source_reader = FfmpegPcmReader.for_source(
@@ -2998,8 +3162,203 @@ class MainWindow(QMainWindow):
         # picture was not playing yet — so asking to listen looked like it had
         # been refused.
         self.preview_view.show_monitoring(not status.muted, status.reason)
+        self.preview_view.show_sound(self._sound_state())
+
+    def _sound_state(self) -> str:
+        """What the preview's sound is doing, in the order that settles it.
+
+        Muted first; then anything that makes this output unmonitorable
+        (the stated reason, which includes a lost or missing output device);
+        then what would be heard and whether there is anything to hear —
+        a recording with no track, an output that exports no sound, or
+        Keep the audio track off for an output nobody chose sound for.
+        Never says "no track" for a muted or unavailable sound, and never
+        calls muted an error.
+        """
+        live = self.live_preview
+        if live is None:
+            return ""
+        status = live.status
+        if not self.preview_view.listen_check.isChecked():
+            return "Muted. The export is unchanged."
+        if status.reason:
+            if status.reason.startswith(("there is nothing to listen on",
+                                         "the audio device stopped")):
+                return (f"No output: {status.reason}. Choose one under "
+                        "Audio ▸ Output device.")
+            return status.reason
+        target = self._music_target
+        if target is None:
+            return "Choose a clip to hear it."
+        listening = live.listening
+        recording_has_audio = self._monitor_has_source_audio(target)
+        if listening is Listening.SOURCE:
+            if not recording_has_audio:
+                return "This recording has no audio track."
+            heard = "the recording"
+        else:
+            mode = self._planned_music(target).mode
+            if mode is AudioMode.NO_SOUND:
+                return "This output exports no sound."
+            if mode is AudioMode.ORIGINAL:
+                if not recording_has_audio:
+                    return "This recording has no audio track."
+                heard = "the recording (original audio)"
+            elif mode in (AudioMode.REPLACE, AudioMode.MIX):
+                heard = "the finished mix"
+            elif not self._monitor_keeps_audio(target):
+                return ("The export has no sound: Keep the audio track is "
+                        "off and no music is chosen.")
+            elif not recording_has_audio:
+                return ("The export has no sound: this recording has no "
+                        "audio track and no music is chosen.")
+            else:
+                heard = "the recording (no music chosen)"
+        device = self._output_device_name()
+        where = f" on {device}" if device else ""
+        state = "playing" if status.playing else "plays with the picture"
+        return f"Hearing {heard}{where}; {state}."
+
+    def _monitor_has_source_audio(self, target) -> bool:
+        if isinstance(target, OutputTarget) and target.is_assembly:
+            fingerprints = {item.fingerprint for item in target.items}
+            return any(clip.has_audio for clip in self.clips
+                       if clip.fingerprint in fingerprints)
+        clip = self._monitor_clip(target) if target is not None else None
+        return bool(clip is not None and clip.has_audio)
+
+    # -- which output device ---------------------------------------------------
+
+    # Replaced in tests: the real one lists the machine's outputs.
+    device_catalog_factory = QtDeviceCatalog
+
+    def _catalog(self):
+        if self._device_catalog is None:
+            self._device_catalog = type(self).device_catalog_factory(
+                on_change=self._outputs_changed)
+        return self._device_catalog
+
+    def _resolve_output(self) -> OutputChoice:
+        """The output this run uses, from the saved preference, once.
+
+        A saved device that is not connected falls back to the system default
+        for this run and says so once; the preference is not touched, so the
+        device is used again when it returns.
+        """
+        if self._output_choice is not None:
+            return self._output_choice
+        key = str(self.settings_store.value(OUTPUT_DEVICE_KEY, "") or "")
+        name = str(self.settings_store.value(OUTPUT_DEVICE_NAME, "") or "")
+        try:
+            choice = resolve_output_device(key, name, self._catalog())
+        except Exception as exc:          # noqa: BLE001 — report, never raise
+            choice = OutputChoice(
+                SYSTEM_DEFAULT, "",
+                notice=f"The audio outputs could not be listed: {exc}")
+        self._output_choice = choice
+        select = getattr(self.audio_output, "select_device", None)
+        if select is not None:
+            select(choice.key, choice.name)
+        if choice.notice:
+            self.statusBar().showMessage(choice.notice, 12000)
+        return choice
+
+    def _output_device_name(self) -> str:
+        choice = self._output_choice
+        return choice.name if choice is not None else ""
+
+    def _fill_output_menu(self) -> None:
+        """System default, named by what it is now, then each output."""
+        menu = self.output_menu
+        menu.clear()
+        self._resolve_output()
+        saved = str(self.settings_store.value(OUTPUT_DEVICE_KEY, "") or "")
+        saved_name = str(self.settings_store.value(OUTPUT_DEVICE_NAME, "") or "")
+        try:
+            outputs = self._catalog().outputs()
+            default = self._catalog().default()
+        except Exception:                 # noqa: BLE001 — a menu, not a crash
+            outputs, default = [], None
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        now = default.name if default is not None else "no output found"
+        entries = [(SYSTEM_DEFAULT, f"System default (now: {now})", "", True)]
+        entries += [(one.key, one.name, one.name, True) for one in outputs]
+        if saved and all(one.key != saved for one in outputs):
+            entries.append((saved, f"{saved_name or 'Chosen output'} — not "
+                            "connected", saved_name, False))
+        for key, label, name, enabled in entries:
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(key == saved)
+            action.setEnabled(enabled)
+            action.triggered.connect(
+                lambda *_, key=key, name=name: self._choose_output(key, name))
+            group.addAction(action)
+
+    def _choose_output(self, key: str, name: str) -> None:
+        """Remember the person's choice and use it now. App-local: the
+        system's own default output is never changed."""
+        self.settings_store.setValue(OUTPUT_DEVICE_KEY, key)
+        self.settings_store.setValue(OUTPUT_DEVICE_NAME, name)
+        self._output_choice = None
+        self._output_lost = False
+        listening = self.preview_view.listen_check.isChecked()
+        if self.live_preview is not None:
+            self.live_preview.pause()
+        self._resolve_output()
+        if listening:
+            self._on_listen_toggled(True)
+        else:
+            self._show_monitoring()
+
+    def _outputs_changed(self) -> None:
+        """Outputs came or went. The device actually in use — System default
+        and its fallback included, as resolved — going away stops the sound
+        and says so; nothing switches to a new default or resumes by itself.
+        Turning Sound on again, or choosing an output, resolves afresh."""
+        choice = self._output_choice
+        if choice is None or not choice.key or self._output_lost:
+            self._show_monitoring()
+            return
+        try:
+            present = any(one.key == choice.key
+                          for one in self._catalog().outputs())
+        except Exception:                 # noqa: BLE001
+            present = False
+        if present:
+            self._show_monitoring()
+            return
+        why = f"{choice.name or 'the chosen output'} was disconnected"
+        self._output_lost = True
+        lost = getattr(self.audio_output, "device_lost", None)
+        if lost is not None:
+            lost(why)
+        self._silence_monitoring(f"there is nothing to listen on: {why}")
+
+    def _mirror_sound_action(self, on: bool) -> None:
+        action = getattr(self, "sound_action", None)
+        if action is not None and action.isChecked() != bool(on):
+            blocked = action.blockSignals(True)
+            action.setChecked(bool(on))
+            action.blockSignals(blocked)
+
+    def _toggle_sound(self) -> None:
+        """M with the picture focused: the Sound control beside Play."""
+        self.preview_view.toggle_sound()
 
     def _on_listen_toggled(self, listening: bool) -> None:
+        if listening:
+            relook = self._output_lost
+            if relook:
+                # Turning Sound on again is the person's own act: the device
+                # is looked up afresh now, and named, rather than followed
+                # silently when the default changed.
+                self._output_choice = None
+                self._output_lost = False
+            self._resolve_output()
+            if relook:
+                self._sync_live_preview()     # the old "disconnected" goes
         if self._output_picture_active() and self._output_recipe is not None:
             coordinate = self._picture_monitor_coordinate(
                 self.preview_view.sequence_strip.position)
@@ -3409,6 +3768,8 @@ class MainWindow(QMainWindow):
             return
         if chosen is Mode.FLOW and not self._offered_stages:
             return
+        # Focus is Classic's way of making room; Flow has its own pages.
+        self.set_music_focus(False)
         if self._view_mode is Mode.FLOW and chosen is not Mode.FLOW:
             if self._flow_stage is Stage.ASSEMBLE:
                 if self._output_recipe is not None:
@@ -3569,7 +3930,7 @@ class MainWindow(QMainWindow):
                 self._refresh_output_picture()
             self.play_button.setToolTip(
                 "Play or pause the assembled picture in joined output time.\n"
-                "Listen previews its joined sound; the finished exported file "
+                "Sound previews its joined sound; the finished exported file "
                 "is not previewed.")
             # A row is an occurrence now, not an instruction to retarget the
             # source editor.  Its start is a useful joined position.
@@ -4784,12 +5145,30 @@ class MainWindow(QMainWindow):
         self.music_action.setChecked(False)
         self.music_action.toggled.connect(
             lambda on: self.preview_view.music_band.setChecked(bool(on)))
+        self.music_focus_action = view_menu.addAction("Music in focus")
+        self.music_focus_action.setCheckable(True)
+        self.music_focus_action.setToolTip(
+            "Give the open Music band the window while you edit it")
+        self.music_focus_action.toggled.connect(self.set_music_focus)
 
         view_menu.addSeparator()
         reset_action = view_menu.addAction("Restore default layout")
         reset_action.setToolTip(
             "Put the clip list, the queue and the split back as they open")
         reset_action.triggered.connect(lambda *_: self.restore_default_layout())
+
+        # Sound for the preview, and which output it plays on. App-local:
+        # choosing an output here never changes the system's default.
+        audio_menu = self.audio_menu = self.menuBar().addMenu("&Audio")
+        self.sound_action = audio_menu.addAction("Sound for the preview")
+        self.sound_action.setCheckable(True)
+        self.sound_action.setToolTip(
+            "The same as the Sound control beside Play, and M on the picture. "
+            "It never changes the export.")
+        self.sound_action.toggled.connect(
+            lambda on: self.preview_view.sound_button.setChecked(bool(on)))
+        self.output_menu = audio_menu.addMenu("Output device")
+        self.output_menu.aboutToShow.connect(self._fill_output_menu)
 
         # About was reachable only from a button beside the queue, which is a
         # strange home for a licence notice and the last place anyone looks for
