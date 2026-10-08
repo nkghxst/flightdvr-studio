@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import struct
+import sys
 import tarfile
 from pathlib import Path
 
@@ -130,6 +131,7 @@ def test_observed_macos_framework_toc_binds_binary_and_separate_links(tmp_path):
         qt.spec_receipt(entries + [("../QtMultimedia", "A", "SYMLINK")], inputs)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX framework symlink topology")
 def test_macos_framework_links_require_exact_targets_and_bound_content(tmp_path):
     bundle = tmp_path / "app"
     root = bundle / "Contents" / "Frameworks"
@@ -170,7 +172,7 @@ def test_macos_framework_links_require_exact_targets_and_bound_content(tmp_path)
     report = {"ffmpeg_libraries": []}
     failures = scanner.binding_check(bundle, report, inputs, collection)
     assert not any("symlink" in failure or "wheel collection origin" in failure
-                   or "architecture" in failure for failure in failures)
+                   or "architecture" in failure for failure in failures), failures
     assert len(report["selected_links"]) == 4
     alias = root / "QtMultimedia"
     alias.unlink()
