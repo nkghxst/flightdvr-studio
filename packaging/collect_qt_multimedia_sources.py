@@ -107,7 +107,18 @@ def spec_receipt(entries: list[tuple], inputs: dict) -> dict:
         if relative in names:
             raise ValueError(f"duplicate multimedia collection path: {relative}")
         names.add(relative)
-        sha = digest(Path(source))
+        source_path = Path(source)
+        if not source_path.is_file():
+            # PyInstaller sometimes names a macOS framework source relative to
+            # site-packages. Resolve only an exact wheel RECORD name; never
+            # interpret an arbitrary relative path against the checkout.
+            wheel_matches = [x for x in inputs["files"]
+                             if x["file"] == str(source).replace("\\", "/")]
+            if len(wheel_matches) != 1:
+                raise ValueError(f"unresolved multimedia framework source: {relative}")
+            origin = wheel_matches[0]
+            source_path = Path(metadata.distribution(origin["package"]).locate_file(origin["file"]))
+        sha = digest(source_path)
         matches = by_hash.get(sha, [])
         if not matches:
             raise ValueError(f"multimedia file is not a locked wheel RECORD byte: {relative}")

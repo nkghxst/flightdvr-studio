@@ -60,6 +60,31 @@ def test_spec_selection_refuses_unpinned_multimedia_bytes(tmp_path):
         qt.spec_receipt(entries, inputs)
 
 
+@pytest.mark.parametrize("framework, platform", [
+    ("PySide6/Qt/lib/QtMultimedia.framework/Versions/A/QtMultimedia", "macos"),
+    ("PySide6/Qt/lib/libavformat.so.61", "linux"),
+])
+def test_framework_source_resolves_only_an_exact_record_path(tmp_path, monkeypatch,
+                                                               framework, platform):
+    source = tmp_path / framework
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"framework bytes")
+    sha = hashlib.sha256(source.read_bytes()).hexdigest()
+    inputs = {"platform": platform, "source_complete": False, "release_ready": False,
+              "files": [{"package": "PySide6-Addons", "file": framework,
+                         "sha256": sha, "wheel_sha256": "a" * 64}]}
+
+    class Wheel:
+        def locate_file(self, item):
+            return tmp_path / item
+
+    monkeypatch.setattr(qt.metadata, "distribution", lambda package: Wheel())
+    entries = [(framework, framework, "BINARY")]
+    assert qt.spec_receipt(entries, inputs)["files"][0]["source_sha256"] == sha
+    with pytest.raises(ValueError, match="unresolved multimedia framework"):
+        qt.spec_receipt([(framework, "other/QtMultimedia", "BINARY")], inputs)
+
+
 def test_present_tag_and_fake_complete_manifest_cannot_cross_provenance_gate(tmp_path):
     manifest = {"schema_version": 1, "source_complete": True, "release_ready": True,
                 "unresolved": [], "delivery": {"approved": True, "format": "single-companion"}}
