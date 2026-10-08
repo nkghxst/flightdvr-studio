@@ -87,6 +87,15 @@ def test_framework_source_resolves_only_an_exact_record_path(tmp_path, monkeypat
     if alias != framework:
         assert qt.spec_receipt([(alias, alias, "BINARY")], inputs)["files"][0][
             "source_sha256"] == sha
+        class WheelWithoutAlias:
+            def locate_file(self, item):
+                return tmp_path / item
+
+        monkeypatch.setattr(qt.metadata, "distribution", lambda package: WheelWithoutAlias())
+        assert qt.spec_receipt([(alias, alias, "BINARY")], inputs)["files"][0][
+            "source_sha256"] == sha
+        with pytest.raises(ValueError, match="unresolved multimedia framework"):
+            qt.spec_receipt([(alias, "other/QtMultimedia", "BINARY")], inputs)
     with pytest.raises(ValueError, match="unresolved multimedia framework"):
         qt.spec_receipt([(framework, "other/QtMultimedia", "BINARY")], inputs)
     with pytest.raises(ValueError, match="unsafe multimedia source path"):

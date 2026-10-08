@@ -124,13 +124,26 @@ def spec_receipt(entries: list[tuple], inputs: dict) -> dict:
                 alias = Path(dist.locate_file(str(name)))
                 target = Path(dist.locate_file(origin["file"]))
                 try:
-                    resolved = alias.resolve(strict=True)
                     recorded = target.resolve(strict=True)
                 except (OSError, RuntimeError):
                     continue
-                if (resolved.is_file() and resolved.is_relative_to(root)
-                        and recorded.is_relative_to(root) and resolved == recorded):
+                if not recorded.is_file() or not recorded.is_relative_to(root):
+                    continue
+                try:
+                    resolved = alias.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    resolved = None
+                if resolved is not None and resolved.is_file() and resolved == recorded:
                     wheel_matches.append((alias, origin))
+                elif (resolved is None and len(name.parts) >= 2
+                      and name.parts[-2].endswith(".framework")
+                      and name.parts[-2] == name.name + ".framework"
+                      and origin["file"] == str(name.parent / "Versions" / "A" / name.name)):
+                    # Some PyInstaller macOS TOCs describe the top-level
+                    # framework alias before that alias exists on disk. Bind
+                    # the uniquely named, hashed RECORD target here; the
+                    # final-package scan still has to verify the shipped byte.
+                    wheel_matches.append((target, origin))
             if not wheel_matches or len({x[1]["package"] for x in wheel_matches}) != 1:
                 raise ValueError(f"unresolved multimedia framework source: {relative}")
             source_path = wheel_matches[0][0]
