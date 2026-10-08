@@ -196,6 +196,30 @@ def test_present_tag_and_fake_complete_manifest_cannot_cross_provenance_gate(tmp
         qt.release_check(manifest, tmp_path)
 
 
+def test_unverified_u2_cannot_be_promoted_by_a_complete_manifest(tmp_path):
+    lock = copy.deepcopy(qt.load_lock())
+    for key in ("upstream_build_receipt", "dependency_source_closure",
+                "modification_record", "replacement_acceptance"):
+        lock[key] = {"independently_verified": True, "evidence_sha256": "a" * 64}
+    lock["delivery"]["approved"] = True
+    assert qt.gate_gaps(lock) == ["U2 wheel-to-payload byte lineage"]
+    manifest = {"schema_version": 1, "source_complete": True, "release_ready": True,
+                "unresolved": [], "delivery": lock["delivery"],
+                "sources": [{"id": source["id"], "verified": True,
+                             "sha256": source["sha256"]} for source in lock["sources"]],
+                "platform_payloads": {platform: {"wheel_to_payload_bytes_verified": True}
+                                      for platform in lock["platforms"]}}
+    with pytest.raises(ValueError, match="provenance"):
+        qt.release_check(manifest, tmp_path, lock)
+    lock["payload_lineage_receipt"] = {"independently_verified": True,
+                                       "evidence_sha256": "b" * 64}
+    manifest["platform_payloads"]["macos"] = {
+        "wheel_to_payload_bytes_verified": False,
+        "transformation_limit": "U2: signed bytes differ from wheel bytes"}
+    with pytest.raises(ValueError, match="U2 wheel-to-shipped-byte lineage"):
+        qt.release_check(manifest, tmp_path, lock)
+
+
 def test_source_archive_rejects_traversal_and_links(tmp_path):
     archive = tmp_path / "source.tar"
     for name, kind in (("../escape", "file"), ("root/link", "link")):
@@ -335,10 +359,12 @@ def test_macos_signing_requires_a_matching_pre_sign_wheel_receipt(tmp_path):
     pre, failures = scanner.check(bundle)
     assert failures == []
     assert scanner.binding_check(bundle, pre, inputs, collection) == []
+    assert pre["wheel_to_payload_bytes_verified"] is True
     pre["failures"] = []
     paths[0].write_bytes(payload + b"signed")
     post, _ = scanner.check(bundle)
     assert scanner.binding_check(bundle, post, inputs, collection, pre) == []
+    assert post["wheel_to_payload_bytes_verified"] is False
     assert next(x for x in post["selected_files"] if x["path"] == entries[0]["path"])[
         "transformation"] == "ad-hoc codesign after verified wheel-byte collection"
     unsigned, _ = scanner.check(bundle)
@@ -373,12 +399,14 @@ def test_macos_pyinstaller_transformation_is_recorded_as_unresolved_u2(tmp_path)
     pre, failures = scanner.check(bundle)
     assert failures == []
     assert scanner.binding_check(bundle, pre, inputs, collection) == []
+    assert pre["wheel_to_payload_bytes_verified"] is False
     assert pre["transformation_limit"].startswith("U2:")
     assert all(item["transformed"] for item in pre["selected_files"])
     pre["failures"] = []
     paths[0].write_bytes(transformed + b"explicit codesign")
     post, _ = scanner.check(bundle)
     assert scanner.binding_check(bundle, post, inputs, collection, pre) == []
+    assert post["wheel_to_payload_bytes_verified"] is False
     assert post["transformation_limit"].startswith("U2:")
 
 

@@ -299,6 +299,8 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
     report["selected_links"] = sorted(final_links, key=lambda x: x["path"])
     report["generated_signing_files"] = sorted(generated_signing_files, key=lambda x: x["path"])
     report["generated_bundle_links"] = sorted(generated_bundle_links, key=lambda x: x["path"])
+    report["wheel_to_payload_bytes_verified"] = all(
+        item.get("final_sha256") == item["source_sha256"] for item in selected.values())
     if platform == "macos" and any("unresolved" in item.get("transformation", "")
                                     for item in selected.values()):
         report["transformation_limit"] = "U2: wheel bytes changed during PyInstaller/macOS signing; original-byte lineage is not independently proven"
@@ -331,6 +333,7 @@ def main(argv: list[str]) -> int:
         if pre_sign_path:
             report["pre_sign_report_sha256"] = sha256(pre_sign_path)
         report["failures"] = failures
+        report["inventory_completed"] = not failures
     for plugin in report["plugins"]:
         print(f"  multimedia plugin  {plugin}")
     for entry in report["ffmpeg_libraries"]:

@@ -242,6 +242,7 @@ def gate_gaps(lock: dict) -> list[str]:
     # upstream build receipt. Current evidence deliberately leaves these null.
     gaps = []
     for key, label in [("upstream_build_receipt", "U1 wheel-build provenance"),
+                       ("payload_lineage_receipt", "U2 wheel-to-payload byte lineage"),
                        ("dependency_source_closure", "U3 source/dependency closure"),
                        ("modification_record", "U1 modifications/build record"),
                        ("replacement_acceptance", "U5 replacement acceptance")]:
@@ -270,7 +271,9 @@ def platform_evidence(folder: Path, lock: dict) -> dict:
         inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
         if (inputs.get("platform") != platform or collection.get("platform") != platform
                 or inventory.get("platform") != platform or inventory.get("failures")
-                or inventory.get("release_ready") is not False):
+                or inventory.get("release_ready") is not False
+                or inventory.get("inventory_completed") is not True
+                or type(inventory.get("wheel_to_payload_bytes_verified")) is not bool):
             raise ValueError(f"{platform}: invalid package receipt")
         expected = {w["package"]: w["sha256"] for w in lock["platforms"][platform]["wheels"]}
         if {w["package"]: w["sha256"] for w in inputs["wheels"]} != expected:
@@ -300,7 +303,9 @@ def platform_evidence(folder: Path, lock: dict) -> dict:
         receipts[platform] = dict(inputs_sha256=digest(inputs_path),
                                   collection_sha256=digest(collection_path),
                                   inventory_sha256=digest(inventory_path),
-                                  selected_files=len(collection["files"]))
+                                  selected_files=len(collection["files"]),
+                                  inventory_completed=True,
+                                  wheel_to_payload_bytes_verified=inventory["wheel_to_payload_bytes_verified"])
         if platform == "macos":
             receipts[platform]["pre_sign_sha256"] = digest(pre_path)
             if inventory.get("transformation_limit"):
@@ -402,6 +407,8 @@ def prepare(out: Path, cache: Path, lock: dict, fetch: bool = False,
         gaps.append("U2 package evidence invalid: " + str(exc))
     if not payloads:
         gaps.append("U2 final platform payload manifests not reconciled")
+    if any(item.get("wheel_to_payload_bytes_verified") is not True for item in payloads.values()):
+        gaps.append("U2 shipped bytes differ from locked wheel bytes")
     gaps += sorted({item["transformation_limit"] for item in payloads.values()
                     if item.get("transformation_limit")})
     assets = []
@@ -439,6 +446,10 @@ def release_check(manifest: dict, folder: Path, lock: dict | None = None) -> lis
             raise ValueError("Qt source payload not verified against lock")
     if set(manifest.get("platform_payloads", {})) != set(lock["platforms"]):
         raise ValueError("Qt platform package inventories incomplete")
+    if any(payload.get("wheel_to_payload_bytes_verified") is not True
+           or payload.get("transformation_limit")
+           for payload in manifest["platform_payloads"].values()):
+        raise ValueError("U2 wheel-to-shipped-byte lineage is unresolved")
     assets = manifest.get("assets", [])
     delivery = manifest["delivery"]
     expected = delivery.get("split_parts", []) if delivery.get("format") == "manifest-linked-split" else []
