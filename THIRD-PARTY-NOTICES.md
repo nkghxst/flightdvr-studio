@@ -6,7 +6,9 @@ The full text is in [LICENSE](LICENSE).
 ## FFmpeg
 
 **The Windows installer and the Linux AppImage bundle FFmpeg.** The macOS app
-uses the copy Homebrew installed and redistributes no FFmpeg binary.
+uses Homebrew's standalone ffmpeg/ffprobe programs and redistributes neither
+program by default. All three packages also carry separate FFmpeg shared
+libraries through PySide6, described under Qt Multimedia below.
 
 Where it is bundled, `ffmpeg` and `ffprobe` (`ffmpeg.exe` and `ffprobe.exe` on
 Windows) are separate programs: FlightDVR Studio runs them as child processes
