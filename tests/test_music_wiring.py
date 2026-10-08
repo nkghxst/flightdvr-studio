@@ -2673,6 +2673,8 @@ class _QuietStream:
     """Stands in for a monitoring stream: every call succeeds, nothing is
     read or played. These tests are about what the window says and stores."""
 
+    generation = 0
+
     def __getattr__(self, _name):
         return lambda *_a, **_k: True
 
@@ -2706,11 +2708,14 @@ def test_sound_beside_play_is_the_one_switch(window, app, catalog):
     focus(window, 0)
     assert not view.listen_check.isVisible() or not view.music_band.isChecked()
     view.sound_button.click()
-    assert view.listen_check.isChecked() and view.sound_button.text() == "Sound: on"
+    assert view.listen_check.isChecked() and view.sound_button.isChecked()
+    assert view.sound_button.toolTip().startswith("Sound is on")
     assert window.sound_action.isChecked()
     window._toggle_sound()
     assert not view.listen_check.isChecked()
-    assert view.sound_button.text() == "Sound: off"
+    assert not view.sound_button.isChecked()
+    assert view.sound_button.toolTip().startswith("Sound is off")
+    assert not view.sound_status.isVisible(), "a muted preview shows no status line"
     assert not window.sound_action.isChecked()
     window.sound_action.setChecked(True)
     assert view.listen_check.isChecked()
@@ -2844,3 +2849,92 @@ def test_unplugging_the_output_in_use_stops_and_says_so(window, app, catalog,
     catalog.made[-1].on_change()                 # it comes back:
     assert not window.live_preview.status.playing, "nothing resumes by itself"
     window._toggle_sound()
+
+
+# -- stage 2: room for the music --------------------------------------------------
+
+def _settle(app, times=5):
+    for _ in range(times):
+        app.processEvents()
+
+
+def _band_stretch(window):
+    layout = window._outer_layout
+    return layout.stretch(layout.indexOf(window.preview_view.music_band))
+
+
+def test_focus_gives_the_band_the_window_and_gives_it_back(window, app):
+    from flightdvr.music_timeline import Presentation
+    view = window.preview_view
+    focus(window, 0)
+    view.music_band.setChecked(True)
+    _settle(app)
+    assert view.music_timeline.presentation is Presentation.CLASSIC
+    view.focus_button.click()
+    _settle(app)
+    assert window.splitter.isHidden(), "the list, picture and export stayed"
+    assert view.music_timeline.presentation is Presentation.FULL
+    assert window.music_focus_action.isChecked()
+    assert _band_stretch(window) == 1
+    view.focus_button.click()
+    _settle(app)
+    assert not window.splitter.isHidden()
+    assert view.music_timeline.presentation is Presentation.CLASSIC
+    assert _band_stretch(window) == 0
+    # Closing the band, or leaving Classic, ends focus too.
+    window.music_focus_action.setChecked(True)
+    _settle(app)
+    assert window.splitter.isHidden()
+    view.music_band.setChecked(False)
+    _settle(app)
+    assert not window.splitter.isHidden() and not view.focus_button.isChecked()
+
+
+def test_focus_needs_the_band_open(window, app):
+    window.set_music_focus(True)
+    assert not window._music_focus and not window.splitter.isHidden()
+
+
+def test_a_collapsed_list_gives_its_room_to_open_music(window, app):
+    from flightdvr.classic_layout import BrowserMode
+    from flightdvr.music_timeline import Presentation
+    from flightdvr.preview_panel import CLASSIC_MUSIC_MAXIMUM
+    view = window.preview_view
+    focus(window, 0)
+    window.set_browser_mode(BrowserMode.COLLAPSED)
+    _settle(app)
+    assert _band_stretch(window) == 0, "closed music asks for nothing"
+    view.music_band.setChecked(True)
+    _settle(app)
+    assert _band_stretch(window) == 1
+    assert view.music_body.maximumHeight() > CLASSIC_MUSIC_MAXIMUM
+    assert view.music_timeline.presentation is Presentation.FULL
+    window.set_browser_mode(BrowserMode.NORMAL)
+    _settle(app)
+    assert _band_stretch(window) == 0
+    assert view.music_body.maximumHeight() == CLASSIC_MUSIC_MAXIMUM
+    assert view.music_timeline.presentation is Presentation.CLASSIC
+    view.music_band.setChecked(False)
+    _settle(app)
+
+
+def test_the_band_names_the_output_it_edits(window, app):
+    focus(window, 0)
+    title = window.preview_view.music_band.title()
+    assert title.startswith("Music — for hdz_001.ts"), title
+    assert "Master" in title
+
+
+def test_export_level_sliders_are_the_numbers_dragged(window, app):
+    panel = window.music_panel
+    for slider, box in ((panel.music_slider, panel.music_level),
+                        (panel.dvr_slider, panel.dvr_level)):
+        box.setEnabled(True)
+        slider.setValue(40)                      # keys or a click: one edit
+        assert box.value() == 40
+        box.setValue(65)
+        assert slider.value() == 65
+        box.setEnabled(False)
+        assert not slider.isEnabled(), "a level that does not apply was draggable"
+        box.setEnabled(True)
+        assert slider.isEnabled()

@@ -237,7 +237,7 @@ class OutputChoice:
     notice: str = ""
 
 
-def resolve_output(saved_key: str, saved_name: str,
+def resolve_output_device(saved_key: str, saved_name: str,
                    catalog: DeviceCatalog) -> OutputChoice:
     """The output to use now, from the saved preference.
 

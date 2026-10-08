@@ -37,7 +37,7 @@ import pytest
 from flightdvr.audio_device import (
     ACTIVE, FRAME_BYTES, IDLE, STOPPED, SUSPENDED, SYSTEM_DEFAULT, UNKNOWN,
     AudioOutput, DeviceFormat, DeviceReport, DeviceUnavailable, OutputDevice,
-    block_bytes, qt_error_text, qt_state_name, resolve_output,
+    block_bytes, qt_error_text, qt_state_name, resolve_output_device,
 )
 from flightdvr.audio_plan import OUTPUT_CHANNELS, OUTPUT_RATE
 from flightdvr.audio_stream import PcmBlock
@@ -737,26 +737,26 @@ HEADSET = OutputDevice("bb02", "USB headset")
 
 
 def test_the_system_default_is_named_by_what_it_resolves_to():
-    choice = resolve_output(SYSTEM_DEFAULT, "", FakeCatalog([SPEAKERS, HEADSET], SPEAKERS))
+    choice = resolve_output_device(SYSTEM_DEFAULT, "", FakeCatalog([SPEAKERS, HEADSET], SPEAKERS))
     assert (choice.key, choice.name, choice.notice) == (SYSTEM_DEFAULT, "Speakers", "")
 
 
 def test_a_connected_saved_device_is_used():
-    choice = resolve_output("bb02", "USB headset", FakeCatalog([SPEAKERS, HEADSET], SPEAKERS))
+    choice = resolve_output_device("bb02", "USB headset", FakeCatalog([SPEAKERS, HEADSET], SPEAKERS))
     assert (choice.key, choice.name, choice.notice) == ("bb02", "USB headset", "")
 
 
 def test_a_missing_saved_device_uses_the_default_for_now_and_says_so():
     """The run falls back; the preference is the caller's and is kept."""
-    choice = resolve_output("bb02", "USB headset", FakeCatalog([SPEAKERS], SPEAKERS))
+    choice = resolve_output_device("bb02", "USB headset", FakeCatalog([SPEAKERS], SPEAKERS))
     assert choice.key == SYSTEM_DEFAULT and choice.name == "Speakers"
     assert "USB headset is not connected" in choice.notice
     assert "(Speakers)" in choice.notice and "Your choice is kept" in choice.notice
 
 
 def test_a_machine_with_no_output_resolves_to_nothing_named():
-    choice = resolve_output(SYSTEM_DEFAULT, "", FakeCatalog([], None))
-    assert choice == resolve_output(SYSTEM_DEFAULT, "", FakeCatalog([], None))
+    choice = resolve_output_device(SYSTEM_DEFAULT, "", FakeCatalog([], None))
+    assert choice == resolve_output_device(SYSTEM_DEFAULT, "", FakeCatalog([], None))
     assert choice.name == ""
 
 

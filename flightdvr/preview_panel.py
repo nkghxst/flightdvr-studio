@@ -105,8 +105,11 @@ SILENT_PREVIEW = QUIET_PREVIEW
 # anything at all.
 # The Sound control's own label: on or off, and nothing else. What is heard,
 # on which output, and why not, is the status line under it.
-SOUND_ON = "Sound: on"
-SOUND_OFF = "Sound: off"
+SOUND_LABEL = "Sound"
+SOUND_ON_TIP = ("Sound is on for the preview (M with the picture focused).\n"
+                "The arrow chooses what you hear. Nothing here changes the export.")
+SOUND_OFF_TIP = ("Sound is off: the preview is muted (M with the picture focused).\n"
+                 "The arrow chooses what you hear. Nothing here changes the export.")
 
 # Neither hint makes a claim about sound: whether the preview is heard is the
 # listening row's to say. "Silent" here outlived the listening work and sat
@@ -178,6 +181,7 @@ class PreviewView(QObject):
     # Before the band's body is shown or hidden: showing it can resize the
     # window at once, and the window needs the size it had before that.
     music_band_changing = Signal(bool)
+    music_focus_toggled = Signal(bool)
     listen_toggled = Signal(bool)
     listen_level_changed = Signal(int)
     listening_changed = Signal(str)
@@ -190,6 +194,7 @@ class PreviewView(QObject):
         # back. Held here rather than read from the clip: this panel is given
         # names, it does not own them.
         self._committed_name = ""
+        self._classic_reach = CLASSIC_MUSIC_MAXIMUM
         self._flow_controls = False
         self._controls_below = False
         self._output_picture = False
@@ -284,34 +289,22 @@ class PreviewView(QObject):
             "Space does the same once the picture has focus."
         )
         self.play_button.clicked.connect(lambda *_: self.play_requested.emit())
-        self._side_actions.addWidget(self.play_button)
 
-        self.still_button = QPushButton("Grab still…")
-        self.still_button.setEnabled(False)
-        self.still_button.setToolTip(
-            "Save the exact paused source frame as a full-resolution PNG.\n"
-            "Pause or step to a real decoded frame first."
-        )
-        self.still_button.clicked.connect(
-            lambda *_: self.grab_still_requested.emit())
-        self._side_actions.addWidget(self.still_button)
-        column.addLayout(self._side_actions)
-
-        # Sound for the preview, beside the transport rather than inside
-        # Music: hearing a recording needs no music chosen, and on the
-        # installed 2.0.0 candidate the only way to listen was to open the
-        # music band. One toggle (M with the picture focused), with what is
-        # heard — the finished mix or the recording alone — on its menu.
+        # Sound for the preview, beside Play rather than inside Music:
+        # hearing a recording needs no music chosen, and on the installed
+        # 2.0.0 candidate the only way to listen was to open the music band.
+        # One toggle (M with the picture focused), with what is heard — the
+        # finished mix or the recording alone — on its menu. In Play's own
+        # row at Play's height, so the column is no taller than it was: the
+        # picture's measured fit depends on it.
         self.sound_button = QToolButton()
         self.sound_button.setCheckable(True)
-        self.sound_button.setText(SOUND_OFF)
+        self.sound_button.setText(SOUND_LABEL)
+        self.sound_button.setAccessibleName("Sound for the preview")
         self.sound_button.setPopupMode(
             QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        self.sound_button.setSizePolicy(QSizePolicy.Policy.Expanding,
-                                        QSizePolicy.Policy.Fixed)
-        self.sound_button.setToolTip(
-            "Hear the preview, or not (M with the picture focused).\n"
-            "The arrow chooses what you hear. Nothing here changes the export.")
+        self.sound_button.setFixedHeight(self.play_button.sizeHint().height())
+        self.sound_button.setToolTip(SOUND_OFF_TIP)
         sound_menu = QMenu(self.sound_button)
         self._sound_choices = QActionGroup(sound_menu)
         self._sound_choices.setExclusive(True)
@@ -324,9 +317,29 @@ class PreviewView(QObject):
             self.sound_actions[data] = action
         self.sound_actions["mix"].setChecked(True)
         self.sound_button.setMenu(sound_menu)
-        column.addWidget(self.sound_button)
+        play_row = QHBoxLayout()
+        play_row.setContentsMargins(0, 0, 0, 0)
+        play_row.setSpacing(TIGHT)
+        play_row.addWidget(self.play_button, 1)
+        play_row.addWidget(self.sound_button)
+        self._side_actions.addLayout(play_row)
+
+        self.still_button = QPushButton("Grab still…")
+        self.still_button.setEnabled(False)
+        self.still_button.setToolTip(
+            "Save the exact paused source frame as a full-resolution PNG.\n"
+            "Pause or step to a real decoded frame first."
+        )
+        self.still_button.clicked.connect(
+            lambda *_: self.grab_still_requested.emit())
+        self._side_actions.addWidget(self.still_button)
+        column.addLayout(self._side_actions)
+        # What the sound is doing. Shown only while Sound is on, so a muted
+        # preview costs the column nothing; the button's own state and
+        # tooltip say muted.
         self.sound_status = dim(QLabel(""))
         self.sound_status.setWordWrap(True)
+        self.sound_status.hide()
         column.addWidget(self.sound_status)
 
         trim_row = QHBoxLayout()
@@ -659,7 +672,7 @@ class PreviewView(QObject):
             lambda *_: self._follow_listening_combo())
 
     def _sound_toggled(self, on: bool) -> None:
-        self.sound_button.setText(SOUND_ON if on else SOUND_OFF)
+        self._show_sound_state(on)
         if self.listen_check.isChecked() != on:
             self.listen_check.setChecked(on)
 
@@ -673,7 +686,11 @@ class PreviewView(QObject):
             blocked = self.sound_button.blockSignals(True)
             self.sound_button.setChecked(on)
             self.sound_button.blockSignals(blocked)
-        self.sound_button.setText(SOUND_ON if on else SOUND_OFF)
+        self._show_sound_state(on)
+
+    def _show_sound_state(self, on: bool) -> None:
+        self.sound_button.setToolTip(SOUND_ON_TIP if on else SOUND_OFF_TIP)
+        self.sound_status.setVisible(bool(on) and bool(self.sound_status.text()))
 
     def _follow_listening_combo(self) -> None:
         action = self.sound_actions.get(str(self.listening_combo.currentData()))
@@ -688,6 +705,7 @@ class PreviewView(QObject):
         """The one line that says what the preview's sound is doing."""
         self.sound_status.setText(text)
         self.sound_status.setToolTip(text)
+        self.sound_status.setVisible(self.sound_button.isChecked() and bool(text))
 
     def show_monitoring(self, listening: bool, reason: str) -> None:
         """Say what the sound is doing, including when it is doing nothing.
@@ -830,6 +848,19 @@ class PreviewView(QObject):
         self.track_status = dim(QLabel(""))
         self.track_status.setWordWrap(True)
         chooser.addWidget(self.track_status, 1)
+        # Classic's band is shallow because it shares the window with the
+        # list, the picture and the export column. Focus gives it the window
+        # for as long as the music is being edited: the whole song, the
+        # passage and fades at a usable depth, and the numbers. The filmstrip
+        # stays; pressing it again puts everything back.
+        self.focus_button = QPushButton("Focus")
+        self.focus_button.setCheckable(True)
+        self.focus_button.setToolTip(
+            "Give the music the window while you edit it. The list, picture "
+            "and export settings come back when you press it again.")
+        self.focus_button.toggled.connect(
+            lambda on: self.music_focus_toggled.emit(bool(on)))
+        chooser.addWidget(self.focus_button)
         body.addLayout(chooser)
 
         # Said plainly rather than left to be discovered by pressing play. The
@@ -912,8 +943,25 @@ class PreviewView(QObject):
 
     def restore_classic_reach(self) -> None:
         """Let Classic's band have its approved depth again, after the list
-        keeping a row held it down to its track row."""
-        self.music_body.setMaximumHeight(CLASSIC_MUSIC_MAXIMUM)
+        keeping a row held it down to its track row — or the room the window
+        has decided to give it when the list is collapsed or Music is in
+        focus."""
+        self.music_body.setMaximumHeight(self._classic_reach)
+
+    def set_classic_reach(self, deep: bool) -> None:
+        """Whether Classic's band may grow past its shallow depth."""
+        self._classic_reach = 16777215 if deep else CLASSIC_MUSIC_MAXIMUM
+        self.restore_classic_reach()
+
+    def set_music_title(self, text: str) -> None:
+        """Say which output the band edits, in its own heading."""
+        self.music_band.setTitle(text)
+
+    def show_music_focus(self, on: bool) -> None:
+        if self.focus_button.isChecked() != bool(on):
+            blocked = self.focus_button.blockSignals(True)
+            self.focus_button.setChecked(bool(on))
+            self.focus_button.blockSignals(blocked)
 
     def _place_note(self) -> None:
         """Classic's band is 120px: the track and listening rows and the

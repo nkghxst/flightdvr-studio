@@ -76,7 +76,7 @@ from .audio_plan import (
     resolve_monitor_audio_plan, round_samples,
 )
 from .audio_device import (SYSTEM_DEFAULT, AudioOutput, OutputChoice,
-                           QtDeviceCatalog, resolve_output)
+                           QtDeviceCatalog, resolve_output_device)
 from .audio_reader import FfmpegPcmReader, MusicAssetProbe
 from .audio_stream import (
     AudioStream, LiveAudioMapping, MonitorState, SequencePcmReader,
@@ -110,7 +110,7 @@ from .presets import (
 )
 from .player import PreviewPlayer, exact_timestamp
 from .preview_recipe import PreviewRecipe, PictureTerminal, make_preview_recipe
-from .preview_panel import PreviewView
+from .preview_panel import CLASSIC_MUSIC_MINIMUM, PreviewView
 from .queue_panel import QueuePanel
 from .assembly import absent, default_items, export_piece, present, resolve
 from .bundle import (
@@ -390,6 +390,8 @@ class MainWindow(QMainWindow):
         self._queue_total = 1.0
         self._queue_done = 0.0
         self.splitter: QSplitter | None = None
+        # Classic's Music band given the window while it is being edited.
+        self._music_focus = False
         self._trim_clip: ClipInfo | None = None
         self._precise_frame_number: int | None = None
         self._precise_frame_seconds: float | None = None
@@ -600,7 +602,7 @@ class MainWindow(QMainWindow):
     def _build(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        outer = QVBoxLayout(central)
+        outer = self._outer_layout = QVBoxLayout(central)
         outer.setContentsMargins(EDGE, EDGE, EDGE, EDGE)
         outer.setSpacing(INNER)
 
@@ -1151,6 +1153,7 @@ class MainWindow(QMainWindow):
         view.music_changed.connect(self._on_music_changed)
         view.music_band_changing.connect(self._before_music_band)
         view.music_band.toggled.connect(self._on_music_band_toggled)
+        view.music_focus_toggled.connect(self.set_music_focus)
         self._build_live_preview()
         return view.music_band
 
@@ -1168,6 +1171,8 @@ class MainWindow(QMainWindow):
             blocked = action.blockSignals(True)
             action.setChecked(bool(open_))
             action.blockSignals(blocked)
+        if not open_:
+            self.set_music_focus(False)
         if self._view_mode is Mode.CLASSIC:
             # Shallow before it is shown, so its first request is the
             # shallow one.
@@ -2073,12 +2078,14 @@ class MainWindow(QMainWindow):
                     self.output_plan.select(target)
             self._music_target = target
             if target is None:
+                self.preview_view.set_music_title("Music")
                 self.preview_view.show_track_status("")
                 self.export_panel.set_music_summary("")
                 self._sync_live_preview()
                 return
             choice = self._planned_music(target)
             name, preset_key, joined, bundle = self._music_context()
+            self._show_music_title(name, preset_key)
             self._music_audition = audition
             self.music_panel.load(
                 choice, target=name, preset_key=preset_key,
@@ -2279,7 +2286,21 @@ class MainWindow(QMainWindow):
         if view is None or self.music_editor is None:
             return
         if self._view_mode is not Mode.FLOW:
-            view.set_music_presentation(Presentation.CLASSIC)
+            # Deep when it has been given the room — Focus, or the list
+            # collapsed with Music open — and the shallow band otherwise,
+            # exactly as before.
+            deep = self._music_focus or self._music_reclaims_list()
+            view.set_classic_reach(deep)
+            if deep:
+                view.set_music_presentation(Presentation.FULL)
+                if not self._music_focus:
+                    # The collapsed list's room, not a new demand on the
+                    # window: no larger minimum than the shallow band's.
+                    view.music_body.setMinimumHeight(CLASSIC_MUSIC_MINIMUM)
+            else:
+                view.set_music_presentation(Presentation.CLASSIC)
+            self._outer_layout.setStretchFactor(view.music_band,
+                                                1 if deep else 0)
             return
         view.set_music_presentation(Presentation.FULL)
         room = view.music_body.viewport().height()
@@ -2289,6 +2310,46 @@ class MainWindow(QMainWindow):
                   - view.music_panel.sizeHint().height())
         if room > 0 and needed > room:
             view.set_music_presentation(Presentation.COMPACT)
+
+    def _show_music_title(self, name: str, preset_key: str) -> None:
+        """The band says which output it edits, so the source being looked
+        at and the output being changed cannot be taken for each other."""
+        label = PRESETS[preset_key].label if preset_key in PRESETS else ""
+        parts = [part for part in (name, label) if part]
+        self.preview_view.set_music_title(
+            "Music — for " + " · ".join(parts) if parts else "Music")
+
+    def _music_reclaims_list(self) -> bool:
+        """Collapsed by choice, in Classic, with Music open: the list's room
+        is the band's. A fold for Music is not a choice and is left alone."""
+        view = getattr(self, "preview_view", None)
+        return (view is not None and self._view_mode is Mode.CLASSIC
+                and view.music_band.isChecked()
+                and self._layout_state.browser is BrowserMode.COLLAPSED
+                and not self.browser_panel.folded)
+
+    def set_music_focus(self, on: bool) -> None:
+        """Give Classic's Music band the window, or give it back.
+
+        Only while the band is open in Classic. The browser, picture and
+        export column are hidden, not rebuilt; the filmstrip stays, and
+        nothing about the session, the selection or the plan changes.
+        """
+        view = self.preview_view
+        on = (bool(on) and self._view_mode is Mode.CLASSIC
+              and view.music_band.isChecked())
+        view.show_music_focus(on)
+        action = getattr(self, "music_focus_action", None)
+        if action is not None and action.isChecked() != on:
+            blocked = action.blockSignals(True)
+            action.setChecked(on)
+            action.blockSignals(blocked)
+        if on == self._music_focus:
+            return
+        self._music_focus = on
+        if self.splitter is not None:
+            self.splitter.setVisible(not on)
+        self._relayout()
 
     def _load_music_editor(self, target, choice: MusicChoice, name: str) -> None:
         editor = self.music_editor
@@ -3115,7 +3176,7 @@ class MainWindow(QMainWindow):
         key = str(self.settings_store.value(OUTPUT_DEVICE_KEY, "") or "")
         name = str(self.settings_store.value(OUTPUT_DEVICE_NAME, "") or "")
         try:
-            choice = resolve_output(key, name, self._catalog())
+            choice = resolve_output_device(key, name, self._catalog())
         except Exception as exc:          # noqa: BLE001 — report, never raise
             choice = OutputChoice(
                 SYSTEM_DEFAULT, "",
@@ -3620,6 +3681,8 @@ class MainWindow(QMainWindow):
             return
         if chosen is Mode.FLOW and not self._offered_stages:
             return
+        # Focus is Classic's way of making room; Flow has its own pages.
+        self.set_music_focus(False)
         if self._view_mode is Mode.FLOW and chosen is not Mode.FLOW:
             if self._flow_stage is Stage.ASSEMBLE:
                 if self._output_recipe is not None:
@@ -4995,6 +5058,11 @@ class MainWindow(QMainWindow):
         self.music_action.setChecked(False)
         self.music_action.toggled.connect(
             lambda on: self.preview_view.music_band.setChecked(bool(on)))
+        self.music_focus_action = view_menu.addAction("Music in focus")
+        self.music_focus_action.setCheckable(True)
+        self.music_focus_action.setToolTip(
+            "Give the open Music band the window while you edit it")
+        self.music_focus_action.toggled.connect(self.set_music_focus)
 
         view_menu.addSeparator()
         reset_action = view_menu.addAction("Restore default layout")

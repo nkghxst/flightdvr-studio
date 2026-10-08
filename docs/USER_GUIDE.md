@@ -85,7 +85,9 @@ Bundling adds separate jobs to the queue. It is not an all-or-nothing export tra
 
 ## Work in a smaller window
 
-Classic's **Collapsed**, **Normal** and **Expanded** list modes change the space given to the browser. **Show clips** returns from its summary. When Music and a complete browser row cannot fit together, Classic can temporarily fold the list and retain a selected-recording summary. Use its visible restore control or close Music to recover the space.
+Classic's **Collapsed**, **Normal** and **Expanded** list modes change the space given to the browser. **Show clips** returns from its summary. With Music open, choosing **Collapsed** gives the list's room to the Music band, which then shows the whole song, the passage and fades at a usable depth, and the numbers. When Music and a complete browser row cannot fit together, Classic can temporarily fold the list and retain a selected-recording summary. Use its visible restore control or close Music to recover the space.
+
+For more room still, press **Focus** in the Music band (or **View ▸ Music in focus**). The list, picture and export settings step aside while you edit the music, the filmstrip stays, and pressing it again puts everything back. The band's heading names the output you are editing. The **Music level** and **Recording level** sliders are the export levels, each with its exact number beside it; they are separate from the listening volume.
 
 Flow keeps the visual music lanes usable in its compact arrangement, with additional numbers behind **More…**. Keep the preset explanation, name and any refusal in view while deciding what to queue. If a layout becomes awkward, **View → Restore default layout** is the recovery action. Layout folding is not a reason to assume selections have been cleared. Which compact window sizes are supported has not been settled for 2.0.0, so this is not a promise that every smaller window works.
 
