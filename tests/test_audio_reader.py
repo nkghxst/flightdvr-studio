@@ -310,6 +310,24 @@ def test_bounded_forward_jump_discards_exact_frames_without_restarting(
         reader.close()
 
 
+def test_forward_jump_past_catchup_bound_starts_a_new_decoder(
+        monkeypatch, tmp_path):
+    first = FakeProcess(floats(0.1, 0.1))
+    second = FakeProcess(floats(0.9, 0.9))
+    commands = install_processes(monkeypatch, [first, second])
+    beyond = reader_module.MAX_FORWARD_SKIP_FRAMES + 2
+    reader = FfmpegPcmReader.for_music(
+        TOOLS, asset(tmp_path / "music.wav", rate=48_000,
+                     samples=beyond + 1))
+    try:
+        reader.read(0, 1, lambda: False)
+        assert reader.read(beyond, 1, lambda: False)[0] == pytest.approx(0.9)
+        assert len(commands) == 2
+        assert first.terminated == 1
+    finally:
+        reader.close()
+
+
 def test_music_short_read_is_an_error_but_clean_source_tail_is_timeline_silence(
         monkeypatch, tmp_path):
     install_processes(monkeypatch, [

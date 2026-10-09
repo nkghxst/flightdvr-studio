@@ -457,7 +457,6 @@ class LivePreview:
             if taken > 0:
                 epoch = self._current_epoch()
                 if epoch is not None:
-                    epoch.accepted = True
                     if epoch.output_anchor is None:
                         # `present` accepted this current-generation material.
                         # Its immutable start is the first real output
@@ -465,7 +464,7 @@ class LivePreview:
                         # seek supplied one.
                         epoch.output_anchor = block.output_start
             self._held = _unaccepted(block, taken)
-            self._output.pump()
+            self._pump_epoch()
             if self._held is not None:
                 # The bound has been reached. Pulling another block now would
                 # be asking the producer for sound there is nowhere to put.
@@ -474,8 +473,16 @@ class LivePreview:
         # fresh acceptance left a stalled final tail with no service path at
         # all: the producer had ended, so nothing was ever accepted again and
         # the last of the music never reached the device.
-        self._output.pump()
+        self._pump_epoch()
         return sent
+
+    def _pump_epoch(self) -> None:
+        """Arm clock comparison only after the sink takes actual PCM bytes."""
+        written = self._output.pump()
+        if written > 0:
+            epoch = self._current_epoch()
+            if epoch is not None:
+                epoch.accepted = True
 
     def _current_epoch(self) -> _OutputEpoch | None:
         epoch = self._epoch
@@ -573,6 +580,14 @@ class LivePreview:
                 "picture to be worth hearing")
 
     def _judge_starvation(self, report) -> None:
+        epoch = self._current_epoch()
+        if epoch is None or not epoch.accepted:
+            # A newly opened sink cannot underrun material it has never
+            # received. Slow first FFmpeg reads are startup buffering, not
+            # a run of device starvation. The ordinary limit begins once
+            # the sink has actually taken PCM in this fenced epoch.
+            self._starved = 0
+            return
         cause = self._output.starvation(report)
         if cause == "backend":
             self._stop_with("the audio device reported a problem of its own")

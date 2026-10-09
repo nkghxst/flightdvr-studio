@@ -139,16 +139,20 @@ class FakeOutput:
                                    bytes_free=4096, buffer_size=4096)
         self.cause = ""
         self.processed = 0
+        self._pending_bytes = 0
 
     def present(self, block) -> int:
         if block.generation != self.generation:
             return 0
         self.presented.append(block)
-        return block.frames * FRAME_BYTES
+        taken = block.frames * FRAME_BYTES
+        self._pending_bytes += taken
+        return taken
 
     def pump(self) -> int:
         self.calls.append("pump")
-        return 0
+        written, self._pending_bytes = self._pending_bytes, 0
+        return written
 
     def start(self) -> None:
         if self._no_device:
@@ -170,6 +174,7 @@ class FakeOutput:
         self.calls.append(f"reset:{generation}")
         self.generation = generation
         self.presented.clear()
+        self._pending_bytes = 0
 
     def observe(self) -> DeviceReport:
         return self.report
@@ -385,8 +390,9 @@ def test_a_device_error_stops_monitoring_and_names_it():
 def test_a_run_of_starved_ticks_gives_up_rather_than_stuttering():
     """One is ordinary — a block arrived late. A run of them is a stutter
     nobody asked to listen to."""
-    live, _stream, output = transport(blocks=0)
+    live, _stream, output = transport(blocks=1)
     live.play()
+    live.tick(0)
     output.cause = "starved"
 
     for _ in range(STARVED_LIMIT - 1):
@@ -399,14 +405,33 @@ def test_a_run_of_starved_ticks_gives_up_rather_than_stuttering():
 
 
 def test_a_single_late_block_is_forgiven():
-    live, _stream, output = transport(blocks=0)
+    live, _stream, output = transport(blocks=1)
     live.play()
+    live.tick(0)
     output.cause = "starved"
     live.tick(0)
     output.cause = ""
     for _ in range(STARVED_LIMIT * 2):
         live.tick(0)
     assert live.status.playing, "an isolated late block was treated as failure"
+
+
+def test_slow_first_decoder_read_is_buffering_not_sink_starvation():
+    live, stream, output = transport(blocks=0)
+    live.play()
+    output.cause = "starved"
+
+    for _ in range(STARVED_LIMIT * 3):
+        live.tick(0)
+    assert live.status.playing, "the sink had received no PCM to starve on"
+
+    stream.remaining = 1
+    live.tick(0)
+    assert live.status.playing, live.status.reason
+    for _ in range(STARVED_LIMIT - 1):
+        live.tick(0)
+    assert not live.status.playing
+    assert "could not be kept up with" in live.status.reason
 
 
 def test_material_running_out_is_not_treated_as_a_failure():
@@ -544,6 +569,32 @@ def test_second_late_first_pcm_stops_instead_of_chasing_picture():
     assert not live.status.playing
     assert "could not catch up" in live.status.reason
     assert output.presented == []
+
+
+def test_pause_seek_starts_a_fresh_catchup_without_old_sink_bytes():
+    live, stream, output = transport(blocks=1)
+    live.play()
+    live.tick(0)
+    assert output.presented
+
+    live.pause()
+    live.seek(48_000)
+    stream.remaining = 0
+    live.play()
+    output.cause = "starved"
+    for _ in range(STARVED_LIMIT * 2):
+        live.tick(48_000)
+    assert live.status.playing, live.status.reason
+    assert output.presented == []
+
+    stream.remaining = 1
+    live.tick(72_000)
+    assert stream.calls.count("reprime:72000") == 1
+    assert output.presented == []
+    stream.remaining = 1
+    live.tick(72_000)
+    assert output.presented[0].output_start == 72_000
+    assert live.status.playing, live.status.reason
 
 
 def test_pause_invalidates_the_epoch_without_changing_stream_generation():
@@ -2401,6 +2452,29 @@ def test_known_seek_origin_waits_for_acceptance_then_enforces_drift():
 
     live.tick(57_601)
     assert not live.status.playing, "acceptance never armed drift checking"
+    assert "drifted too far" in live.status.reason
+
+
+def test_adapter_queue_is_not_mistaken_for_sink_consumed_pcm():
+    sink = ShortSink(accepts=(0,) * 12)
+    output = AudioOutput(sink_factory=lambda: sink)
+    stream = NumberedStream(blocks=1)
+    live = LivePreview(stream_factory=lambda *a, **k: stream, output=output)
+    live.set_target(object())
+    live.play()
+
+    live.tick(0)
+    live.tick(DRIFT_LIMIT_SAMPLES + 1)
+    assert output.queued_bytes > 0
+    assert output.submitted_bytes == 0
+    assert bytes(sink.received) == b""
+    assert live.status.playing, "an adapter queue is not sink progress"
+
+    sink.accepts = [1 << 20]
+    live.tick(0)
+    assert output.submitted_bytes > 0
+    live.tick(DRIFT_LIMIT_SAMPLES + 1)
+    assert not live.status.playing
     assert "drifted too far" in live.status.reason
 
 
