@@ -370,6 +370,45 @@ All three share `packaging/flightdvr_studio.spec`, which branches on
 `sys.platform` for the icon format, the macOS `BUNDLE` step, and whether ffmpeg
 is bundled.
 
+**Local packaging needs a locked Qt input receipt first.** The three build
+scripts and the shared spec require `build/qt-inputs.json`; the ordinary
+`pip install -r requirements.txt` above is enough to run from source, but does
+not create that receipt. From the repository root, use CI's hashed
+PySide6/Addons/Essentials/shiboken6 install-and-report sequence. The lock only
+names the current Windows x86-64, Linux x86-64 and macOS universal2 wheels;
+an environment resolving another wheel is refused, not silently substituted.
+Use the Python environment that will run the build, with pip available; the
+platform-specific tools named in each build script (the ffmpeg pair, Inno
+Setup, Xcode tools, or Linux build tools) still apply.
+
+Windows PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force build | Out-Null
+python -m pip install --no-deps --force-reinstall --require-hashes --report build/qt-pip-report.json -r packaging/requirements-qt-build.txt
+python -m pip install -r requirements.txt pyinstaller pytest
+python packaging/collect_qt_multimedia_sources.py inputs build/qt-pip-report.json build/qt-inputs.json
+# Then: pwsh packaging/build.ps1 -FfmpegDir <verified-pinned-ffmpeg-bin-folder>
+```
+
+macOS or Linux shell:
+
+```bash
+mkdir -p build
+python3 -m pip install --no-deps --force-reinstall --require-hashes --report build/qt-pip-report.json -r packaging/requirements-qt-build.txt
+python3 -m pip install -r requirements.txt pyinstaller pytest
+python3 packaging/collect_qt_multimedia_sources.py inputs build/qt-pip-report.json build/qt-inputs.json
+# Then: packaging/build-macos.sh (macOS), or packaging/build-appimage.sh (Linux)
+```
+
+The `inputs` command rejects a missing/mismatched quartet, wheel URL, version,
+platform or SHA-256 against `packaging/qt-multimedia-sources.json`, and hashes
+installed multimedia files against their wheel RECORD entries. Keep the pip
+report with the build evidence; do not copy a receipt from another platform or
+an unrelated environment. This establishes which locked wheel files the build
+selected, **not** their upstream build provenance or corresponding-source
+completeness. The source companion and release gates remain separate.
+
 **ffmpeg is bundled on Windows and Linux.** Windows users have no package
 manager to supply one. On Linux the distributions' ffmpeg ranges from 4.4 on
 Ubuntu 22.04 to Fedora's restricted `ffmpeg-free`, so the AppImage carries the
@@ -493,9 +532,10 @@ the measured findings above stale.
 
 **The Windows installer is built in CI from that pin.** The workflow downloads
 the recorded URL, checks its hash, passes the verified folder to the same
-`packaging/build.ps1` used locally, and uploads the installer beside the Linux
-and macOS artifacts. A changed or vanished ffmpeg archive therefore fails the
-build instead of silently changing the binary being shipped.
+`packaging/build.ps1` used locally after the locked Qt input preparation above,
+and uploads the installer beside the Linux and macOS artifacts. A changed or
+vanished ffmpeg archive therefore fails the build instead of silently changing
+the binary being shipped.
 
 ### Releasing
 
