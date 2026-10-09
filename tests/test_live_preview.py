@@ -35,6 +35,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import flightdvr.live_preview as preview_module
+
 from flightdvr.audio_device import (
     ACTIVE, FRAME_BYTES, IDLE, UNKNOWN, AudioOutput, DeviceReport,
     DeviceUnavailable,
@@ -434,6 +436,75 @@ def test_slow_first_decoder_read_is_buffering_not_sink_starvation():
     assert "could not be kept up with" in live.status.reason
 
 
+def test_sink_that_never_takes_pcm_has_a_bounded_named_startup_stop(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(preview_module, "monotonic", lambda: now[0], raising=False)
+
+    class NeverTakingOutput(FakeOutput):
+        def pump(self):
+            self.calls.append("pump")
+            return 0
+
+    stream = FakeStream(blocks=1)
+    output = NeverTakingOutput()
+    live = LivePreview(stream_factory=lambda _t, _l: stream, output=output)
+    live.set_target("stalled-sink")
+    live.play()
+
+    for frame in range(301):
+        now[0] = frame / 30
+        live.tick(round(now[0] * OUTPUT_RATE))
+        if not live.status.playing:
+            break
+
+    assert not live.status.playing, "ten seconds of silent startup stayed on"
+    assert "sound did not start within 3 seconds" in live.status.reason
+    assert now[0] == pytest.approx(3.0)
+    assert stream.stopped
+
+
+def test_cold_decoder_gets_time_but_catchup_does_not_extend_startup(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(preview_module, "monotonic", lambda: now[0], raising=False)
+    live, stream, _output = transport(blocks=0)
+    live.play()
+
+    now[0] = 1.5
+    live.tick(72_000)
+    assert live.status.playing, "the measured cold read was timed out"
+    stream.remaining = 1
+    live.tick(72_000)  # first old block triggers the single catch-up
+    assert stream.calls.count("reprime:72000") == 1
+    stream.remaining = 0
+    now[0] = 2.99
+    live.tick(round(now[0] * OUTPUT_RATE))
+    assert live.status.playing
+    now[0] = 3.0
+    live.tick(144_000)
+    assert not live.status.playing, "catch-up reset the startup budget"
+    assert "sound did not start within 3 seconds" in live.status.reason
+
+
+def test_paused_seek_waits_until_play_to_start_its_startup_budget(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(preview_module, "monotonic", lambda: now[0], raising=False)
+    live, stream, _output = transport(blocks=0)
+    live.play()
+    now[0] = 2.0
+    live.pause()
+    live.seek(48_000)
+    stream.remaining = 0
+    now[0] = 100.0
+    live.play()
+    now[0] = 101.5
+    live.tick(48_000)
+    assert live.status.playing, "paused time consumed the startup budget"
+    now[0] = 103.0
+    live.tick(48_000)
+    assert not live.status.playing
+    assert "sound did not start within 3 seconds" in live.status.reason
+
+
 def test_material_running_out_is_not_treated_as_a_failure():
     live, _stream, output = transport(blocks=0)
     live.play()
@@ -550,7 +621,7 @@ def test_late_first_pcm_is_fenced_and_reprimed_to_picture_once():
     assert output.generation == stream.generation
 
     stream.remaining = 1
-    live.tick(72_000)
+    live.tick(73_600)  # picture advances one 30 Hz tick after the reprime
     assert output.presented[0].output_start == 72_000
     assert live.status.playing, live.status.reason
 

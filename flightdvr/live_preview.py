@@ -36,6 +36,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from enum import Enum
+from time import monotonic
 
 from .audio_device import FRAME_BYTES, AudioOutput, DeviceUnavailable
 from .audio_plan import OUTPUT_CHANNELS, OUTPUT_RATE
@@ -54,6 +55,9 @@ STARTUP_CATCHUP_SAMPLES = OUTPUT_RATE // 20
 # block arrived late. A run of them means we are not keeping up, and carrying
 # on would be a stutter nobody asked to listen to.
 STARVED_LIMIT = 8
+# A cold real DVR read has taken 1.5 seconds here. Startup gets a separate
+# wall-clock budget; a sink that never takes PCM must still give a named stop.
+STARTUP_TIMEOUT_SECONDS = 3.0
 
 
 def _unaccepted(block: PcmBlock, taken: int) -> PcmBlock | None:
@@ -117,6 +121,7 @@ class _OutputEpoch:
     latest_processed: int | None = None
     accepted: bool = False
     catchup_attempted: bool = False
+    startup_deadline: float | None = None
 
 
 class LivePreview:
@@ -281,6 +286,9 @@ class LivePreview:
             # the existing explicit device-reporting refusal before draining.
             self._capture_epoch_baseline()
         self._playing = True
+        epoch = self._current_epoch()
+        if epoch is not None and epoch.startup_deadline is None:
+            epoch.startup_deadline = monotonic() + STARTUP_TIMEOUT_SECONDS
         self._starved = 0
         self._stream.resume()
         if self._output is not None:
@@ -384,6 +392,13 @@ class LivePreview:
             return 0
         if self._record_epoch_progress(before) is None:
             return 0
+        epoch = self._current_epoch()
+        if (epoch is not None and not epoch.accepted
+                and epoch.startup_deadline is not None
+                and monotonic() >= epoch.startup_deadline):
+            self._stop_with(
+                "monitoring stopped: sound did not start within 3 seconds")
+            return 0
         sent = self._drain(int(output_sample))
         if not self._playing:
             # A producer failure inside `_drain` has already named the reason
@@ -449,7 +464,8 @@ class LivePreview:
                 self._held = None
                 self._output.reset(self._generation)
                 self._begin_epoch(output_anchor=output_sample,
-                                  catchup_attempted=True)
+                                  catchup_attempted=True,
+                                  startup_deadline=epoch.startup_deadline)
                 self._capture_epoch_baseline()
                 return sent
             taken = self._output.present(block)
@@ -497,14 +513,18 @@ class LivePreview:
         self._epoch = None
 
     def _begin_epoch(self, *, output_anchor: int | None = None,
-                     catchup_attempted: bool = False) -> None:
+                     catchup_attempted: bool = False,
+                     startup_deadline: float | None = None) -> None:
         """Name a fresh sink epoch; its backend baseline is still pending."""
+        if startup_deadline is None and self._playing:
+            startup_deadline = monotonic() + STARTUP_TIMEOUT_SECONDS
         self._fence += 1
         self._epoch = _OutputEpoch(
             generation=self._generation,
             fence=self._fence,
             output_anchor=output_anchor,
             catchup_attempted=catchup_attempted,
+            startup_deadline=startup_deadline,
         )
 
     def _capture_epoch_baseline(self, report=None) -> bool:
