@@ -29,14 +29,20 @@ _spec.loader.exec_module(sources)
 
 # -- release file selection -------------------------------------------------------------
 
-def _qt_lock() -> dict:
+def _qt_lock(qt_folder: Path) -> dict:
     # Synthetic satisfied prerequisites let selector negatives reach their named
     # artifact checks; the real lock remains fail-closed on U1/U2/U3/U5.
     lock = json.loads((ROOT / "packaging" / "qt-multimedia-sources.json").read_text())
+    evidence = qt_folder / "evidence"
+    evidence.mkdir(parents=True, exist_ok=True)
     for field in ("upstream_build_receipt", "payload_lineage_receipt",
                   "dependency_source_closure",
                   "modification_record", "replacement_acceptance"):
-        lock[field] = {"independently_verified": True, "evidence_sha256": "a" * 64}
+        path = evidence / (field + ".txt")
+        path.write_bytes(field.encode())
+        lock[field] = {"independently_verified": True,
+                       "evidence_file": "evidence/" + path.name,
+                       "evidence_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
     lock["delivery"]["approved"] = True
     lock["sources"] = [{"id": "synthetic", "filename": "synthetic.tar.xz",
                         "sha256": hashlib.sha256(b"source").hexdigest()}]
@@ -45,7 +51,7 @@ def _qt_lock() -> dict:
 
 def _downloads(tmp_path: Path, **changes) -> Path:
     root = tmp_path / "artifacts"
-    lock = _qt_lock()
+    lock = _qt_lock(root / "qt-multimedia-source")
     qt_name = "FlightDVR_Studio-2.0.0-qt-multimedia-source.tar"
     declared = [{"id": x["id"], "verified": True, "sha256": x["sha256"]}
                 for x in lock["sources"]]
@@ -97,7 +103,9 @@ def _downloads(tmp_path: Path, **changes) -> Path:
 
 
 def test_only_the_four_release_files_are_selected(tmp_path):
-    chosen = sources.select_release_files(_downloads(tmp_path), tmp_path / "release-files", _qt_lock())
+    root = _downloads(tmp_path)
+    chosen = sources.select_release_files(
+        root, tmp_path / "release-files", _qt_lock(root / "qt-multimedia-source"))
     assert sorted(p.name for p in chosen) == [
         "FlightDVR_Studio-2.0.0-arm64.dmg",
         "FlightDVR_Studio-2.0.0-linux-ffmpeg-source.tar",
@@ -123,8 +131,10 @@ def test_only_the_four_release_files_are_selected(tmp_path):
 ], ids=["missing", "ambiguous", "gpl-source-bundle-missing",
         "qt-source-bundle-missing", "qt-source-bundle-tampered"])
 def test_a_missing_or_ambiguous_release_file_fails(tmp_path, changes, message):
+    root = _downloads(tmp_path, **changes)
     with pytest.raises(SystemExit, match=message):
-        sources.select_release_files(_downloads(tmp_path, **changes), tmp_path / "out", _qt_lock())
+        sources.select_release_files(root, tmp_path / "out",
+                                     _qt_lock(root / "qt-multimedia-source"))
 
 
 def test_a_release_artifact_that_was_not_downloaded_fails(tmp_path):
@@ -133,7 +143,8 @@ def test_a_release_artifact_that_was_not_downloaded_fails(tmp_path):
         path.unlink()
     (root / "windows-installer").rmdir()
     with pytest.raises(SystemExit, match="windows-installer was not downloaded"):
-        sources.select_release_files(root, tmp_path / "out", _qt_lock())
+        sources.select_release_files(root, tmp_path / "out",
+                                     _qt_lock(root / "qt-multimedia-source"))
 
 
 # -- reading the build system ---------------------------------------------------------------

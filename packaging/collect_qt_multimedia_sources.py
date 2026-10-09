@@ -237,17 +237,49 @@ def safe_archive(path: Path, required: list[str]) -> None:
         raise ValueError("required source/interfaces/licence/build members absent")
 
 
-def gate_gaps(lock: dict) -> list[str]:
-    # A URL/tag/boolean must not stand in for an independently reconciled
-    # upstream build receipt. Current evidence deliberately leaves these null.
+def retained_receipt(value: object, evidence_root: Path | None) -> bool:
+    """Bind a declared receipt to bytes retained with the source artifact.
+
+    A verified flag and a plausible-looking digest are declarations, not
+    evidence. The path is relative to the Qt source artifact's evidence/
+    directory, never to the process cwd or a URL. These checks do not decide
+    whether the retained document itself proves its legal/technical claim.
+    """
+    if not isinstance(value, dict) or value.get("independently_verified") is not True:
+        return False
+    expected = value.get("evidence_sha256")
+    name = value.get("evidence_file")
+    if (not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected)
+            or not isinstance(name, str) or "\\" in name or ":" in name):
+        return False
+    relative = PurePosixPath(name)
+    if (relative.is_absolute() or len(relative.parts) < 2 or relative.parts[0] != "evidence"
+            or ".." in relative.parts or relative.as_posix() != name
+            or evidence_root is None):
+        return False
+    try:
+        if not evidence_root.is_dir() or evidence_root.is_symlink():
+            return False
+        path = evidence_root
+        for part in relative.parts:
+            path = path / part
+            if path.is_symlink():
+                return False
+        return path.is_file() and digest(path) == expected
+    except OSError:
+        return False
+
+
+def gate_gaps(lock: dict, evidence_root: Path | None = None) -> list[str]:
+    # A URL/tag/boolean/digest alone must not stand in for an independently
+    # reconciled upstream build receipt. Current lock fields stay null.
     gaps = []
     for key, label in [("upstream_build_receipt", "U1 wheel-build provenance"),
                        ("payload_lineage_receipt", "U2 wheel-to-payload byte lineage"),
                        ("dependency_source_closure", "U3 source/dependency closure"),
                        ("modification_record", "U1 modifications/build record"),
                        ("replacement_acceptance", "U5 replacement acceptance")]:
-        value = lock.get(key)
-        if not isinstance(value, dict) or value.get("independently_verified") is not True or not value.get("evidence_sha256"):
+        if not retained_receipt(lock.get(key), evidence_root):
             gaps.append(label)
     if lock.get("delivery", {}).get("approved") is not True:
         gaps.append("U4 delivery decision")
@@ -327,7 +359,7 @@ def draft_companion(out: Path, cache: Path, lock: dict, sources: list[dict]) -> 
                 ("qt-multimedia-sources.json", LOCK)]
     content_manifest = {"sources": [{k: x[k] for k in ("id", "filename", "sha256", "bytes")}
                                     for x in sources],
-                        "unresolved": gate_gaps(lock), "source_complete": False,
+                        "unresolved": gate_gaps(lock, out), "source_complete": False,
                         "release_ready": False}
     with tarfile.open(target, "w") as archive:
         for name, path in members:
@@ -398,7 +430,7 @@ def prepare(out: Path, cache: Path, lock: dict, fetch: bool = False,
         except Exception as exc:  # transport failure is unavailable evidence
             record["error"] = f"transport unavailable: {exc}"
         results.append(record)
-    gaps = gate_gaps(lock)
+    gaps = gate_gaps(lock, out)
     gaps += ["U3 unavailable source: " + x["id"] for x in results if not x["verified"]]
     try:
         payloads = platform_evidence(evidence, lock) if evidence else {}
@@ -430,7 +462,7 @@ def prepare(out: Path, cache: Path, lock: dict, fetch: bool = False,
 def release_check(manifest: dict, folder: Path, lock: dict | None = None) -> list[Path]:
     """Exact asset counts/hashes; no permissive fallback or silent splitting."""
     lock = load_lock() if lock is None else lock
-    if gate_gaps(lock):
+    if gate_gaps(lock, folder):
         raise ValueError("Qt multimedia upstream provenance, closure or approval unresolved")
     if (manifest.get("schema_version") != 1 or manifest.get("source_complete") is not True
             or manifest.get("release_ready") is not True or manifest.get("unresolved")

@@ -25,6 +25,28 @@ scanner = importlib.util.module_from_spec(_scanner_spec)
 _scanner_spec.loader.exec_module(scanner)
 
 
+RECEIPT_LABELS = {
+    "upstream_build_receipt": "U1 wheel-build provenance",
+    "payload_lineage_receipt": "U2 wheel-to-payload byte lineage",
+    "dependency_source_closure": "U3 source/dependency closure",
+    "modification_record": "U1 modifications/build record",
+    "replacement_acceptance": "U5 replacement acceptance",
+}
+
+
+def _retain_receipts(lock: dict, folder: Path, omit: str | None = None) -> None:
+    evidence = folder / "evidence"
+    evidence.mkdir(parents=True, exist_ok=True)
+    for field in RECEIPT_LABELS:
+        if field == omit:
+            continue
+        path = evidence / (field + ".txt")
+        path.write_bytes(field.encode())
+        lock[field] = {"independently_verified": True,
+                       "evidence_file": "evidence/" + path.name,
+                       "evidence_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
 def test_same_quartet_must_match_platform_url_version_and_hash():
     lock = qt.load_lock()
     wheels = lock["platforms"]["windows"]["wheels"]
@@ -198,11 +220,9 @@ def test_present_tag_and_fake_complete_manifest_cannot_cross_provenance_gate(tmp
 
 def test_unverified_u2_cannot_be_promoted_by_a_complete_manifest(tmp_path):
     lock = copy.deepcopy(qt.load_lock())
-    for key in ("upstream_build_receipt", "dependency_source_closure",
-                "modification_record", "replacement_acceptance"):
-        lock[key] = {"independently_verified": True, "evidence_sha256": "a" * 64}
+    _retain_receipts(lock, tmp_path, omit="payload_lineage_receipt")
     lock["delivery"]["approved"] = True
-    assert qt.gate_gaps(lock) == ["U2 wheel-to-payload byte lineage"]
+    assert qt.gate_gaps(lock, tmp_path) == ["U2 wheel-to-payload byte lineage"]
     manifest = {"schema_version": 1, "source_complete": True, "release_ready": True,
                 "unresolved": [], "delivery": lock["delivery"],
                 "sources": [{"id": source["id"], "verified": True,
@@ -211,13 +231,129 @@ def test_unverified_u2_cannot_be_promoted_by_a_complete_manifest(tmp_path):
                                       for platform in lock["platforms"]}}
     with pytest.raises(ValueError, match="provenance"):
         qt.release_check(manifest, tmp_path, lock)
-    lock["payload_lineage_receipt"] = {"independently_verified": True,
-                                       "evidence_sha256": "b" * 64}
+    _retain_receipts(lock, tmp_path)
     manifest["platform_payloads"]["macos"] = {
         "wheel_to_payload_bytes_verified": False,
         "transformation_limit": "U2: signed bytes differ from wheel bytes"}
     with pytest.raises(ValueError, match="U2 wheel-to-shipped-byte lineage"):
         qt.release_check(manifest, tmp_path, lock)
+
+
+@pytest.mark.parametrize("field,label", RECEIPT_LABELS.items())
+def test_future_receipts_require_retained_matching_bytes(tmp_path, field, label):
+    lock = copy.deepcopy(qt.load_lock())
+    _retain_receipts(lock, tmp_path)
+    lock["delivery"]["approved"] = True
+    assert qt.gate_gaps(lock, tmp_path) == []
+    assert label in qt.gate_gaps(lock), "a digest alone cleared the gate without a retained root"
+    path = tmp_path / lock[field]["evidence_file"]
+    original = path.read_bytes()
+    path.write_bytes(b"tampered")
+    assert label in qt.gate_gaps(lock, tmp_path)
+    with pytest.raises(ValueError, match="provenance"):
+        qt.release_check({"source_complete": True, "release_ready": True}, tmp_path, lock)
+    path.unlink()
+    assert label in qt.gate_gaps(lock, tmp_path)
+    path.write_bytes(original)
+    assert qt.gate_gaps(lock, tmp_path) == []
+    lock[field]["evidence_sha256"] = "z" * 64
+    assert label in qt.gate_gaps(lock, tmp_path)
+    lock[field]["evidence_sha256"] = hashlib.sha256(original).hexdigest()
+    lock[field]["evidence_file"] = "../evidence/" + path.name
+    assert label in qt.gate_gaps(lock, tmp_path)
+    lock[field]["evidence_file"] = "evidence/" + path.name
+    assert qt.gate_gaps(lock, tmp_path) == []
+
+
+def _synthetic_release(tmp_path: Path, split: bool) -> tuple[dict, dict, Path]:
+    folder = tmp_path / "qt-multimedia-source"
+    folder.mkdir()
+    lock = copy.deepcopy(qt.load_lock())
+    _retain_receipts(lock, folder)
+    lock["delivery"]["approved"] = True
+    if split:
+        lock["delivery"].update(format="manifest-linked-split",
+                                split_parts=["part-1.tar", "part-2.tar"])
+    payload = b"source"
+    lock["sources"] = [{"id": "synthetic", "filename": "synthetic.tar.xz",
+                        "sha256": hashlib.sha256(payload).hexdigest()}]
+    declared = [{"id": "synthetic", "verified": True,
+                 "sha256": lock["sources"][0]["sha256"]}]
+    members = [
+        ("sources/synthetic.tar.xz", payload),
+        ("MANIFEST.json", json.dumps({"source_complete": True,
+                                       "release_ready": True,
+                                       "sources": declared}).encode()),
+        ("LICENSE.LGPL-2.1.txt", b"licence"),
+        ("THIRD-PARTY-NOTICES.md", b"notices"),
+        ("qt-multimedia-sources.json", b"lock"),
+    ]
+    groups = [members[:2], members[2:]] if split else [members]
+    names = lock["delivery"]["split_parts"] if split else ["source.tar"]
+    assets = []
+    for name, group in zip(names, groups):
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w") as archive:
+            for member_name, data in group:
+                info = tarfile.TarInfo(member_name)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+        body = stream.getvalue()
+        (folder / name).write_bytes(body)
+        assets.append({"filename": name, "bytes": len(body),
+                       "sha256": hashlib.sha256(body).hexdigest()})
+    manifest = {"schema_version": 1, "source_complete": True, "release_ready": True,
+                "unresolved": [], "delivery": lock["delivery"], "sources": declared,
+                "platform_payloads": {
+                    platform: {"wheel_to_payload_bytes_verified": True}
+                    for platform in lock["platforms"]},
+                "assets": assets}
+    (folder / "qt-multimedia-source.manifest.json").write_text(json.dumps(manifest))
+    return lock, manifest, folder
+
+
+def test_companion_reaches_limit_and_is_removed(tmp_path, monkeypatch):
+    out, cache = tmp_path / "out", tmp_path / "cache"
+    out.mkdir()
+    cache.mkdir()
+    source = cache / "synthetic.tar.xz"
+    source.write_bytes(b"source")
+    item = {"id": "synthetic", "filename": source.name, "sha256": qt.digest(source),
+            "bytes": source.stat().st_size, "verified": True}
+    lock = qt.load_lock()
+    asset = qt.draft_companion(out, cache, lock, [item])
+    target = out / asset["filename"]
+    assert target.is_file() and asset["bytes"] < qt.ASSET_LIMIT
+    monkeypatch.setattr(qt, "ASSET_LIMIT", asset["bytes"])
+    with pytest.raises(ValueError, match="reaches 2 GiB"):
+        qt.draft_companion(out, cache, lock, [item])
+    assert not target.exists(), "oversize draft was left behind"
+
+
+def test_release_companion_limit_and_split_parts_are_exact(tmp_path, monkeypatch):
+    lock, manifest, folder = _synthetic_release(tmp_path, split=True)
+    assert [p.name for p in qt.release_check(manifest, folder, lock)] == [
+        "part-1.tar", "part-2.tar"]
+    first = folder / "part-1.tar"
+    original_limit = qt.ASSET_LIMIT
+    monkeypatch.setattr(qt, "ASSET_LIMIT", first.stat().st_size)
+    with pytest.raises(ValueError, match="source companion size/hash mismatch"):
+        qt.release_check(manifest, folder, lock)
+    monkeypatch.setattr(qt, "ASSET_LIMIT", original_limit)
+    missing = copy.deepcopy(manifest)
+    missing["assets"].pop()
+    with pytest.raises(ValueError, match="split companion parts/count"):
+        qt.release_check(missing, folder, lock)
+    (folder / "part-2.tar").unlink()
+    with pytest.raises(ValueError, match="source companion size/hash mismatch"):
+        qt.release_check(manifest, folder, lock)
+
+
+def test_release_companion_rejects_stray_part(tmp_path):
+    lock, manifest, folder = _synthetic_release(tmp_path, split=True)
+    (folder / "part-extra.tar").write_bytes(b"stray")
+    with pytest.raises(ValueError, match="unexpected or missing source companion artifact"):
+        qt.release_check(manifest, folder, lock)
 
 
 def test_source_archive_rejects_traversal_and_links(tmp_path):
