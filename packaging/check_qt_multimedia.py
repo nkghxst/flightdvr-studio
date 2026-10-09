@@ -277,7 +277,7 @@ def binding_check(bundle: Path, report: dict, inputs: dict, collection: dict,
                 and resolved in bound_files and link.name == resolved.name):
             generated_bundle_links.append(dict(path=relative,
                                                target=os.readlink(link).replace("\\", "/"),
-                                               bound_path=resolved.relative_to(bundle).as_posix()))
+                                               bound_path=resolved.relative_to(bundle.resolve()).as_posix()))
         else:
             failures.append(f"shipped multimedia symlink lacks collection origin: {relative}")
     found_families = {family(p.name) for p in actual_paths.values()}
