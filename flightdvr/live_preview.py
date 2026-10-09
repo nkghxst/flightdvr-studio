@@ -45,6 +45,10 @@ from .audio_stream import Buffering, PcmBlock, StreamFailed
 # before monitoring stops. A fifth of a second is past the point where a person
 # stops hearing "the music" and starts hearing "the music is late".
 DRIFT_LIMIT_SAMPLES = OUTPUT_RATE // 5
+# A first block this old belongs to the picture's past, even if a backend
+# counter advanced while no PCM was available. Keep this below the drift
+# refusal bound: catch-up is a new, fenced start, not tolerance for late sound.
+STARTUP_CATCHUP_SAMPLES = OUTPUT_RATE // 20
 
 # Consecutive starved ticks tolerated before giving up. One is ordinary — a
 # block arrived late. A run of them means we are not keeping up, and carrying
@@ -112,6 +116,7 @@ class _OutputEpoch:
     processed_anchor: int | None = None
     latest_processed: int | None = None
     accepted: bool = False
+    catchup_attempted: bool = False
 
 
 class LivePreview:
@@ -379,7 +384,7 @@ class LivePreview:
             return 0
         if self._record_epoch_progress(before) is None:
             return 0
-        sent = self._drain()
+        sent = self._drain(int(output_sample))
         if not self._playing:
             # A producer failure inside `_drain` has already named the reason
             # and fenced this epoch. Do not replace it with a timing symptom.
@@ -392,7 +397,7 @@ class LivePreview:
             self._judge_starvation(report)
         return sent
 
-    def _drain(self) -> int:
+    def _drain(self, output_sample: int) -> int:
         """Offer what belongs here, and keep what the adapter could not take.
 
         `pull` removes the block from the producer and `present` may take a
@@ -423,6 +428,30 @@ class LivePreview:
                     return sent
                 if block is None:
                     break
+            epoch = self._current_epoch()
+            if (epoch is not None and not epoch.accepted
+                    and output_sample - block.output_start
+                    > STARTUP_CATCHUP_SAMPLES):
+                # The producer's first PCM may arrive after the picture has
+                # moved on. Never hand that stale block to the sink: a backend
+                # may count idle time as processed and make it appear in sync.
+                # A single forward reprime fences both queues. If even that
+                # misses the picture, report failure rather than chasing it.
+                if epoch.catchup_attempted:
+                    self._stop_with(
+                        "monitoring stopped: sound could not catch up to the picture")
+                    return sent
+                try:
+                    self._generation = self._stream.reprime(output_sample)
+                except (RuntimeError, ValueError) as exc:
+                    self._stop_with(f"monitoring stopped: sound could not catch up: {exc}")
+                    return sent
+                self._held = None
+                self._output.reset(self._generation)
+                self._begin_epoch(output_anchor=output_sample,
+                                  catchup_attempted=True)
+                self._capture_epoch_baseline()
+                return sent
             taken = self._output.present(block)
             sent += taken
             if taken > 0:
@@ -460,13 +489,15 @@ class LivePreview:
         self._fence += 1
         self._epoch = None
 
-    def _begin_epoch(self, *, output_anchor: int | None = None) -> None:
+    def _begin_epoch(self, *, output_anchor: int | None = None,
+                     catchup_attempted: bool = False) -> None:
         """Name a fresh sink epoch; its backend baseline is still pending."""
         self._fence += 1
         self._epoch = _OutputEpoch(
             generation=self._generation,
             fence=self._fence,
             output_anchor=output_anchor,
+            catchup_attempted=catchup_attempted,
         )
 
     def _capture_epoch_baseline(self, report=None) -> bool:

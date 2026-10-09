@@ -275,20 +275,37 @@ def test_contiguous_pulls_reuse_one_child(monkeypatch, tmp_path):
         reader.close()
 
 
-def test_noncontiguous_read_discards_the_old_child_before_starting_another(
+def test_backward_read_discards_the_old_child_before_starting_another(
         monkeypatch, tmp_path):
-    first = FakeProcess(floats(0.1, 0.1))
+    first = FakeProcess(floats(*([0.1, 0.1] * 11)))
     second = FakeProcess(floats(0.9, 0.9))
     commands = install_processes(monkeypatch, [first, second])
     reader = FfmpegPcmReader.for_music(
         TOOLS, asset(tmp_path / "music.wav", rate=48_000, samples=20))
     try:
-        assert reader.read(0, 1, lambda: False)[0] == pytest.approx(0.1)
-        assert reader.read(10, 1, lambda: False)[0] == pytest.approx(0.9)
+        assert reader.read(10, 1, lambda: False)[0] == pytest.approx(0.1)
+        assert reader.read(0, 1, lambda: False)[0] == pytest.approx(0.9)
         assert len(commands) == 2
         assert first.terminated == 1
-        assert "atrim=start_sample=10" in commands[1][0][
+        assert "atrim=start_sample=0" in commands[1][0][
             commands[1][0].index("-af") + 1]
+    finally:
+        reader.close()
+
+
+def test_bounded_forward_jump_discards_exact_frames_without_restarting(
+        monkeypatch, tmp_path):
+    samples = [float(i) / 100 for i in range(24) for _ in range(2)]
+    first = FakeProcess(floats(*samples))
+    commands = install_processes(monkeypatch, [first])
+    reader = FfmpegPcmReader.for_music(
+        TOOLS, asset(tmp_path / "music.wav", rate=48_000, samples=24))
+    try:
+        assert reader.read(0, 1, lambda: False)[0] == pytest.approx(0)
+        assert reader.read(10, 1, lambda: False)[0] == pytest.approx(0.1)
+        assert reader.read(11, 1, lambda: False)[0] == pytest.approx(0.11)
+        assert len(commands) == 1
+        assert first.terminated == 0
     finally:
         reader.close()
 

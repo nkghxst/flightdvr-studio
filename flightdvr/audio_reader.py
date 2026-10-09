@@ -52,6 +52,7 @@ FLOAT_BYTES = 4
 PCM_FRAME_BYTES = OUTPUT_CHANNELS * FLOAT_BYTES
 MAX_READ_FRAMES = BLOCK_FRAMES
 MAX_READ_BYTES = MAX_READ_FRAMES * PCM_FRAME_BYTES
+MAX_FORWARD_SKIP_FRAMES = 5 * OUTPUT_RATE
 HASH_CHUNK_BYTES = 1024 * 1024
 DECODE_CHUNK_BYTES = 64 * 1024
 STDERR_LINES = 30
@@ -530,8 +531,21 @@ class FfmpegPcmReader:
                     raise AudioOperationCancelled("audio reader is stopping")
             if cancelled():
                 raise AudioOperationCancelled("Cancelled")
-            if self._process is None or self._cursor != start:
+            if (self._process is None or self._cursor is None
+                    or start < self._cursor
+                    or start - self._cursor > MAX_FORWARD_SKIP_FRAMES):
                 self._replace_process(start)
+            elif start > self._cursor:
+                # A live monitor can advance after a slow first decode. Keep
+                # the already-running decoder and discard only the skipped
+                # output frames; restarting FFmpeg for a forward catch-up
+                # repeats the very startup delay we are trying to escape.
+                remaining = start - self._cursor
+                while remaining:
+                    count = min(remaining, MAX_READ_FRAMES)
+                    self._read_bytes(count * PCM_FRAME_BYTES, cancelled)
+                    remaining -= count
+                self._cursor = start
             data = self._read_bytes(frames * PCM_FRAME_BYTES, cancelled)
             self._check_process_after_read(
                 final_extent=start + frames == self.frames,

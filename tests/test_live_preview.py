@@ -424,6 +424,7 @@ def test_drift_beyond_the_bound_stops_monitoring_rather_than_nudging():
     live, _stream, output = transport()
     live.play()
     output.processed = 0
+    live.tick(0)
 
     live.tick(DRIFT_LIMIT_SAMPLES + 1)
 
@@ -476,6 +477,7 @@ def test_device_epoch_keeps_the_literal_drift_boundary():
     live, _stream, output = transport()
     live.play()
     output.processed = 0
+    live.tick(0)
 
     live.tick(9_600)
     assert live.status.playing, "the inclusive 9600-sample bound changed"
@@ -501,6 +503,47 @@ def test_startup_buffering_waits_for_the_first_accepted_block_origin():
     live.tick(48_000)
     assert output.presented[0].output_start == 48_000
     assert live.status.playing, live.status.reason
+
+
+def test_late_first_pcm_is_fenced_and_reprimed_to_picture_once():
+    stream = FakeStream(blocks=0)
+    output = FakeOutput()
+    live = LivePreview(stream_factory=lambda _t, _l: stream, output=output)
+    live.set_target("slow-real-decoder")
+    live.play()
+    live.tick(0)
+
+    # The picture ran while FFmpeg produced its first block. A backend may
+    # also report that idle interval as processed; neither makes output zero
+    # the right sound for the picture at 1.5 seconds.
+    stream.remaining = 1
+    output.processed = 72_000 * FRAME_BYTES
+    live.tick(72_000)
+    assert live.status.playing, live.status.reason
+    assert stream.calls.count("reprime:72000") == 1
+    assert output.presented == [], "the stale first block reached the sink"
+    assert output.generation == stream.generation
+
+    stream.remaining = 1
+    live.tick(72_000)
+    assert output.presented[0].output_start == 72_000
+    assert live.status.playing, live.status.reason
+
+
+def test_second_late_first_pcm_stops_instead_of_chasing_picture():
+    stream = FakeStream(blocks=1)
+    output = FakeOutput()
+    live = LivePreview(stream_factory=lambda _t, _l: stream, output=output)
+    live.set_target("still-slow")
+    live.play()
+
+    live.tick(72_000)
+    assert stream.calls.count("reprime:72000") == 1
+    live.tick(76_000)
+
+    assert not live.status.playing
+    assert "could not catch up" in live.status.reason
+    assert output.presented == []
 
 
 def test_pause_invalidates_the_epoch_without_changing_stream_generation():
