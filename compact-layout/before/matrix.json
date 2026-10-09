@@ -1,0 +1,542 @@
+[
+ {
+  "tag": "1160x880-collapsed-musicoff",
+  "window": [
+   1160,
+   880
+  ],
+  "window_min": 806,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 1,
+  "browser_h": 222,
+  "preview_h": 288,
+  "band_h": 16,
+  "band_body_h": 0,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 516,
+    "min": 516
+   },
+   {
+    "item": "QGroupBox",
+    "top": 564,
+    "h": 192,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 762,
+    "h": 16,
+    "min": 16
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ]
+ },
+ {
+  "tag": "1160x880-collapsed-musicon",
+  "window": [
+   1160,
+   880
+  ],
+  "window_min": 840,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 1,
+  "browser_h": 222,
+  "preview_h": 288,
+  "band_h": 90,
+  "band_body_h": 64,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 516,
+    "min": 516
+   },
+   {
+    "item": "QGroupBox",
+    "top": 564,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 688,
+    "h": 90,
+    "min": 50
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ]
+ },
+ {
+  "tag": "1160x880-normal-musicoff",
+  "window": [
+   1160,
+   880
+  ],
+  "window_min": 734,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 2,
+  "browser_h": 296,
+  "preview_h": 288,
+  "band_h": 16,
+  "band_body_h": 0,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 590,
+    "min": 444
+   },
+   {
+    "item": "QGroupBox",
+    "top": 638,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 762,
+    "h": 16,
+    "min": 16
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ]
+ },
+ {
+  "tag": "1160x880-normal-musicon",
+  "window": [
+   1160,
+   880
+  ],
+  "window_min": 750,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 1,
+  "browser_h": 280,
+  "preview_h": 278,
+  "band_h": 42,
+  "band_body_h": 26,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 564,
+    "min": 434
+   },
+   {
+    "item": "QGroupBox",
+    "top": 612,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 736,
+    "h": 42,
+    "min": 42
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ]
+ },
+ {
+  "tag": "1160x880-expanded-musicoff",
+  "window": [
+   1160,
+   880
+  ],
+  "window_min": 724,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 2,
+  "browser_h": 306,
+  "preview_h": 278,
+  "band_h": 16,
+  "band_body_h": 0,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 590,
+    "min": 434
+   },
+   {
+    "item": "QGroupBox",
+    "top": 638,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 762,
+    "h": 16,
+    "min": 16
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ]
+ },
+ {
+  "tag": "1160x880-expanded-musicon",
+  "window": [
+   1160,
+   880
+  ],
+  "window_min": 750,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 2,
+  "browser_h": 280,
+  "preview_h": 278,
+  "band_h": 42,
+  "band_body_h": 26,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 564,
+    "min": 434
+   },
+   {
+    "item": "QGroupBox",
+    "top": 612,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 736,
+    "h": 42,
+    "min": 42
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ]
+ },
+ {
+  "tag": "1490x880-collapsed-musicoff",
+  "window": [
+   1490,
+   880
+  ],
+  "window_min": 886,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 1,
+  "browser_h": 216,
+  "preview_h": 368,
+  "band_h": 16,
+  "band_body_h": 0,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 590,
+    "min": 596
+   },
+   {
+    "item": "QGroupBox",
+    "top": 638,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 762,
+    "h": 16,
+    "min": 16
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ]
+ },
+ {
+  "tag": "1490x880-collapsed-musicon",
+  "window": [
+   1490,
+   880
+  ],
+  "window_min": 880,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 1,
+  "browser_h": 222,
+  "preview_h": 328,
+  "band_h": 50,
+  "band_body_h": 24,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 556,
+    "min": 556
+   },
+   {
+    "item": "QGroupBox",
+    "top": 604,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 728,
+    "h": 50,
+    "min": 50
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ]
+ },
+ {
+  "tag": "1490x880-normal-musicoff",
+  "window": [
+   1490,
+   880
+  ],
+  "window_min": 738,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 2,
+  "browser_h": 292,
+  "preview_h": 292,
+  "band_h": 16,
+  "band_body_h": 0,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 590,
+    "min": 448
+   },
+   {
+    "item": "QGroupBox",
+    "top": 638,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 762,
+    "h": 16,
+    "min": 16
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ]
+ },
+ {
+  "tag": "1490x880-normal-musicon",
+  "window": [
+   1490,
+   880
+  ],
+  "window_min": 750,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 1,
+  "browser_h": 280,
+  "preview_h": 278,
+  "band_h": 42,
+  "band_body_h": 26,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 564,
+    "min": 434
+   },
+   {
+    "item": "QGroupBox",
+    "top": 612,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 736,
+    "h": 42,
+    "min": 42
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ]
+ },
+ {
+  "tag": "1490x880-expanded-musicoff",
+  "window": [
+   1490,
+   880
+  ],
+  "window_min": 724,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 2,
+  "browser_h": 306,
+  "preview_h": 278,
+  "band_h": 16,
+  "band_body_h": 0,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 590,
+    "min": 434
+   },
+   {
+    "item": "QGroupBox",
+    "top": 638,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 762,
+    "h": 16,
+    "min": 16
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ]
+ },
+ {
+  "tag": "1490x880-expanded-musicon",
+  "window": [
+   1490,
+   880
+  ],
+  "window_min": 750,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 2,
+  "browser_h": 278,
+  "preview_h": 278,
+  "band_h": 44,
+  "band_body_h": 28,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 562,
+    "min": 434
+   },
+   {
+    "item": "QGroupBox",
+    "top": 610,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 734,
+    "h": 44,
+    "min": 42
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ]
+ }
+]
