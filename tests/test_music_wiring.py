@@ -3152,7 +3152,6 @@ def test_leaving_focus_gives_the_window_back_at_its_own_size(window, app, collap
     the window. In a window with no room to spare, leaving Focus must leave
     the window exactly as it was, with the band back to its shallow least."""
     from flightdvr.classic_layout import BrowserMode
-    from flightdvr.preview_panel import CLASSIC_MUSIC_MINIMUM
     view = window.preview_view
     focus(window, 0)
     window.set_browser_mode(BrowserMode.COLLAPSED if collapsed else BrowserMode.NORMAL)
@@ -3163,6 +3162,8 @@ def test_leaving_focus_gives_the_window_back_at_its_own_size(window, app, collap
     window.resize(window.width(), window.minimumSizeHint().height())
     _settle(app)
     size = window.size()
+    least = view.music_body.minimumHeight()
+    demand = window.minimumSizeHint().height()
     window.set_music_focus(True)
     _settle(app)
     assert window.splitter.isHidden()
@@ -3170,10 +3171,16 @@ def test_leaving_focus_gives_the_window_back_at_its_own_size(window, app, collap
     scroll = view.music_body.verticalScrollBar()
     scroll.setValue(scroll.maximum())
     window.set_music_focus(False)
+    # The cause itself, before any event can grow the window: the moment the
+    # split is back, the window must ask for no more than it did before Focus.
+    # (Whether the platform then grows the window depends on its timing and
+    # fonts — 5 px on one Windows host, 9-10 px in CI's — so the size check
+    # alone was not enough.)
+    assert window.minimumSizeHint().height() <= demand, "Focus's band was still asked for"
     _settle(app)
     assert not window.splitter.isHidden()
     assert window.size() == size, "leaving Focus grew the window"
-    assert view.music_body.minimumHeight() == CLASSIC_MUSIC_MINIMUM
+    assert view.music_body.minimumHeight() == least, "the band kept Focus's demand"
     assert scroll.value() == 0, "the track and Level rows were left scrolled away"
     view.music_band.setChecked(False)
     window.hide()

@@ -398,6 +398,8 @@ class MainWindow(QMainWindow):
         self.splitter: QSplitter | None = None
         # Classic's Music band given the window while it is being edited.
         self._music_focus = False
+        # The band's height limits just before Focus, given back when it ends.
+        self._band_before_focus: tuple[int, int] | None = None
         # The depth last given to the band, fitted to the room at the time.
         self._applied_depth = 0
         # A depth the person set for Classic's band, or 0 for the shallow one.
@@ -2418,14 +2420,29 @@ class MainWindow(QMainWindow):
         if on == self._music_focus:
             return
         self._music_focus = on
-        if not on:
+        body = view.music_body
+        if on:
+            self._band_before_focus = (view.music_timeline.presentation,
+                                       body.minimumHeight(), body.maximumHeight())
+        elif self._band_before_focus is not None:
             # Focus's lanes ask for a deep band (MUSIC_BAND_MINIMUM). Shown
-            # again with that demand still on the band, the split above made
-            # the window's minimum taller than the window, and Qt grew it —
-            # past the screen (893 to 1029 px, measured natively). Back to the
-            # shallow band's least first; the relayout below fits the band to
-            # the room there is once the split has its place again.
-            view.music_body.setMinimumHeight(CLASSIC_MUSIC_MINIMUM)
+            # again with that still on the band, the split above made the
+            # window's minimum taller than the window, and Qt grew it — past
+            # the screen (893 to 1029 px, measured natively). The band gets
+            # back exactly what it was before Focus first — its arrangement,
+            # its limits and its grip; a fixed shallow least alone still left
+            # Focus's arrangement a few pixels taller (9-10 px in CI's fonts).
+            # The relayout below then fits it to the room there is once the
+            # split has its place again.
+            presentation, least, most = self._band_before_focus
+            self._band_before_focus = None
+            view.set_music_presentation(presentation)
+            body.setMinimumHeight(least)
+            body.setMaximumHeight(most)
+            view.band_grip.setVisible(True)
+        else:
+            body.setMinimumHeight(CLASSIC_MUSIC_MINIMUM)
+        if not on:
             # The shallow band shows its top: the track and Level rows. Kept
             # from Focus, the scroll left them above the band's fold (natively,
             # Focus to a collapsed list's band, same arrangement both ways).
