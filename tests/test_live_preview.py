@@ -1042,9 +1042,11 @@ def _make_joined_window(window):
 def _pull_stream_at(stream, output_sample: int):
     if stream.state.value == "ready":
         stream.start()
-    else:
-        stream.pause()
-        stream.reprime(output_sample)
+    # Inspect the requested position directly. Draining from zero to a later
+    # seam renders hundreds of unrelated blocks and makes this an accidental
+    # CPU-speed test (notably in the full macOS packaging suite).
+    stream.pause()
+    stream.reprime(output_sample)
     stream.resume()
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
