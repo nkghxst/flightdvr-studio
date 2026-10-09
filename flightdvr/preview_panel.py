@@ -1054,9 +1054,18 @@ class PreviewView(QObject):
         self.restore_classic_reach()
 
     def set_classic_depth(self, height: int) -> None:
-        """A depth the person chose for Classic's band: exactly this tall."""
+        """A depth the person chose for Classic's band: as tall as this when
+        the window has the room, and never a demand on the window.
+
+        The band keeps the shallow band's least as its minimum and takes the
+        depth as its ceiling; its stretch (set by the window) lets it take
+        free room up to it first. Set as min = max = depth, a depth fitted
+        against a minimum that leaves out wrapped text grew the window on
+        macOS and Ubuntu CI (791 to 810, 770 to 832 px; Sol, 9 October).
+        """
         self._classic_reach = int(height)
-        self.music_body.setMinimumHeight(int(height))
+        self.music_body.setMinimumHeight(max(
+            CLASSIC_MUSIC_MINIMUM, self.track_button.sizeHint().height()))
         self.music_body.setMaximumHeight(int(height))
 
     def set_music_title(self, text: str) -> None:

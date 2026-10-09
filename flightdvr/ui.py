@@ -2409,8 +2409,10 @@ class MainWindow(QMainWindow):
                         body.setMaximumHeight(max(body.minimumHeight(),
                                                   essential))
             view.band_grip.setVisible(not self._music_focus)
-            self._outer_layout.setStretchFactor(view.music_band,
-                                                1 if deep else 0)
+            # A chosen depth takes free room before the split does, up to its
+            # ceiling (set_classic_depth); it never sets the window's minimum.
+            self._outer_layout.setStretchFactor(
+                view.music_band, 4 if (depth and not deep) else 1 if deep else 0)
             # The filmstrip keeps its own height in every arrangement. Stretched
             # into a collapsed list's room it drew its stills at a 112 px cap
             # in a much taller box — "the filmstrip swallowing freed space",

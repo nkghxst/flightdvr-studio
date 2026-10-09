@@ -3313,10 +3313,13 @@ def test_a_short_music_page_folds_and_more_unfolds_without_choosing(window, app)
     from flightdvr.music_timeline import Presentation
     first, _second = planned_pair(window, app)
     window.show()
-    window.resize(1402, 660)  # P1: one-line captions freed ~60px at 700
-    settled(app)
     window._select_working_target(first)
     window._show_stage(Stage.MUSIC)
+    settled(app)
+    # The shortest this window can be, wherever it runs. A fixed 660 px
+    # stopped making the page short once the band's notes went to one line
+    # (macOS and Ubuntu CI: needed 226 of 230 and 238 of 255; Sol, 9 October).
+    window.resize(1402, window.minimumSizeHint().height())
     settled(app)
     window._fit_music_presentation()
     timeline = window.preview_view.music_timeline

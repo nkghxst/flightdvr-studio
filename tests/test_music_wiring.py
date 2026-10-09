@@ -3071,11 +3071,15 @@ def test_the_band_can_be_made_taller_without_growing_the_window(window, app):
         app.processEvents()
     size = window.size()
     start = view.music_body.height()
+    least = view.music_body.minimumHeight()
     window.set_music_depth(start + 60)
     for _ in range(10):
         app.processEvents()
     assert window._music_depth >= start
     assert window.size() == size, "the window grew for the band"
+    # A ceiling the band may grow to, never a new minimum: as a minimum it
+    # grew the window on macOS CI (791 to 801 px; Sol, 9 October).
+    assert view.music_body.minimumHeight() == least
     assert not window.splitter.isHidden(), "the picture and export went away"
     from flightdvr.ui import MUSIC_DEPTH_KEY
     assert int(window.settings_store.value(MUSIC_DEPTH_KEY)) == window._music_depth
@@ -3136,6 +3140,9 @@ def test_a_saved_depth_is_fitted_to_the_room_when_music_opens(window, app):
         app.processEvents()
     assert window.size() == size, "a remembered depth grew the window"
     assert view.music_body.height() <= 240
+    # Never the band's minimum (Ubuntu CI grew 770 to 832 px when it was).
+    assert view.music_body.minimumHeight() <= max(
+        24, view.track_button.sizeHint().height())
     assert window._music_depth == 240, "the preference was overwritten"
     assert int(window.settings_store.value(MUSIC_DEPTH_KEY)) == 240
     view.music_band.setChecked(False)
