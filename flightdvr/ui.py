@@ -2418,6 +2418,18 @@ class MainWindow(QMainWindow):
         if on == self._music_focus:
             return
         self._music_focus = on
+        if not on:
+            # Focus's lanes ask for a deep band (MUSIC_BAND_MINIMUM). Shown
+            # again with that demand still on the band, the split above made
+            # the window's minimum taller than the window, and Qt grew it —
+            # past the screen (893 to 1029 px, measured natively). Back to the
+            # shallow band's least first; the relayout below fits the band to
+            # the room there is once the split has its place again.
+            view.music_body.setMinimumHeight(CLASSIC_MUSIC_MINIMUM)
+            # The shallow band shows its top: the track and Level rows. Kept
+            # from Focus, the scroll left them above the band's fold (natively,
+            # Focus to a collapsed list's band, same arrangement both ways).
+            view.music_body.verticalScrollBar().setValue(0)
         if self.splitter is not None:
             self.splitter.setVisible(not on)
         self._relayout()

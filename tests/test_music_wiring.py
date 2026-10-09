@@ -3142,3 +3142,38 @@ def test_a_saved_depth_is_fitted_to_the_room_when_music_opens(window, app):
     assert int(window.settings_store.value(MUSIC_DEPTH_KEY)) == 240
     view.music_band.setChecked(False)
     window.hide()
+
+
+@pytest.mark.parametrize("collapsed", [False, True], ids=["normal", "collapsed"])
+def test_leaving_focus_gives_the_window_back_at_its_own_size(window, app, collapsed):
+    """Nk's native check (9 October): Focus on then off grew a 1400x893
+    window to 1029 px on a 933 px screen. The split came back while the band
+    still asked for Focus's depth, so the window's minimum briefly exceeded
+    the window. In a window with no room to spare, leaving Focus must leave
+    the window exactly as it was, with the band back to its shallow least."""
+    from flightdvr.classic_layout import BrowserMode
+    from flightdvr.preview_panel import CLASSIC_MUSIC_MINIMUM
+    view = window.preview_view
+    focus(window, 0)
+    window.set_browser_mode(BrowserMode.COLLAPSED if collapsed else BrowserMode.NORMAL)
+    window.show()
+    view.music_band.setChecked(True)
+    _settle(app)
+    # No slack anywhere: the window at the least it needs with the band open.
+    window.resize(window.width(), window.minimumSizeHint().height())
+    _settle(app)
+    size = window.size()
+    window.set_music_focus(True)
+    _settle(app)
+    assert window.splitter.isHidden()
+    # Read down to the lanes in Focus, as someone editing there does.
+    scroll = view.music_body.verticalScrollBar()
+    scroll.setValue(scroll.maximum())
+    window.set_music_focus(False)
+    _settle(app)
+    assert not window.splitter.isHidden()
+    assert window.size() == size, "leaving Focus grew the window"
+    assert view.music_body.minimumHeight() == CLASSIC_MUSIC_MINIMUM
+    assert scroll.value() == 0, "the track and Level rows were left scrolled away"
+    view.music_band.setChecked(False)
+    window.hide()
