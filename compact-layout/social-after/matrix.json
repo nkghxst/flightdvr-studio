@@ -1,0 +1,302 @@
+[
+ {
+  "tag": "1160x880-collapsed-musicoff",
+  "window": [
+   1160,
+   880
+  ],
+  "window_min": 742,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 2,
+  "browser_h": 296,
+  "preview_h": 288,
+  "band_h": 16,
+  "band_body_h": 0,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 590,
+    "min": 452
+   },
+   {
+    "item": "QGroupBox",
+    "top": 638,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 762,
+    "h": 16,
+    "min": 16
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ],
+  "preview_floor": 278,
+  "preview_useful": 288,
+  "sidebar_hint": 232,
+  "list_viewport": 153,
+  "list_folded": false
+ },
+ {
+  "tag": "1160x880-collapsed-musicon",
+  "window": [
+   1160,
+   880
+  ],
+  "window_min": 650,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 2,
+  "browser_h": 158,
+  "preview_h": 162,
+  "band_h": 280,
+  "band_body_h": 254,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 326,
+    "min": 326
+   },
+   {
+    "item": "QGroupBox",
+    "top": 374,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 498,
+    "h": 280,
+    "min": 50
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ],
+  "preview_floor": 162,
+  "preview_useful": 202,
+  "sidebar_hint": 132,
+  "list_viewport": 153,
+  "list_folded": false
+ },
+ {
+  "tag": "1160x880-normal-musicoff",
+  "window": [
+   1160,
+   880
+  ],
+  "window_min": 728,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 3,
+  "browser_h": 302,
+  "preview_h": 282,
+  "band_h": 16,
+  "band_body_h": 0,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 590,
+    "min": 438
+   },
+   {
+    "item": "QGroupBox",
+    "top": 638,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 762,
+    "h": 16,
+    "min": 16
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ],
+  "preview_floor": 278,
+  "preview_useful": 288,
+  "sidebar_hint": 232,
+  "list_viewport": 156,
+  "list_folded": false
+ },
+ {
+  "tag": "1160x880-normal-musicon",
+  "window": [
+   1160,
+   880
+  ],
+  "window_min": 634,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 2,
+  "browser_h": 302,
+  "preview_h": 162,
+  "band_h": 136,
+  "band_body_h": 120,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 470,
+    "min": 318
+   },
+   {
+    "item": "QGroupBox",
+    "top": 518,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 642,
+    "h": 136,
+    "min": 42
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ],
+  "preview_floor": 162,
+  "preview_useful": 202,
+  "sidebar_hint": 132,
+  "list_viewport": 156,
+  "list_folded": false
+ },
+ {
+  "tag": "1160x880-expanded-musicoff",
+  "window": [
+   1160,
+   880
+  ],
+  "window_min": 608,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 6,
+  "browser_h": 422,
+  "preview_h": 162,
+  "band_h": 16,
+  "band_body_h": 0,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 590,
+    "min": 318
+   },
+   {
+    "item": "QGroupBox",
+    "top": 638,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 762,
+    "h": 16,
+    "min": 16
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ],
+  "preview_floor": 162,
+  "preview_useful": 202,
+  "sidebar_hint": 132,
+  "list_viewport": 276,
+  "list_folded": false
+ },
+ {
+  "tag": "1160x880-expanded-musicon",
+  "window": [
+   1160,
+   880
+  ],
+  "window_min": 634,
+  "screen_avail": [
+   1493,
+   933
+  ],
+  "central_h": 826,
+  "list_rows": 4,
+  "browser_h": 364,
+  "preview_h": 162,
+  "band_h": 74,
+  "band_body_h": 58,
+  "band_bottom": 810,
+  "items": [
+   {
+    "item": "QSplitter",
+    "top": 42,
+    "h": 532,
+    "min": 318
+   },
+   {
+    "item": "QGroupBox",
+    "top": 580,
+    "h": 118,
+    "min": 118
+   },
+   {
+    "item": "QGroupBox",
+    "top": 704,
+    "h": 74,
+    "min": 42
+   },
+   {
+    "item": "QueuePanel",
+    "top": 790,
+    "h": 26,
+    "min": 26
+   }
+  ],
+  "preview_floor": 162,
+  "preview_useful": 202,
+  "sidebar_hint": 132,
+  "list_viewport": 218,
+  "list_folded": false
+ }
+]
