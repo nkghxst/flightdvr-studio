@@ -1,0 +1,14 @@
+screen available 1493x933 dpr=1.5
+settings backend D:/Dev/test-output/flightdvr-screenshots-20261009/home/flightdvr-settings.ini
+scan complete=True clips=3
+music title='Music — for hdz_001.ts · Master'
+01-classic-collapsed-music-open.png: saved=True size=1400x893
+sound state='Hearing the finished mix on Speakers (Realtek(R) Audio); plays with the picture.'
+03-sound-on-state-line.png: saved=True size=1400x893
+04-audio-menu.png: saved=True size=164x54
+04-audio-menu.png entries=['Sound for the preview', 'Output device']
+05-audio-output-device-menu.png: saved=True size=309x54
+05-audio-output-device-menu.png entries=['System default (now: Speakers (Realtek(R) Audio))', 'Speakers (Realtek(R) Audio)']
+02-music-focus.png: saved=True size=1400x893
+after Focus off: window=1400x1029 screen_h=933
+06-DEFECT-after-focus-off-window-grew.png: saved=True size=1400x1029
