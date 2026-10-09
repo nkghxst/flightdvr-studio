@@ -3127,7 +3127,10 @@ def test_a_frame_with_only_the_picture_keeps_no_room_for_a_list(window, app):
         assert box.height() == frame.height(), (box.height(), frame.height())
     window.set_view_mode(Mode.CLASSIC)
     settled(app)
-    assert box._list_room == MIN_LIST_HEIGHT, "Classic lost its list room"
+    # Classic's room is the list's own rows plus three clips (9 October),
+    # never less than the old flat reserve.
+    assert box._list_room == window._classic_list_room(), "Classic lost its list room"
+    assert box._list_room >= MIN_LIST_HEIGHT
 
 
 def test_classic_gets_its_picture_controls_back_exactly(window, app):
