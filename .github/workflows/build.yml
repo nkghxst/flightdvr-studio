@@ -392,6 +392,7 @@ jobs:
         with:
           name: windows-installer
           path: dist/installer/*.exe
+          if-no-files-found: error
 
       # The same bundle the installer carries, so a candidate can be run in an
       # isolated profile (FLIGHTDVR_SETTINGS_FILE) without installing it.
@@ -399,7 +400,6 @@ jobs:
         with:
           name: windows-bundle
           path: dist/FlightDVRStudio/
-          if-no-files-found: error
           if-no-files-found: error
 
   linux-ffmpeg-source:
