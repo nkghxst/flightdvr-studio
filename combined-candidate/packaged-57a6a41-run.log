@@ -1,0 +1,6 @@
+--check exit 0
+window found: True title='FlightDVR Studio' still running: True
+grab saved=True window rect=1612x1366 image=1590x1310
+exit 0
+real registry unchanged: True; real ~/.flightdvr unchanged: True
+isolated INI now 29 lines; isolated home files: 1
