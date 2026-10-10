@@ -156,6 +156,10 @@ SIDEBAR_MINIMUM = 210
 LIST_ROOM_ROWS = 3
 EXPANDED_LIST_ROOM_ROWS = 6
 
+# After opening Music, when the band's momentary demand is checked against the
+# settled layout and any height it took is given back.
+MUSIC_GROWTH_CHECK_MS = 400
+
 # Beside a thumbnail, room for a recording's name: under this the Clip column
 # stops being a column. Measured natively at the compact size, where it
 # stretched to about 40px and the name never showed.
@@ -1207,9 +1211,31 @@ class MainWindow(QMainWindow):
             if open_:
                 was = self._size_before_band or self.size()
                 QTimer.singleShot(0, lambda: self._make_music_room(was))
+                QTimer.singleShot(
+                    MUSIC_GROWTH_CHECK_MS,
+                    lambda: self._give_back_band_growth(was))
             else:
                 self._restore_classic_picture()
         self._relayout()
+
+    def _give_back_band_growth(self, was) -> None:
+        """Height the band's arrival took for an instant, given back.
+
+        Measured natively (1490x880, list collapsed, a track chosen): every
+        deferred fit had run and the layout settled at a 650 px minimum, but
+        Qt's last pass still applied a stale 885 px one and the window grew
+        5 px, with nothing left to take it back. Only that: the band still
+        open, the window not maximised, its width untouched (so nobody resized
+        it), and the settled layout fitting the height it had.
+        """
+        if (self._view_mode is not Mode.CLASSIC
+                or not self.preview_view.music_band.isChecked()
+                or not self.isVisible() or self.isMaximized()
+                or self.isFullScreen() or self.width() != was.width()
+                or self.height() <= was.height()
+                or self.minimumSizeHint().height() > was.height()):
+            return
+        self.resize(self.width(), was.height())
 
     def _say_music_growth(self, was) -> None:
         """Never silently: if even the shallow band did not fit, say by how
@@ -1363,9 +1389,23 @@ class MainWindow(QMainWindow):
             return
         if clearance < 0 and box.height() > box.content_floor():
             fit = max(box.content_floor(), box.height() + clearance)
-        elif clearance > 0 and self._classic_fit is not None:
-            fit = box.height() + clearance
-            if fit >= box.useful_height(box.width()):
+        elif clearance >= 0 and self._classic_fit is not None:
+            # Given back as soon as the column can hold more. The list sits
+            # above the picture and stretches, so with everything fitting
+            # there is nothing under the picture: waiting for a positive
+            # clearance kept a cap from one overflow for good (macOS CI:
+            # Normal left at 280 px; Sol's R3, 9 October). The picture grows
+            # back only to its own uncapped height, which already leaves the
+            # list its reserve, and only by what is there to take — any
+            # clearance plus what the list holds above its minimum — so it
+            # cannot overflow and be capped again in turn.
+            spare = clearance + max(
+                0, self.browser_panel.height() - self.browser_panel.minimumHeight())
+            uncapped = max(box.content_floor(), min(
+                box.useful_height(box.width()),
+                max(1, column.height() - box._list_room)))
+            fit = min(uncapped, box.height() + spare)
+            if fit >= uncapped:
                 fit = None
         else:
             return

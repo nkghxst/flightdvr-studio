@@ -503,14 +503,49 @@ def test_the_view_menu_follows_the_mode_chosen_in_the_browser(window, qt_app):
 # at, the left column is already at its own minimum width.
 
 
-def test_no_cap_is_exactly_todays_sizing(window, qt_app):
+def _settled_cap_state(window) -> str:
+    box = window.preview_box
+    return (f"cap={box._height_cap} fit={window._classic_fit} "
+            f"room={box._list_room} box={box.height()} "
+            f"column={box.parentWidget().height()} "
+            f"list={window.browser_panel.height()} floor={box.content_floor()}")
+
+
+def test_no_cap_is_exactly_todays_sizing(own_window, qt_app):
     """Normal sets no cap: the picture is what its width earns, short only
     of the list's own room (its rows and three clips) and never under its
-    floor."""
+    floor. In a window of its own with room to spare, measured once the
+    deferred layout has finished (one pump was not enough on macOS CI,
+    where a safety cap from a transient overflow was still set; Sol R3)."""
+    window = own_window
     window.set_browser_mode(BrowserMode.NORMAL)
-    qt_app.processEvents()
+    _wait(qt_app)
     box = window.preview_box
-    assert box._height_cap is None
+    assert box._height_cap is None, _settled_cap_state(window)
+    expected = min(box.useful_height(box.width()),
+                   box.parentWidget().height() - box._list_room)
+    assert box.height() == max(expected, box.content_floor()), _settled_cap_state(window)
+
+
+def test_a_safety_cap_is_given_back_once_the_column_has_room(own_window, qt_app):
+    """A cap taken in a transient overflow comes off when the room returns,
+    not only on the next mode change. With everything fitting, the picture
+    has no clearance under it (the list above it stretches), so a release
+    that waited for a positive clearance never came (Sol R3, 9 October)."""
+    window = own_window
+    window.set_browser_mode(BrowserMode.NORMAL)
+    _wait(qt_app)
+    box = window.preview_box
+    assert box._height_cap is None, _settled_cap_state(window)
+    # What an overflow leaves behind: the picture held at its floor.
+    window._classic_fit = box.content_floor()
+    box.set_height_cap(window._classic_height_cap())
+    _wait(qt_app, 0.3)
+    assert box._height_cap is not None
+    window._relayout()
+    _wait(qt_app)
+    assert window._classic_fit is None and box._height_cap is None, (
+        _settled_cap_state(window))
     expected = min(box.useful_height(box.width()),
                    box.parentWidget().height() - box._list_room)
     assert box.height() == max(expected, box.content_floor())
@@ -909,6 +944,10 @@ def test_switching_modes_repeatedly_lands_on_the_same_rows(qt_app):
         for _round in range(3):
             for mode in (BrowserMode.EXPANDED, BrowserMode.NORMAL):
                 window.set_browser_mode(mode)
+                # Measured once the deferred layout (40 and 60 ms retries)
+                # has finished: four bare pumps sometimes sampled before it,
+                # 43 against 41 px in long combined runs (9-10 October).
+                _wait(qt_app, 0.5)
                 for _ in range(4):
                     qt_app.processEvents()
                     window._sync_thumbnail_size()
@@ -2102,3 +2141,31 @@ def test_a_trim_that_changes_nothing_leaves_sound_alone_and_a_change_pauses(
     finally:
         window.close()
         assert_no_threads_left(window)
+
+
+def test_height_the_band_took_for_an_instant_is_given_back(own_window, qt_app):
+    """Natively at 1490x880 with the list collapsed, Qt's last layout pass
+    applied a stale minimum as Music opened and the window grew 5 px with
+    everything settled at a 650 px minimum (Sol R3 follow-up, 10 October)."""
+    window = own_window
+    view = window.preview_view
+    window.set_browser_mode(BrowserMode.COLLAPSED)
+    view.music_band.setChecked(True)
+    _wait(qt_app)
+    try:
+        was = window.size()
+        assert window.minimumSizeHint().height() < was.height()
+        window.resize(was.width(), was.height() + 5)       # the momentary growth
+        _wait(qt_app, 0.3)
+        window._give_back_band_growth(was)
+        _wait(qt_app, 0.3)
+        assert window.size() == was
+        # Not when the person has resized the window since.
+        window.resize(was.width() + 40, was.height() + 5)
+        _wait(qt_app, 0.3)
+        window._give_back_band_growth(was)
+        _wait(qt_app, 0.3)
+        assert window.height() == was.height() + 5
+    finally:
+        view.music_band.setChecked(False)
+        window.set_browser_mode(BrowserMode.NORMAL)
