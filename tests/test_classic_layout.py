@@ -2146,7 +2146,9 @@ def test_a_trim_that_changes_nothing_leaves_sound_alone_and_a_change_pauses(
 def test_height_the_band_took_for_an_instant_is_given_back(own_window, qt_app):
     """Natively at 1490x880 with the list collapsed, Qt's last layout pass
     applied a stale minimum as Music opened and the window grew 5 px with
-    everything settled at a 650 px minimum (Sol R3 follow-up, 10 October)."""
+    everything settled at a 650 px minimum (Sol R3 follow-up, 10 October).
+    The layout's growth lands exactly on the minimum it applied; that, and
+    only that, is given back."""
     window = own_window
     view = window.preview_view
     window.set_browser_mode(BrowserMode.COLLAPSED)
@@ -2154,18 +2156,39 @@ def test_height_the_band_took_for_an_instant_is_given_back(own_window, qt_app):
     _wait(qt_app)
     try:
         was = window.size()
+        least = window.minimumHeight()
         assert window.minimumSizeHint().height() < was.height()
-        window.resize(was.width(), was.height() + 5)       # the momentary growth
+        window._band_growth = {"grown": None, "moved": False}
+        # Growth the way the layout makes it: to the minimum it applies.
+        window.setMinimumHeight(was.height() + 5)
         _wait(qt_app, 0.3)
+        assert window.height() == was.height() + 5
+        window.setMinimumHeight(least)
         window._give_back_band_growth(was)
         _wait(qt_app, 0.3)
         assert window.size() == was
-        # Not when the person has resized the window since.
-        window.resize(was.width() + 40, was.height() + 5)
-        _wait(qt_app, 0.3)
-        window._give_back_band_growth(was)
-        _wait(qt_app, 0.3)
-        assert window.height() == was.height() + 5
+    finally:
+        view.music_band.setChecked(False)
+        window.set_browser_mode(BrowserMode.NORMAL)
+
+
+@pytest.mark.parametrize("wider", [False, True], ids=["height-only", "width-and-height"])
+def test_a_resize_made_while_music_opens_is_left_alone(own_window, qt_app, wider):
+    """Sol R4 (10 October): a height-only resize made before the growth check
+    ran (1490x880 to 1490x980) was put back to 880. Someone resizing the
+    window is never undone, height-only or not."""
+    window = own_window
+    view = window.preview_view
+    window.set_browser_mode(BrowserMode.COLLAPSED)
+    _wait(qt_app)
+    try:
+        was = window.size()
+        view.music_band.setChecked(True)
+        qt_app.processEvents()
+        wanted = (was.width() + (40 if wider else 0), was.height() + 100)
+        window.resize(*wanted)                      # before the pending check
+        _wait(qt_app, 0.9)                          # past MUSIC_GROWTH_CHECK_MS
+        assert (window.width(), window.height()) == wanted
     finally:
         view.music_band.setChecked(False)
         window.set_browser_mode(BrowserMode.NORMAL)

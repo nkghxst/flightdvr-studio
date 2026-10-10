@@ -512,6 +512,9 @@ class MainWindow(QMainWindow):
         self.flow_source_note = None
         self._music_band_was_open: bool | None = None
         self._size_before_band = None
+        # While Music has just opened: whether the window grew by its
+        # layout alone, or anything else resized it (_give_back_band_growth).
+        self._band_growth: dict | None = None
         self._classic_list_place: tuple[int, int] | None = None
         self._list_before_band = 0
         self._holding = False
@@ -1211,6 +1214,7 @@ class MainWindow(QMainWindow):
             if open_:
                 was = self._size_before_band or self.size()
                 QTimer.singleShot(0, lambda: self._make_music_room(was))
+                self._band_growth = {"grown": None, "moved": False}
                 QTimer.singleShot(
                     MUSIC_GROWTH_CHECK_MS,
                     lambda: self._give_back_band_growth(was))
@@ -1225,10 +1229,18 @@ class MainWindow(QMainWindow):
         deferred fit had run and the layout settled at a 650 px minimum, but
         Qt's last pass still applied a stale 885 px one and the window grew
         5 px, with nothing left to take it back. Only that: the band still
-        open, the window not maximised, its width untouched (so nobody resized
-        it), and the settled layout fitting the height it had.
+        open, the window not maximised, its width untouched, and the settled
+        layout fitting the height it had.
+
+        And only growth the layout made: Qt grows a window to exactly the
+        minimum it has applied, so a height-only increase landing on that
+        minimum is the layout's; any other resize in the meantime is someone
+        resizing the window, and is left alone (Sol R4: a height-only resize
+        to 980 px before the check was put back to 880).
         """
-        if (self._view_mode is not Mode.CLASSIC
+        track, self._band_growth = self._band_growth, None
+        if (track is None or track["moved"] or track["grown"] != self.height()
+                or self._view_mode is not Mode.CLASSIC
                 or not self.preview_view.music_band.isChecked()
                 or not self.isVisible() or self.isMaximized()
                 or self.isFullScreen() or self.width() != was.width()
@@ -5648,6 +5660,14 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         super().resizeEvent(event)
+        track = self._band_growth
+        if track is not None:
+            new, old = event.size(), event.oldSize()
+            if (new.width() == old.width() and new.height() > old.height()
+                    and new.height() == self.minimumHeight()):
+                track["grown"] = new.height()       # the layout's growth
+            else:
+                track["moved"] = True               # someone resized it
         self._relayout()
 
     def event(self, event) -> bool:  # noqa: D102
