@@ -384,7 +384,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.tools = tools
         self._closing = False
-        self.settings_store = QSettings(ORG, APP_NAME)
+        self.settings_store = _settings_store()
         self.clips: list[ClipInfo] = []
         self._layout_state = ClassicLayout.default()
         self.clip_by_path: dict[str, ClipInfo] = {}
@@ -8869,6 +8869,20 @@ def _describe_environment() -> tuple[str, int]:
         code = code or 3
 
     return "\n".join(lines), code
+
+
+def _settings_store() -> QSettings:
+    """The person's settings, or a file named by FLIGHTDVR_SETTINGS_FILE.
+
+    The override is for checking a packaged build without touching the
+    settings of the copy someone actually uses: on Windows `QSettings(ORG,
+    APP_NAME)` is the registry, and a packaged candidate had no other place
+    to put them (9-10 October). Unset, nothing changes.
+    """
+    path = os.environ.get("FLIGHTDVR_SETTINGS_FILE", "").strip()
+    if path:
+        return QSettings(path, QSettings.Format.IniFormat)
+    return QSettings(ORG, APP_NAME)
 
 
 def launch(argv: list[str] | None = None) -> int:

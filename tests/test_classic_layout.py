@@ -2192,3 +2192,20 @@ def test_a_resize_made_while_music_opens_is_left_alone(own_window, qt_app, wider
     finally:
         view.music_band.setChecked(False)
         window.set_browser_mode(BrowserMode.NORMAL)
+
+
+def test_a_settings_file_override_keeps_a_check_off_the_real_settings(
+        qt_app, tmp_path, monkeypatch):
+    """FLIGHTDVR_SETTINGS_FILE puts the settings in that INI file, so a
+    packaged candidate can be checked without the registry (10 October)."""
+    from PySide6.QtCore import QSettings
+    import flightdvr.ui as ui
+    path = tmp_path / "candidate-settings.ini"
+    monkeypatch.setattr(ui, "QSettings", QSettings)    # the real class
+    monkeypatch.setenv("FLIGHTDVR_SETTINGS_FILE", str(path))
+    store = ui._settings_store()
+    assert store.format() == QSettings.Format.IniFormat
+    assert Path(store.fileName()) == path
+    store.setValue("probe", 1)
+    store.sync()
+    assert path.is_file()
