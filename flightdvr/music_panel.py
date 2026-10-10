@@ -65,7 +65,13 @@ from .audio_plan import (
     configured_audio_export_supported,
 )
 from .presets import PRESET_ORDER, PRESETS
-from .widgets import INNER, TIGHT, dim
+from .widgets import INNER, TIGHT, ElidedLabel, dim
+
+# The numbers are the exact alternative to the lanes, not the main way in:
+# at their natural widths rather than stretched across the whole band, which
+# in Nk's tested candidate made each value a full-window field (9 October).
+NUMBER_WIDTH = 140
+LEVEL_SLIDER_WIDTH = 360
 
 
 # The words are the approved design's, kept rather than trimmed to icons: what
@@ -145,8 +151,11 @@ def _level_row(slider: QSlider, box: QSpinBox) -> QWidget:
     layout = QHBoxLayout(row)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(TIGHT)
+    slider.setMaximumWidth(LEVEL_SLIDER_WIDTH)
+    box.setMaximumWidth(NUMBER_WIDTH)
     layout.addWidget(slider, 1)
     layout.addWidget(box)
+    layout.addStretch(1)
     return row
 
 
@@ -298,6 +307,7 @@ class MusicPanel(QWidget):
         self.passage_start.setDecimals(2)
         self.passage_start.setMaximum(0.0)
         self.passage_start.valueChanged.connect(self._on_passage_changed)
+        self.passage_start.setMaximumWidth(NUMBER_WIDTH)
         form.addRow("Starts at:", self.passage_start)
 
         self.passage_end = QDoubleSpinBox()
@@ -305,6 +315,7 @@ class MusicPanel(QWidget):
         self.passage_end.setDecimals(2)
         self.passage_end.setMaximum(0.0)
         self.passage_end.valueChanged.connect(self._on_passage_changed)
+        self.passage_end.setMaximumWidth(NUMBER_WIDTH)
         form.addRow("Ends at:", self.passage_end)
 
         self.short_track_combo = QComboBox()
@@ -315,10 +326,9 @@ class MusicPanel(QWidget):
                                                  self.short_track_combo)
         form.addRow(self.short_track_row)
 
-        self.passage_note = dim(QLabel(
+        self.passage_note = dim(ElidedLabel(
             "The passage needs the track's own sample clock, so it can only be "
             "set once the track has been read."))
-        self.passage_note.setWordWrap(True)
         form.addRow(self.passage_note)
         return box
 
@@ -347,6 +357,7 @@ class MusicPanel(QWidget):
         self.fade_in.setDecimals(2)
         self.fade_in.setMaximum(3600.0)
         self.fade_in.valueChanged.connect(self._on_fade_changed)
+        self.fade_in.setMaximumWidth(NUMBER_WIDTH)
         fades.addWidget(QLabel("Fade in:"))
         fades.addWidget(self.fade_in)
 
@@ -355,16 +366,16 @@ class MusicPanel(QWidget):
         self.fade_out.setDecimals(2)
         self.fade_out.setMaximum(3600.0)
         self.fade_out.valueChanged.connect(self._on_fade_changed)
+        self.fade_out.setMaximumWidth(NUMBER_WIDTH)
         fades.addWidget(QLabel("Fade out:"))
         fades.addWidget(self.fade_out)
         fades.addStretch(1)
         form.addRow(fades)
 
-        self.fade_note = dim(QLabel(
+        self.fade_note = dim(ElidedLabel(
             "These are what you are asking for. A pair longer than the finished "
             "output is shortened when the export is built; the request is kept "
             "as you set it."))
-        self.fade_note.setWordWrap(True)
         form.addRow(self.fade_note)
         return box
 
