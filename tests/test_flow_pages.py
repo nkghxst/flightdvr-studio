@@ -3127,7 +3127,10 @@ def test_a_frame_with_only_the_picture_keeps_no_room_for_a_list(window, app):
         assert box.height() == frame.height(), (box.height(), frame.height())
     window.set_view_mode(Mode.CLASSIC)
     settled(app)
-    assert box._list_room == MIN_LIST_HEIGHT, "Classic lost its list room"
+    # Classic's room is the list's own rows plus three clips (9 October),
+    # never less than the old flat reserve.
+    assert box._list_room == window._classic_list_room(), "Classic lost its list room"
+    assert box._list_room >= MIN_LIST_HEIGHT
 
 
 def test_classic_gets_its_picture_controls_back_exactly(window, app):
@@ -3310,10 +3313,13 @@ def test_a_short_music_page_folds_and_more_unfolds_without_choosing(window, app)
     from flightdvr.music_timeline import Presentation
     first, _second = planned_pair(window, app)
     window.show()
-    window.resize(1402, 660)  # P1: one-line captions freed ~60px at 700
-    settled(app)
     window._select_working_target(first)
     window._show_stage(Stage.MUSIC)
+    settled(app)
+    # The shortest this window can be, wherever it runs. A fixed 660 px
+    # stopped making the page short once the band's notes went to one line
+    # (macOS and Ubuntu CI: needed 226 of 230 and 238 of 255; Sol, 9 October).
+    window.resize(1402, window.minimumSizeHint().height())
     settled(app)
     window._fit_music_presentation()
     timeline = window.preview_view.music_timeline

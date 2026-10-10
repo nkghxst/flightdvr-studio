@@ -3071,11 +3071,15 @@ def test_the_band_can_be_made_taller_without_growing_the_window(window, app):
         app.processEvents()
     size = window.size()
     start = view.music_body.height()
+    least = view.music_body.minimumHeight()
     window.set_music_depth(start + 60)
     for _ in range(10):
         app.processEvents()
     assert window._music_depth >= start
     assert window.size() == size, "the window grew for the band"
+    # A ceiling the band may grow to, never a new minimum: as a minimum it
+    # grew the window on macOS CI (791 to 801 px; Sol, 9 October).
+    assert view.music_body.minimumHeight() == least
     assert not window.splitter.isHidden(), "the picture and export went away"
     from flightdvr.ui import MUSIC_DEPTH_KEY
     assert int(window.settings_store.value(MUSIC_DEPTH_KEY)) == window._music_depth
@@ -3095,10 +3099,11 @@ def test_the_band_can_be_made_taller_without_growing_the_window(window, app):
     window.hide()
 
 
-def test_a_collapsed_list_with_music_closed_gives_its_room_to_the_filmstrip(
-        window, app):
+def test_the_filmstrip_never_takes_a_collapsed_list_s_room(window, app):
+    """Nk's tested candidate (9 October): stretched into a collapsed list's
+    room, the filmstrip drew its stills at a cap inside a much taller box —
+    freed space swallowed. It keeps its own height in every arrangement."""
     from flightdvr.classic_layout import BrowserMode
-    from flightdvr.ui import FILMSTRIP_TALL
     view = window.preview_view
     layout = window._outer_layout
 
@@ -3106,18 +3111,15 @@ def test_a_collapsed_list_with_music_closed_gives_its_room_to_the_filmstrip(
         return layout.stretch(layout.indexOf(view.trim_band))
 
     focus(window, 0)
-    window.set_browser_mode(BrowserMode.COLLAPSED)
-    _settle(app)
-    assert strip_stretch() == 1
-    assert view.trim_bar.maximumHeight() == FILMSTRIP_TALL
-    view.music_band.setChecked(True)          # then the room is Music's
-    _settle(app)
-    assert strip_stretch() == 0
+    for mode in (BrowserMode.COLLAPSED, BrowserMode.NORMAL, BrowserMode.EXPANDED):
+        window.set_browser_mode(mode)
+        for music in (False, True):
+            view.music_band.setChecked(music)
+            _settle(app)
+            assert strip_stretch() == 0, (mode, music)
+            assert view.trim_bar.maximumHeight() == 16777215, (mode, music)
     view.music_band.setChecked(False)
     window.set_browser_mode(BrowserMode.NORMAL)
-    _settle(app)
-    assert strip_stretch() == 0
-    assert view.trim_bar.maximumHeight() > FILMSTRIP_TALL
 
 
 def test_a_saved_depth_is_fitted_to_the_room_when_music_opens(window, app):
@@ -3138,6 +3140,9 @@ def test_a_saved_depth_is_fitted_to_the_room_when_music_opens(window, app):
         app.processEvents()
     assert window.size() == size, "a remembered depth grew the window"
     assert view.music_body.height() <= 240
+    # Never the band's minimum (Ubuntu CI grew 770 to 832 px when it was).
+    assert view.music_body.minimumHeight() <= max(
+        24, view.track_button.sizeHint().height())
     assert window._music_depth == 240, "the preference was overwritten"
     assert int(window.settings_store.value(MUSIC_DEPTH_KEY)) == 240
     view.music_band.setChecked(False)
