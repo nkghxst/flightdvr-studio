@@ -5918,11 +5918,13 @@ class MainWindow(QMainWindow):
         range_count = len(clip.real_selects)
         flight_count = self._flight_count(clip)
         review_item = SortItem(
-            review_state_text(clip.review, range_count, flight_count),
+            review_state_text(clip.review, range_count, flight_count,
+                              star_count=len(clip.stars)),
             REVIEW_STATES.index(clip.review),
         )
         review_item.setToolTip(
-            review_state_tooltip(clip.review, range_count, flight_count))
+            review_state_tooltip(clip.review, range_count, flight_count,
+                                 star_count=len(clip.stars)))
         items = (
             name_item,
             SortItem(clip.duration_label, clip.duration),
@@ -6060,10 +6062,12 @@ class MainWindow(QMainWindow):
             range_count = len(clip.real_selects)
             flight_count = self._flight_count(clip)
             item.setText(review_state_text(
-                clip.review, range_count, flight_count))
+                clip.review, range_count, flight_count,
+                star_count=len(clip.stars)))
             item.setData(SortItem.SORT_ROLE, REVIEW_STATES.index(clip.review))
             item.setToolTip(review_state_tooltip(
-                clip.review, range_count, flight_count))
+                clip.review, range_count, flight_count,
+                star_count=len(clip.stars)))
             self.table.blockSignals(previous)
             break
 
@@ -6342,6 +6346,7 @@ class MainWindow(QMainWindow):
             self.preview_box.updateGeometry()
         self._refresh_vertical_overlay()
         self.trim_bar.set_clip(clip.duration, clip.trim_in, clip.out_point)
+        self.trim_bar.set_stars(clip.stars)
         self._show_selects()
         self.trim_bar.set_strip(Filmstrip())
         self.preview_view.range_lanes.set_strip(None)
@@ -7047,9 +7052,11 @@ class MainWindow(QMainWindow):
             flight_count = self._flight_count(clip)
             previous = self.table.blockSignals(True)
             item.setText(review_state_text(
-                clip.review, range_count, flight_count))
+                clip.review, range_count, flight_count,
+                star_count=len(clip.stars)))
             item.setToolTip(review_state_tooltip(
-                clip.review, range_count, flight_count))
+                clip.review, range_count, flight_count,
+                star_count=len(clip.stars)))
             self.table.blockSignals(previous)
             break
 
@@ -7334,13 +7341,15 @@ class MainWindow(QMainWindow):
             range_count = len(clip.real_selects)
             flight_count = self._flight_count(clip)
             state_text = review_state_text(
-                clip.review, range_count, flight_count)
+                clip.review, range_count, flight_count,
+                star_count=len(clip.stars))
             if state_item is not None and state_item.text() != state_text:
                 previous = self.table.blockSignals(True)
                 state_item.setText(state_text)
                 state_item.setToolTip(
                     review_state_tooltip(
-                        clip.review, range_count, flight_count))
+                        clip.review, range_count, flight_count,
+                        star_count=len(clip.stars)))
                 self.table.blockSignals(previous)
             break
 

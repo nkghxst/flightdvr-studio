@@ -25,6 +25,7 @@ seconds, so scrubbing afterwards is instant.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -33,8 +34,8 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRect, QSize, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QPainter, QPalette, QPixmap
+from PySide6.QtCore import QObject, QPointF, QRect, QSize, Qt, QThread, Signal
+from PySide6.QtGui import QColor, QPainter, QPalette, QPixmap, QPolygonF
 from PySide6.QtWidgets import QWidget
 
 from .media import (
@@ -44,6 +45,12 @@ from .media import (
 FRAME_WIDTH = 160
 PTS = re.compile(r"pts_time:([0-9.]+)")
 BELOW_NORMAL_PRIORITY = 0x00004000 if os.name == "nt" else 0
+
+# Gold rather than a palette role: the marks sit on top of video, whose
+# colours the theme knows nothing about, and the outline keeps them readable
+# over sky and over grass alike.
+STAR_FILL = QColor(255, 196, 0)
+STAR_EDGE = QColor(40, 30, 0)
 
 
 def cache_root() -> Path:
@@ -379,6 +386,14 @@ class TrimBar(QWidget):
         self.ranges: list[tuple[float, float]] = []
         self.selected = 0
 
+        # Moments the pilot starred in the goggles. Drawn over everything but
+        # the handles and the playhead; they mark the source, not a decision.
+        self.stars: list[float] = []
+
+    def set_stars(self, seconds) -> None:
+        self.stars = sorted(float(one) for one in seconds or [])
+        self.update()
+
     def set_clip(self, duration: float, in_point: float, out_point: float,
                  ranges=None, selected: int = 0) -> None:
         self.duration = max(0.0, duration)
@@ -505,6 +520,8 @@ class TrimBar(QWidget):
                 x = self._x_for(seconds)
                 painter.drawRect(QRect(x - 1, 0, 2, rect.height()))
 
+        self._paint_stars(painter, rect)
+
         left = self._x_for(self.in_point)
         right = self._x_for(self.out_point)
         painter.setPen(accent)
@@ -516,6 +533,38 @@ class TrimBar(QWidget):
         painter.setPen(text)
         painter.drawLine(head, 0, head, rect.height())
         painter.end()
+
+    def _paint_stars(self, painter: QPainter, rect: QRect) -> None:
+        """A line through the strip and a star on top, for each starred moment."""
+        if self.duration <= 0 or not self.stars:
+            return
+        line = QColor(STAR_FILL)
+        line.setAlpha(170)
+        radius = max(4.0, min(7.0, rect.height() / 8))
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for seconds in self.stars:
+            if seconds > self.duration:
+                continue
+            x = self._x_for(seconds)
+            painter.fillRect(QRect(x - 1, 0, 2, rect.height()), line)
+            painter.setPen(STAR_EDGE)
+            painter.setBrush(STAR_FILL)
+            painter.drawPolygon(_star_shape(x, radius + 1, radius))
+        painter.restore()
+
+    def _star_near(self, x: int) -> float | None:
+        """The starred moment under this pixel, if the pointer is on one."""
+        if self.duration <= 0:
+            return None
+        best = None
+        for seconds in self.stars:
+            if seconds > self.duration:
+                continue
+            gap = abs(x - self._x_for(seconds))
+            if gap <= self.HANDLE and (best is None or gap < best[0]):
+                best = (gap, seconds)
+        return best[1] if best else None
 
     # -- interaction ----------------------------------------------------------
 
@@ -531,6 +580,15 @@ class TrimBar(QWidget):
         elif self._near(x, self.out_point):
             self._dragging = "out"
         else:
+            # A starred moment is a small target, so a click on its mark lands
+            # on it exactly rather than wherever the pointer happened to be.
+            star = self._star_near(x)
+            if star is not None:
+                self._dragging = "head"
+                self.playhead = star
+                self.playhead_moved.emit(self.playhead)
+                self.update()
+                return
             # Clicking inside another range picks it up, which is the only way
             # to reach a select with the mouse. The handles are checked first,
             # so overlapping ranges never steal a drag that had already begun.
@@ -561,6 +619,9 @@ class TrimBar(QWidget):
         near = self._near(x, self.in_point) or self._near(x, self.out_point)
         self.setCursor(Qt.CursorShape.SplitHCursor if near
                        else Qt.CursorShape.PointingHandCursor)
+        star = None if near else self._star_near(x)
+        self.setToolTip("" if star is None else
+                        f"Starred in the goggles at {_clock(star)}")
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         self._dragging = None
@@ -579,3 +640,20 @@ class TrimBar(QWidget):
             self.playhead = seconds
         self.playhead_moved.emit(self.playhead)
         self.update()
+
+
+def _clock(seconds: float) -> str:
+    """M:SS, the way the goggles write a star's time."""
+    minutes, secs = divmod(int(round(seconds)), 60)
+    return f"{minutes}:{secs:02d}"
+
+
+def _star_shape(x: float, y: float, radius: float) -> QPolygonF:
+    """A five-pointed star centred on (x, y), point up."""
+    points = []
+    for step in range(10):
+        reach = radius if step % 2 == 0 else radius * 0.45
+        angle = -math.pi / 2 + step * math.pi / 5
+        points.append(QPointF(x + reach * math.cos(angle),
+                              y + reach * math.sin(angle)))
+    return QPolygonF(points)

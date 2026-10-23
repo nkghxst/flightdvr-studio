@@ -52,10 +52,20 @@ def _count_label(count: int, singular: str, plural: str | None = None) -> str:
     return f"{count} {singular if count == 1 else plural or singular + 's'}"
 
 
+# The same glyph the filmstrip draws, so a starred row and its starred
+# moments read as one thing.
+STAR_GLYPH = "★"
+
+
 def review_state_text(state: str, range_count: int,
-                      flight_count: int | None = None) -> str:
+                      flight_count: int | None = None,
+                      star_count: int = 0) -> str:
     """The compact State-column summary for a clip."""
+    # On the state letter's own line: rows are sized to the thumbnail, and a
+    # starred clip with ranges and a motion estimate must not need a fourth.
     lines = [REVIEW_KEYS[state]]
+    if star_count:
+        lines[0] += f"  {STAR_GLYPH} {star_count}"
     if range_count:
         lines.append(_count_label(range_count, "range"))
     if flight_count is not None:
@@ -65,9 +75,13 @@ def review_state_text(state: str, range_count: int,
 
 
 def review_state_tooltip(state: str, range_count: int,
-                         flight_count: int | None = None) -> str:
+                         flight_count: int | None = None,
+                         star_count: int = 0) -> str:
     """Spell out the compact marker without making the column wider."""
     details = [REVIEW_LABELS[state]]
+    if star_count:
+        details.append(f"{_count_label(star_count, 'starred moment')} "
+                       "from the goggles")
     if range_count:
         details.append(f"{_count_label(range_count, 'saved range')}")
     if flight_count is not None:
