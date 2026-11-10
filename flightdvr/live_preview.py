@@ -36,6 +36,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from enum import Enum
+from time import monotonic
 
 from .audio_device import FRAME_BYTES, AudioOutput, DeviceUnavailable
 from .audio_plan import OUTPUT_CHANNELS, OUTPUT_RATE
@@ -45,11 +46,18 @@ from .audio_stream import Buffering, PcmBlock, StreamFailed
 # before monitoring stops. A fifth of a second is past the point where a person
 # stops hearing "the music" and starts hearing "the music is late".
 DRIFT_LIMIT_SAMPLES = OUTPUT_RATE // 5
+# A first block this old belongs to the picture's past, even if a backend
+# counter advanced while no PCM was available. Keep this below the drift
+# refusal bound: catch-up is a new, fenced start, not tolerance for late sound.
+STARTUP_CATCHUP_SAMPLES = OUTPUT_RATE // 20
 
 # Consecutive starved ticks tolerated before giving up. One is ordinary — a
 # block arrived late. A run of them means we are not keeping up, and carrying
 # on would be a stutter nobody asked to listen to.
 STARVED_LIMIT = 8
+# A cold real DVR read has taken 1.5 seconds here. Startup gets a separate
+# wall-clock budget; a sink that never takes PCM must still give a named stop.
+STARTUP_TIMEOUT_SECONDS = 3.0
 
 
 def _unaccepted(block: PcmBlock, taken: int) -> PcmBlock | None:
@@ -112,6 +120,8 @@ class _OutputEpoch:
     processed_anchor: int | None = None
     latest_processed: int | None = None
     accepted: bool = False
+    catchup_attempted: bool = False
+    startup_deadline: float | None = None
 
 
 class LivePreview:
@@ -276,6 +286,9 @@ class LivePreview:
             # the existing explicit device-reporting refusal before draining.
             self._capture_epoch_baseline()
         self._playing = True
+        epoch = self._current_epoch()
+        if epoch is not None and epoch.startup_deadline is None:
+            epoch.startup_deadline = monotonic() + STARTUP_TIMEOUT_SECONDS
         self._starved = 0
         self._stream.resume()
         if self._output is not None:
@@ -379,7 +392,14 @@ class LivePreview:
             return 0
         if self._record_epoch_progress(before) is None:
             return 0
-        sent = self._drain()
+        epoch = self._current_epoch()
+        if (epoch is not None and not epoch.accepted
+                and epoch.startup_deadline is not None
+                and monotonic() >= epoch.startup_deadline):
+            self._stop_with(
+                "monitoring stopped: sound did not start within 3 seconds")
+            return 0
+        sent = self._drain(int(output_sample))
         if not self._playing:
             # A producer failure inside `_drain` has already named the reason
             # and fenced this epoch. Do not replace it with a timing symptom.
@@ -392,7 +412,7 @@ class LivePreview:
             self._judge_starvation(report)
         return sent
 
-    def _drain(self) -> int:
+    def _drain(self, output_sample: int) -> int:
         """Offer what belongs here, and keep what the adapter could not take.
 
         `pull` removes the block from the producer and `present` may take a
@@ -423,12 +443,36 @@ class LivePreview:
                     return sent
                 if block is None:
                     break
+            epoch = self._current_epoch()
+            if (epoch is not None and not epoch.accepted
+                    and output_sample - block.output_start
+                    > STARTUP_CATCHUP_SAMPLES):
+                # The producer's first PCM may arrive after the picture has
+                # moved on. Never hand that stale block to the sink: a backend
+                # may count idle time as processed and make it appear in sync.
+                # A single forward reprime fences both queues. If even that
+                # misses the picture, report failure rather than chasing it.
+                if epoch.catchup_attempted:
+                    self._stop_with(
+                        "monitoring stopped: sound could not catch up to the picture")
+                    return sent
+                try:
+                    self._generation = self._stream.reprime(output_sample)
+                except (RuntimeError, ValueError) as exc:
+                    self._stop_with(f"monitoring stopped: sound could not catch up: {exc}")
+                    return sent
+                self._held = None
+                self._output.reset(self._generation)
+                self._begin_epoch(output_anchor=output_sample,
+                                  catchup_attempted=True,
+                                  startup_deadline=epoch.startup_deadline)
+                self._capture_epoch_baseline()
+                return sent
             taken = self._output.present(block)
             sent += taken
             if taken > 0:
                 epoch = self._current_epoch()
                 if epoch is not None:
-                    epoch.accepted = True
                     if epoch.output_anchor is None:
                         # `present` accepted this current-generation material.
                         # Its immutable start is the first real output
@@ -436,7 +480,7 @@ class LivePreview:
                         # seek supplied one.
                         epoch.output_anchor = block.output_start
             self._held = _unaccepted(block, taken)
-            self._output.pump()
+            self._pump_epoch()
             if self._held is not None:
                 # The bound has been reached. Pulling another block now would
                 # be asking the producer for sound there is nowhere to put.
@@ -445,8 +489,16 @@ class LivePreview:
         # fresh acceptance left a stalled final tail with no service path at
         # all: the producer had ended, so nothing was ever accepted again and
         # the last of the music never reached the device.
-        self._output.pump()
+        self._pump_epoch()
         return sent
+
+    def _pump_epoch(self) -> None:
+        """Arm clock comparison only after the sink takes actual PCM bytes."""
+        written = self._output.pump()
+        if written > 0:
+            epoch = self._current_epoch()
+            if epoch is not None:
+                epoch.accepted = True
 
     def _current_epoch(self) -> _OutputEpoch | None:
         epoch = self._epoch
@@ -460,13 +512,19 @@ class LivePreview:
         self._fence += 1
         self._epoch = None
 
-    def _begin_epoch(self, *, output_anchor: int | None = None) -> None:
+    def _begin_epoch(self, *, output_anchor: int | None = None,
+                     catchup_attempted: bool = False,
+                     startup_deadline: float | None = None) -> None:
         """Name a fresh sink epoch; its backend baseline is still pending."""
+        if startup_deadline is None and self._playing:
+            startup_deadline = monotonic() + STARTUP_TIMEOUT_SECONDS
         self._fence += 1
         self._epoch = _OutputEpoch(
             generation=self._generation,
             fence=self._fence,
             output_anchor=output_anchor,
+            catchup_attempted=catchup_attempted,
+            startup_deadline=startup_deadline,
         )
 
     def _capture_epoch_baseline(self, report=None) -> bool:
@@ -542,6 +600,14 @@ class LivePreview:
                 "picture to be worth hearing")
 
     def _judge_starvation(self, report) -> None:
+        epoch = self._current_epoch()
+        if epoch is None or not epoch.accepted:
+            # A newly opened sink cannot underrun material it has never
+            # received. Slow first FFmpeg reads are startup buffering, not
+            # a run of device starvation. The ordinary limit begins once
+            # the sink has actually taken PCM in this fenced epoch.
+            self._starved = 0
+            return
         cause = self._output.starvation(report)
         if cause == "backend":
             self._stop_with("the audio device reported a problem of its own")

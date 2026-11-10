@@ -24,8 +24,8 @@ from PySide6.QtCore import QDate, QEvent, QSettings, Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QRadioButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QToolButton,
-    QVBoxLayout, QWidget,
+    QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStackedWidget,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from .format import (
@@ -51,6 +51,55 @@ AUDIO_CHECK_HELP = (
 # Nothing here is assumed about the source; the choices are built from the clips.
 RESOLUTION_STEPS = [1440, 1080, 720, 540, 480, 360]
 FPS_STEPS = [90, 60, 50, 30, 25]
+
+
+class _CurrentPageStack(QWidget):
+    """The preset's options: every page held, only the one shown laid out.
+
+    A QStackedWidget asks for its tallest page, even through its own layout's
+    height-for-width, so Master's rows sat above Upload's 290 px — the gap
+    between the options and Colour in Nk's tested candidate (9 October;
+    measured 290 against Master's 197). Hidden widgets take no room in a
+    layout, so here the page shown is the only one measured.
+    """
+
+    currentChanged = Signal(int)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._pages: list[QWidget] = []
+        self._current = -1
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+    def addWidget(self, page: QWidget) -> int:  # noqa: N802 (Qt naming)
+        self._pages.append(page)
+        self.layout().addWidget(page)
+        if self._current < 0:
+            self._current = 0
+        page.setVisible(len(self._pages) - 1 == self._current)
+        return len(self._pages) - 1
+
+    def count(self) -> int:
+        return len(self._pages)
+
+    def widget(self, index: int) -> QWidget | None:
+        return self._pages[index] if 0 <= index < len(self._pages) else None
+
+    def currentIndex(self) -> int:  # noqa: N802 (Qt naming)
+        return self._current
+
+    def currentWidget(self) -> QWidget | None:  # noqa: N802 (Qt naming)
+        return self.widget(self._current)
+
+    def setCurrentIndex(self, index: int) -> None:  # noqa: N802 (Qt naming)
+        if not 0 <= index < len(self._pages) or index == self._current:
+            return
+        self._current = index
+        for position, page in enumerate(self._pages):
+            page.setVisible(position == index)
+        self.currentChanged.emit(index)
 
 
 class ExportPanel(QWidget):
@@ -98,7 +147,20 @@ class ExportPanel(QWidget):
         scroller.verticalScrollBar().setStyleSheet(
             "QScrollBar:vertical { width: 12px; }"
         )
-        scroller.setWidget(self._build_controls())
+        controls = self._build_controls()
+        # `dim` makes help text MinimumExpanding so a narrow column never
+        # clips it. In this scrolling form that also made every help line
+        # take a share of any spare height — the gaps between the export
+        # rows in Nk's tested candidate (9 October). Wrapped help keeps its
+        # whole height (Minimum) but no longer grows past it; the spare
+        # height goes to the column's own end stretch.
+        for label in controls.findChildren(QLabel):
+            policy = label.sizePolicy()
+            if policy.verticalPolicy() == QSizePolicy.Policy.MinimumExpanding:
+                # The same policy object, so height-for-width is kept.
+                policy.setVerticalPolicy(QSizePolicy.Policy.Minimum)
+                label.setSizePolicy(policy)
+        scroller.setWidget(controls)
         self.scroller = scroller
         scroller.viewport().installEventFilter(self)
         layout.addWidget(scroller, 1)
@@ -293,7 +355,7 @@ class ExportPanel(QWidget):
         self.preset_buttons["master"].setChecked(True)
         layout.addWidget(preset_box)
 
-        self.options_stack = QStackedWidget()
+        self.options_stack = _CurrentPageStack()
         builders = {
             "edit": self._build_edit_options,
             "master": self._build_master_options,

@@ -35,6 +35,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import flightdvr.live_preview as preview_module
+
 from flightdvr.audio_device import (
     ACTIVE, FRAME_BYTES, IDLE, UNKNOWN, AudioOutput, DeviceReport,
     DeviceUnavailable,
@@ -139,16 +141,20 @@ class FakeOutput:
                                    bytes_free=4096, buffer_size=4096)
         self.cause = ""
         self.processed = 0
+        self._pending_bytes = 0
 
     def present(self, block) -> int:
         if block.generation != self.generation:
             return 0
         self.presented.append(block)
-        return block.frames * FRAME_BYTES
+        taken = block.frames * FRAME_BYTES
+        self._pending_bytes += taken
+        return taken
 
     def pump(self) -> int:
         self.calls.append("pump")
-        return 0
+        written, self._pending_bytes = self._pending_bytes, 0
+        return written
 
     def start(self) -> None:
         if self._no_device:
@@ -170,6 +176,7 @@ class FakeOutput:
         self.calls.append(f"reset:{generation}")
         self.generation = generation
         self.presented.clear()
+        self._pending_bytes = 0
 
     def observe(self) -> DeviceReport:
         return self.report
@@ -385,8 +392,9 @@ def test_a_device_error_stops_monitoring_and_names_it():
 def test_a_run_of_starved_ticks_gives_up_rather_than_stuttering():
     """One is ordinary — a block arrived late. A run of them is a stutter
     nobody asked to listen to."""
-    live, _stream, output = transport(blocks=0)
+    live, _stream, output = transport(blocks=1)
     live.play()
+    live.tick(0)
     output.cause = "starved"
 
     for _ in range(STARVED_LIMIT - 1):
@@ -399,14 +407,102 @@ def test_a_run_of_starved_ticks_gives_up_rather_than_stuttering():
 
 
 def test_a_single_late_block_is_forgiven():
-    live, _stream, output = transport(blocks=0)
+    live, _stream, output = transport(blocks=1)
     live.play()
+    live.tick(0)
     output.cause = "starved"
     live.tick(0)
     output.cause = ""
     for _ in range(STARVED_LIMIT * 2):
         live.tick(0)
     assert live.status.playing, "an isolated late block was treated as failure"
+
+
+def test_slow_first_decoder_read_is_buffering_not_sink_starvation():
+    live, stream, output = transport(blocks=0)
+    live.play()
+    output.cause = "starved"
+
+    for _ in range(STARVED_LIMIT * 3):
+        live.tick(0)
+    assert live.status.playing, "the sink had received no PCM to starve on"
+
+    stream.remaining = 1
+    live.tick(0)
+    assert live.status.playing, live.status.reason
+    for _ in range(STARVED_LIMIT - 1):
+        live.tick(0)
+    assert not live.status.playing
+    assert "could not be kept up with" in live.status.reason
+
+
+def test_sink_that_never_takes_pcm_has_a_bounded_named_startup_stop(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(preview_module, "monotonic", lambda: now[0], raising=False)
+
+    class NeverTakingOutput(FakeOutput):
+        def pump(self):
+            self.calls.append("pump")
+            return 0
+
+    stream = FakeStream(blocks=1)
+    output = NeverTakingOutput()
+    live = LivePreview(stream_factory=lambda _t, _l: stream, output=output)
+    live.set_target("stalled-sink")
+    live.play()
+
+    for frame in range(301):
+        now[0] = frame / 30
+        live.tick(round(now[0] * OUTPUT_RATE))
+        if not live.status.playing:
+            break
+
+    assert not live.status.playing, "ten seconds of silent startup stayed on"
+    assert "sound did not start within 3 seconds" in live.status.reason
+    assert now[0] == pytest.approx(3.0)
+    assert stream.stopped
+
+
+def test_cold_decoder_gets_time_but_catchup_does_not_extend_startup(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(preview_module, "monotonic", lambda: now[0], raising=False)
+    live, stream, _output = transport(blocks=0)
+    live.play()
+
+    now[0] = 1.5
+    live.tick(72_000)
+    assert live.status.playing, "the measured cold read was timed out"
+    stream.remaining = 1
+    live.tick(72_000)  # first old block triggers the single catch-up
+    assert stream.calls.count("reprime:72000") == 1
+    stream.remaining = 0
+    now[0] = 2.99
+    live.tick(round(now[0] * OUTPUT_RATE))
+    assert live.status.playing
+    now[0] = 3.0
+    live.tick(144_000)
+    assert not live.status.playing, "catch-up reset the startup budget"
+    assert "sound did not start within 3 seconds" in live.status.reason
+
+
+def test_paused_seek_waits_until_play_to_start_its_startup_budget(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(preview_module, "monotonic", lambda: now[0], raising=False)
+    live, stream, _output = transport(blocks=0)
+    live.play()
+    now[0] = 2.0
+    live.pause()
+    live.seek(48_000)
+    stream.remaining = 0
+    now[0] = 100.0
+    live.play()
+    now[0] = 101.5
+    live.tick(48_000)
+    assert live.status.playing, "paused time consumed the startup budget"
+    now[0] = 103.0
+    live.tick(48_000)
+    assert not live.status.playing
+    assert "sound did not start within 3 seconds" in live.status.reason
 
 
 def test_material_running_out_is_not_treated_as_a_failure():
@@ -424,6 +520,7 @@ def test_drift_beyond_the_bound_stops_monitoring_rather_than_nudging():
     live, _stream, output = transport()
     live.play()
     output.processed = 0
+    live.tick(0)
 
     live.tick(DRIFT_LIMIT_SAMPLES + 1)
 
@@ -476,6 +573,7 @@ def test_device_epoch_keeps_the_literal_drift_boundary():
     live, _stream, output = transport()
     live.play()
     output.processed = 0
+    live.tick(0)
 
     live.tick(9_600)
     assert live.status.playing, "the inclusive 9600-sample bound changed"
@@ -500,6 +598,73 @@ def test_startup_buffering_waits_for_the_first_accepted_block_origin():
     stream.remaining = 1
     live.tick(48_000)
     assert output.presented[0].output_start == 48_000
+    assert live.status.playing, live.status.reason
+
+
+def test_late_first_pcm_is_fenced_and_reprimed_to_picture_once():
+    stream = FakeStream(blocks=0)
+    output = FakeOutput()
+    live = LivePreview(stream_factory=lambda _t, _l: stream, output=output)
+    live.set_target("slow-real-decoder")
+    live.play()
+    live.tick(0)
+
+    # The picture ran while FFmpeg produced its first block. A backend may
+    # also report that idle interval as processed; neither makes output zero
+    # the right sound for the picture at 1.5 seconds.
+    stream.remaining = 1
+    output.processed = 72_000 * FRAME_BYTES
+    live.tick(72_000)
+    assert live.status.playing, live.status.reason
+    assert stream.calls.count("reprime:72000") == 1
+    assert output.presented == [], "the stale first block reached the sink"
+    assert output.generation == stream.generation
+
+    stream.remaining = 1
+    live.tick(73_600)  # picture advances one 30 Hz tick after the reprime
+    assert output.presented[0].output_start == 72_000
+    assert live.status.playing, live.status.reason
+
+
+def test_second_late_first_pcm_stops_instead_of_chasing_picture():
+    stream = FakeStream(blocks=1)
+    output = FakeOutput()
+    live = LivePreview(stream_factory=lambda _t, _l: stream, output=output)
+    live.set_target("still-slow")
+    live.play()
+
+    live.tick(72_000)
+    assert stream.calls.count("reprime:72000") == 1
+    live.tick(76_000)
+
+    assert not live.status.playing
+    assert "could not catch up" in live.status.reason
+    assert output.presented == []
+
+
+def test_pause_seek_starts_a_fresh_catchup_without_old_sink_bytes():
+    live, stream, output = transport(blocks=1)
+    live.play()
+    live.tick(0)
+    assert output.presented
+
+    live.pause()
+    live.seek(48_000)
+    stream.remaining = 0
+    live.play()
+    output.cause = "starved"
+    for _ in range(STARVED_LIMIT * 2):
+        live.tick(48_000)
+    assert live.status.playing, live.status.reason
+    assert output.presented == []
+
+    stream.remaining = 1
+    live.tick(72_000)
+    assert stream.calls.count("reprime:72000") == 1
+    assert output.presented == []
+    stream.remaining = 1
+    live.tick(72_000)
+    assert output.presented[0].output_start == 72_000
     assert live.status.playing, live.status.reason
 
 
@@ -1042,9 +1207,11 @@ def _make_joined_window(window):
 def _pull_stream_at(stream, output_sample: int):
     if stream.state.value == "ready":
         stream.start()
-    else:
-        stream.pause()
-        stream.reprime(output_sample)
+    # Inspect the requested position directly. Draining from zero to a later
+    # seam renders hundreds of unrelated blocks and makes this an accidental
+    # CPU-speed test (notably in the full macOS packaging suite).
+    stream.pause()
+    stream.reprime(output_sample)
     stream.resume()
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
@@ -2358,6 +2525,29 @@ def test_known_seek_origin_waits_for_acceptance_then_enforces_drift():
 
     live.tick(57_601)
     assert not live.status.playing, "acceptance never armed drift checking"
+    assert "drifted too far" in live.status.reason
+
+
+def test_adapter_queue_is_not_mistaken_for_sink_consumed_pcm():
+    sink = ShortSink(accepts=(0,) * 12)
+    output = AudioOutput(sink_factory=lambda: sink)
+    stream = NumberedStream(blocks=1)
+    live = LivePreview(stream_factory=lambda *a, **k: stream, output=output)
+    live.set_target(object())
+    live.play()
+
+    live.tick(0)
+    live.tick(DRIFT_LIMIT_SAMPLES + 1)
+    assert output.queued_bytes > 0
+    assert output.submitted_bytes == 0
+    assert bytes(sink.received) == b""
+    assert live.status.playing, "an adapter queue is not sink progress"
+
+    sink.accepts = [1 << 20]
+    live.tick(0)
+    assert output.submitted_bytes > 0
+    live.tick(DRIFT_LIMIT_SAMPLES + 1)
+    assert not live.status.playing
     assert "drifted too far" in live.status.reason
 
 

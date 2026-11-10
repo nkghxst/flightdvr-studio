@@ -31,7 +31,8 @@ from .player import FrameView
 from .range_lanes import RangeLanes
 from .sequence_strip import SequenceStrip
 from .trim import TrimBar
-from .widgets import INNER, TIGHT, PreviewPanel as AspectPreviewBox, dim
+from .widgets import (INNER, TIGHT, ElidedLabel, PreviewPanel as AspectPreviewBox,
+                      dim)
 
 # Enough of the band to work in without the window demanding a screen it may
 # not have. The rest scrolls; nothing is removed.
@@ -50,6 +51,11 @@ CLASSIC_MUSIC_MAXIMUM = 120
 # still — the height a short Flow page cannot spare, without dropping a word.
 SIDE_WIDTH = 190
 FLOW_SIDE_WIDTH = 300
+# Classic's compact column: Play, Sound and Grab still on one row at their
+# natural widths (at 190 px Sound was cut to "S...d", natively). The picture
+# is held to its floor and letterboxed whenever the column is compact, so the
+# width comes out of black bars, not out of the picture.
+COMPACT_SIDE_WIDTH = 256
 
 class ControlsColumn(QWidget):
     """The column of controls beside the picture.
@@ -392,8 +398,9 @@ class PreviewView(QObject):
         # What the sound is doing. Shown only while Sound is on, so a muted
         # preview costs the column nothing; the button's own state and
         # tooltip say muted.
-        self.sound_status = dim(QLabel(""))
-        self.sound_status.setWordWrap(True)
+        # One line beside the picture; the whole of it is the tooltip. Wrapped,
+        # a reason took three lines of the column and set the picture's floor.
+        self.sound_status = dim(ElidedLabel(""))
         self.sound_status.hide()
         column.addWidget(self.sound_status)
 
@@ -806,7 +813,7 @@ class PreviewView(QObject):
         self._flow_controls = flow
         side = self.sidebar
         if not self._controls_below:
-            side.setFixedWidth(FLOW_SIDE_WIDTH if flow else SIDE_WIDTH)
+            side.setFixedWidth(self._side_width())
         side.measured_at_width = flow
         self._side_actions.setDirection(
             QBoxLayout.Direction.LeftToRight if flow
@@ -832,6 +839,12 @@ class PreviewView(QObject):
         self._compact_controls = compact
         for line in (self.clip_format, self.clip_date):
             line.setVisible(not compact)
+        # The key hint is a line of the column too; compact, the picture
+        # itself carries it as its tooltip (it is where the keys go).
+        self.focus_note.setVisible(not compact)
+        self.frame_view.setToolTip(
+            f"{self.focus_note.text()}\n\n{self.focus_note.toolTip()}"
+            if compact else "")
         side_by_side = compact or self._flow_controls
         self._side_actions.setDirection(
             QBoxLayout.Direction.LeftToRight if side_by_side
@@ -841,9 +854,18 @@ class PreviewView(QObject):
                            QSizePolicy.Policy.Minimum,
                            QSizePolicy.Policy.Fixed)
         side = self.sidebar
+        if not self._controls_below:
+            side.setFixedWidth(self._side_width())
         side.layout().invalidate()
         side.updateGeometry()
         self.preview_box.updateGeometry()
+
+    def _side_width(self) -> int:
+        if self._flow_controls:
+            return FLOW_SIDE_WIDTH
+        if getattr(self, "_compact_controls", False):
+            return COMPACT_SIDE_WIDTH
+        return SIDE_WIDTH
 
     def set_controls_below(self, below: bool) -> None:
         """Put the controls column under the picture, or back beside it.
@@ -862,8 +884,7 @@ class PreviewView(QObject):
             side.setMinimumWidth(0)
             side.setMaximumWidth(16777215)
         else:
-            side.setFixedWidth(FLOW_SIDE_WIDTH if self._flow_controls
-                               else SIDE_WIDTH)
+            side.setFixedWidth(self._side_width())
         self.preview_box.set_controls_below(below)
         side.updateGeometry()
         self.preview_box.updateGeometry()
@@ -931,8 +952,9 @@ class PreviewView(QObject):
         # here is not a fault in the music that was just chosen.
         body.addLayout(self._build_listening_row())
 
-        self.music_silence_note = dim(QLabel(SILENT_PREVIEW))
-        self.music_silence_note.setWordWrap(True)
+        # One line across the band, the whole of it in the tooltip: wrapped,
+        # it cost the shallow band a second line at every size.
+        self.music_silence_note = dim(ElidedLabel(SILENT_PREVIEW))
         body.addWidget(self.music_silence_note)
         self._note_is_reason = False
         self._arranged_as = None
@@ -1011,15 +1033,39 @@ class PreviewView(QObject):
         focus."""
         self.music_body.setMaximumHeight(self._classic_reach)
 
+    def essential_music_height(self) -> int:
+        """The band's body down to the end of its listening row: Choose
+        track, Focus and the grip, then Level. Measured off the rows as they
+        are laid out, so it is the font's and the style's, not a guess."""
+        content = self.music_content
+        bottom = 0
+        for widget in (self.track_button, self.focus_button, self.listen_level,
+                       self.restart_button):
+            if widget.isVisibleTo(content):
+                rect = widget.geometry()
+                corner = widget.mapTo(content, rect.bottomLeft() - rect.topLeft())
+                bottom = max(bottom, corner.y() + 1)
+        frame = self.music_body.frameWidth() * 2
+        return bottom + frame if bottom else 0
+
     def set_classic_reach(self, deep: bool) -> None:
         """Whether Classic's band may grow past its shallow depth."""
         self._classic_reach = 16777215 if deep else CLASSIC_MUSIC_MAXIMUM
         self.restore_classic_reach()
 
     def set_classic_depth(self, height: int) -> None:
-        """A depth the person chose for Classic's band: exactly this tall."""
+        """A depth the person chose for Classic's band: as tall as this when
+        the window has the room, and never a demand on the window.
+
+        The band keeps the shallow band's least as its minimum and takes the
+        depth as its ceiling; its stretch (set by the window) lets it take
+        free room up to it first. Set as min = max = depth, a depth fitted
+        against a minimum that leaves out wrapped text grew the window on
+        macOS and Ubuntu CI (791 to 810, 770 to 832 px; Sol, 9 October).
+        """
         self._classic_reach = int(height)
-        self.music_body.setMinimumHeight(int(height))
+        self.music_body.setMinimumHeight(max(
+            CLASSIC_MUSIC_MINIMUM, self.track_button.sizeHint().height()))
         self.music_body.setMaximumHeight(int(height))
 
     def set_music_title(self, text: str) -> None:

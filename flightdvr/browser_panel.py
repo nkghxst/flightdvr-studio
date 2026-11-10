@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from .classic_layout import BrowserMode, UNSET, bound_text
 from .session import KEEP, MAYBE, REJECT, UNREVIEWED
 from .thumbs import THUMB_WIDTH
-from .widgets import MIN_THUMB_WIDTH, MIN_VISIBLE_CLIPS, dim
+from .widgets import ElidedLabel, MIN_THUMB_WIDTH, MIN_VISIBLE_CLIPS, dim
 
 
 FILTER_ALL = "all"
@@ -271,7 +271,9 @@ class BrowserPanel(QWidget):
         # cannot grow quietly.
         self._build_length_row(self._row(layout))
 
-        self.warning_label = dim(QLabel())
+        # One line; the whole note is in its tooltip (Nk, 9 October: four
+        # wrapped lines here pushed Music off a maximised window).
+        self.warning_label = dim(ElidedLabel())
         self.warning_label.hide()
         layout.addWidget(self.warning_label)
 

@@ -451,7 +451,10 @@ def test_collapsed_gives_the_list_reserve_back_to_the_picture(window, qt_app):
     assert collapsed < MIN_LIST_HEIGHT
     window.set_browser_mode(BrowserMode.NORMAL)
     qt_app.processEvents()
-    assert box._list_room == MIN_LIST_HEIGHT
+    # The list's own rows above its table plus three whole clips, and never
+    # less than the old flat reserve (Nk's tested candidate, 9 October).
+    assert box._list_room == window._classic_list_room()
+    assert box._list_room >= MIN_LIST_HEIGHT
 
 
 def test_the_classic_band_is_the_shallow_one(window, qt_app):
@@ -500,13 +503,52 @@ def test_the_view_menu_follows_the_mode_chosen_in_the_browser(window, qt_app):
 # at, the left column is already at its own minimum width.
 
 
-def test_no_cap_is_exactly_todays_sizing(window, qt_app):
-    """The default has to cost nothing, or every other window changes too."""
-    window.set_browser_mode(BrowserMode.NORMAL)
-    qt_app.processEvents()
+def _settled_cap_state(window) -> str:
     box = window.preview_box
-    assert box._height_cap is None
-    assert box.height() == box.useful_height(box.width())
+    return (f"cap={box._height_cap} fit={window._classic_fit} "
+            f"room={box._list_room} box={box.height()} "
+            f"column={box.parentWidget().height()} "
+            f"list={window.browser_panel.height()} floor={box.content_floor()}")
+
+
+def test_no_cap_is_exactly_todays_sizing(own_window, qt_app):
+    """Normal sets no cap: the picture is what its width earns, short only
+    of the list's own room (its rows and three clips) and never under its
+    floor. In a window of its own with room to spare, measured once the
+    deferred layout has finished (one pump was not enough on macOS CI,
+    where a safety cap from a transient overflow was still set; Sol R3)."""
+    window = own_window
+    window.set_browser_mode(BrowserMode.NORMAL)
+    _wait(qt_app)
+    box = window.preview_box
+    assert box._height_cap is None, _settled_cap_state(window)
+    expected = min(box.useful_height(box.width()),
+                   box.parentWidget().height() - box._list_room)
+    assert box.height() == max(expected, box.content_floor()), _settled_cap_state(window)
+
+
+def test_a_safety_cap_is_given_back_once_the_column_has_room(own_window, qt_app):
+    """A cap taken in a transient overflow comes off when the room returns,
+    not only on the next mode change. With everything fitting, the picture
+    has no clearance under it (the list above it stretches), so a release
+    that waited for a positive clearance never came (Sol R3, 9 October)."""
+    window = own_window
+    window.set_browser_mode(BrowserMode.NORMAL)
+    _wait(qt_app)
+    box = window.preview_box
+    assert box._height_cap is None, _settled_cap_state(window)
+    # What an overflow leaves behind: the picture held at its floor.
+    window._classic_fit = box.content_floor()
+    box.set_height_cap(window._classic_height_cap())
+    _wait(qt_app, 0.3)
+    assert box._height_cap is not None
+    window._relayout()
+    _wait(qt_app)
+    assert window._classic_fit is None and box._height_cap is None, (
+        _settled_cap_state(window))
+    expected = min(box.useful_height(box.width()),
+                   box.parentWidget().height() - box._list_room)
+    assert box.height() == max(expected, box.content_floor())
 
 
 def test_the_cap_applies_without_waiting_for_a_width_change(window, qt_app):
@@ -629,6 +671,8 @@ def test_repeated_toggles_settle_rather_than_drifting(own_window, qt_app):
     qt_app.processEvents()
     qt_app.processEvents()
     settled_expanded = window.preview_box.height()
+    # Expanded's controls are compact, so its floor is measured there.
+    expanded_floor = window.preview_box.content_floor()
     window.set_browser_mode(BrowserMode.NORMAL)
     qt_app.processEvents()
     qt_app.processEvents()
@@ -645,7 +689,7 @@ def test_repeated_toggles_settle_rather_than_drifting(own_window, qt_app):
         assert window.preview_box.height() == settled_normal
 
     assert settled_expanded < settled_normal
-    assert settled_expanded >= window.preview_box.content_floor()
+    assert settled_expanded >= expanded_floor
 
 
 def test_the_cap_does_not_raise_the_window_minimum(window, qt_app):
@@ -900,6 +944,10 @@ def test_switching_modes_repeatedly_lands_on_the_same_rows(qt_app):
         for _round in range(3):
             for mode in (BrowserMode.EXPANDED, BrowserMode.NORMAL):
                 window.set_browser_mode(mode)
+                # Measured once the deferred layout (40 and 60 ms retries)
+                # has finished: four bare pumps sometimes sampled before it,
+                # 43 against 41 px in long combined runs (9-10 October).
+                _wait(qt_app, 0.5)
                 for _ in range(4):
                     qt_app.processEvents()
                     window._sync_thumbnail_size()
@@ -1146,6 +1194,9 @@ def test_folding_for_music_sets_the_filter_rows_and_secondary_lines_aside(
         before = [w.isVisible() for w in _filter_widgets(window)]
         assert all(before)
         window._set_list_folded(True)
+        # Held folded for the check: with the compact controls (9 October)
+        # this window has room, and the next pass would unfold it.
+        window._fold_need = 10 ** 6
         qt_app.processEvents()
         assert not any(w.isVisible() for w in _filter_widgets(window))
         assert not view.clip_format.isVisible()
@@ -1162,6 +1213,11 @@ def test_folding_for_music_sets_the_filter_rows_and_secondary_lines_aside(
         qt_app.processEvents()
         assert not panel.folded
         assert [w.isVisible() for w in _filter_widgets(window)] == before
+        # Music is still open, so the controls stay compact (format and date
+        # in the list); closing it brings the lines back.
+        assert not view.clip_format.isVisible()
+        view.music_band.setChecked(False)
+        qt_app.processEvents()
         assert view.clip_format.isVisible() and view.clip_date.isVisible()
         assert (panel.review_filter.currentIndex(),
                 panel.min_length.value()) == state, "filter state kept"
@@ -1197,7 +1253,9 @@ def test_closing_music_or_leaving_classic_brings_the_rows_back(
         window.set_view_mode(Mode.CLASSIC)
         qt_app.processEvents()
         assert window._music_hidden is None
-        assert view.clip_format.isVisible()
+        assert panel.review_filter.isVisible()
+        # Compact while Music is open: every control, format in the list.
+        assert not view.clip_format.isVisible() and view.still_button.isVisible()
         # And a list mode chosen while folded, which also unfolds.
         view.music_band.setChecked(True)
         qt_app.processEvents()
@@ -1205,7 +1263,8 @@ def test_closing_music_or_leaving_classic_brings_the_rows_back(
         window.set_browser_mode(BrowserMode.EXPANDED)
         qt_app.processEvents()
         assert window._music_hidden is None
-        assert panel.review_filter.isVisible() and view.clip_format.isVisible()
+        assert panel.review_filter.isVisible() and view.still_button.isVisible()
+        assert not view.clip_format.isVisible()
         window.set_browser_mode(BrowserMode.NORMAL)
     finally:
         view.music_band.setChecked(False)
@@ -1223,6 +1282,9 @@ def test_unfolding_counts_what_the_fold_set_aside(qt_app):
         view.music_band.setChecked(True)
         qt_app.processEvents()
         window._set_list_folded(True)
+        # Held folded for the check: with the compact controls (9 October)
+        # this window has room, and the next pass would unfold it.
+        window._fold_need = 10 ** 6
         qt_app.processEvents()
         window._fold_need = 1
         box, body = view.preview_box, view.music_body
@@ -1966,3 +2028,184 @@ def test_remux_and_back_ask_nothing_more_of_the_window(
     assert state() == baseline_state, "not the state the baseline was taken in"
     assert (window.minimumHeight(), window.size()) == (baseline, size)
     assert column_holds_the_picture(window)
+
+
+# -- Nk's tested candidate, 9 October: room for the list and for Music -------
+#
+# Each of these failed on the tested candidate (39fe1ee): an open band left at
+# its track row with Level below the fold, a controls column whose full height
+# set the picture's floor, a four-line card-clock note, an export column as
+# tall as its tallest preset page, and a trim drag that silenced playing sound
+# whether or not the range changed.
+
+
+def _wait(qt_app, seconds: float = 0.8) -> None:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        qt_app.processEvents()
+        time.sleep(0.01)
+
+
+def test_open_music_keeps_its_working_rows_in_view(qt_app):
+    window = many_clips_window(qt_app, BrowserMode.NORMAL, (1160, 880))
+    view = window.preview_view
+    try:
+        view.music_band.setChecked(True)
+        _wait(qt_app)
+        body = view.music_body
+        viewport = body.viewport().rect()
+        for widget in (view.track_button, view.focus_button, view.listen_level):
+            corner = widget.mapTo(body.viewport(), widget.rect().bottomRight())
+            assert viewport.contains(corner), f"{widget.objectName() or widget} below the fold"
+    finally:
+        view.music_band.setChecked(False)
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_music_open_compacts_the_controls_and_lowers_the_picture_floor(qt_app):
+    window = many_clips_window(qt_app, BrowserMode.NORMAL, (1160, 880))
+    view = window.preview_view
+    box = view.preview_box
+    try:
+        _wait(qt_app, 0.4)
+        floor_closed = box.content_floor()
+        view.music_band.setChecked(True)
+        _wait(qt_app)
+        assert box.content_floor() < floor_closed
+        # Every control stays.
+        assert view.play_button.isVisible() and view.sound_button.isVisible()
+        assert view.still_button.isVisible()
+        assert all(button.isVisible() for button, _tip in view._source_edits)
+        view.music_band.setChecked(False)
+        _wait(qt_app)
+        assert box.content_floor() == floor_closed
+    finally:
+        view.music_band.setChecked(False)
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_the_card_clock_note_takes_one_line(qt_app):
+    window = many_clips_window(qt_app, BrowserMode.NORMAL, (1160, 880))
+    note = window.warning_label
+    try:
+        text = ("All 14 clips are stamped 08 Oct 2025 within 39 minutes of each "
+                "other, which is not when they were filmed. These goggles have a "
+                "socket for a CR2032 clock battery but none fitted, so the clock "
+                "restarts from the same value on every power-up.")
+        note.setText(text)
+        note.show()
+        _wait(qt_app, 0.4)
+        assert note.height() <= note.fontMetrics().height() + 6
+        assert note.toolTip() == text and note.text() == text
+    finally:
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_the_export_options_take_the_height_of_the_page_shown(qt_app):
+    window = many_clips_window(qt_app, BrowserMode.NORMAL, (1160, 880))
+    stack = window.export_panel.options_stack
+    try:
+        tallest = max(stack.widget(i).sizeHint().height() for i in range(stack.count()))
+        window.export_panel.preset_buttons["master"].click()
+        _wait(qt_app, 0.4)
+        shown = stack.currentWidget().sizeHint().height()
+        assert shown < tallest
+        assert stack.height() <= shown + 2
+    finally:
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_a_trim_that_changes_nothing_leaves_sound_alone_and_a_change_pauses(
+        qt_app, monkeypatch):
+    window = many_clips_window(qt_app, BrowserMode.NORMAL, (1160, 880))
+    try:
+        window.browser_panel.table.setCurrentCell(0, 0)
+        window._load_selected_clip()
+        _wait(qt_app, 0.3)
+        clip = window._trim_clip
+        assert clip is not None
+        fenced, paused = [], []
+        monkeypatch.setattr(window, "_silence_monitoring",
+                            lambda reason, **kw: fenced.append(reason))
+        monkeypatch.setattr(window.player, "pause", lambda: paused.append(True))
+        window.player.is_playing = True
+        window._on_trim_changed(0.0, clip.duration)          # the whole clip
+        assert fenced == [] and paused == [], "a no-op trim silenced playback"
+        window._on_trim_changed(5.0, clip.duration - 5.0)    # a real change
+        assert len(fenced) == 1 and paused == [True]
+        window.player.is_playing = False
+    finally:
+        window.close()
+        assert_no_threads_left(window)
+
+
+def test_height_the_band_took_for_an_instant_is_given_back(own_window, qt_app):
+    """Natively at 1490x880 with the list collapsed, Qt's last layout pass
+    applied a stale minimum as Music opened and the window grew 5 px with
+    everything settled at a 650 px minimum (Sol R3 follow-up, 10 October).
+    The layout's growth lands exactly on the minimum it applied; that, and
+    only that, is given back."""
+    window = own_window
+    view = window.preview_view
+    window.set_browser_mode(BrowserMode.COLLAPSED)
+    view.music_band.setChecked(True)
+    _wait(qt_app)
+    try:
+        was = window.size()
+        least = window.minimumHeight()
+        assert window.minimumSizeHint().height() < was.height()
+        window._band_growth = {"grown": None, "moved": False}
+        # Growth the way the layout makes it: to the minimum it applies.
+        window.setMinimumHeight(was.height() + 5)
+        _wait(qt_app, 0.3)
+        assert window.height() == was.height() + 5
+        window.setMinimumHeight(least)
+        window._give_back_band_growth(was)
+        _wait(qt_app, 0.3)
+        assert window.size() == was
+    finally:
+        view.music_band.setChecked(False)
+        window.set_browser_mode(BrowserMode.NORMAL)
+
+
+@pytest.mark.parametrize("wider", [False, True], ids=["height-only", "width-and-height"])
+def test_a_resize_made_while_music_opens_is_left_alone(own_window, qt_app, wider):
+    """Sol R4 (10 October): a height-only resize made before the growth check
+    ran (1490x880 to 1490x980) was put back to 880. Someone resizing the
+    window is never undone, height-only or not."""
+    window = own_window
+    view = window.preview_view
+    window.set_browser_mode(BrowserMode.COLLAPSED)
+    _wait(qt_app)
+    try:
+        was = window.size()
+        view.music_band.setChecked(True)
+        qt_app.processEvents()
+        wanted = (was.width() + (40 if wider else 0), was.height() + 100)
+        window.resize(*wanted)                      # before the pending check
+        _wait(qt_app, 0.9)                          # past MUSIC_GROWTH_CHECK_MS
+        assert (window.width(), window.height()) == wanted
+    finally:
+        view.music_band.setChecked(False)
+        window.set_browser_mode(BrowserMode.NORMAL)
+
+
+def test_a_settings_file_override_keeps_a_check_off_the_real_settings(
+        qt_app, tmp_path, monkeypatch):
+    """FLIGHTDVR_SETTINGS_FILE puts the settings in that INI file, so a
+    packaged candidate can be checked without the registry (10 October)."""
+    from PySide6.QtCore import QSettings
+    import flightdvr.ui as ui
+    path = tmp_path / "candidate-settings.ini"
+    monkeypatch.setattr(ui, "QSettings", QSettings)    # the real class
+    monkeypatch.setenv("FLIGHTDVR_SETTINGS_FILE", str(path))
+    store = ui._settings_store()
+    assert store.format() == QSettings.Format.IniFormat
+    assert Path(store.fileName()) == path
+    store.setValue("probe", 1)
+    store.sync()
+    assert path.is_file()

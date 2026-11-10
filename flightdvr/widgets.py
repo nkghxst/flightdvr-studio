@@ -90,6 +90,59 @@ def dim(label: QLabel, strength: float = 0.34) -> QLabel:
     label.setSizePolicy(QSizePolicy.Policy.Preferred,
                         QSizePolicy.Policy.MinimumExpanding)
     return label
+
+
+class ElidedLabel(QLabel):
+    """One line of secondary text, cut with … when the room is shorter, and
+    the whole of it in the tooltip.
+
+    For notes that are worth a glance but not worth the height: wrapped, Nk's
+    tested 2.0.0 candidate spent four lines above the picture on the card-clock
+    note and three beside it on a status, and the Music band went off the bottom
+    of a maximised window for them (9 October). Never a smaller font: the line
+    is the normal size and simply shorter.
+    """
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self._full = ""
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt naming)
+        self._full = text or ""
+        super().setText(self._full)
+        self.setToolTip(self._full)
+
+    def text(self) -> str:
+        return self._full
+
+    def setWordWrap(self, on: bool) -> None:  # noqa: N802 (Qt naming)
+        # `dim` wraps every label it mutes; this one is one line by design.
+        super().setWordWrap(False)
+
+    def setSizePolicy(self, *args) -> None:  # noqa: N802 (Qt naming)
+        # Likewise `dim`'s MinimumExpanding: one line, never taller.
+        super().setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+
+    def minimumSizeHint(self):  # noqa: N802 (Qt naming)
+        hint = super().minimumSizeHint()
+        hint.setWidth(0)
+        return hint
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        from PySide6.QtGui import QPainter
+        painter = QPainter(self)
+        rect = self.contentsRect()
+        shown = self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideRight, rect.width())
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.drawText(rect, int(self.alignment() | Qt.AlignmentFlag.AlignVCenter),
+                         shown)
+        painter.end()
+
+
 # Every gap in the window is one of these four, and which one says how related
 # the two things either side of it are. Before this they were a dozen different
 # literals chosen a panel at a time, so the spacing varied in ways that meant
@@ -339,7 +392,14 @@ class PreviewPanel(QGroupBox):
             # measured natively, 320px where the controls needed 206.
             if (self._height_cap is None and not self._controls_below
                     and self.view is not None and self.view.height() > 0):
-                self._chrome = self.height() - self.view.height()
+                # Never less than the box's own margins (title and frame):
+                # read mid-layout, with the picture briefly taller than the
+                # box, the difference came out negative and the floor 48 px
+                # short — Play, In, Out and Reset squeezed to slivers in
+                # Expanded at 1160x880, natively (9 October).
+                margins = self.contentsMargins()
+                self._chrome = max(self.height() - self.view.height(),
+                                   margins.top() + margins.bottom())
             wanted = self._wanted_height()
             if self.height() != wanted:
                 self.setFixedHeight(wanted)
