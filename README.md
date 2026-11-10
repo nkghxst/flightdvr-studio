@@ -22,8 +22,8 @@ Free and open source under the GPL v3. Nothing is gated and there is no
 account, no telemetry, and nothing to sign up for.
 
 The one thing it does over the network is check whether a newer version exists:
-a single request, at most once a day, to this project's own releases page on
-GitHub. Nothing is sent beyond what any web request unavoidably reveals — an IP
+a single request, at most once a day, to GitHub's API for this project's latest
+release. Nothing is sent beyond what any web request unavoidably reveals — an IP
 address and the app's version — and nothing is downloaded or installed; a newer
 release just shows a link. Untick **Check for updates** in the About box and no
 request is made at all.
@@ -310,7 +310,7 @@ handing the file to something that cannot decode it.
 Trimming chooses the useful part of a recording. HDZero DVR starts at arming,
 so there is not normally a long quiet section before take-off. Drag either
 handle on the filmstrip, or press **I** and **O** while the clip plays to cut at
-the picture in front of you. **Set in** / **Set out** do the same from the
+the picture in front of you. **In** / **Out** do the same from the
 buttons, and **Reset** restores the whole clip. The list then shows the range
 next to the length, and the size estimate, progress and time remaining all
 follow the trimmed length.
@@ -338,8 +338,8 @@ Player, which cannot handle HEVC inside an MPEG-TS — so it would work
 perfectly on test footage and fail on every real recording.
 
 Frames are pulled from the clip the first time you select it — a three minute
-recording takes about four seconds, and is cached afterwards, so dragging is
-instant rather than waiting on a seek.
+recording takes about four and a half seconds, and is cached afterwards, so
+dragging is instant rather than waiting on a seek.
 
 Trims survive into a joined export: each clip keeps its own in and out points.
 *Remux* is the exception and will say so — see below.
@@ -367,13 +367,14 @@ mismatched set, because copying without re-encoding cannot change anything.
 
 | Preset | Produces | Roughly | Use it for |
 |---|---|---|---|
-| **Edit** | DNxHR or ProRes in `.mov` | 58 GB/hour | DaVinci timelines, handing to an editor |
-| **Master** | H.264 `.mp4`, quality-based | 11 GB/hour | archiving, sending to editors online |
+| **Edit** | DNxHR or ProRes in `.mov` | 59 GB/hour | DaVinci timelines, handing to an editor |
+| **Master** | H.264 `.mp4`, quality-based | 12 GB/hour | archiving, sending to editors online |
 | **Social** | H.264 `.mp4`, size-targeted | you choose | WhatsApp, Instagram, Discord |
-| **Upload** | H.264 `.mp4` at 1080p or above | 20 GB/hour | YouTube, Instagram, Reddit |
+| **Upload** | H.264 `.mp4` at source resolution or higher | 21 GB/hour | YouTube, Instagram, Reddit |
 | **Remux** | `.ts` → `.mp4`, no re-encode | same as source | instant lossless rewrap |
 
-Sizes are for 720p60; other resolutions are scaled accordingly.
+Sizes are for 720p60; Upload's estimate assumes 1080p output at CRF 20.
+Other resolutions and quality settings change the estimates.
 
 **Edit** exists because the free version of DaVinci Resolve on Windows cannot
 decode H.265, so the original files cannot go on a timeline at all. Mezzanine
@@ -391,19 +392,22 @@ is arrive at a site in a higher resolution tier. YouTube, Instagram and Reddit
 re-encode everything they receive and decide how much bitrate to spend based on
 the resolution you sent, so a 1080p upload gets a bigger allowance than a 720p
 one and more of your footage survives their encode. The picture going in is the
-same; the difference is how kindly the platform treats it.
+same; the difference is how kindly the platform treats it. The *Upload at:* list
+starts at the source height, so 720p footage starts at 720p; choose *Upscale to
+1080p* to arrive at 1080p.
 
 It is quality-based and never size-targeted. Spreading a fixed byte budget over
 2.25 times as many pixels is worse than doing neither, so that combination is
 not offered.
 
-**Social** hits an exact file size using a two-pass encode, landing within about
-one percent of the number you ask for. With a hardware encoder, size targeting
+**Social** hits an exact file size using a two-pass encode, landing within a few
+percent of the number you ask for. With a hardware encoder, size targeting
 is a single pass and less precise. It can also downscale and halve the frame
 rate. Only sizes smaller than the source are offered, so it never upscales.
 
-**Keep the audio track** can be turned off on any preset. DVR audio is mostly
-motor noise and wind, and dropping it buys bitrate on a size-targeted export.
+**Keep the audio track** can be turned off on any preset except Remux, which
+copies the audio across and greys the tickbox out. DVR audio is mostly motor
+noise and wind, and dropping it buys bitrate on a size-targeted export.
 
 ### Hardware encoding
 
@@ -447,8 +451,9 @@ time, weighted by footage length rather than job count.
   A full card at Edit quality runs to several hundred gigabytes.
 - **Leave a broken file behind.** An encode is written to a temporary
   `.flightdvr-part` file and checked for video before it is moved into place.
-  Cancelling removes the temporary file; an output that was already there is
-  never touched.
+  Cancelling normally removes the temporary file. If Windows still has it open,
+  it can be left behind, named `*.flightdvr-part*`; your existing file is never
+  touched.
 - **Queue the same output twice**, or re-encode work that has already finished.
 
 ## Keyboard shortcuts
@@ -638,7 +643,7 @@ the icon, build the bundle and prove the result starts before packaging it.
 | macOS | `packaging/build-macos.sh` | signed-ad-hoc `.app` in a `.dmg` | Xcode command line tools |
 
 All three are produced by
-[GitHub Actions](.github/workflows/build.yml) on relevant code and packaging
+[GitHub Actions](https://github.com/nkghxst/flightdvr-studio/blob/v1.5.0/.github/workflows/build.yml) on relevant code and packaging
 pushes and on version tags; documentation-only pushes are skipped. You do not
 need any of those machines to release for them. The commands above are for
 building one yourself.
@@ -648,7 +653,7 @@ handling, and the traps in this footage in
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 Where this is going next — and what it deliberately will not do — is in
-[docs/ROADMAP.md](docs/ROADMAP.md).
+[docs/ROADMAP.md](docs/ROADMAP.md), which also covers the unreleased 2.0.
 
 ### How it is put together
 
@@ -660,7 +665,7 @@ Where this is going next — and what it deliberately will not do — is in
 | Interface | `browser_panel.py`, `preview_panel.py`, `export_panel.py`, `queue_panel.py`, `ui.py` | panel-local behaviour and cross-panel workflows |
 
 The module-by-module layout is maintained in
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#layout).
+[docs/DEVELOPMENT.md](https://github.com/nkghxst/flightdvr-studio/blob/v1.5.0/docs/DEVELOPMENT.md#layout).
 
 A few decisions that are not obvious from the code:
 
@@ -698,7 +703,7 @@ The bundled Windows build is `n7.1.5-12-g1fdbca85aa` from
 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), tag
 `autobuild-2026-07-31-14-10`, configured `--enable-gpl --enable-version3`. It is
 **not** an `--enable-nonfree` build, which could not be redistributed at all.
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) records the version, origin and
+[THIRD-PARTY-NOTICES.md](https://github.com/nkghxst/flightdvr-studio/blob/v1.5.0/THIRD-PARTY-NOTICES.md) records the version, origin and
 licence, along with a written offer for the corresponding source as required by
 section 6 of the GPL.
 
