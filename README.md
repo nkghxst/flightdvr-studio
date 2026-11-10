@@ -12,24 +12,18 @@ It also fixes the colour problem these recordings have, which is the reason
 footage converted with a plain ffmpeg command often comes out with crushed
 blacks.
 
-> **This page describes 2.0.0, an unreleased release candidate.** The latest
-> published release is **1.5.0**. Flow, Music, the Assembly, bundles, Vertical,
-> Slow motion, stills, naming templates and the Linux AppImage's own FFmpeg all
-> came after it, and are not in the 1.5.0 downloads. The
-> [user guide](docs/USER_GUIDE.md) covers 2.0's workflow, and
-> [CHANGELOG.md](CHANGELOG.md) what changed.
+This page describes the published **v1.5.0** downloads. Version **2.0** is in
+development and has not yet been released; see the
+[draft README](docs/README-2.0-draft.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ![Ticking clips, trimming one, and exporting](docs/demo.gif)
-
-*Recorded with an earlier version, before Flow and Music; the current window
-looks different.*
 
 Free and open source under the GPL v3. Nothing is gated and there is no
 account, no telemetry, and nothing to sign up for.
 
 The one thing it does over the network is check whether a newer version exists:
-a single request, at most once a day, to this project's own releases page on
-GitHub. Nothing is sent beyond what any web request unavoidably reveals — an IP
+a single request, at most once a day, to GitHub's API for this project's latest
+release. Nothing is sent beyond what any web request unavoidably reveals — an IP
 address and the app's version — and nothing is downloaded or installed; a newer
 release just shows a link. Untick **Check for updates** in the About box and no
 request is made at all.
@@ -64,20 +58,25 @@ chmod +x FlightDVR_Studio-*.AppImage
 ./FlightDVR_Studio-*.AppImage
 ```
 
-One file, nothing installed, delete it to uninstall. It is built on Ubuntu
-22.04 and needs glibc 2.35 or newer. Some supported enterprise distributions
-still carry an older glibc; `ldd --version` reports yours.
+About 63 MB. One file, nothing installed, delete it to uninstall. It is built on
+Ubuntu 22.04 and needs glibc 2.35 or newer. Some supported enterprise
+distributions still carry an older glibc; `ldd --version` reports yours.
 
-From 2.0.0, like the Windows build, it carries **its own ffmpeg and ffprobe**
-(the published 1.5.0 AppImage uses the system's ffmpeg instead): the pinned
-build named in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), so every
-export uses the same ffmpeg whatever your distribution ships. Nothing needs
-installing first, and an ffmpeg you have installed yourself is left alone; the
-app always prefers the copy inside the AppImage. The bundled ffmpeg needs the
-system's C library. It also needs `libgcc_s.so.1` and `libmvec.so.1`; the
-AppImage carries a copy of each and, on the systems measured (Ubuntu 22.04 and
-24.04), ffmpeg uses those copies.
-Run the app with `--check` to see exactly which ffmpeg it is using.
+Unlike the Windows build it does **not** carry its own ffmpeg, because your
+distribution already ships a maintained one:
+
+```bash
+sudo apt install ffmpeg      # Debian, Ubuntu, Mint, Pop!_OS
+sudo dnf install ffmpeg      # Nobara; Fedora after enabling RPM Fusion
+sudo pacman -S ffmpeg        # Arch, Manjaro
+```
+
+Fedora's own `ffmpeg-free` package has limited codec support and does not cover
+every FlightDVR export. Enable [RPM Fusion](https://rpmfusion.org/Configuration)
+and install its full `ffmpeg` package first.
+
+Some image-based systems already include a suitable ffmpeg. Run the app with
+`--check` before installing anything to see exactly what it found.
 
 Playback happens in the window and needs nothing else. Install VLC or mpv as
 well if you want **Open in player…** to have somewhere to send a clip.
@@ -118,8 +117,6 @@ Get-FileHash FlightDVRStudio-1.5.0-Setup.exe -Algorithm SHA256
 sha256sum FlightDVR_Studio-1.5.0-x86_64.AppImage    # Linux
 shasum -a 256 FlightDVR-Studio-1.5.0-arm64.dmg      # macOS
 ```
-
-2.0.0 is not published yet; its hashes are added here when it is.
 
 **1.5.0**
 
@@ -208,17 +205,13 @@ there is no reason to choose it.
 4. Pick an export preset on the right.
 5. **Add to queue**, then **Start export**.
 
-That is the whole loop. Everything below is detail. For Flow, Music, the
-Assembly and bundles, start with the [user guide](docs/USER_GUIDE.md).
+That is the whole loop. Everything below is detail.
 
 ---
 
 ## The clip browser
 
 ![The clip list, with thumbnails, review states and export settings](docs/01-browse.png)
-
-*Screenshots on this page were taken with an earlier version, before Flow and
-Music; the current window looks different.*
 
 Clips are listed with a thumbnail taken from a representative frame, plus
 length, size, card date and format. Click any column heading to sort by it. The
@@ -237,45 +230,6 @@ Clips that already have an export for the current preset are marked
 
 Widening the window makes the thumbnails bigger rather than leaving an empty
 filename column.
-
-### Length and browser layout
-
-These controls are new since 1.5.0 and are part of the 2.0.0 candidate.
-Native compact readability and the complete acceptance of
-[issue #96](https://github.com/nkghxst/flightdvr-studio/issues/96) remain open.
-
-**Length** filters the list without changing the recordings. **At least** and
-**At most** are whole-second bounds; their starting value is **off**, and an
-active bound includes a clip exactly on its edge. **Show unknown** is checked by
-default. A clip whose duration could not be read is shown as `?` in the Length
-column; untick this box to hide those clips too. **Reset** turns both bounds
-off and shows unknown lengths again.
-
-The length rule and **Show** review filter are combined: a clip must pass both.
-The line beside the controls says how many rows are shown and hidden, and when
-appropriate how much of the hiding is due to length. Filtering only hides rows.
-If you tick a clip and then hide it, it stays ticked and is still included when
-you add the selected clips to the queue; its review state, saved ranges and
-already queued work are not changed.
-
-The **List:** buttons offer **Collapsed**, **Normal** and **Expanded**. The
-same choices are available under **View ▸ Clip list**. Collapsed replaces the
-table with a one-line summary containing the selected clip's thumbnail and
-identity, review/range information, the shown count and a **Show clips** way
-back. Expanded gives the list more height by capping the preview; the complete
-filtered list remains scrollable. It does not cap the list at nine rows.
-
-**View ▸ Export queue** mirrors the queue strip, and **View ▸ Restore default
-layout** returns the browser to Normal, closes the queue and restores the
-default split. These are layout controls, not documented session settings, so
-this page makes no promise that browser modes persist after reopening. Flow
-and Music are described in the [user guide](docs/USER_GUIDE.md).
-
-Collapsed hides the list but does not enlarge the preview: the current
-preview/list height clamp still reserves room for the list. The existing native
-window size limits remain in force, and native compact readability has not been
-accepted from an offscreen prototype capture. Treat a smaller mock window as a
-design exploration, not as a supported release size.
 
 ## Reviewing a card
 
@@ -356,7 +310,7 @@ handing the file to something that cannot decode it.
 Trimming chooses the useful part of a recording. HDZero DVR starts at arming,
 so there is not normally a long quiet section before take-off. Drag either
 handle on the filmstrip, or press **I** and **O** while the clip plays to cut at
-the picture in front of you. **Set in** / **Set out** do the same from the
+the picture in front of you. **In** / **Out** do the same from the
 buttons, and **Reset** restores the whole clip. The list then shows the range
 next to the length, and the size estimate, progress and time remaining all
 follow the trimmed length.
@@ -375,25 +329,8 @@ frames (hold **Shift** for ten). The preview decodes only a small window around
 the playhead, shows its exact timestamp and source frame number, and replaces
 that window when you seek elsewhere rather than decoding the whole recording.
 
-**Grab still…** saves the frame you are paused on as a full-resolution PNG. It
-uses the frame number and timestamp the preview decoder has already established
-rather than picking a nearby picture from the wall clock, and it saves at the
-source's own dimensions — what the preview scaled to fit the window has no
-effect on the file.
-
-It offers a name built from the naming template and the Output box, with a
-`still` suffix, then lets you change it: the save dialog is where the still
-finally lands, unlike an export, which goes where the queue said it would. The
-button only does anything when a real decoded frame is on screen. The PNG is
-written beside its target and moved into place only once ffmpeg has produced a
-readable image, so a cancelled or failed capture leaves nothing behind and never
-damages a file already there.
-
-Trimming itself is done by eye. To hear what an output will sound like —
-its original audio, chosen music or a mix — select that output and turn
-**Sound** on beside Play; see [choosing the sound](docs/USER_GUIDE.md#choose-the-sound-for-this-output)
-in the user guide. Monitoring volume changes only what you hear, not the
-export, and Slow motion exports silently.
+The preview is silent. Sound would need a second pipe and a second clock, and
+DVR audio is motor whine — an in point is something you find by eye.
 
 Playback decodes through ffmpeg rather than through Qt's video widget. On
 Windows that widget uses Media Foundation, the same decoder behind Media
@@ -401,99 +338,22 @@ Player, which cannot handle HEVC inside an MPEG-TS — so it would work
 perfectly on test footage and fail on every real recording.
 
 Frames are pulled from the clip the first time you select it — a three minute
-recording takes about four seconds, and is cached afterwards, so dragging is
-instant rather than waiting on a seek.
+recording takes about four and a half seconds, and is cached afterwards, so
+dragging is instant rather than waiting on a seek.
 
 Trims survive into a joined export: each clip keeps its own in and out points.
 *Remux* is the exception and will say so — see below.
 
-## Joining several ranges into one file
-
-When the DVR split one flight across several recordings, or when two moments
-out of one recording belong together, the **Assembly** list under *Output* is
-what makes them a single file. It is an ordered list you can look at before
-committing to an encode, which is the whole point of it: a delivery is a
-decision, and a decision nobody can see beforehand is not one they made.
-
-It replaces the *Join the ticked clips into one file* tickbox. That box asked
-for a joined file and worked the order out for itself — DVR counter order with
-a stored per-clip preference laid over it — so it could not express two ranges
-of one recording in any order but the one they happen to occur in, and it
-showed nobody what was about to be encoded.
-
-**Use ticked ranges** fills the list from the ranges ticked in the browser, in
-DVR counter order and then along each recording, because
-[the goggles cannot keep time](#the-goggles-cannot-keep-time). A recording you
-have not trimmed goes in whole.
-
-**Default order** runs that same fill again. It is not a sort of what is already
-in the list: it rebuilds the list from whatever is ticked *now*, and the order
-and the contents you had are replaced. A row you removed comes back if its
-recording is still ticked, and a row whose recording you have since unticked
-does not come back at all. It is the way back to a known state rather than an
-undo.
-
-Then arrange it:
-
-| | |
-|---|---|
-| **Move up** / **Move down**, or `Alt` `↑` / `Alt` `↓` | move the selected rows one place, keeping a multi-row selection together and in order |
-| **Remove**, or `Delete` | take rows out of the list — the range itself is left alone |
-| **Add assembly to queue** | queue one joined export of exactly this list, in this order |
-
-The keyboard reaches everything the buttons do. `Alt` with the arrows is the
-usual spelling for *move the thing*, which leaves plain `↑` and `↓` doing what
-they always do in a list.
-
-A row names the recording, and the range only when it needs to: the name you
-gave that range, `range 2` when you did not name it, and the filename on its
-own when the row is the whole recording. Its length follows, and the line under
-the list counts the items and adds up how much footage they come to — the
-duration of the material, not the runtime of the finished file. Those are the
-same number for every preset except *Slow motion*, which writes twice what goes
-in: two ten-second ranges read as twenty seconds here and produce forty.
-
-**A row is a reference, not a copy.** The list stores which recording and which
-range, never a position or the range itself, so retrimming a range afterwards
-changes what that row will export — it still means that range — and deleting or
-renaming some other range does not disturb it.
-
-A range that has genuinely gone stays **visible, in the position it was stored
-in**, marked `missing`. It cannot be selected or moved, because it is a problem
-to resolve rather than something to arrange, and the summary counts it. Queuing
-is refused while one is there, naming what it could not find, rather than
-quietly joining a shorter film than you asked for.
-
-Being unselectable, a missing row is also out of reach of **Remove** and
-`Delete`, which act on the selection. There are two ways past it. If the footage
-should still be there — a card remounted somewhere else, a folder moved — put it
-back and scan again, and the row resolves itself into the range it always named.
-Otherwise tick the ranges you do want and press **Use ticked ranges**, which
-rebuilds the list without the gap, at the cost of the order you had.
-
-The list is part of the [session](#sessions), so it survives closing the window
-and comes back with the card — filling it, reordering it, removing a row and
-resetting it all schedule the same save.
-
-Two more things worth knowing. **Add assembly to queue** wants at least two
-rows: one range is a trim, and ordinary **Add to queue** does that better. And
-once there is anything in the list, the size estimate follows the *list* rather
-than the ticks — the assembly is both the order and the content, so unticking
-one of its sources no longer quietly turns a two-clip join into a single-clip
-export.
-
-The joined file is named from the template like any other export, with
-`_joined` added to the `{clip}` field — so the default template turns three
-ranges beginning with `hdz_047.ts` into `hdz_047_joined_master.mp4`.
+**Joining clips into one file** is the *Join the ticked clips into one file*
+box, for when the DVR split a single flight across several recordings. Clips
+are joined in DVR counter order rather than by timestamp, because
+[the goggles cannot keep time](#the-goggles-cannot-keep-time).
 
 Clips that do not match each other are fine. Different sizes, frame rates and
 codecs are brought to a common format — the largest size and rate among them,
 so nothing is thrown away to suit the smallest — and a clip with no sound gets
-silence rather than removing the audio from the rest. Two presets refuse a
-mismatched set instead: *Remux*, because copying without re-encoding cannot
-change anything, and *Slow motion*, because putting clips recorded at different
-rates onto one rate would have to invent or discard the frames it exists to
-keep.
+silence rather than removing the audio from the rest. Only *Remux* refuses a
+mismatched set, because copying without re-encoding cannot change anything.
 
 > **Remux is the exception.** It does no re-encoding, so it can only cut where a
 > keyframe already is, and a trimmed rewrap may be a second or so out. Every
@@ -507,16 +367,14 @@ keep.
 
 | Preset | Produces | Roughly | Use it for |
 |---|---|---|---|
-| **Edit** | DNxHR or ProRes in `.mov` | 58 GB/hour | DaVinci timelines, handing to an editor |
-| **Master** | H.264 `.mp4`, quality-based | 11 GB/hour | archiving, sending to editors online |
+| **Edit** | DNxHR or ProRes in `.mov` | 59 GB/hour | DaVinci timelines, handing to an editor |
+| **Master** | H.264 `.mp4`, quality-based | 12 GB/hour | archiving, sending to editors online |
 | **Social** | H.264 `.mp4`, size-targeted | you choose | WhatsApp, Instagram, Discord |
-| **Upload** | H.264 `.mp4` at 1080p or above | 20 GB/hour | YouTube, Instagram, Reddit |
-| **Vertical** | H.264 `.mp4`, 9:16 crop | 11 GB/hour | Reels, Shorts, TikTok, sending to a phone |
+| **Upload** | H.264 `.mp4` at source resolution or higher | 21 GB/hour | YouTube, Instagram, Reddit |
 | **Remux** | `.ts` → `.mp4`, no re-encode | same as source | instant lossless rewrap |
-| **Slow motion** | H.264 `.mp4` at half speed | 18 GB/hour | showing the moment something went wrong |
 
-Sizes are for 720p60; other resolutions are scaled accordingly. Slow motion is
-per hour of *recording* — the file it writes runs for two.
+Sizes are for 720p60; Upload's estimate assumes 1080p output at CRF 20.
+Other resolutions and quality settings change the estimates.
 
 **Edit** exists because the free version of DaVinci Resolve on Windows cannot
 decode H.265, so the original files cannot go on a timeline at all. Mezzanine
@@ -534,66 +392,22 @@ is arrive at a site in a higher resolution tier. YouTube, Instagram and Reddit
 re-encode everything they receive and decide how much bitrate to spend based on
 the resolution you sent, so a 1080p upload gets a bigger allowance than a 720p
 one and more of your footage survives their encode. The picture going in is the
-same; the difference is how kindly the platform treats it.
+same; the difference is how kindly the platform treats it. The *Upload at:* list
+starts at the source height, so 720p footage starts at 720p; choose *Upscale to
+1080p* to arrive at 1080p.
 
 It is quality-based and never size-targeted. Spreading a fixed byte budget over
 2.25 times as many pixels is worse than doing neither, so that combination is
 not offered.
 
-**Social** hits an exact file size using a two-pass encode, landing within about
-one percent of the number you ask for. With a hardware encoder, size targeting
+**Social** hits an exact file size using a two-pass encode, landing within a few
+percent of the number you ask for. With a hardware encoder, size targeting
 is a single pass and less precise. It can also downscale and halve the frame
 rate. Only sizes smaller than the source are offered, so it never upscales.
 
-**Vertical** crops a 9:16 slice out of the recording for phone feeds. It crops
-rather than padding, so the picture fills the screen instead of sitting in a
-letterbox — and because a 16:9 recording is much wider than 9:16 is, *which*
-slice you keep is a real decision. A slider chooses it from left to right, or
-drag the crop on the preview itself; the shaded area is what will be thrown
-away.
-
-The frame it takes is the largest exact 9:16 rectangle in the source. A 720p60
-recording gives a 396×704 crop, delivered at 720×1280; a 1080p one gives
-594×1056 at 1080×1920. That costs eight lines top and bottom at 720p, which is
-the price of an exactly square pixel: the alternative that keeps the full height
-is 0.25% out, and ffmpeg hides that difference in a sample-aspect flag rather
-than in the picture, so it looks correct until a platform ignores the flag.
-Taking the eight lines is the version that is true everywhere.
-
-A source too narrow to hold a 9:16 crop is refused with both numbers rather than
-padded with bars.
-
-Worth knowing before you use it: **the goggle OSD lives at the edges of the
-frame**, so a vertical crop cuts off the timer, battery and warnings at the
-sides. That is unavoidable in a 9:16 slice of a 16:9 recording, and the preview
-shows exactly what goes.
-
-**Slow motion** plays the recording at half speed while keeping every frame that
-was recorded. Nothing is invented between frames: a 60 fps source becomes 30 fps,
-and a 90 fps source becomes 45 fps. The output rate comes from the recording
-rather than being rounded to the frame rates the Social preset offers.
-
-It has its own quality setting, independent of Master, so changing one does not
-silently change the other. Sound is left out, and **Keep the audio track** is
-greyed out while this preset is chosen rather than left looking effective:
-slowed motor noise drops an octave and is not worth having, and keeping the
-sound at normal speed over video that now runs twice as long would drift apart
-by the length of the clip. The preset's own panel says so, where the decision
-is made.
-
-It refuses a clip whose frame rate cannot be read, and a joined set recorded at
-different rates. Every other preset may reasonably guess at a rate; this is the
-only one that promises to keep every frame exactly once, and neither case can
-keep that promise without inventing or discarding frames. That refusal is worth
-having: before it existed, falling back to 60 threw away a third of the frames
-of a 90 fps recording and reported a successful export.
-
-**Keep the audio track** can be turned off on any preset that re-encodes. DVR
-audio is mostly motor noise and wind, and dropping it buys bitrate on a
-size-targeted export. It is greyed out for *Remux*, which copies the streams
-across and cannot be told otherwise, and for *Slow motion*, which always drops
-the sound — a tickbox that changes nothing is a promise the export does not
-keep.
+**Keep the audio track** can be turned off on any preset except Remux, which
+copies the audio across and greys the tickbox out. DVR audio is mostly motor
+noise and wind, and dropping it buys bitrate on a size-targeted export.
 
 ### Hardware encoding
 
@@ -629,37 +443,6 @@ row opens what it produced.
 Below the queue is an overall progress bar with elapsed and estimated remaining
 time, weighted by footage length rather than job count.
 
-### Naming what comes out
-
-The queue shows the filename that will be written, and the **Name** field under
-Output decides how that name is built. It takes a template and shows an example
-as you type. The default is:
-
-```
-{date}_{clip}_{range_number}_{range}_{preset}
-```
-
-| Field | Means |
-|---|---|
-| `{date}` | the flight date, as used when copying originals to the library |
-| `{session}` | the session name, when one has been given |
-| `{clip}` | the recording's filename without its extension |
-| `{range_number}` | the one-based number, when a clip has more than one range |
-| `{range}` | the name of that range, when a clip has more than one |
-| `{preset}` | the preset suffix — `master`, `upload`, and blank for Remux |
-
-**An empty field takes its separator with it**, which is what lets one string
-cover every case without leaving gaps: an untitled single range is
-`hdz_048_upload`, a named second range out of several is
-`hdz_048_2_Tree-dive_upload`, and a Remux export, whose suffix is deliberately
-blank, is just `hdz_048`.
-
-A template names a file, never a folder — the Output box still decides where it
-is written. Slashes, unknown fields, unpaired braces and characters the
-operating system will not accept are reported as you type; the finished name is
-checked again before anything is queued, which is what catches a reserved name
-that only appears once the fields are filled in.
-
 ### What it will not do quietly
 
 - **Overwrite.** If an export would replace a file that already exists, it says
@@ -668,8 +451,9 @@ that only appears once the fields are filled in.
   A full card at Edit quality runs to several hundred gigabytes.
 - **Leave a broken file behind.** An encode is written to a temporary
   `.flightdvr-part` file and checked for video before it is moved into place.
-  Cancelling removes the temporary file; an output that was already there is
-  never touched.
+  Cancelling normally removes the temporary file. If Windows still has it open,
+  it can be left behind, named `*.flightdvr-part*`; your existing file is never
+  touched.
 - **Queue the same output twice**, or re-encode work that has already finished.
 
 ## Keyboard shortcuts
@@ -795,11 +579,10 @@ not work, clear the quarantine flag:
 xattr -dr com.apple.quarantine "/Applications/FlightDVR Studio.app"
 ```
 
-**"Could not find ffmpeg" at startup.** On macOS the app uses your system
-ffmpeg, so install it — see [Installing](#installing) for the command. The
-Windows installer and, from 2.0.0, the Linux AppImage carry their own copy, so
-there this only happens when running from source (or with the 1.5.0
-AppImage, which uses the system's ffmpeg).
+**"Could not find ffmpeg" at startup.** On Linux and macOS the app uses your
+system ffmpeg, so install it — see [Installing](#installing) for the command.
+On Windows this only happens when running from source; the installed build
+carries its own copy.
 
 If you have installed it and the app still cannot see it, ask the app what it
 found:
@@ -833,12 +616,6 @@ alone* instead.
 **Every clip has the same date.** Expected — see
 [above](#the-goggles-cannot-keep-time).
 
-**A `.flightdvr-part` file was left after cancelling (Windows).** A known issue:
-cancelling while the sound is being checked can occasionally leave the
-cancelled export's unfinished temporary file. The queue names the exact file.
-It is not your export, and your existing file is untouched. See
-[docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) for how to remove it safely.
-
 ---
 
 ## Building from source
@@ -866,7 +643,7 @@ the icon, build the bundle and prove the result starts before packaging it.
 | macOS | `packaging/build-macos.sh` | signed-ad-hoc `.app` in a `.dmg` | Xcode command line tools |
 
 All three are produced by
-[GitHub Actions](.github/workflows/build.yml) on relevant code and packaging
+[GitHub Actions](https://github.com/nkghxst/flightdvr-studio/blob/v1.5.0/.github/workflows/build.yml) on relevant code and packaging
 pushes and on version tags; documentation-only pushes are skipped. You do not
 need any of those machines to release for them. The commands above are for
 building one yourself.
@@ -876,7 +653,7 @@ handling, and the traps in this footage in
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 Where this is going next — and what it deliberately will not do — is in
-[docs/ROADMAP.md](docs/ROADMAP.md).
+[docs/ROADMAP.md](docs/ROADMAP.md), which also covers the unreleased 2.0.
 
 ### How it is put together
 
@@ -884,12 +661,11 @@ Where this is going next — and what it deliberately will not do — is in
 |---|---|---|
 | Media and export | `media.py`, `presets.py`, `jobs.py` | ffmpeg discovery, probing, export commands and the worker queue |
 | Browsing and analysis | `scan.py`, `thumbs.py`, `trim.py`, `motion.py` | clip discovery, cached frames, trimming and flight readings |
-| Playback and decisions | `player.py`, `stills.py`, `session.py` | bounded in-window playback, full-resolution stills and saved review decisions |
-| Delivery | `assembly.py` | the ordered list of ranges that becomes one file, held as references rather than positions |
-| Interface | `browser_panel.py`, `preview_panel.py`, `export_panel.py`, `assembly_panel.py`, `queue_panel.py`, `ui.py` | panel-local behaviour and cross-panel workflows |
+| Playback and decisions | `player.py`, `session.py` | bounded in-window playback and saved review decisions |
+| Interface | `browser_panel.py`, `preview_panel.py`, `export_panel.py`, `queue_panel.py`, `ui.py` | panel-local behaviour and cross-panel workflows |
 
 The module-by-module layout is maintained in
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#layout).
+[docs/DEVELOPMENT.md](https://github.com/nkghxst/flightdvr-studio/blob/v1.5.0/docs/DEVELOPMENT.md#layout).
 
 A few decisions that are not obvious from the code:
 
@@ -919,19 +695,17 @@ Matching the licence of the bundled ffmpeg is deliberate. It removes any
 question about whether the app and the binary form a combined work, which is the
 one genuinely murky part of shipping ffmpeg inside an installer.
 
-The Windows installer bundles ffmpeg, and from 2.0.0 so does the Linux
-AppImage. The macOS app, and the published 1.5.0 AppImage, use whatever your
-package manager installed, so they redistribute no ffmpeg binary and carry no
-obligation for its source.
+Only the Windows installer bundles ffmpeg. The AppImage and the macOS app use
+whatever your package manager installed, so they redistribute no ffmpeg binary
+and carry no obligation for its source.
 
 The bundled Windows build is `n7.1.5-12-g1fdbca85aa` from
 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), tag
 `autobuild-2026-07-31-14-10`, configured `--enable-gpl --enable-version3`. It is
 **not** an `--enable-nonfree` build, which could not be redistributed at all.
-The AppImage carries the Linux build of the same FFmpeg commit.
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) records the versions, origins
-and licences, and how the corresponding source is provided, as section 6 of
-the GPL requires.
+[THIRD-PARTY-NOTICES.md](https://github.com/nkghxst/flightdvr-studio/blob/v1.5.0/THIRD-PARTY-NOTICES.md) records the version, origin and
+licence, along with a written offer for the corresponding source as required by
+section 6 of the GPL.
 
 Qt is used via PySide6 under the **LGPL v3**, dynamically linked and unmodified.
 
