@@ -866,23 +866,32 @@ def test_cancel_during_the_real_pcm_count_keeps_the_destination(
     queued_before = deepcopy(queued)
     worker = ExportWorker(tools, [job, queued], tmp_path / "work")
 
+    from tests.test_media_correctness import (
+        PhaseTrace, UnlinkObserver, trace_the_count, traced_decode)
     real_popen = subprocess.Popen
-    decodes = []
+    decodes, known = [], []
+    trace = PhaseTrace()
 
     def slow_decode(command, *args, **kwargs):
-        # Only the count's decode is slowed: read at playback speed.
+        # Only the count's decode is slowed: read at playback speed. Every
+        # child is kept for the observer's receipts; the decode alone is
+        # traced, through its own object and pipes.
         if "s16le" in command and "-map" in command:
             command = list(command)
             command.insert(command.index("-i"), "-re")
-            proc = real_popen(command, *args, **kwargs)
+            proc = traced_decode(real_popen, trace, command, *args, **kwargs)
             decodes.append(proc)
+            known.append(proc)
             return proc
-        return real_popen(command, *args, **kwargs)
+        proc = real_popen(command, *args, **kwargs)
+        known.append(proc)
+        return proc
 
     monkeypatch.setattr(audio_export.subprocess, "Popen", slow_decode)
+    trace_the_count(monkeypatch, trace)
     part = out.with_name("edit.flightdvr-part.mov")
-    from tests.test_media_correctness import UnlinkObserver
-    observer = UnlinkObserver(monkeypatch, part)
+    observer = UnlinkObserver(monkeypatch, part, children=lambda: list(known),
+                              trace=trace)
     result = []
     runner = threading.Thread(
         target=lambda: result.append(worker._run_job(0, job)), daemon=True)
