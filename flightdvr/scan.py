@@ -28,6 +28,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
+from .media import star_sidecar
+
 # The Box Pro writes .ts by default; the DVR can be switched to .mp4 in the menus.
 CLIP_EXTENSIONS = {".ts", ".mp4", ".mov", ".mkv"}
 
@@ -419,6 +421,7 @@ def copy_clips(
 
             if target.exists() and target.stat().st_size == source.stat().st_size:
                 written.append(target)
+                _copy_stars(source, target, problems)
                 continue
 
             temporary = target.with_suffix(target.suffix + ".part")
@@ -433,6 +436,7 @@ def copy_clips(
             temporary.replace(target)
             temporary = None          # it is the real file now
             written.append(target)
+            _copy_stars(source, target, problems)
         except OSError as exc:
             problems.append(f"{source.name}: {exc}")
         finally:
@@ -448,6 +452,25 @@ def copy_clips(
     if on_progress:
         on_progress(total, total, "")
     return written, problems
+
+
+def _copy_stars(source: Path, target: Path, problems: list[str]) -> None:
+    """Bring the goggles' star sidecar along, named for the copied clip.
+
+    The sidecar is named after the recording, so a date prefix added on the
+    way in has to be added to it too or the stars would no longer be found.
+    A failure here is reported but leaves the recording itself in place.
+    """
+    stars = star_sidecar(source)
+    if not stars.is_file():
+        return
+    landed = star_sidecar(target)
+    try:
+        if landed.is_file() and landed.stat().st_size == stars.stat().st_size:
+            return
+        shutil.copy2(stars, landed)
+    except OSError as exc:
+        problems.append(f"{stars.name}: {exc}")
 
 
 def free_space(path: Path) -> int:

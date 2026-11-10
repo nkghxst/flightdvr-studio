@@ -356,6 +356,37 @@ class Select:
                    **({"sid": stored} if stored else {}))
 
 
+# The goggles' star button writes "<clip name>.star.txt" next to the
+# recording, one "MM:SS star" line per press. A press long enough into a
+# flight gives a minutes field past 59, so neither field is range-checked.
+STAR_SUFFIX = ".star.txt"
+_STAR_LINE = re.compile(r"^\s*(\d+):(\d{1,2})\b")
+
+
+def star_sidecar(path: Path) -> Path:
+    """Where the goggles put this recording's starred moments."""
+    return path.with_name(path.name + STAR_SUFFIX)
+
+
+def read_stars(path: Path) -> list[float]:
+    """Seconds into this recording at which the pilot pressed star.
+
+    Sorted, without duplicates. No sidecar, an unreadable one, or one with no
+    line in the expected shape is simply no stars: a star is a hint for the
+    reviewer, never a reason to refuse a recording.
+    """
+    try:
+        text = star_sidecar(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    found = set()
+    for line in text.splitlines():
+        match = _STAR_LINE.match(line)
+        if match:
+            found.add(int(match.group(1)) * 60 + int(match.group(2)))
+    return [float(seconds) for seconds in sorted(found)]
+
+
 def editing_range(clip) -> "Select | None":
     """The real range being edited, or None when it is the whole recording.
 
@@ -412,6 +443,11 @@ class ClipInfo:
     # here because session.py imports ClipInfo; importing the review constants
     # back from there would make the model depend on its persistence layer.
     review: str = ""
+
+    # Seconds into the recording the pilot marked with the goggles' star
+    # button, read from its sidecar at probe time (see `read_stars`). Derived
+    # from the card, never saved in a session.
+    stars: list[float] = field(default_factory=list)
 
     # Seconds from the file's start to its picture's first frame: ffprobe's
     # video-stream start_time minus the format start_time (the earliest of
@@ -788,10 +824,12 @@ def probe(tools: Tools, path: Path, should_stop=None,
     pass could not make sense of.
     """
     stat = path.stat()
+    stars = read_stars(path)
     info = ClipInfo(
         path=path,
         size=stat.st_size,
         modified=datetime.fromtimestamp(stat.st_mtime),
+        stars=stars,
     )
 
     timeline: dict = {}
@@ -802,7 +840,8 @@ def probe(tools: Tools, path: Path, should_stop=None,
         return info
     if info.error or not info.width or info.duration <= 0:
         # A stubborn transport stream: pay for a deeper look this time.
-        retry = ClipInfo(path=path, size=info.size, modified=info.modified)
+        retry = ClipInfo(path=path, size=info.size, modified=info.modified,
+                         stars=stars)
         timeline = {}
         _probe_once(
             tools, path, retry,

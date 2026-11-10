@@ -258,6 +258,12 @@ reds look alike to you.
 card: mark everything once, then show only Keep. The count beside it says how
 far through you are.
 
+A **`★ 2`** beside the letter means the pilot pressed the goggles' star button
+twice while that clip was recording. HDZero goggles write those presses to a
+`<clip>.star.txt` file next to the recording; FlightDVR reads it and draws a
+gold star on the filmstrip at each moment. Hover a star to see its time, and
+click it to jump the playhead exactly there.
+
 Two more things appear under the letter when they are known:
 
 - **`2 ranges`** — how many parts of that clip you have marked for export. See
@@ -427,6 +433,9 @@ folders named after the flight date. Each one is written through a temporary
 `.part` file, checked to be the same size as the source and then moved into
 place; an existing same-size file is skipped. Nothing is converted, and nothing
 is deleted from the card — clearing it is left to you deliberately.
+
+A clip's `.star.txt` comes with it, renamed to match if the copy gains a date
+prefix, so its starred moments still show in the library.
 
 ## The queue
 
