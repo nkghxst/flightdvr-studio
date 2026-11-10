@@ -60,6 +60,7 @@ step "Icon"
 QT_QPA_PLATFORM=offscreen python3 tools/make_icon.py packaging/flightdvr.ico
 
 step "PyInstaller bundle"
+test -f build/qt-inputs.json || { echo "Locked Qt input receipt missing" >&2; exit 1; }
 rm -rf dist/FlightDVRStudio build/FlightDVRStudio
 python3 -m PyInstaller packaging/flightdvr_studio.spec \
     --noconfirm --distpath dist --workpath build
@@ -75,7 +76,8 @@ printf '  bundle: %s\n' "$(du -sh dist/FlightDVRStudio | cut -f1)"
 python3 packaging/verify_ffmpeg_linux.py check-dir dist/FlightDVRStudio/_internal/ffmpeg
 # Listen needs QtMultimedia's PCM sink and a backend for it. What else PySide6
 # brought with it is read from its bytes; anything but LGPL fails the build.
-python3 packaging/check_qt_multimedia.py dist/FlightDVRStudio dist/qt-multimedia.json
+python3 packaging/check_qt_multimedia.py dist/FlightDVRStudio dist/qt-multimedia.json \
+    --inputs build/qt-inputs.json --collection=build/qt-collection.json
 
 step "AppDir"
 rm -rf "$APPDIR"
@@ -113,7 +115,7 @@ chmod +x "$APPDIR/AppRun"
 
 # Licences travel with the binary. The LGPL text accompanies Qt as its section
 # 4(b) requires; the GPL text is our own licence.
-cp LICENSE LICENSE.LGPL-3.0.txt THIRD-PARTY-NOTICES.md \
+cp LICENSE LICENSE.LGPL-2.1.txt LICENSE.LGPL-3.0.txt THIRD-PARTY-NOTICES.md \
    packaging/ffmpeg-configuration-linux.txt "$APPDIR/"
 
 step "appimagetool"

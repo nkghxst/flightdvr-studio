@@ -18,7 +18,10 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
+import struct
+import sys
 from pathlib import Path
 
 import pytest
@@ -63,6 +66,7 @@ def test_lgpl_libraries_and_a_backend_pass(tmp_path):
     (b"GPL version 3 or later", "declares ['GPL 3+']"),
     (LGPL + b"nonfree and unredistributable", "says it is nonfree"),
     (b"no licence here", "declares no licence"),
+    (b"LGPL version 3 or later", "unexpected LGPL version"),
 ])
 def test_anything_but_lgpl_fails(tmp_path, data, why):
     root = bundle(tmp_path, {"avcodec-61.dll": LGPL, "avformat-61.dll": data})
@@ -75,3 +79,52 @@ def test_a_bundle_without_a_backend_fails(tmp_path):
     root = bundle(tmp_path, {}, plugin=False)
     _report, failures = check_qt.check(root)
     assert failures == ["no Qt multimedia backend plugin in the bundle"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="file symlink creation needs Windows privilege")
+@pytest.mark.parametrize("relative_bundle", [False, True])
+def test_generated_macos_link_binds_with_absolute_or_relative_bundle(
+        tmp_path, monkeypatch, relative_bundle):
+    root = tmp_path / "app"
+    name = "PySide6/Qt/lib/libavformat.61.dylib"
+    binary = root / "Contents" / "Frameworks" / name
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"\xcf\xfa\xed\xfe" + struct.pack("<I", 0x0100000c))
+    alias = root / "Contents" / "Resources" / binary.name
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(f"../Frameworks/{name}")
+    sha = hashlib.sha256(binary.read_bytes()).hexdigest()
+    wheel = "a" * 64
+    inputs = {"platform": "macos", "release_ready": False,
+              "wheels": [{"package": "PySide6-Addons", "sha256": wheel}],
+              "files": [{"package": "PySide6-Addons", "file": name, "sha256": sha}]}
+    collection = {"platform": "macos", "files": [
+        {"path": name, "kind": "BINARY", "source_sha256": sha,
+         "wheel_package": "PySide6-Addons", "wheel_file": name,
+         "wheel_sha256": wheel}], "links": []}
+    monkeypatch.chdir(tmp_path)
+    bundle_path = Path("app") if relative_bundle else root
+    report = {"ffmpeg_libraries": [{"versions": ["7.1.5"]}]}
+    failures = check_qt.binding_check(bundle_path, report, inputs, collection)
+    assert not any("symlink" in failure for failure in failures), failures
+    assert report["generated_bundle_links"] == [{
+        "path": f"Contents/Resources/{binary.name}",
+        "target": f"../Frameworks/{name}",
+        "bound_path": f"Contents/Frameworks/{name}",
+    }]
+    unbound = binary.with_name("libavcodec.61.dylib")
+    unbound.write_bytes(b"unbound")
+    unbound_alias = alias.with_name(unbound.name)
+    unbound_alias.symlink_to(f"../Frameworks/PySide6/Qt/lib/{unbound.name}")
+    failures = check_qt.binding_check(bundle_path, report, inputs, collection)
+    assert any("shipped multimedia symlink lacks collection origin" in f
+               for f in failures), failures
+    unbound_alias.unlink()
+    unbound.unlink()
+    outside = tmp_path / "outside.dylib"
+    outside.write_bytes(b"outside")
+    escaping = alias.with_name("libavcodec.61.dylib")
+    escaping.symlink_to(outside)
+    failures = check_qt.binding_check(bundle_path, report, inputs, collection)
+    assert any("broken or escaping multimedia symlink" in f
+               for f in failures), failures

@@ -60,6 +60,7 @@ cp packaging/icon_1024.png "$ICONSET/icon_512x512@2x.png"
 iconutil --convert icns --output packaging/flightdvr.icns "$ICONSET"
 
 step "PyInstaller bundle"
+test -f build/qt-inputs.json || { echo "Locked Qt input receipt missing" >&2; exit 1; }
 rm -rf "$APP" dist/FlightDVRStudio build/FlightDVRStudio
 python3 -m PyInstaller packaging/flightdvr_studio.spec \
     --noconfirm --distpath dist --workpath build
@@ -69,9 +70,14 @@ if [ ! -d "$APP" ]; then
     exit 1
 fi
 printf '  bundle: %s\n' "$(du -sh "$APP" | cut -f1)"
+# PyInstaller ad-hoc signs the assembled BUNDLE before returning. Verify that
+# signature before recording its already-transformed bytes; this is not a
+# wheel-byte equality or release-clearance claim.
+codesign --verify --deep --strict "$APP"
 # Listen needs QtMultimedia's PCM sink and a backend for it. What else PySide6
 # brought with it is read from its bytes; anything but LGPL fails the build.
-python3 packaging/check_qt_multimedia.py "$APP" dist/qt-multimedia.json
+python3 packaging/check_qt_multimedia.py "$APP" dist/qt-multimedia-pre-sign.json \
+    --inputs build/qt-inputs.json --collection=build/qt-collection.json
 
 step "Ad-hoc signature"
 # arm64 refuses to load an unsigned binary at all, so this is required rather
@@ -79,6 +85,9 @@ step "Ad-hoc signature"
 # Gatekeeper; it only makes the code loadable.
 codesign --force --deep --sign - --timestamp=none "$APP"
 codesign --verify --deep --strict "$APP" && echo "  signature verifies"
+python3 packaging/check_qt_multimedia.py "$APP" dist/qt-multimedia.json \
+    --inputs build/qt-inputs.json --collection=build/qt-collection.json \
+    --signed-pre=dist/qt-multimedia-pre-sign.json
 
 step "Smoke check"
 # --check starts Qt, loads the platform plugin and resolves ffmpeg, then exits.
@@ -116,7 +125,7 @@ cp -a "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 # Licences travel with the binary. The LGPL text accompanies Qt as its section
 # 4(b) requires; the GPL text is our own licence.
-cp LICENSE LICENSE.LGPL-3.0.txt THIRD-PARTY-NOTICES.md README.md "$STAGE/"
+cp LICENSE LICENSE.LGPL-2.1.txt LICENSE.LGPL-3.0.txt THIRD-PARTY-NOTICES.md README.md "$STAGE/"
 
 rm -f "$DMG"
 hdiutil create -volname "FlightDVR Studio" -srcfolder "$STAGE" \

@@ -594,9 +594,20 @@ RELEASE_FILES = {
 }
 
 
-def select_release_files(downloads: Path, out: Path) -> list[Path]:
-    """Exactly one file from each named artifact folder; nothing else."""
-    out.mkdir(parents=True, exist_ok=True)
+def select_release_files(downloads: Path, out: Path, qt_lock: dict | None = None) -> list[Path]:
+    """Select the legacy four files plus a manifest-verified Qt companion."""
+    sys.path.insert(0, str(HERE))
+    from collect_qt_multimedia_sources import release_check
+
+    qt_folder = downloads / "qt-multimedia-source"
+    qt_manifest = qt_folder / "qt-multimedia-source.manifest.json"
+    if not qt_manifest.is_file() or qt_manifest.is_symlink():
+        raise SystemExit("Qt multimedia source manifest missing")
+    try:
+        qt_assets = release_check(json.loads(qt_manifest.read_text(encoding="utf-8")),
+                                  qt_folder, qt_lock)
+    except (ValueError, KeyError, OSError) as exc:
+        raise SystemExit(f"Qt multimedia source release gate failed: {exc}") from exc
     chosen = []
     for artifact, pattern in RELEASE_FILES.items():
         folder = downloads / artifact
@@ -606,10 +617,17 @@ def select_release_files(downloads: Path, out: Path) -> list[Path]:
         if len(matches) != 1:
             raise SystemExit(f"release artifact {artifact}: expected one {pattern}, "
                              f"found {[p.name for p in matches]}")
-        target = out / matches[0].name
-        shutil.copyfile(matches[0], target)
-        chosen.append(target)
-    return chosen
+        chosen.append(matches[0])
+    chosen.extend([*qt_assets, qt_manifest])
+    if len({p.name for p in chosen}) != len(chosen):
+        raise SystemExit("duplicate release filename")
+    out.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for source in chosen:
+        target = out / source.name
+        shutil.copyfile(source, target)
+        copied.append(target)
+    return copied
 
 
 def main(argv: list[str]) -> int:

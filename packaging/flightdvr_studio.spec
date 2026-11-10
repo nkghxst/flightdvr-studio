@@ -80,7 +80,7 @@ data_files = [(str(ROOT / "flightdvr" / "resources" / "icon.ico"),
 # there because Qt reaches us under it and section 4(b) requires a copy of that
 # licence to accompany a combined work — it is not optional and was missing
 # from every build format before 1.1.1.
-for name in ("LICENSE", "LICENSE.LGPL-3.0.txt", "THIRD-PARTY-NOTICES.md"):
+for name in ("LICENSE", "LICENSE.LGPL-2.1.txt", "LICENSE.LGPL-3.0.txt", "THIRD-PARTY-NOTICES.md"):
     if (ROOT / name).exists():
         data_files.append((str(ROOT / name), "."))
 
@@ -159,6 +159,18 @@ _before = len(a.binaries) + len(a.datas)
 a.binaries = [e for e in a.binaries if not _unwanted(e)]
 a.datas = [e for e in a.datas if not _unwanted(e)]
 print(f"[spec] dropped {_before - len(a.binaries) - len(a.datas)} unused Qt files")
+
+# The pinned pip receipt is generated in CI before Analysis. Match the wheel
+# RECORD bytes to the exact selected Analysis entries, then carry the small
+# source reference with the package. This records inputs, not source clearance.
+sys.path.insert(0, str(PACKAGING))
+from collect_qt_multimedia_sources import write_spec_receipt
+
+inputs_path = ROOT / "build" / "qt-inputs.json"
+collection_path = ROOT / "build" / "qt-collection.json"
+write_spec_receipt(a.binaries + a.datas, inputs_path, collection_path)
+a.datas.append(("qt-multimedia-source-reference.json", str(collection_path), "DATA"))
+a.datas.append(("qt-multimedia-sources.json", str(PACKAGING / "qt-multimedia-sources.json"), "DATA"))
 
 # -- assembling ---------------------------------------------------------------
 

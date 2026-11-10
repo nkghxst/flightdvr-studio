@@ -68,6 +68,7 @@ Step "Icon"
 python tools/make_icon.py packaging/flightdvr.ico
 
 Step "PyInstaller bundle"
+if (-not (Test-Path "build\qt-inputs.json")) { throw "Locked Qt input receipt missing." }
 Remove-Item "dist\FlightDVRStudio" -Recurse -Force -ErrorAction SilentlyContinue
 python -m PyInstaller packaging/flightdvr_studio.spec --noconfirm --distpath dist --workpath build
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed." }
@@ -81,7 +82,7 @@ Step "Audio output: Qt Multimedia backend and the FFmpeg libraries it brings"
 # Listen needs QtMultimedia's PCM sink. PySide6 ships it with FFmpeg's shared
 # libraries; their licence is read from their own bytes, and anything other
 # than LGPL fails the build (THIRD-PARTY-NOTICES.md describes them).
-python packaging/check_qt_multimedia.py "dist\FlightDVRStudio" "dist\qt-multimedia.json"
+python packaging/check_qt_multimedia.py "dist\FlightDVRStudio" "dist\qt-multimedia.json" --inputs "build\qt-inputs.json" --collection="build\qt-collection.json"
 if ($LASTEXITCODE -ne 0) { throw "The bundle's audio output check failed." }
 
 Step "Smoke check: does the bundle run without ffmpeg on PATH?"

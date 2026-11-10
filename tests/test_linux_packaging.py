@@ -268,6 +268,11 @@ def _run_spec(monkeypatch, platform: str, ffmpeg_dir: str | None) -> list:
     monkeypatch.chdir(ROOT)
     monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.syspath_prepend(str(PACKAGING))
+    import collect_qt_multimedia_sources as qt_source
+    # These tests isolate the existing standalone ffmpeg pair routing. The
+    # wheel-to-Analysis receipt has its own direct positive/negative tests.
+    monkeypatch.setattr(qt_source, "write_spec_receipt", lambda *args: None)
     if ffmpeg_dir is None:
         monkeypatch.delenv("FFMPEG_DIR", raising=False)
     else:
@@ -391,16 +396,17 @@ def test_ci_gates_the_linux_bundle_without_softening_failures():
 def test_a_release_waits_for_the_current_linux_check():
     workflow = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
     assert ("needs: [appimage, appimage-current-linux, linux-ffmpeg-source, macos, "
-            "windows-installer]") in workflow
+            "windows-installer, qt-multimedia-source]") in workflow
 
 
 def test_the_release_attaches_only_the_named_artifacts():
     workflow = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
     release = workflow[workflow.index("  release:"):]
     assert "merge-multiple" not in release
-    for name in ("linux-appimage", "macos-dmg", "windows-installer", "linux-ffmpeg-source"):
+    for name in ("linux-appimage", "macos-dmg", "windows-installer",
+                 "linux-ffmpeg-source", "qt-multimedia-source"):
         assert f"name: {name}\n          path: artifacts/{name}" in release
-    assert release.count("actions/download-artifact@v4") == 4
+    assert release.count("actions/download-artifact@v4") == 5
     assert "select-release-files artifacts release-files" in release
     assert 'gh release upload "$GITHUB_REF_NAME" release-files/*' in release
     assert "--draft" in release
